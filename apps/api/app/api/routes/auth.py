@@ -8,10 +8,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_username, get_db, get_redis, get_settings
-from app.core.config import Settings
-from app.core.logging import get_logger
-from app.core.security import create_token, decode_token, verify_password
-from app.db.models import AuditLog, Session as SessionModel, User
+from yonixalpha_core.config import Settings
+from yonixalpha_core.logging import get_logger
+from yonixalpha_core.security import create_token, decode_token, verify_password
+from yonixalpha_core.db.models import AuditLog, Session as SessionModel, User
 from app.schemas.auth import LoginRequest, MeResponse, RefreshRequest, TokenResponse
 
 router = APIRouter(prefix="/auth", tags=["auth"])

@@ -42,8 +42,8 @@ services:
 
   api:
     build:
-      context: ../../apps/api
-      dockerfile: Dockerfile
+      context: ../..
+      dockerfile: apps/api/Dockerfile
     env_file:
       - ../../.env
     depends_on:
@@ -61,6 +61,28 @@ services:
       - ../../.env
     depends_on:
       - api
+    networks: [yonixalpha]
+
+  data-solana:
+    build:
+      context: ../..
+      dockerfile: services/data-solana/Dockerfile
+    env_file:
+      - ../../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [yonixalpha]
+
+  data-binance:
+    build:
+      context: ../..
+      dockerfile: services/data-binance/Dockerfile
+    env_file:
+      - ../../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks: [yonixalpha]
 
 networks:

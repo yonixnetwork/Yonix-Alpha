@@ -1,8 +1,8 @@
 import jwt
 import pytest
 
-from app.core.config import Settings
-from app.core.security import create_token, decode_token, hash_password, verify_password
+from yonixalpha_core.config import Settings
+from yonixalpha_core.security import create_token, decode_token, hash_password, verify_password
 
 
 def _settings(**overrides) -> Settings:

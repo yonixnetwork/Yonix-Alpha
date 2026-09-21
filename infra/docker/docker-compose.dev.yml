@@ -1,6 +1,10 @@
 # Local development override: hot reload, source bind mounts, and direct
 # port exposure for debugging (Postgres/Redis are reachable from the host —
 # never do this in prod, see docker-compose.prod.yml).
+#
+# api/data-solana/data-binance all bind-mount BOTH their own app/ directory
+# AND packages/core-py to the paths the image's `pip install -e` points at,
+# so editing shared code hot-reloads across every service without a rebuild.
 
 services:
   postgres:
@@ -17,6 +21,7 @@ services:
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
     volumes:
       - ../../apps/api:/app
+      - ../../packages/core-py:/packages/core-py
     ports:
       - "8000:8000"
 
@@ -32,3 +37,13 @@ services:
       - WATCHPACK_POLLING=true
     ports:
       - "3000:3000"
+
+  data-solana:
+    volumes:
+      - ../../services/data-solana/app:/app/app
+      - ../../packages/core-py:/packages/core-py
+
+  data-binance:
+    volumes:
+      - ../../services/data-binance/app:/app/app
+      - ../../packages/core-py:/packages/core-py

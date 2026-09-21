@@ -1,6 +1,6 @@
 from redis.asyncio import Redis, from_url
 
-from app.core.config import Settings
+from yonixalpha_core.config import Settings
 
 
 def make_redis(settings: Settings) -> Redis:

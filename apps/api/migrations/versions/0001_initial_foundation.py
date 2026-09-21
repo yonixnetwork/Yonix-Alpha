@@ -24,7 +24,7 @@ def upgrade() -> None:
         sa.Column("username", sa.String(length=64), nullable=False),
         sa.Column("password_hash", sa.String(length=255), nullable=False),
         sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.true()),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column("last_login_at", sa.DateTime(timezone=True), nullable=True),
     )
     op.create_index("ix_users_username", "users", ["username"], unique=True)
@@ -34,7 +34,7 @@ def upgrade() -> None:
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("user_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
         sa.Column("refresh_token_jti", sa.String(length=36), nullable=False),
-        sa.Column("issued_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
+        sa.Column("issued_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("user_agent", sa.String(length=512), nullable=True),
@@ -50,7 +50,7 @@ def upgrade() -> None:
         sa.Column("event_type", sa.String(length=128), nullable=False),
         sa.Column("detail", postgresql.JSONB(), nullable=True),
         sa.Column("ip_address", postgresql.INET(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     )
     op.create_index("ix_audit_logs_user_id", "audit_logs", ["user_id"])
     op.create_index("ix_audit_logs_event_type", "audit_logs", ["event_type"])
@@ -63,7 +63,7 @@ def upgrade() -> None:
         sa.Column("event_type", sa.String(length=128), nullable=False),
         sa.Column("severity", sa.String(length=16), nullable=False, server_default="info"),
         sa.Column("detail", postgresql.JSONB(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     )
     op.create_index("ix_system_events_service", "system_events", ["service"])
     op.create_index("ix_system_events_event_type", "system_events", ["event_type"])

@@ -6,8 +6,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import Settings
-from app.core.security import decode_token
+from yonixalpha_core.config import Settings
+from yonixalpha_core.security import decode_token
 
 _bearer = HTTPBearer(auto_error=False)
 

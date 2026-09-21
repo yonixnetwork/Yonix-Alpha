@@ -4,7 +4,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, get_redis
-from app.core.config import Settings
+from yonixalpha_core.config import Settings
 from app.api.deps import get_settings
 
 router = APIRouter(tags=["health"])

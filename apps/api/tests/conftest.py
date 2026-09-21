@@ -14,14 +14,14 @@ os.environ.setdefault(
 )
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/15")
 
-from app.core.security import hash_password  # noqa: E402
+from yonixalpha_core.security import hash_password  # noqa: E402
 
 TEST_ADMIN_PASSWORD = "test-password-123"
 os.environ.setdefault("ADMIN_PASSWORD_HASH", hash_password(TEST_ADMIN_PASSWORD))
 
-from app.core.config import get_settings  # noqa: E402
-from app.db.base import Base, make_session_factory  # noqa: E402
-from app.db.redis import make_redis  # noqa: E402
+from yonixalpha_core.config import get_settings  # noqa: E402
+from yonixalpha_core.db.base import Base, make_session_factory  # noqa: E402
+from yonixalpha_core.db.redis import make_redis  # noqa: E402
 from app.main import create_app  # noqa: E402
 
 

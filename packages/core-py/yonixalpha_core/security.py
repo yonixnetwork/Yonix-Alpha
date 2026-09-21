@@ -5,7 +5,7 @@ from typing import Any, Literal
 import jwt
 from passlib.context import CryptContext
 
-from app.core.config import Settings
+from yonixalpha_core.config import Settings
 
 _pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
 

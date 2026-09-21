@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends
 
 from app.api.deps import get_current_username, get_settings
-from app.core.config import Settings
+from yonixalpha_core.config import Settings
 
 router = APIRouter(prefix="/system", tags=["system"])
 

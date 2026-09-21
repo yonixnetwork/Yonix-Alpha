@@ -5,11 +5,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 
 from app.api.router import api_router
-from app.core.config import get_settings
-from app.core.logging import configure_logging, get_logger
-from app.db.base import make_engine, make_session_factory
-from app.db.models import User
-from app.db.redis import make_redis
+from yonixalpha_core.config import get_settings
+from yonixalpha_core.logging import configure_logging, get_logger
+from yonixalpha_core.db.base import make_engine, make_session_factory
+from yonixalpha_core.db.models import User
+from yonixalpha_core.db.redis import make_redis
 
 log = get_logger("api.main")
 

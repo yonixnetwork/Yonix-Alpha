@@ -1,3 +1,6 @@
+# Build from the repo root: docker build -f apps/api/Dockerfile .
+# (this service depends on packages/core-py, which sits outside its own
+# directory, so the build context must be the repo root — see docker-compose.yml).
 FROM python:3.12-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -10,10 +13,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install -r requirements.txt
+COPY packages/core-py /packages/core-py
+COPY apps/api/requirements.txt .
+RUN sed -i 's#../../packages/core-py#/packages/core-py#' requirements.txt \
+    && pip install -r requirements.txt
 
-COPY . .
+COPY apps/api .
 
 RUN useradd --create-home --shell /bin/bash appuser && chown -R appuser:appuser /app
 USER appuser
