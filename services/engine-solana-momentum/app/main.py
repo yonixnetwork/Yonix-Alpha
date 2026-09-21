@@ -1,40 +1,31 @@
 import asyncio
-import os
 import signal
+from datetime import datetime, timezone
 
 import httpx
 
 from yonixalpha_core.config import get_settings
 from yonixalpha_core.db.base import make_engine, make_session_factory
 from yonixalpha_core.db.models import SystemEvent
-from yonixalpha_core.db.writers import write_market_snapshot
 from yonixalpha_core.logging import configure_logging, get_logger
 from yonixalpha_core.solana.rpc import RpcManager
+from yonixalpha_core.solana.token_program import TOKEN_PROGRAM_ID, extract_transfer_checked, logs_mention_transfer_checked
 from yonixalpha_core.solana.ws import SolanaWsClient
 
-from app.ingest import normalize_logs_notification, normalize_slot_notification
+from app.candidates import record_transfer_and_evaluate
 
-log = get_logger("data-solana.main")
-
-# Additional program/account addresses to watch via logsSubscribe, one per
-# line, comma-separated. Left empty by default — see app/ingest.py for why
-# this service doesn't ship a hardcoded launch-platform program ID.
-WATCHED_ADDRESSES = [a.strip() for a in os.getenv("SOLANA_WATCHED_ADDRESSES", "").split(",") if a.strip()]
+log = get_logger("engine-solana-momentum.main")
 
 HEALTH_CHECK_INTERVAL_SECONDS = 30
 
 
 async def _record_system_event(session_factory, event_type: str, severity: str, detail: dict | None = None) -> None:
     async with session_factory() as session:
-        session.add(SystemEvent(service="data-solana", event_type=event_type, severity=severity, detail=detail))
+        session.add(SystemEvent(service="engine-solana-momentum", event_type=event_type, severity=severity, detail=detail))
         await session.commit()
 
 
 async def _health_check_loop(rpc: RpcManager, session_factory, stop_event: asyncio.Event) -> None:
-    """Periodically calls getHealth against the currently-preferred endpoint
-    so RPC failover state is exercised even during a quiet WS period, and so
-    an operator has a System Event trail of RPC health over time.
-    """
     while not stop_event.is_set():
         try:
             await rpc.call("getHealth")
@@ -50,41 +41,20 @@ async def _health_check_loop(rpc: RpcManager, session_factory, stop_event: async
             pass
 
 
-def _build_subscriptions() -> list[dict]:
-    subs: list[dict] = [{"jsonrpc": "2.0", "method": "slotSubscribe", "params": []}]
-    for address in WATCHED_ADDRESSES:
-        subs.append(
-            {
-                "jsonrpc": "2.0",
-                "method": "logsSubscribe",
-                "params": [{"mentions": [address]}, {"commitment": "confirmed"}],
-            }
-        )
-    return subs
-
-
 async def run() -> None:
     settings = get_settings()
     configure_logging(settings.LOG_LEVEL)
 
     if not settings.SOLANA_RPC_URL:
-        log.warning("data-solana.disabled", reason="SOLANA_RPC_URL not set")
+        log.warning("engine-solana-momentum.disabled", reason="SOLANA_RPC_URL not set")
+        return
+    ws_urls = [u for u in (settings.SOLANA_WS_URL, settings.SOLANA_WS_BACKUP_URL) if u]
+    if not ws_urls:
+        log.warning("engine-solana-momentum.disabled", reason="SOLANA_WS_URL not set")
         return
 
     engine = make_engine(settings)
     session_factory = make_session_factory(engine)
-
-    async def handle_message(message: dict) -> None:
-        method = message.get("method", "")
-        event = None
-        if method == "slotNotification":
-            event = normalize_slot_notification(message)
-        elif method == "logsNotification":
-            event = normalize_logs_notification(message)
-        if event is None:
-            return
-        async with session_factory() as session:
-            await write_market_snapshot(session, event)
 
     async with httpx.AsyncClient() as http_client:
         rpc = RpcManager.create(
@@ -93,11 +63,37 @@ async def run() -> None:
             backup_url=settings.SOLANA_RPC_BACKUP_URL,
         )
 
-        ws_urls = [u for u in (settings.SOLANA_WS_URL, settings.SOLANA_WS_BACKUP_URL) if u]
-        if not ws_urls:
-            log.warning("data-solana.ws_disabled", reason="SOLANA_WS_URL not set")
-            await engine.dispose()
-            return
+        async def handle_message(message: dict) -> None:
+            if message.get("method") != "logsNotification":
+                return
+            value = message.get("params", {}).get("result", {}).get("value", {})
+            if value.get("err") is not None:
+                return
+            logs = value.get("logs", [])
+            if not logs_mention_transfer_checked(logs):
+                return
+
+            signature = value.get("signature")
+            if not signature:
+                return
+
+            try:
+                tx_result = await rpc.call(
+                    "getTransaction",
+                    [signature, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0, "commitment": "confirmed"}],
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("main.get_transaction_failed", signature=signature, error=str(exc))
+                return
+
+            for transfer_info in extract_transfer_checked(tx_result or {}):
+                occurred_at = (
+                    datetime.fromtimestamp(transfer_info["block_time"], tz=timezone.utc)
+                    if transfer_info.get("block_time")
+                    else datetime.now(timezone.utc)
+                )
+                async with session_factory() as session:
+                    await record_transfer_and_evaluate(session, transfer_info, occurred_at)
 
         ws_index = {"i": 0}
 
@@ -106,9 +102,18 @@ async def run() -> None:
             ws_index["i"] += 1
             return url
 
+        # Same mentions-filter caveat as engine-solana-discovery: see that
+        # service's main.py for why this may need a dedicated indexer in
+        # production rather than raw public-RPC logsSubscribe.
         ws_client = SolanaWsClient(
             url_provider=next_ws_url,
-            subscriptions=_build_subscriptions(),
+            subscriptions=[
+                {
+                    "jsonrpc": "2.0",
+                    "method": "logsSubscribe",
+                    "params": [{"mentions": [TOKEN_PROGRAM_ID]}, {"commitment": "confirmed"}],
+                }
+            ],
             on_message=handle_message,
         )
 
@@ -118,7 +123,7 @@ async def run() -> None:
             loop.add_signal_handler(sig, stop_event.set)
 
         await _record_system_event(session_factory, "service_started", "info")
-        log.info("data-solana.started", watched_addresses=WATCHED_ADDRESSES)
+        log.info("engine-solana-momentum.started", token_program=TOKEN_PROGRAM_ID)
 
         try:
             await asyncio.gather(

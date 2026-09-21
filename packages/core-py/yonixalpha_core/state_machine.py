@@ -1,0 +1,70 @@
+from datetime import datetime, timezone
+from enum import StrEnum
+
+
+class CandidateState(StrEnum):
+    """Per spec section 10. A candidate is any token/opportunity an engine
+    is tracking, independent of which engine (discovery/migration/momentum)
+    produced it. REJECTED is reachable any time before capital is
+    committed (ENTERED); once a position is actually open, the only honest
+    terminal state is CLOSED, reached via the exit chain — a real position
+    doesn't get "rejected" out of existence.
+    """
+
+    DISCOVERED = "discovered"
+    OBSERVING = "observing"
+    QUALIFIED = "qualified"
+    ENTRY_PENDING = "entry_pending"
+    ENTERED = "entered"
+    MANAGING = "managing"
+    EXIT_SIGNAL = "exit_signal"
+    EXITING = "exiting"
+    CLOSED = "closed"
+    REJECTED = "rejected"
+
+
+TERMINAL_STATES = {CandidateState.CLOSED, CandidateState.REJECTED}
+
+VALID_TRANSITIONS: dict[CandidateState, set[CandidateState]] = {
+    CandidateState.DISCOVERED: {CandidateState.OBSERVING, CandidateState.REJECTED},
+    CandidateState.OBSERVING: {CandidateState.QUALIFIED, CandidateState.REJECTED},
+    CandidateState.QUALIFIED: {CandidateState.ENTRY_PENDING, CandidateState.REJECTED},
+    CandidateState.ENTRY_PENDING: {CandidateState.ENTERED, CandidateState.REJECTED},
+    CandidateState.ENTERED: {CandidateState.MANAGING},
+    CandidateState.MANAGING: {CandidateState.EXIT_SIGNAL},
+    CandidateState.EXIT_SIGNAL: {CandidateState.EXITING},
+    CandidateState.EXITING: {CandidateState.CLOSED},
+    CandidateState.CLOSED: set(),
+    CandidateState.REJECTED: set(),
+}
+
+
+class InvalidStateTransitionError(Exception):
+    def __init__(self, from_state: CandidateState, to_state: CandidateState):
+        self.from_state = from_state
+        self.to_state = to_state
+        super().__init__(f"Cannot transition from {from_state.value} to {to_state.value}")
+
+
+def apply_transition(candidate, new_state: CandidateState, reason: str | None = None) -> None:
+    """Mutates `candidate` (a TradingCandidate ORM instance) in place: sets
+    `.state`, appends to `.state_history` (so the full path is recoverable
+    from Postgres after a restart, per spec section 10 — never just the
+    current state), and stamps `.state_updated_at`. Caller still owns
+    session.commit(); this function does no I/O.
+
+    Raises InvalidStateTransitionError rather than silently allowing an
+    illegal jump (e.g. DISCOVERED -> ENTERED) — a bug in caller code should
+    fail loudly here, not corrupt the candidate's history.
+    """
+    current = CandidateState(candidate.state)
+    if new_state not in VALID_TRANSITIONS.get(current, set()):
+        raise InvalidStateTransitionError(current, new_state)
+
+    now = datetime.now(timezone.utc)
+    history = list(candidate.state_history or [])
+    history.append({"state": new_state.value, "at": now.isoformat(), "reason": reason})
+
+    candidate.state = new_state.value
+    candidate.state_history = history
+    candidate.state_updated_at = now

@@ -66,7 +66,7 @@ def upgrade() -> None:
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.ForeignKeyConstraint(['token_id'], ['tokens.id'], ondelete='CASCADE'),
     sa.PrimaryKeyConstraint('id'),
-    sa.UniqueConstraint('source', 'signature', 'event_type', name='uq_token_events_source_signature_type')
+    sa.UniqueConstraint('source', 'signature', 'event_type', 'token_id', name='uq_token_events_source_signature_type_token')
     )
     op.create_index(op.f('ix_token_events_event_type'), 'token_events', ['event_type'], unique=False)
     op.create_index(op.f('ix_token_events_occurred_at'), 'token_events', ['occurred_at'], unique=False)

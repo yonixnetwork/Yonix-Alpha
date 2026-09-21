@@ -25,6 +25,15 @@ services:
   data-binance:
     restart: unless-stopped
 
+  engine-solana-discovery:
+    restart: unless-stopped
+
+  engine-solana-momentum:
+    restart: unless-stopped
+
+  engine-solana-migration:
+    restart: unless-stopped
+
   reverse-proxy:
     image: nginx:1.27-alpine
     restart: unless-stopped

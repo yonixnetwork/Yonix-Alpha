@@ -4,7 +4,7 @@ import json
 import pytest
 import websockets
 
-from app.ws.client import SolanaWsClient
+from yonixalpha_core.solana.ws import SolanaWsClient
 
 pytestmark = pytest.mark.asyncio
 

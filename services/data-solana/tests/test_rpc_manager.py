@@ -1,7 +1,7 @@
 import httpx
 import pytest
 
-from app.rpc.manager import RpcAllEndpointsFailedError, RpcManager
+from yonixalpha_core.solana.rpc import RpcAllEndpointsFailedError, RpcManager
 
 pytestmark = pytest.mark.asyncio
 

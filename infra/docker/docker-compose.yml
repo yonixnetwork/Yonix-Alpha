@@ -85,6 +85,39 @@ services:
         condition: service_healthy
     networks: [yonixalpha]
 
+  engine-solana-discovery:
+    build:
+      context: ../..
+      dockerfile: services/engine-solana-discovery/Dockerfile
+    env_file:
+      - ../../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [yonixalpha]
+
+  engine-solana-momentum:
+    build:
+      context: ../..
+      dockerfile: services/engine-solana-momentum/Dockerfile
+    env_file:
+      - ../../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [yonixalpha]
+
+  engine-solana-migration:
+    build:
+      context: ../..
+      dockerfile: services/engine-solana-migration/Dockerfile
+    env_file:
+      - ../../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [yonixalpha]
+
 networks:
   yonixalpha:
     driver: bridge

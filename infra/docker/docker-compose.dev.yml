@@ -2,9 +2,9 @@
 # port exposure for debugging (Postgres/Redis are reachable from the host —
 # never do this in prod, see docker-compose.prod.yml).
 #
-# api/data-solana/data-binance all bind-mount BOTH their own app/ directory
-# AND packages/core-py to the paths the image's `pip install -e` points at,
-# so editing shared code hot-reloads across every service without a rebuild.
+# Every backend service bind-mounts BOTH its own app/ directory AND
+# packages/core-py to the paths the image's `pip install -e` points at, so
+# editing shared code hot-reloads across every service without a rebuild.
 
 services:
   postgres:
@@ -46,4 +46,19 @@ services:
   data-binance:
     volumes:
       - ../../services/data-binance/app:/app/app
+      - ../../packages/core-py:/packages/core-py
+
+  engine-solana-discovery:
+    volumes:
+      - ../../services/engine-solana-discovery/app:/app/app
+      - ../../packages/core-py:/packages/core-py
+
+  engine-solana-momentum:
+    volumes:
+      - ../../services/engine-solana-momentum/app:/app/app
+      - ../../packages/core-py:/packages/core-py
+
+  engine-solana-migration:
+    volumes:
+      - ../../services/engine-solana-migration/app:/app/app
       - ../../packages/core-py:/packages/core-py

@@ -149,7 +149,13 @@ class TokenEvent(Base):
 
     token: Mapped["Token"] = relationship(back_populates="events")
 
-    __table_args__ = (UniqueConstraint("source", "signature", "event_type", name="uq_token_events_source_signature_type"),)
+    __table_args__ = (
+        # token_id is part of the key, not just (source, signature, event_type):
+        # a single transaction can create more than one mint (e.g. a
+        # multi-mint CPI), producing multiple "created" TokenEvents that
+        # legitimately share a signature but belong to different tokens.
+        UniqueConstraint("source", "signature", "event_type", "token_id", name="uq_token_events_source_signature_type_token"),
+    )
 
 
 class MarketSnapshot(Base):
@@ -176,3 +182,33 @@ class MarketSnapshot(Base):
     __table_args__ = (
         UniqueConstraint("source", "symbol", "snapshot_type", "sequence", name="uq_market_snapshots_dedup"),
     )
+
+
+class TradingCandidate(Base):
+    """One row per opportunity an engine is tracking through the state
+    machine in yonixalpha_core.state_machine (DISCOVERED -> ... -> CLOSED,
+    or REJECTED at any point before ENTERED). `state_history` carries the
+    full transition path with timestamps and reasons, so state is always
+    reconstructable from Postgres after a restart rather than relying on
+    RAM (spec section 10) — `state` alone is a cache of
+    state_history[-1]["state"], never the source of truth on its own.
+
+    No risk_score/confidence columns here: those are the Risk/Decision
+    Engine's output (Phase 5), not something a discovery-stage engine
+    produces. `detail` holds whatever engine-specific findings justified
+    the DISCOVERED transition (e.g. the triggering signature, an
+    acceleration ratio) for later inspection.
+    """
+
+    __tablename__ = "trading_candidates"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    token_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tokens.id", ondelete="CASCADE"), nullable=False, index=True)
+    engine: Mapped[str] = mapped_column(String(32), nullable=False, index=True)  # discovery|migration|momentum
+    state: Mapped[str] = mapped_column(String(16), nullable=False, index=True, default="discovered")
+    state_history: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    state_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    token: Mapped["Token"] = relationship()
