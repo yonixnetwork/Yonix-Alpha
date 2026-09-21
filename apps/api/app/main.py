@@ -1,0 +1,77 @@
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import select
+
+from app.api.router import api_router
+from app.core.config import get_settings
+from app.core.logging import configure_logging, get_logger
+from app.db.base import make_engine, make_session_factory
+from app.db.models import User
+from app.db.redis import make_redis
+
+log = get_logger("api.main")
+
+
+async def _seed_admin_user(session_factory) -> None:
+    settings = get_settings()
+    if not settings.ADMIN_PASSWORD_HASH:
+        log.warning("admin.seed.skipped", reason="ADMIN_PASSWORD_HASH not set")
+        return
+    async with session_factory() as session:
+        result = await session.execute(select(User).where(User.username == settings.ADMIN_USERNAME))
+        existing = result.scalar_one_or_none()
+        if existing is None:
+            session.add(User(username=settings.ADMIN_USERNAME, password_hash=settings.ADMIN_PASSWORD_HASH))
+            await session.commit()
+            log.info("admin.seed.created", username=settings.ADMIN_USERNAME)
+        elif existing.password_hash != settings.ADMIN_PASSWORD_HASH:
+            # ADMIN_PASSWORD_HASH in the environment is the source of truth —
+            # rotating it in .env and restarting is how the admin password changes.
+            existing.password_hash = settings.ADMIN_PASSWORD_HASH
+            await session.commit()
+            log.info("admin.seed.password_rotated", username=settings.ADMIN_USERNAME)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings = get_settings()
+    configure_logging(settings.LOG_LEVEL)
+
+    engine = make_engine(settings)
+    session_factory = make_session_factory(engine)
+    redis = make_redis(settings)
+
+    app.state.settings = settings
+    app.state.engine = engine
+    app.state.db_session_factory = session_factory
+    app.state.redis = redis
+
+    await _seed_admin_user(session_factory)
+
+    log.info("api.startup", app_env=settings.APP_ENV, trading_enabled=settings.TRADING_ENABLED)
+    yield
+
+    await engine.dispose()
+    await redis.aclose()
+    log.info("api.shutdown")
+
+
+def create_app() -> FastAPI:
+    settings = get_settings()
+    app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    app.include_router(api_router, prefix="/api")
+    return app
+
+
+app = create_app()

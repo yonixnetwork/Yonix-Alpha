@@ -1,0 +1,39 @@
+# Production override: no host-exposed DB/Redis ports, restart policies,
+# and the reverse proxy fronting the api/web services. Deployed from
+# /opt/yonixalpha on the DigitalOcean droplet — see docs/DEPLOYMENT.md.
+
+services:
+  postgres:
+    restart: unless-stopped
+
+  redis:
+    restart: unless-stopped
+
+  api:
+    restart: unless-stopped
+    environment:
+      - APP_ENV=production
+
+  web:
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+
+  reverse-proxy:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - api
+      - web
+    volumes:
+      - ../nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - certbot_www:/var/www/certbot:ro
+      - certbot_conf:/etc/letsencrypt:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    networks: [yonixalpha]
+
+volumes:
+  certbot_www:
+  certbot_conf:
