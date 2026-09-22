@@ -1,3 +1,4 @@
+from decimal import Decimal
 from functools import lru_cache
 from typing import Optional
 
@@ -54,6 +55,20 @@ class Settings(BaseSettings):
     # Telegram (wired up Phase 11 — yonixalpha_core.notify.send_telegram_alert)
     TELEGRAM_BOT_TOKEN: Optional[str] = None
     TELEGRAM_CHAT_ID: Optional[str] = None
+
+    # Simulated trading cost charged to EACH leg of a paper position, in
+    # basis points of that leg's notional (entry and exit are charged
+    # separately). Defaults to 0, which means paper PnL is GROSS — no fee,
+    # spread, or price impact.
+    #
+    # 0 is deliberately not a claim that trading is free. It is a refusal
+    # to invent a number: a realistic Solana/Jupiter round-trip cost cannot
+    # be verified from this codebase's environment, and a fabricated
+    # constant would quietly propagate into every ML label. It matters
+    # because a label is literally `realized_pnl > 0`, so at 0 bps a trade
+    # that only cleared costs on paper still trains the model as a winner.
+    # Set this to a measured value before trusting paper results.
+    PAPER_TRADING_PER_LEG_COST_BPS: Decimal = Decimal(0)
 
     # Frontend / domain
     NEXT_PUBLIC_API_URL: str = "http://localhost:8000"

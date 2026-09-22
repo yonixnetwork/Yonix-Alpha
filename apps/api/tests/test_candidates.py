@@ -114,3 +114,34 @@ async def test_get_candidate_detail_with_no_related_rows(app, client, auth_heade
     assert body["latest_signal"] is None
     assert body["latest_risk_event"] is None
     assert body["paper_position"] is None
+
+
+async def test_malformed_state_history_is_normalised_not_passed_through(app, client, auth_headers):
+    """state_history is a JSONB column, so nothing at the database level
+    guarantees its shape — an entry written by an older build, a migration
+    or a manual fix can differ. It used to be typed `list[Any]` and
+    forwarded verbatim, and the dashboard called `.replace()` on
+    `entry.state`; one such row raised an uncaught TypeError and
+    white-screened the whole candidate detail page (reproduced in a real
+    browser during the audit). The API must normalise instead.
+    """
+    candidate = await _seed_candidate(app)
+    async with app.state.db_session_factory() as session:
+        row = await session.get(TradingCandidate, candidate.id)
+        row.state_history = [
+            {"to": "discovered", "at": "2026-01-01"},  # legacy/unknown shape: no "state" key
+            {"state": "observing", "at": "2026-01-02", "reason": "ok"},
+        ]
+        await session.commit()
+
+    resp = await client.get(f"/api/candidates/{candidate.id}", headers=auth_headers)
+
+    assert resp.status_code == 200
+    history = resp.json()["state_history"]
+    assert len(history) == 2
+    # Every entry is guaranteed to carry a string `state`, so no consumer
+    # can trip over a missing key.
+    assert all(isinstance(entry["state"], str) for entry in history)
+    assert history[0]["state"] == "unknown"
+    assert history[1]["state"] == "observing"
+    assert history[1]["reason"] == "ok"

@@ -25,3 +25,12 @@ export function candidateStatePillClass(state: string): string {
 export function boolPillClass(value: boolean): string {
   return value ? "pill pill-ok" : "pill pill-danger";
 }
+
+export function formatState(state: string | null | undefined): string {
+  // state_history and state come from a JSONB column, so nothing at the
+  // database level guarantees they are present or strings. Calling
+  // .replace() on them directly used to throw an uncaught TypeError that
+  // white-screened the whole candidate detail page for one malformed row.
+  if (typeof state !== "string" || state.length === 0) return "unknown";
+  return state.replace(/_/g, " ");
+}

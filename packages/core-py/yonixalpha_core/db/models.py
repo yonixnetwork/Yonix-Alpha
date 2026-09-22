@@ -2,7 +2,19 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, LargeBinary, Numeric, String, UniqueConstraint, func
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Integer,
+    LargeBinary,
+    Numeric,
+    String,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import INET, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -482,6 +494,16 @@ class PaperPosition(Base):
     """
 
     __tablename__ = "paper_positions"
+    # A position with a zero (or negative) entry price or quantity has an
+    # undefined cost basis, which makes both position sizing at entry and
+    # realized_pnl_pct at close undefined. Enforced here as well as in
+    # services/paper-trading/app/entry.py so no future writer can
+    # reintroduce the row shape that broke closing (and, through it, every
+    # other open position's stop-loss) before this constraint existed.
+    __table_args__ = (
+        CheckConstraint("entry_price > 0", name="ck_paper_positions_entry_price_positive"),
+        CheckConstraint("quantity > 0", name="ck_paper_positions_quantity_positive"),
+    )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     candidate_id: Mapped[uuid.UUID | None] = mapped_column(

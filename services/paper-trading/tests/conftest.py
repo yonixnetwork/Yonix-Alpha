@@ -12,14 +12,25 @@ from yonixalpha_core.db import models  # noqa: F401,E402 - registers models on B
 
 
 @pytest_asyncio.fixture
-async def db_session():
+async def _engine():
     engine = create_async_engine(os.environ["DATABASE_URL"])
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
-    session_factory = make_session_factory(engine)
+    yield engine
+    await engine.dispose()
 
-    async with session_factory() as session:
+
+@pytest_asyncio.fixture
+async def db_session(_engine):
+    async with make_session_factory(_engine)() as session:
         yield session
 
-    await engine.dispose()
+
+@pytest_asyncio.fixture
+async def session_factory(_engine):
+    """The same session-factory shape app/main.py's loop functions take, on
+    the same engine as `db_session`, so a test can seed through one and
+    exercise the real loop through the other.
+    """
+    return make_session_factory(_engine)

@@ -185,3 +185,55 @@ def test_multiple_violations_all_collected_not_just_first():
     )
     assert verdict.approved is False
     assert len(verdict.reasons) >= 2
+
+
+# ---------------------------------------------------------------------------
+# Audit regression: a configured limit whose input is unknown must REJECT.
+#
+# Previously proposed_position_size/current_portfolio_exposure/
+# daily_realized_pnl defaulted to Decimal(0), so a caller that could not
+# measure them (every caller in this codebase today) silently satisfied
+# every corresponding limit. An operator following docs/DEPLOYMENT.md's
+# "enabling live trading" checklist would set MAX_POSITION_SIZE and
+# MAX_DAILY_LOSS and believe capital was capped, while neither check could
+# ever fire. Unknown is now distinct from zero, and unknown loses.
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_position_size_rejects_when_max_position_size_configured():
+    verdict = evaluate(_config(max_position_size=Decimal("1000")), _context())
+    assert verdict.approved is False
+    assert any("cannot determine the proposed position size" in r for r in verdict.reasons)
+
+
+def test_unknown_daily_pnl_rejects_when_max_daily_loss_configured():
+    verdict = evaluate(_config(max_daily_loss=Decimal("500")), _context())
+    assert verdict.approved is False
+    assert any("cannot determine today's realized PnL" in r for r in verdict.reasons)
+
+
+def test_unknown_exposure_rejects_when_max_portfolio_exposure_configured():
+    verdict = evaluate(_config(max_portfolio_exposure=Decimal("5000")), _context())
+    assert verdict.approved is False
+    assert any("cannot determine current exposure" in r for r in verdict.reasons)
+
+
+def test_unconfigured_limits_still_approve_when_inputs_unknown():
+    """Not knowing a value is only fatal when a limit depends on it."""
+    verdict = evaluate(_config(), _context())
+    assert verdict.approved is True
+
+
+def test_zero_is_still_a_real_measured_value_not_unknown():
+    """An honestly-measured zero must pass a configured limit, proving the
+    fix distinguishes 'measured 0' from 'unknown'.
+    """
+    verdict = evaluate(
+        _config(max_position_size=Decimal("1000"), max_daily_loss=Decimal("500"), max_portfolio_exposure=Decimal("5000")),
+        _context(
+            proposed_position_size=Decimal("0"),
+            daily_realized_pnl=Decimal("0"),
+            current_portfolio_exposure=Decimal("0"),
+        ),
+    )
+    assert verdict.approved is True, verdict.reasons

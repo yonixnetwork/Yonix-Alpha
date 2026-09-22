@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { apiGet, ApiError } from "@/lib/api";
-import { boolPillClass, candidateStatePillClass, decisionPillClass, formatDate, formatDecimal } from "@/lib/format";
+import { boolPillClass, candidateStatePillClass, decisionPillClass, formatDate, formatDecimal, formatState } from "@/lib/format";
 import type { CandidateDetail } from "@/lib/types";
 
 export default function CandidateDetailPage() {
@@ -46,7 +46,7 @@ export default function CandidateDetailPage() {
           </Link>
           <div className="page-title mono">{candidate.mint_address}</div>
         </div>
-        <span className={candidateStatePillClass(candidate.state)}>{candidate.state.replace(/_/g, " ")}</span>
+        <span className={candidateStatePillClass(candidate.state)}>{formatState(candidate.state)}</span>
       </div>
 
       <div className="detail-grid">
@@ -155,7 +155,7 @@ export default function CandidateDetailPage() {
           {[...candidate.state_history].reverse().map((h, i) => (
             <tr key={i}>
               <td>
-                <span className={candidateStatePillClass(h.state)}>{h.state.replace(/_/g, " ")}</span>
+                <span className={candidateStatePillClass(h.state)}>{formatState(h.state)}</span>
               </td>
               <td>{formatDate(h.at)}</td>
               <td>{h.reason ?? "—"}</td>

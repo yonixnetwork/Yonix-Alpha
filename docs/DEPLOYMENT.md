@@ -179,6 +179,21 @@ to `true` on a production `.env`:
    `MAX_OPEN_POSITIONS` to real, deliberately-chosen limits — they default
    unset (unenforced), which is fine for observing the system but not for
    risking real capital.
+
+   **Know which of these can actually fire today** (a limit that silently
+   cannot enforce is worse than no limit, so this is stated plainly
+   rather than left to be discovered):
+
+   | Limit | Status | Why |
+   |---|---|---|
+   | `MAX_OPEN_POSITIONS` | **Enforced** | `decision-engine` counts real open positions. |
+   | `MAX_POSITION_SIZE` | **Blocks all trading if set** | No position-sizing algorithm exists, so the proposed size is unknown. Since the audit, an unknown input to a *configured* limit is a rejection, not a pass (`risk.py`) — so setting this makes every decision `NO_TRADE` until sizing is implemented. That is deliberate: it fails closed and visibly, instead of appearing to cap size while capping nothing. |
+   | `MAX_DAILY_LOSS` | **Blocks all trading if set** | Same reason: no realized-PnL feed, so today's PnL is unknown. |
+   | `MAX_SLIPPAGE` | **Not wired** | Deliberately not mapped into `RiskConfig` — it is a fraction, not basis points, and no Solana quote/slippage feed exists to compare against, so a unit conversion here would be unverified. It has no effect either way. |
+
+   In other words: on today's codebase the only limit that both applies
+   and permits trading is `MAX_OPEN_POSITIONS`. The rest are honest
+   blockers until the missing measurements exist.
 2. Confirm `BINANCE_TESTNET=false` only once you've watched a full
    `engine-binance-futures` cycle succeed against testnet.
 3. Know where the kill switch is (`/dashboard` → Overview → Kill Switch)

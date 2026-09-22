@@ -161,7 +161,10 @@ async def test_reconcile_updates_pending_order_from_exchange_state(db_session):
     assert client.get_order_calls[0]["orig_client_order_id"] == "yxa-test-1"
 
 
-async def test_reconcile_marks_400_response_as_not_found(db_session):
+async def test_reconcile_marks_explicit_order_does_not_exist_as_not_found(db_session):
+    """-2013 is the ONLY answer that proves the order never reached the
+    book, and therefore the only one allowed to end reconciliation.
+    """
     order = Order(
         client_order_id="yxa-test-2", symbol="BTCUSDT", side="BUY", order_type="MARKET",
         quantity=Decimal("0.01"), status="submit_failed",
@@ -176,6 +179,68 @@ async def test_reconcile_marks_400_response_as_not_found(db_session):
 
     assert len(reconciled) == 1
     assert reconciled[0].status == "not_found"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"code":-1121,"msg":"Invalid symbol."}',
+        '{"code":-1102,"msg":"Mandatory parameter was not sent, was empty/null, or malformed."}',
+        "<html><body>400 Bad Request</body></html>",  # not JSON at all
+        '{"msg":"something went wrong"}',  # JSON, but no code
+        "",
+    ],
+)
+async def test_reconcile_does_not_abandon_an_order_on_an_ambiguous_400(db_session, body):
+    """The critical safety property: Binance returns 400 for a family of
+    conditions that say nothing about whether the order is live. Marking
+    such an order `not_found` is terminal and unrecoverable — the system
+    would go on believing a real, open position does not exist. It must
+    stay non-terminal and be retried instead.
+    """
+    order = Order(
+        client_order_id="yxa-ambiguous", symbol="BTCUSDT", side="BUY", order_type="MARKET",
+        quantity=Decimal("0.01"), status="pending_submit",
+    )
+    db_session.add(order)
+    await db_session.commit()
+
+    client = FakeClient()
+    client._get_order_exception = BinanceApiError(400, body)
+
+    reconciled = await reconcile_pending_orders(db_session, client)
+
+    assert reconciled == [], "an ambiguous 400 must not resolve the order"
+    result = await db_session.execute(select(Order).where(Order.client_order_id == "yxa-ambiguous"))
+    persisted = result.scalar_one()
+    assert persisted.status == "pending_submit", "must remain non-terminal so the next pass retries it"
+
+
+async def test_reconcile_retries_an_ambiguous_400_on_the_next_pass(db_session):
+    """Proves the order is genuinely still reachable by reconciliation
+    after an ambiguous failure, and resolves correctly once Binance
+    answers properly.
+    """
+    order = Order(
+        client_order_id="yxa-retry", symbol="BTCUSDT", side="BUY", order_type="MARKET",
+        quantity=Decimal("0.01"), status="pending_submit",
+    )
+    db_session.add(order)
+    await db_session.commit()
+
+    client = FakeClient()
+    client._get_order_exception = BinanceApiError(400, '{"code":-1121,"msg":"Invalid symbol."}')
+    assert await reconcile_pending_orders(db_session, client) == []
+
+    # Second pass: the transient condition clears and the order turns out
+    # to have been live and filled all along.
+    client._get_order_exception = None
+    client._get_order_response = {"orderId": 777, "status": "FILLED"}
+    reconciled = await reconcile_pending_orders(db_session, client)
+
+    assert len(reconciled) == 1
+    assert reconciled[0].status == "FILLED"
+    assert reconciled[0].exchange_order_id == "777"
 
 
 async def test_reconcile_leaves_status_unchanged_on_transient_error(db_session):

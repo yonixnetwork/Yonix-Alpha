@@ -13,10 +13,10 @@ async def test_unlabeled_rows_are_excluded(db_session):
     db_session.add(_feature_row(label=1))
     await db_session.commit()
 
-    X, y, skipped = await load_labeled_dataset(db_session)
-    assert len(X) == 1
-    assert y == [1]
-    assert skipped == 0
+    dataset = await load_labeled_dataset(db_session)
+    assert len(dataset.features) == 1
+    assert dataset.labels == [1]
+    assert dataset.skipped_rows == 0
 
 
 async def test_rows_missing_a_declared_feature_are_skipped_and_counted(db_session):
@@ -25,10 +25,10 @@ async def test_rows_missing_a_declared_feature_are_skipped_and_counted(db_sessio
     db_session.add(row)
     await db_session.commit()
 
-    X, y, skipped = await load_labeled_dataset(db_session)
-    assert X == []
-    assert y == []
-    assert skipped == 1
+    dataset = await load_labeled_dataset(db_session)
+    assert dataset.features == []
+    assert dataset.labels == []
+    assert dataset.skipped_rows == 1
 
 
 async def test_feature_vector_order_matches_feature_names(db_session):
@@ -36,15 +36,17 @@ async def test_feature_vector_order_matches_feature_names(db_session):
     db_session.add(row)
     await db_session.commit()
 
-    X, y, _ = await load_labeled_dataset(db_session)
+    dataset = await load_labeled_dataset(db_session)
+    X = dataset.features
     assert len(X) == 1
     assert X[0][FEATURE_NAMES.index("token_age_seconds")] == 42.0
     assert X[0][FEATURE_NAMES.index("tx_count_current_window")] == 6.0
-    assert y == [0]
+    assert dataset.labels == [0]
 
 
 async def test_empty_dataset_returns_empty_lists(db_session):
-    X, y, skipped = await load_labeled_dataset(db_session)
-    assert X == []
-    assert y == []
-    assert skipped == 0
+    dataset = await load_labeled_dataset(db_session)
+    assert dataset.features == []
+    assert dataset.labels == []
+    assert dataset.skipped_rows == 0
+    assert dataset.candidate_count == 0

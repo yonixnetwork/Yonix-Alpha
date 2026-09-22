@@ -1,4 +1,6 @@
+import json
 import uuid
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -12,6 +14,37 @@ from app.client import BinanceApiError, BinanceFuturesClient
 log = get_logger("engine-binance-futures.orders")
 
 TERMINAL_ORDER_STATUSES = {"FILLED", "CANCELED", "REJECTED", "EXPIRED", "not_found"}
+
+# Binance's documented, stable code for "no such order" on a query
+# (GET /fapi/v1/order). It is the ONLY 4xx that proves an order never
+# reached the book. See _is_order_does_not_exist below for why nothing
+# else may be treated as terminal.
+ORDER_DOES_NOT_EXIST_CODE = -2013
+
+# An order that has been non-terminal for longer than this is not
+# "pending", it is stuck: something is wrong that retrying alone has not
+# solved. Surfaced so an operator finds out from an alert rather than from
+# a surprise position.
+STUCK_ORDER_AFTER_SECONDS = 15 * 60
+
+
+def _is_order_does_not_exist(exc: BinanceApiError) -> bool:
+    """True only when Binance explicitly said the order does not exist.
+
+    Keying on the HTTP status class instead (any 400) is unsafe: Binance
+    returns 400 for a whole family of conditions — invalid symbol (-1121),
+    malformed/missing parameter (-1102, -1105, -1106), and others — none of
+    which say anything about whether the order is live. Marking a live
+    order `not_found` is terminal and unrecoverable: reconciliation stops,
+    and the system goes on believing a real, open position does not exist.
+    So an ambiguous 4xx is left non-terminal and retried; only -2013 ends
+    the matter.
+    """
+    try:
+        parsed = json.loads(exc.body)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(parsed, dict) and parsed.get("code") == ORDER_DOES_NOT_EXIST_CODE
 
 
 class TradingNotEnabledError(Exception):
@@ -121,18 +154,39 @@ async def reconcile_pending_orders(session: AsyncSession, client: BinanceFutures
     """
     result = await session.execute(select(Order).where(Order.status.notin_(TERMINAL_ORDER_STATUSES)))
     pending = result.scalars().all()
+    stuck_cutoff = datetime.now(timezone.utc) - timedelta(seconds=STUCK_ORDER_AFTER_SECONDS)
 
     reconciled: list[Order] = []
     for order in pending:
+        created_at = order.created_at
+        if created_at is not None and created_at.replace(tzinfo=created_at.tzinfo or timezone.utc) < stuck_cutoff:
+            # Not an error in itself, but an order this old with no terminal
+            # answer means repeated reconciliation is not converging. Say so
+            # loudly rather than retrying in silence forever.
+            log.error(
+                "orders.reconcile_stuck",
+                client_order_id=order.client_order_id,
+                symbol=order.symbol,
+                status=order.status,
+                created_at=str(created_at),
+            )
+
         try:
             response = await client.get_order(order.symbol, orig_client_order_id=order.client_order_id)
         except BinanceApiError as exc:
-            if exc.status_code == 400:
+            if _is_order_does_not_exist(exc):
                 log.warning("orders.reconcile_not_found", client_order_id=order.client_order_id, body=exc.body)
                 order.status = "not_found"
                 reconciled.append(order)
             else:
-                log.warning("orders.reconcile_failed_will_retry", client_order_id=order.client_order_id, error=str(exc))
+                # Includes every ambiguous 4xx. The order may be live; only
+                # an explicit -2013 is allowed to end reconciliation.
+                log.warning(
+                    "orders.reconcile_failed_will_retry",
+                    client_order_id=order.client_order_id,
+                    status_code=exc.status_code,
+                    error=str(exc),
+                )
             continue
         except Exception as exc:  # noqa: BLE001
             log.warning("orders.reconcile_failed_will_retry", client_order_id=order.client_order_id, error=str(exc))

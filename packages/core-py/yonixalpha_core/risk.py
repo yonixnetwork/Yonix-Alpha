@@ -54,9 +54,15 @@ class RiskContext:
     now: datetime
     data_quality: DataQuality
     kill_switch_engaged: bool = False
-    proposed_position_size: Decimal = Decimal(0)
-    current_portfolio_exposure: Decimal = Decimal(0)
-    daily_realized_pnl: Decimal = Decimal(0)
+    # None means "this caller cannot determine this value", which is NOT
+    # the same as zero. Encoding unknown as 0 silently satisfies every
+    # corresponding limit — an operator who configures MAX_POSITION_SIZE
+    # would believe capital was capped while the check could never fire.
+    # evaluate() therefore rejects when a limit is configured but its
+    # input is unknown, rather than passing by default.
+    proposed_position_size: Decimal | None = None
+    current_portfolio_exposure: Decimal | None = None
+    daily_realized_pnl: Decimal | None = None
     open_position_count: int = 0
     proposed_slippage_bps: Decimal | None = None
     available_liquidity: Decimal | None = None
@@ -81,6 +87,13 @@ def evaluate(config: RiskConfig, context: RiskContext) -> RiskVerdict:
     first and unconditionally, regardless of what else is configured —
     per section 37, the kill switch "must work even if the ML system is
     malfunctioning."
+
+    A configured limit whose input the caller cannot supply (None, meaning
+    unknown — see RiskContext) is a REJECTION, not a pass. A risk limit
+    that silently cannot fire is worse than no limit at all, because the
+    operator believes capital is protected when it is not. If that makes a
+    limit block every trade, the correct response is to implement the
+    missing measurement, not to loosen this.
     """
     reasons: list[str] = []
 
@@ -93,20 +106,38 @@ def evaluate(config: RiskConfig, context: RiskContext) -> RiskVerdict:
     if context.data_quality in (DataQuality.STALE, DataQuality.UNAVAILABLE):
         reasons.append(f"data quality is {context.data_quality.value}")
 
-    if config.max_position_size is not None and context.proposed_position_size > config.max_position_size:
-        reasons.append(
-            f"proposed position size {context.proposed_position_size} exceeds max_position_size {config.max_position_size}"
-        )
-
-    if config.max_portfolio_exposure is not None:
-        total_exposure = context.current_portfolio_exposure + context.proposed_position_size
-        if total_exposure > config.max_portfolio_exposure:
+    if config.max_position_size is not None:
+        if context.proposed_position_size is None:
             reasons.append(
-                f"portfolio exposure {total_exposure} would exceed max_portfolio_exposure {config.max_portfolio_exposure}"
+                "max_position_size is configured but this caller cannot determine the proposed position size "
+                "— refusing rather than treating an unknown size as within the limit"
+            )
+        elif context.proposed_position_size > config.max_position_size:
+            reasons.append(
+                f"proposed position size {context.proposed_position_size} exceeds max_position_size {config.max_position_size}"
             )
 
-    if config.max_daily_loss is not None and context.daily_realized_pnl <= -config.max_daily_loss:
-        reasons.append(f"daily realized PnL {context.daily_realized_pnl} has hit max_daily_loss {config.max_daily_loss}")
+    if config.max_portfolio_exposure is not None:
+        if context.current_portfolio_exposure is None or context.proposed_position_size is None:
+            reasons.append(
+                "max_portfolio_exposure is configured but this caller cannot determine current exposure and/or "
+                "proposed position size — refusing rather than treating an unknown exposure as within the limit"
+            )
+        else:
+            total_exposure = context.current_portfolio_exposure + context.proposed_position_size
+            if total_exposure > config.max_portfolio_exposure:
+                reasons.append(
+                    f"portfolio exposure {total_exposure} would exceed max_portfolio_exposure {config.max_portfolio_exposure}"
+                )
+
+    if config.max_daily_loss is not None:
+        if context.daily_realized_pnl is None:
+            reasons.append(
+                "max_daily_loss is configured but this caller cannot determine today's realized PnL "
+                "— refusing rather than treating an unknown PnL as within the limit"
+            )
+        elif context.daily_realized_pnl <= -config.max_daily_loss:
+            reasons.append(f"daily realized PnL {context.daily_realized_pnl} has hit max_daily_loss {config.max_daily_loss}")
 
     if config.max_open_positions is not None and context.open_position_count >= config.max_open_positions:
         reasons.append(f"open position count {context.open_position_count} at/above max_open_positions {config.max_open_positions}")

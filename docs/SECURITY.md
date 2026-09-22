@@ -186,6 +186,20 @@ see the script's comments for the exact jail config chosen and why.
   before nginx's own rate limiting ever engages. Out of scope for a
   single-operator private tool on a single droplet; would matter if this
   were ever made multi-tenant or public-facing.
+- **An access token stays valid until it expires (≤15 min) after
+  logout.** Logout revokes the refresh token server-side (the `sessions`
+  row), but access tokens are stateless JWTs with no denylist, so a
+  stolen one cannot be cut off early. Verified during the audit. Standard
+  tradeoff for a single-operator tool; a Redis `jti` denylist on logout
+  would close it if that window ever becomes unacceptable.
+- **The kill switch has no durable store.** It lives only in Redis. The
+  audit measured `appendonly no` with `save 3600 1 ...`, meaning a single
+  kill-switch write could sit unpersisted for up to an hour, and a crash
+  in that window would bring Redis back with trading **re-armed** — it
+  fails open. Mitigated by enabling AOF in
+  `infra/docker/docker-compose.yml` (worst case ~1s instead of ~1h). The
+  full fix is to make Postgres the system of record and fail *closed* on
+  a Redis miss; see `FINAL_PRODUCTION_AUDIT.md` R-2.
 - **CSP `style-src 'unsafe-inline'`**: Next.js inlines some critical CSS;
   a stricter nonce-based policy is possible but adds real complexity
   (nonce generation/threading through Next's SSR pipeline) for a

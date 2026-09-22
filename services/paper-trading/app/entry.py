@@ -62,6 +62,21 @@ async def try_open_position(
         await session.commit()
         return None
 
+    # A non-positive entry price is not merely useless, it is corrupting:
+    # it makes `quantity` below undefined (ZeroDivisionError) and produces a
+    # position whose cost basis is zero, which then breaks PnL at close
+    # time. Reachable for real — StrategySignal.entry is Numeric(38, 18),
+    # so any true price below 1e-18 (not unusual for a Solana memecoin
+    # quoted per raw unit) rounds to exactly 0 on write.
+    if signal.entry <= 0:
+        apply_transition(
+            candidate,
+            CandidateState.REJECTED,
+            reason=f"refusing to paper-trade a non-positive entry price ({signal.entry}) — likely a feed error or a price below Numeric(38,18) resolution",
+        )
+        await session.commit()
+        return None
+
     provider, routing_reasons = route(RoutingContext(asset_class="solana", migration_confirmed=migration_confirmed))
     if provider == ExecutionProvider.UNSUPPORTED:
         apply_transition(candidate, CandidateState.REJECTED, reason="; ".join(routing_reasons))

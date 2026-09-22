@@ -1,6 +1,7 @@
 import asyncio
 import signal
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from sqlalchemy import select
 
@@ -38,42 +39,63 @@ async def _open_qualified_candidates(session_factory, now: datetime) -> int:
 
     opened = 0
     for candidate_id in candidate_ids:
-        async with session_factory() as session:
-            candidate = await session.get(TradingCandidate, candidate_id)
-            if candidate is None or candidate.state != CandidateState.QUALIFIED.value:
-                continue  # state changed since the query above
-            position = await try_open_position(session, candidate, now)
-            if position is not None:
-                opened += 1
+        # Per-candidate isolation, matching services/decision-engine's own
+        # loop: one bad row must not abort the rest of the batch, and must
+        # never prevent _manage_open_positions below from running at all.
+        try:
+            async with session_factory() as session:
+                candidate = await session.get(TradingCandidate, candidate_id)
+                if candidate is None or candidate.state != CandidateState.QUALIFIED.value:
+                    continue  # state changed since the query above
+                position = await try_open_position(session, candidate, now)
+                if position is not None:
+                    opened += 1
+        except Exception as exc:  # noqa: BLE001
+            log.error("entry.candidate_failed", candidate_id=str(candidate_id), error=str(exc))
+            await _record_system_event(
+                session_factory, "paper_entry_failed", "error", {"candidate_id": str(candidate_id), "error": str(exc)}
+            )
     return opened
 
 
-async def _manage_open_positions(session_factory, now: datetime) -> int:
+async def _manage_open_positions(session_factory, now: datetime, per_leg_cost_bps: Decimal = Decimal(0)) -> int:
     async with session_factory() as session:
         result = await session.execute(select(PaperPosition.id).where(PaperPosition.status == "open"))
         position_ids = result.scalars().all()
 
     closed = 0
     for position_id in position_ids:
-        async with session_factory() as session:
-            position = await session.get(PaperPosition, position_id)
-            if position is None or position.status != "open":
-                continue
-            price = await latest_price(session, position.symbol)
-            if price is None:
-                log.info("manage.no_price_available", symbol=position.symbol, position_id=str(position_id))
-                continue
-            if await evaluate_open_position(session, position, price, now):
-                closed += 1
+        # Per-position isolation. Without it, a single position that raises
+        # while closing (a zero cost basis, a bad row, a transient DB error)
+        # aborts the whole batch — meaning every *other* open position's
+        # stop-loss silently stops being evaluated, every cycle, for as long
+        # as the bad row exists. That is the worst failure mode this service
+        # has, so it is contained here rather than left to the loop above.
+        try:
+            async with session_factory() as session:
+                position = await session.get(PaperPosition, position_id)
+                if position is None or position.status != "open":
+                    continue
+                price = await latest_price(session, position.symbol, now)
+                if price is None:
+                    log.info("manage.no_price_available", symbol=position.symbol, position_id=str(position_id))
+                    continue
+                if await evaluate_open_position(session, position, price, now, per_leg_cost_bps=per_leg_cost_bps):
+                    closed += 1
+        except Exception as exc:  # noqa: BLE001
+            log.error("manage.position_failed", position_id=str(position_id), error=str(exc))
+            await _record_system_event(
+                session_factory, "paper_manage_failed", "error", {"position_id": str(position_id), "error": str(exc)}
+            )
     return closed
 
 
-async def _paper_trading_loop(session_factory, stop_event: asyncio.Event) -> None:
+async def _paper_trading_loop(session_factory, stop_event: asyncio.Event, per_leg_cost_bps: Decimal = Decimal(0)) -> None:
     while not stop_event.is_set():
         now = datetime.now(timezone.utc)
         try:
             opened = await _open_qualified_candidates(session_factory, now)
-            closed = await _manage_open_positions(session_factory, now)
+            closed = await _manage_open_positions(session_factory, now, per_leg_cost_bps)
             if opened or closed:
                 log.info("loop.completed", opened=opened, closed=closed)
         except Exception as exc:  # noqa: BLE001
@@ -102,7 +124,7 @@ async def run() -> None:
     log.info("paper-trading.started")
 
     try:
-        await _paper_trading_loop(session_factory, stop_event)
+        await _paper_trading_loop(session_factory, stop_event, settings.PAPER_TRADING_PER_LEG_COST_BPS)
     finally:
         await _record_system_event(session_factory, "service_stopped", "info")
         await engine.dispose()

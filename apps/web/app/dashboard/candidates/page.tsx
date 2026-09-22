@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Pagination from "@/components/Pagination";
 import { usePagedList } from "@/lib/usePagedList";
-import { candidateStatePillClass, formatDate } from "@/lib/format";
+import { candidateStatePillClass, formatDate, formatState } from "@/lib/format";
 import type { CandidateSummary } from "@/lib/types";
 
 const STATES = ["discovered", "observing", "qualified", "entry_pending", "entered", "managing", "exit_signal", "exiting", "closed", "rejected"];
@@ -27,7 +27,7 @@ export default function CandidatesPage() {
           <option value="">All states</option>
           {STATES.map((s) => (
             <option key={s} value={s}>
-              {s.replace(/_/g, " ")}
+              {formatState(s)}
             </option>
           ))}
         </select>
@@ -68,7 +68,7 @@ export default function CandidatesPage() {
                   <td className="mono">{c.mint_address}</td>
                   <td>{c.engine}</td>
                   <td>
-                    <span className={candidateStatePillClass(c.state)}>{c.state.replace(/_/g, " ")}</span>
+                    <span className={candidateStatePillClass(c.state)}>{formatState(c.state)}</span>
                   </td>
                   <td>{formatDate(c.state_updated_at)}</td>
                   <td>{formatDate(c.created_at)}</td>

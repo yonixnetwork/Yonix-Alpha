@@ -42,7 +42,18 @@ def _check_exit(position: PaperPosition, current_price: Decimal) -> tuple[str, D
     return None
 
 
-async def close_position(session: AsyncSession, position: PaperPosition, exit_price: Decimal, exit_reason: str, now: datetime) -> None:
+BPS_DIVISOR = Decimal(10_000)
+
+
+async def close_position(
+    session: AsyncSession,
+    position: PaperPosition,
+    exit_price: Decimal,
+    exit_reason: str,
+    now: datetime,
+    *,
+    per_leg_cost_bps: Decimal = Decimal(0),
+) -> None:
     """Closes `position` and, if it has a candidate, backfills every
     still-unlabeled ml_features row tied to that candidate with the real
     realized outcome — profitable exit -> label=1, otherwise 0 — and
@@ -55,8 +66,38 @@ async def close_position(session: AsyncSession, position: PaperPosition, exit_pr
     position.exit_price = exit_price
     position.exit_at = now
     position.exit_reason = exit_reason
-    position.realized_pnl = (exit_price - position.entry_price) * position.quantity if is_long else (position.entry_price - exit_price) * position.quantity
-    position.realized_pnl_pct = position.realized_pnl / (position.entry_price * position.quantity)
+    gross_pnl = (exit_price - position.entry_price) * position.quantity if is_long else (position.entry_price - exit_price) * position.quantity
+
+    # Charged on each leg's own notional. At the default 0 bps this is
+    # exactly zero and realized_pnl is the gross result — see
+    # Settings.PAPER_TRADING_PER_LEG_COST_BPS for why 0 is a declared
+    # assumption rather than a claim that trading is free.
+    entry_notional = position.entry_price * position.quantity
+    exit_notional = exit_price * position.quantity
+    trading_cost = (entry_notional + exit_notional) * per_leg_cost_bps / BPS_DIVISOR
+    position.realized_pnl = gross_pnl - trading_cost
+
+    # Cost basis can be zero if a position was ever opened at entry_price 0
+    # or quantity 0. app/entry.py now refuses to create such a position and
+    # the paper_positions CHECK constraints reject it at the DB level, but a
+    # row predating those guards must still be closable: percentage return
+    # on a zero cost basis is undefined, so it stays NULL (the column is
+    # nullable) rather than crashing here. This is not defensive padding —
+    # an unguarded divide here previously raised DivisionByZero mid-close,
+    # which aborted the whole manage batch and silently stopped every other
+    # open position's stop-loss from ever being evaluated.
+    cost_basis = position.entry_price * position.quantity
+    if cost_basis == 0:
+        position.realized_pnl_pct = None
+        log.warning(
+            "manage.zero_cost_basis",
+            position_id=str(position.id),
+            symbol=position.symbol,
+            entry_price=str(position.entry_price),
+            quantity=str(position.quantity),
+        )
+    else:
+        position.realized_pnl_pct = position.realized_pnl / cost_basis
 
     if position.candidate_id is not None:
         label = 1 if position.realized_pnl > 0 else 0
@@ -82,7 +123,14 @@ async def close_position(session: AsyncSession, position: PaperPosition, exit_pr
     )
 
 
-async def evaluate_open_position(session: AsyncSession, position: PaperPosition, current_price: Decimal, now: datetime) -> bool:
+async def evaluate_open_position(
+    session: AsyncSession,
+    position: PaperPosition,
+    current_price: Decimal,
+    now: datetime,
+    *,
+    per_leg_cost_bps: Decimal = Decimal(0),
+) -> bool:
     """Returns True if `position` was closed. This module never sources a
     price itself (see app/pricing.py and docs/PAPER_TRADING.md for why no
     such source exists for Solana today) — the caller supplies
@@ -93,5 +141,5 @@ async def evaluate_open_position(session: AsyncSession, position: PaperPosition,
     if exit_info is None:
         return False
     exit_reason, exit_price = exit_info
-    await close_position(session, position, exit_price, exit_reason, now)
+    await close_position(session, position, exit_price, exit_reason, now, per_leg_cost_bps=per_leg_cost_bps)
     return True

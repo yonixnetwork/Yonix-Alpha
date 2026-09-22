@@ -30,7 +30,17 @@ services:
     image: redis:7-alpine
     env_file:
       - ../../.env
-    entrypoint: ["sh", "-c", "redis-server --requirepass \"$$REDIS_PASSWORD\""]
+    # --appendonly yes is a safety requirement, not a tuning choice. Redis
+    # holds the kill switch (yonixalpha_core/kill_switch.py), the emergency
+    # stop the risk engine checks first and unconditionally. With only the
+    # default RDB snapshots, a single key change is governed by `save 3600
+    # 1` — so on a quiet system, engaging the kill switch could sit
+    # unpersisted for up to an hour, and a crash in that window would bring
+    # Redis back with the switch DISENGAGED. That fails open: trading
+    # silently re-arms. AOF (fsync every second by default) reduces that
+    # window from an hour to about a second. Measured during the audit:
+    # appendonly was `no` and save was `3600 1 300 100 60 10000`.
+    entrypoint: ["sh", "-c", "redis-server --requirepass \"$$REDIS_PASSWORD\" --appendonly yes"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s

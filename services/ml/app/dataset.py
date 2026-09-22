@@ -1,3 +1,7 @@
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,29 +23,65 @@ FEATURE_NAMES = [
 ]
 
 
-async def load_labeled_dataset(
-    session: AsyncSession, feature_names: list[str] = FEATURE_NAMES
-) -> tuple[list[list[float]], list[int], int]:
-    """Every row returned has a non-NULL label — set by whatever future
-    phase first closes a real or paper position with a known outcome (see
-    docs/ML.md; nothing in this codebase sets one today, so this returns
-    empty until then). A row whose `features` payload is missing one of
-    feature_names is skipped and counted rather than defaulted to 0.0 —
-    that would mean decision-engine's feature space changed after the row
-    was written, and training on a silently fabricated value would defeat
-    the whole point of a labeled dataset.
+@dataclass
+class LabeledDataset:
+    """Labeled training rows plus the two things that make an honest
+    holdout possible: which candidate each row came from, and when.
+
+    Both matter because decision-engine writes one row per candidate per
+    evaluation cycle (every 15s), and paper-trading then stamps the SAME
+    label on every row belonging to that candidate. Rows are therefore
+    heavily duplicated within a candidate and are NOT independent samples.
+    Splitting them randomly puts near-identical siblings on both sides of
+    the holdout, which lets a model score its own training data: an audit
+    probe measured holdout AUC 0.73 on a dataset with no signal at all,
+    comfortably clearing the activation gate. `groups` exists so the
+    splitter can keep a candidate wholly on one side, and `group_started_at`
+    so the split can also run forward in time rather than shuffling the
+    past and the future together.
     """
-    result = await session.execute(select(MLFeatureSnapshot).where(MLFeatureSnapshot.label.is_not(None)))
+
+    features: list[list[float]] = field(default_factory=list)
+    labels: list[int] = field(default_factory=list)
+    groups: list[str] = field(default_factory=list)
+    group_started_at: dict[str, datetime] = field(default_factory=dict)
+    skipped_rows: int = 0
+
+    @property
+    def candidate_count(self) -> int:
+        """Independent outcomes — the number that actually bounds how much
+        can be learned, unlike len(features), which mostly counts how long
+        each candidate happened to be observed.
+        """
+        return len(self.group_started_at)
+
+
+async def load_labeled_dataset(session: AsyncSession, feature_names: list[str] = FEATURE_NAMES) -> LabeledDataset:
+    """Every row returned has a non-NULL label — set by paper-trading when
+    it closes a position with a known outcome (see docs/ML.md). A row whose
+    `features` payload is missing one of feature_names is skipped and
+    counted rather than defaulted to 0.0 — that would mean decision-engine's
+    feature space changed after the row was written, and training on a
+    silently fabricated value would defeat the whole point of a labeled
+    dataset.
+    """
+    result = await session.execute(
+        select(MLFeatureSnapshot).where(MLFeatureSnapshot.label.is_not(None)).order_by(MLFeatureSnapshot.created_at)
+    )
     rows = result.scalars().all()
 
-    features: list[list[float]] = []
-    labels: list[int] = []
-    skipped = 0
+    dataset = LabeledDataset()
     for row in rows:
         if any(name not in row.features for name in feature_names):
-            skipped += 1
+            dataset.skipped_rows += 1
             continue
-        features.append([row.features[name] for name in feature_names])
-        labels.append(row.label)
+        # A row with no candidate link shares its outcome with nothing, so
+        # it is its own group rather than being lumped in with every other
+        # unlinked row.
+        group = str(row.candidate_id) if row.candidate_id is not None else f"orphan:{uuid.uuid4()}"
+        dataset.features.append([row.features[name] for name in feature_names])
+        dataset.labels.append(row.label)
+        dataset.groups.append(group)
+        dataset.group_started_at.setdefault(group, row.created_at)
 
-    return features, labels, skipped
+    return dataset

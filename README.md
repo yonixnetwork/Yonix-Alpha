@@ -108,10 +108,14 @@ rather than resubmitting; position sync and the authenticated user-data
 WebSocket stream (`app/positions.py`, `app/user_stream.py`,
 `app/events.py`) keep `positions`/`orders`/fills current. Phase 5's risk
 engine and decision-engine are the first things in this codebase that
-could call `place_order_idempotent()` — the execution router currently
-sends it every approved Binance decision, but since `decision-engine`
-only ever evaluates Solana candidates today, nothing calls it
-autonomously yet in practice.
+could call `place_order_idempotent()`. To be exact about what is and
+isn't wired (the audit corrected an earlier, looser phrasing here):
+`execution_router.route()` is a *pure classification* function — it
+returns which executor **would** handle a candidate and sends nothing.
+`place_order_idempotent()` has **no production caller at all**; the only
+reference to it outside its own module and tests is a docstring. So
+there is no autonomous path from a decision to a live order anywhere in
+this codebase, by construction rather than by configuration.
 
 Phase 3 added a persisted candidate state machine (`trading_candidates`,
 DISCOVERED through CLOSED/REJECTED — see `yonixalpha_core.state_machine`)
