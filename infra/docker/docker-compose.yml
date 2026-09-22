@@ -1,7 +1,7 @@
 # Base service definitions shared by dev and prod. Run with an override:
 #   docker compose -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.dev.yml up
 #   docker compose -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.prod.yml up -d
-# Both expect a .env file in the repo root (see .env.example / docs/ENVIRONMENT.md).
+# Both expect a .env file in the repo root (see .env.example / docs/DEPLOYMENT.md).
 #
 # Every service loads the same env_file (repo-root .env) rather than relying
 # on docker compose's ${VAR} substitution, which resolves against the

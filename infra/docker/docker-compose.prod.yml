@@ -47,18 +47,38 @@ services:
     restart: unless-stopped
 
   reverse-proxy:
-    image: nginx:1.27-alpine
+    build:
+      context: ../nginx
+      dockerfile: Dockerfile
     restart: unless-stopped
     depends_on:
       - api
       - web
     volumes:
-      - ../nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - certbot_www:/var/www/certbot:ro
-      - certbot_conf:/etc/letsencrypt:ro
+      - certbot_conf:/etc/letsencrypt
     ports:
       - "80:80"
       - "443:443"
+    networks: [yonixalpha]
+
+  # Renews whatever certificate already exists at certbot_conf every 12h —
+  # a no-op until the operator runs the one-time `certbot certonly` bootstrap
+  # command in docs/DEPLOYMENT.md, since `renew` only ever touches a
+  # certificate that's already been issued (never the temporary self-signed
+  # one reverse-proxy's own entrypoint generates — certbot doesn't recognize
+  # that as something it manages). nginx isn't told to reload automatically
+  # here since a renewal only actually changes anything roughly every ~60
+  # days; the same manual `docker compose restart reverse-proxy` documented
+  # for the initial bootstrap applies.
+  certbot:
+    image: certbot/certbot:latest
+    restart: unless-stopped
+    volumes:
+      - certbot_www:/var/www/certbot
+      - certbot_conf:/etc/letsencrypt
+    entrypoint: >
+      sh -c 'trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done;'
     networks: [yonixalpha]
 
 volumes:

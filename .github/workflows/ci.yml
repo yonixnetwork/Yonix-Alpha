@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: python (${{ matrix.project }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project:
+          - packages/core-py
+          - apps/api
+          - services/data-solana
+          - services/data-binance
+          - services/engine-solana-discovery
+          - services/engine-solana-momentum
+          - services/engine-solana-migration
+          - services/engine-binance-futures
+          - services/decision-engine
+          - services/ml
+          - services/paper-trading
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: yonixalpha
+          POSTGRES_PASSWORD: yonixalpha_test_pw
+          POSTGRES_DB: yonixalpha_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U yonixalpha -d yonixalpha_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        working-directory: ${{ matrix.project }}
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint
+        working-directory: ${{ matrix.project }}
+        run: |
+          if [ "${{ matrix.project }}" = "packages/core-py" ]; then
+            ruff check yonixalpha_core tests
+          else
+            ruff check app tests
+          fi
+
+      # Every other project's conftest.py connects with real credentials
+      # (postgresql+asyncpg://yonixalpha:yonixalpha_test_pw@localhost:5432/yonixalpha_test,
+      # redis://localhost:6379/15) as its own os.environ.setdefault(...)
+      # default — matched exactly by the service containers above — so no
+      # DATABASE_URL/REDIS_URL overrides are needed here. Run before the
+      # test step: it needs a schema created via real migrations (not
+      # SQLAlchemy's Base.metadata.create_all, which is all pytest's own
+      # fixtures use), and running it after pytest would collide with
+      # whatever tables that left behind.
+      - name: Alembic migration check
+        if: matrix.project == 'apps/api'
+        working-directory: apps/api
+        env:
+          JWT_SECRET: ci-only-secret-not-used-for-anything-real
+          ADMIN_PASSWORD_HASH: unused-in-this-step
+        run: |
+          alembic upgrade head
+          alembic check
+
+      - name: Test
+        working-directory: ${{ matrix.project }}
+        run: pytest tests -v
+
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build

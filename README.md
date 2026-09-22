@@ -6,35 +6,53 @@ reference repositories this platform draws patterns from.
 
 ## Status
 
-**Phase 8 — full dashboard.** Phases 1-7 (foundation, data infrastructure,
+**Phase 9 — deployment.** Phases 1-8 (foundation, data infrastructure,
 three Solana engines, the Binance Futures execution engine, the shared
-risk/decision system, the ML pipeline, paper trading) are done. Phase 8
-gives every one of those phases a real, authenticated view: `apps/api`
-gained read endpoints over candidates, signals, risk events, the ML
-registry, and paper positions, plus the one write action an operator has
-— kill-switch engage/disengage — and `apps/web` grew from a single status
-page into a real multi-page dashboard against all of it. **See
-`docs/API.md` for the full route reference.**
+risk/decision system, the ML pipeline, paper trading, the full dashboard)
+are done. Phase 9 makes this codebase genuinely deployable rather than
+just runnable in dev: a working TLS bootstrap (the reverse proxy's HTTPS
+block had sat commented out since Phase 1 — nginx refuses to start if the
+certificate file it references doesn't exist yet, which is exactly the
+state a fresh server is in before certbot has ever run), a certbot
+renewal service, deploy/backup/bootstrap scripts, and a CI pipeline.
+**See `docs/DEPLOYMENT.md` for the full runbook, including an explicit
+section on what's genuinely verified vs. not** — this sandbox has no
+DigitalOcean access, no real DNS, and (unlike GitHub's own CI runners)
+can't even pull images from Docker Hub, so this phase leaned hard on
+whatever *could* be verified for real: the actual nginx binary (via apt,
+which is reachable here) tested live against the real config, every
+certbot flag checked against the real CLI, every script shellchecked.
 
-- **`GET /api/system/status` now reports real per-service state** —
-  `running`/`stopped`/`unknown` derived from each service's own
-  `SystemEvent` rows — replacing the hardcoded `"not_implemented"`
-  strings that had sat there, untouched, since Phase 1 while Phases 2-7
-  built every one of those services.
-- **The kill switch is reachable from the dashboard**: engaging or
-  disengaging it (`POST /api/risk/kill-switch/{engage,disengage}`) writes
-  an `AuditLog` row with the authenticated operator, their IP, and — for
-  engage — a required reason. Tested end-to-end, including that engaging
-  without a reason is rejected.
-- **Every list endpoint is honestly paginated, filterable, and real** —
-  no mock data anywhere. Several are expected to return zero rows today
-  for reasons `docs/ML.md` and `docs/PAPER_TRADING.md` already document
-  (no trained model, no paper position, no `LONG` signal); the dashboard
-  says so in its empty states instead of showing placeholder rows.
-- Verified live in a real browser (Playwright against the built dev
-  server, real Postgres/Redis), not just typecheck/build: login, the
-  kill-switch engage/disengage round-trip, candidate list→detail
-  drill-in, and every new page, all against seeded data.
+- **`infra/nginx/`**: the HTTPS server block is live from the first
+  `docker compose up`, not something enabled by hand later — a custom
+  entrypoint (`docker-entrypoint.sh`) generates a short-lived self-signed
+  certificate at the exact Let's Encrypt path on first boot if no real
+  cert exists yet, so nginx always has something to bind to. Verified
+  live: built the real nginx config against fake upstreams and confirmed
+  the ACME challenge location, the HTTP→HTTPS redirect, and both TLS
+  proxy paths all work end-to-end.
+- **A `certbot` renewal service** in `docker-compose.prod.yml` checks
+  every 12h; the one-time `certonly --webroot` bootstrap command is
+  documented, not automated (it needs real DNS pointed at the box first).
+- **`scripts/`**: `bootstrap-server.sh` (fresh droplet → Docker + ufw +
+  clone), `deploy.sh` (fetch → build → up → health-check, migrations
+  already automatic via `apps/api`'s own Dockerfile `CMD`), `backup-db.sh`
+  (dumps via `docker compose exec`, deliberately never `source`s `.env` —
+  see the doc for the real `$`-in-secrets bug that taught this).
+- **`.github/workflows/ci.yml`**: lint + test for every Python project in
+  a matrix against real Postgres/Redis service containers, an Alembic
+  round-trip check, and frontend typecheck/lint/build — running on
+  GitHub's own infrastructure, the first place in this project's history
+  any of these Docker images have actually been pullable.
+
+Phase 8 gave every phase since 5 a real, authenticated dashboard view —
+`apps/api` gained read endpoints over candidates, signals, risk events,
+the ML registry, and paper positions, plus kill-switch engage/disengage
+as the one write action an operator has, all live-verified in a real
+browser against seeded data (not just typecheck/build). `GET
+/api/system/status` finally reports real per-service state instead of the
+`"not_implemented"` strings that had sat untouched since Phase 1. See
+`docs/API.md`.
 
 Phase 7 added a real simulated-execution engine
 (`services/paper-trading`) — and, honestly, it has never opened a single
@@ -175,11 +193,18 @@ packages/
                               (yonixalpha_core)
 infra/
   docker/                    docker-compose.yml + dev/prod overrides
-  nginx/                     reverse proxy config (HTTP only until TLS is provisioned)
+  nginx/                     Reverse proxy: Dockerfile, nginx.conf, TLS-bootstrap entrypoint
+scripts/
+  bootstrap-server.sh        Fresh-droplet setup: Docker + ufw + clone
+  deploy.sh                  Pull, build, up, health-check
+  backup-db.sh               Timestamped pg_dump with retention
+.github/
+  workflows/ci.yml           Lint + test every project, migration check, frontend build
 docs/
   ML.md                      Why no model is trained yet, and what changes once one can be
   PAPER_TRADING.md           Why no paper position has ever opened, and what changes once one can
   API.md                     Full apps/api route reference
+  DEPLOYMENT.md              Deploy runbook + what's genuinely verified vs. not
 ```
 
 Every Python service depends on `packages/core-py` via an editable pip
@@ -290,11 +315,11 @@ npm run typecheck && npm run lint && npm run build   # what CI-equivalent verifi
 
 ## Production deployment
 
-Not yet documented — this lands with Phase 9 (`docs/DEPLOYMENT.md`), once
-there's an engine worth deploying. The `docker-compose.prod.yml` override and
-`infra/nginx/nginx.conf` are a starting skeleton (no TLS cert provisioning
-wired up yet — that requires the live `yonixalpha.com` DNS pointed at the
-droplet first).
+See `docs/DEPLOYMENT.md` for the full runbook (server bootstrap, secrets,
+first deploy, TLS via certbot, subsequent deploys, rollback, backups,
+CI) — including an explicit section on what's genuinely verified there
+vs. what needs a real droplet/DNS this project's dev sandbox never had
+access to.
 
 ## Security notes
 
