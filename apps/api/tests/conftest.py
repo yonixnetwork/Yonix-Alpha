@@ -61,3 +61,10 @@ async def client(app):
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
+
+
+@pytest_asyncio.fixture
+async def auth_headers(client):
+    login = await client.post("/api/auth/login", json={"username": "admin", "password": TEST_ADMIN_PASSWORD})
+    token = login.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}

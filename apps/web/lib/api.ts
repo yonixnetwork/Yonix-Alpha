@@ -61,6 +61,41 @@ export async function logout(): Promise<void> {
   clearTokens();
 }
 
+/** GETs `path` with the given query params, attached via apiFetch (bearer
+ * token + one 401 refresh-and-retry). Throws ApiError on a non-2xx
+ * response rather than returning a Response the caller has to check —
+ * every dashboard page wants "the data, or an error to show," never a
+ * raw Response to unwrap itself.
+ */
+export async function apiGet<T>(path: string, params?: Record<string, string | number | boolean | undefined>): Promise<T> {
+  const query = params
+    ? "?" +
+      Object.entries(params)
+        .filter(([, v]) => v !== undefined && v !== "")
+        .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+        .join("&")
+    : "";
+  const res = await apiFetch(`${path}${query}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new ApiError(res.status, body.detail ?? `Request failed (${res.status})`);
+  }
+  return res.json() as Promise<T>;
+}
+
+export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
+  const res = await apiFetch(path, {
+    method: "POST",
+    headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw new ApiError(res.status, errBody.detail ?? `Request failed (${res.status})`);
+  }
+  return res.json() as Promise<T>;
+}
+
 /** Authenticated fetch — attaches the bearer token, and on a 401 attempts
  * exactly one refresh-and-retry before giving up (no infinite retry loop).
  */

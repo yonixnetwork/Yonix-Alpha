@@ -6,32 +6,45 @@ reference repositories this platform draws patterns from.
 
 ## Status
 
-**Phase 7 — paper trading.** Phases 1-6 (foundation, data infrastructure,
+**Phase 8 — full dashboard.** Phases 1-7 (foundation, data infrastructure,
 three Solana engines, the Binance Futures execution engine, the shared
-risk/decision system, the ML pipeline) are done. Phase 7 adds a real
-simulated-execution engine — and, honestly, it has never opened a single
-position, because every path into it is blocked by the same root cause
-every phase since 5 has run into: no Solana price feed exists anywhere in
-this codebase. **See `docs/PAPER_TRADING.md` for the full explanation.**
+risk/decision system, the ML pipeline, paper trading) are done. Phase 8
+gives every one of those phases a real, authenticated view: `apps/api`
+gained read endpoints over candidates, signals, risk events, the ML
+registry, and paper positions, plus the one write action an operator has
+— kill-switch engage/disengage — and `apps/web` grew from a single status
+page into a real multi-page dashboard against all of it. **See
+`docs/API.md` for the full route reference.**
 
-- **`services/paper-trading`** watches for `QUALIFIED` candidates and
-  tries to simulate the position decision-engine approved. Two
-  independent gates always block it today: `decision-engine` never
-  populates `Decision.entry` for any decision (no price to fill at), and
-  even given one, `execution_router` only routes Solana to `JUPITER` on a
-  *verified* migration confirmation — never inferred from weaker evidence
-  — which Engine B's empty parser registry never produces. Both are
-  deterministically tested (`tests/test_entry.py`), not hand-waved.
-- **`app/manage.py` closes the Phase 6 loop**: when a paper position
-  closes (stop-loss/take-profit hit against a real price from
-  `market_snapshots` — populated for Binance if configured, never for
-  Solana today), it backfills every still-`NULL` `ml_features.label` for
-  that candidate with the real outcome. This is the only thing in this
-  codebase that has ever set that column to anything but `NULL`.
-- **`paper_positions` table** (migration 0007) — single-row lifecycle
-  (open through close); unlike Binance's real Order/Fill split there's no
-  live exchange to reconcile against, so this table is the source of
-  truth outright.
+- **`GET /api/system/status` now reports real per-service state** —
+  `running`/`stopped`/`unknown` derived from each service's own
+  `SystemEvent` rows — replacing the hardcoded `"not_implemented"`
+  strings that had sat there, untouched, since Phase 1 while Phases 2-7
+  built every one of those services.
+- **The kill switch is reachable from the dashboard**: engaging or
+  disengaging it (`POST /api/risk/kill-switch/{engage,disengage}`) writes
+  an `AuditLog` row with the authenticated operator, their IP, and — for
+  engage — a required reason. Tested end-to-end, including that engaging
+  without a reason is rejected.
+- **Every list endpoint is honestly paginated, filterable, and real** —
+  no mock data anywhere. Several are expected to return zero rows today
+  for reasons `docs/ML.md` and `docs/PAPER_TRADING.md` already document
+  (no trained model, no paper position, no `LONG` signal); the dashboard
+  says so in its empty states instead of showing placeholder rows.
+- Verified live in a real browser (Playwright against the built dev
+  server, real Postgres/Redis), not just typecheck/build: login, the
+  kill-switch engage/disengage round-trip, candidate list→detail
+  drill-in, and every new page, all against seeded data.
+
+Phase 7 added a real simulated-execution engine
+(`services/paper-trading`) — and, honestly, it has never opened a single
+position: `decision-engine` never populates `Decision.entry` (no Solana
+price feed exists in this codebase) and `execution_router` only routes
+Solana to `JUPITER` on a verified migration confirmation Engine B's empty
+parser registry never produces. When a paper position *does* close, it
+backfills `ml_features.label` with the real outcome — the only thing in
+this codebase that has ever set that column to anything but `NULL`. See
+`docs/PAPER_TRADING.md`.
 
 Phase 6 added a real ML training/registry/inference pipeline
 (`packages/core-py/yonixalpha_core/ml/`, `model_versions`/`ml_features`
@@ -140,8 +153,10 @@ deployment, hardening).
 
 ```
 apps/
-  api/                       FastAPI backend (Python 3.12, SQLAlchemy async, Alembic, Redis)
-  web/                       Next.js dashboard (TypeScript, App Router)
+  api/                       FastAPI backend (Python 3.12, SQLAlchemy async, Alembic, Redis) —
+                              candidates/signals/risk/ml/paper/system routes (see docs/API.md)
+  web/                       Next.js dashboard (TypeScript, App Router) — overview, candidates,
+                              signals, risk, ML, paper trading, system events
 services/
   data-solana/               Solana RPC/WS ingestion worker (public data)
   data-binance/              Binance Futures market-data ingestion worker (public data)
@@ -164,6 +179,7 @@ infra/
 docs/
   ML.md                      Why no model is trained yet, and what changes once one can be
   PAPER_TRADING.md           Why no paper position has ever opened, and what changes once one can
+  API.md                     Full apps/api route reference
 ```
 
 Every Python service depends on `packages/core-py` via an editable pip
@@ -268,7 +284,8 @@ logic every consuming service's own tests then build on.
 ```
 cd apps/web
 npm install
-npm run dev
+npm run dev                 # needs NEXT_PUBLIC_API_URL pointed at a running apps/api
+npm run typecheck && npm run lint && npm run build   # what CI-equivalent verification runs
 ```
 
 ## Production deployment
