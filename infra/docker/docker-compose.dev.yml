@@ -62,3 +62,8 @@ services:
     volumes:
       - ../../services/engine-solana-migration/app:/app/app
       - ../../packages/core-py:/packages/core-py
+
+  engine-binance-futures:
+    volumes:
+      - ../../services/engine-binance-futures/app:/app/app
+      - ../../packages/core-py:/packages/core-py

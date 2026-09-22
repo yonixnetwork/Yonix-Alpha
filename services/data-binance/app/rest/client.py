@@ -57,3 +57,7 @@ class BinanceMarketDataClient:
     async def get_mark_price(self, symbol: str) -> dict:
         """markPrice, indexPrice, lastFundingRate, nextFundingTime."""
         return await self._get("/fapi/v1/premiumIndex", {"symbol": symbol})
+
+    async def get_open_interest(self, symbol: str) -> dict:
+        """openInterest, symbol, time — public, no API key needed."""
+        return await self._get("/fapi/v1/openInterest", {"symbol": symbol})

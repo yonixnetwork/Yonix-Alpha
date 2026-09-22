@@ -34,6 +34,18 @@ async def test_testnet_base_url_used_when_requested():
         assert "testnet" in client.base_url
 
 
+async def test_get_open_interest_passes_symbol():
+    def responder(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/fapi/v1/openInterest"
+        assert dict(request.url.params) == {"symbol": "BTCUSDT"}
+        return httpx.Response(200, json={"symbol": "BTCUSDT", "openInterest": "12345.678", "time": 1700000000000})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as http_client:
+        client = BinanceMarketDataClient(http_client)
+        result = await client.get_open_interest("BTCUSDT")
+        assert result["openInterest"] == "12345.678"
+
+
 async def test_http_error_raises_binance_rest_error():
     def responder(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, json={"msg": "server error"})

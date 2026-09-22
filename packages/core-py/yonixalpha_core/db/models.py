@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Numeric, String, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import INET, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -212,3 +212,123 @@ class TradingCandidate(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     token: Mapped["Token"] = relationship()
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: Binance USDT-M Futures execution/account state. Distinct from the
+# Solana engines' Token/TokenEvent/TradingCandidate tables — these track a
+# real exchange account, not discovered opportunities. No strategy/signal
+# columns here: this is the mechanical execution/account layer per spec
+# section 8 ("the strategy layer must be independent from the execution
+# layer"); the shared risk/decision system that decides WHETHER to trade is
+# Phase 5's table, not this one's.
+# ---------------------------------------------------------------------------
+
+
+class Order(Base):
+    """One row per order intent, created BEFORE the exchange is ever called
+    (spec section 21: "create client order ID, store intent, execute,
+    store exchange transaction ID, reconcile, update status") — this is
+    what makes crash-safe idempotent submission possible: a restart can
+    find every `pending_submit` row and ask the exchange "what actually
+    happened to this clientOrderId" rather than guessing or double-submitting.
+    """
+
+    __tablename__ = "orders"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    client_order_id: Mapped[str] = mapped_column(String(36), unique=True, index=True, nullable=False)
+    exchange_order_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    side: Mapped[str] = mapped_column(String(4), nullable=False)  # BUY|SELL
+    position_side: Mapped[str] = mapped_column(String(8), nullable=False, default="BOTH")
+    order_type: Mapped[str] = mapped_column(String(24), nullable=False)  # MARKET|LIMIT|STOP_MARKET|TAKE_PROFIT_MARKET|...
+    quantity: Mapped[Decimal] = mapped_column(Numeric(28, 8), nullable=False)
+    price: Mapped[Decimal | None] = mapped_column(Numeric(28, 8), nullable=True)
+    stop_price: Mapped[Decimal | None] = mapped_column(Numeric(28, 8), nullable=True)
+    reduce_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Our own lifecycle starts at pending_submit/submit_failed (before/around
+    # the exchange call); once confirmed it mirrors Binance's own status
+    # values verbatim (NEW, PARTIALLY_FILLED, FILLED, CANCELED, REJECTED,
+    # EXPIRED) rather than inventing a parallel vocabulary for them.
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending_submit", index=True)
+    raw_response: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    fills: Mapped[list["Fill"]] = relationship(back_populates="order")
+
+
+class Position(Base):
+    """One row per symbol (one-way position mode, Binance's default — no
+    hedge-mode dual long/short rows). Always overwritten from the
+    authoritative exchange state (GET /fapi/v2/positionRisk or an
+    ACCOUNT_UPDATE stream event), never computed locally from fills — the
+    exchange's own numbers (entry price, liquidation price, unrealized
+    PnL) already account for funding, fees and any manual intervention a
+    locally-derived calculation would miss.
+    """
+
+    __tablename__ = "positions"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    symbol: Mapped[str] = mapped_column(String(20), unique=True, index=True, nullable=False)
+    position_amt: Mapped[Decimal] = mapped_column(Numeric(28, 8), nullable=False, default=0)  # signed: +long/-short/0=flat
+    entry_price: Mapped[Decimal | None] = mapped_column(Numeric(28, 8), nullable=True)
+    mark_price: Mapped[Decimal | None] = mapped_column(Numeric(28, 8), nullable=True)
+    unrealized_pnl: Mapped[Decimal | None] = mapped_column(Numeric(28, 8), nullable=True)
+    leverage: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    margin_type: Mapped[str | None] = mapped_column(String(16), nullable=True)  # isolated|cross
+    liquidation_price: Mapped[Decimal | None] = mapped_column(Numeric(28, 8), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class Fill(Base):
+    """One row per exchange trade (a single order can produce several,
+    on partial fills). `order_id` is nullable because a fill can arrive on
+    the user-data stream referencing a clientOrderId this process doesn't
+    recognize (e.g. an order placed manually on the exchange, or from
+    before this table existed) — still worth recording, just unlinked.
+    """
+
+    __tablename__ = "fills"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    order_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("orders.id", ondelete="SET NULL"), nullable=True, index=True)
+    exchange_trade_id: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    side: Mapped[str] = mapped_column(String(4), nullable=False)
+    price: Mapped[Decimal] = mapped_column(Numeric(28, 8), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(28, 8), nullable=False)
+    commission: Mapped[Decimal | None] = mapped_column(Numeric(28, 8), nullable=True)
+    commission_asset: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    realized_pnl: Mapped[Decimal | None] = mapped_column(Numeric(28, 8), nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    order: Mapped["Order | None"] = relationship(back_populates="fills")
+
+
+class PnlRecord(Base):
+    """One row per Binance "income" entry (GET /fapi/v1/income):
+    REALIZED_PNL, FUNDING_FEE, COMMISSION, and other income/expense types
+    Binance itself categorizes — never computed or inferred locally.
+    `tran_id` is Binance's own transaction id for the income record, used
+    for dedup on repeated polling.
+    """
+
+    __tablename__ = "pnl_records"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    income_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    symbol: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    income: Mapped[Decimal] = mapped_column(Numeric(28, 8), nullable=False)
+    asset: Mapped[str] = mapped_column(String(16), nullable=False)
+    tran_id: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    info: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
