@@ -5,13 +5,24 @@
 # or, having already cloned the repo some other way:
 #   sudo bash scripts/bootstrap-server.sh
 #
-# Idempotent: re-running on a box that already has Docker/the repo/ufw
-# configured skips whatever's already done rather than failing or
-# duplicating it. Installs Docker Engine + the compose plugin, clones (or
-# updates) the repo into /opt/yonixalpha, and opens only 22/80/443 in ufw.
-# It does NOT create .env, obtain TLS certs, or start any service — those
-# are separate, deliberate steps in docs/DEPLOYMENT.md, not something a
-# bootstrap script should do unattended with production credentials.
+# Idempotent: re-running on a box that already has Docker/the repo/ufw/
+# fail2ban/unattended-upgrades configured skips whatever's already done
+# rather than failing or duplicating it. Installs Docker Engine + the
+# compose plugin, clones (or updates) the repo into /opt/yonixalpha, opens
+# only 22/80/443 in ufw, enables unattended security upgrades, and installs
+# fail2ban's default SSH jail. It does NOT create .env, obtain TLS certs, or
+# start any service — those are separate, deliberate steps in
+# docs/DEPLOYMENT.md, not something a bootstrap script should do
+# unattended with production credentials.
+#
+# Neither hardening addition below can lock out a legitimate operator:
+# unattended-upgrades only ever installs *security* updates (never a
+# release upgrade, never anything requiring a config-file decision it would
+# have to guess at); fail2ban's sshd jail only ever bans an IP after
+# repeated *failed password* attempts (a key-based login, which is what
+# docs/DEPLOYMENT.md's own `ssh root@<droplet-ip>` assumes, never counts as
+# a failure to trigger it), and even a false-positive ban is temporary
+# (1 hour, see below) rather than permanent.
 set -euo pipefail
 
 REPO_URL="https://github.com/yonixnetwork/Yonix-Alpha.git"
@@ -59,6 +70,31 @@ if command -v ufw >/dev/null 2>&1; then
     ufw status verbose
 else
     echo "    ufw not installed — skipping firewall setup. Configure the droplet's firewall manually (only 22/80/443 should be reachable)." >&2
+fi
+
+echo "==> Enabling unattended security upgrades"
+if ! dpkg -s unattended-upgrades >/dev/null 2>&1; then
+    apt-get update
+    apt-get install -y unattended-upgrades
+    dpkg-reconfigure -f noninteractive unattended-upgrades
+else
+    echo "    unattended-upgrades already installed, skipping."
+fi
+
+echo "==> Installing fail2ban (SSH jail only, 1h ban after 5 failed attempts in 10m)"
+if ! command -v fail2ban-client >/dev/null 2>&1; then
+    apt-get update
+    apt-get install -y fail2ban
+    cat > /etc/fail2ban/jail.local <<'JAIL'
+[sshd]
+enabled = true
+maxretry = 5
+findtime = 10m
+bantime = 1h
+JAIL
+    systemctl enable --now fail2ban
+else
+    echo "    fail2ban already installed, skipping."
 fi
 
 cat <<EOF

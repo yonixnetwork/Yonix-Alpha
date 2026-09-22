@@ -70,6 +70,26 @@ jobs:
             ruff check app tests
           fi
 
+      # Audits this project's actual installed dependency set (from the
+      # `pip install` above, run in this same working-directory so the
+      # `-e ../../packages/core-py` line in every non-core-py requirements.txt
+      # resolves correctly) rather than parsing requirements.txt in
+      # isolation, which would miss what versions transitive deps actually
+      # resolve to. `python -m pip install --upgrade pip` first so pip's own
+      # version doesn't itself show up as a finding. PYSEC-2026-1845 (pytest,
+      # fixed only in pytest 9.x) is ignored deliberately — see
+      # docs/SECURITY.md section 10: it's a local /tmp-race issue in a
+      # dev/test-only tool that never runs against untrusted input or in
+      # production, and bumping to pytest 9 + pytest-asyncio 1.x across all
+      # 11 projects is a real-risk change not worth making for a
+      # near-zero-real-risk finding.
+      - name: Dependency audit (pip-audit)
+        working-directory: ${{ matrix.project }}
+        run: |
+          python -m pip install -q --upgrade pip setuptools
+          pip install -q pip-audit
+          pip-audit --desc off --ignore-vuln PYSEC-2026-1845
+
       # Every other project's conftest.py connects with real credentials
       # (postgresql+asyncpg://yonixalpha:yonixalpha_test_pw@localhost:5432/yonixalpha_test,
       # redis://localhost:6379/15) as its own os.environ.setdefault(...)
@@ -118,6 +138,26 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # `postcss`/`next` are the one known, deferred finding as of Phase 10
+      # (only fix is a major next.js bump — see docs/SECURITY.md section 10
+      # for why that's not applied blind here) — explicitly allow-listed so
+      # this step still fails on anything *new*, rather than raising
+      # --audit-level and silently missing a future high/critical finding
+      # in some other dependency.
+      - name: Dependency audit (npm audit)
+        run: |
+          npm audit --json > audit.json || true
+          node -e '
+            const r = require("./audit.json");
+            const allowed = new Set(["next", "postcss"]);
+            const unexpected = Object.keys(r.vulnerabilities || {}).filter(n => !allowed.has(n));
+            if (unexpected.length > 0) {
+              console.error("Unexpected new vulnerabilities:", unexpected);
+              process.exit(1);
+            }
+            console.log("Only known, deferred findings present:", Object.keys(r.vulnerabilities || {}));
+          '
+
       - name: Typecheck
         run: npm run typecheck
 
@@ -126,3 +166,17 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  secrets:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: sudo apt-get update && sudo apt-get install -y gitleaks
+
+      - name: Scan full history for committed secrets
+        run: gitleaks detect --source . --verbose

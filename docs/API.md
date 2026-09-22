@@ -1,7 +1,7 @@
 # API
 
-`apps/api` is a FastAPI backend behind JWT auth (see `docs/SECURITY.md` if
-present, or `app/api/routes/auth.py`). Every route below requires a bearer
+`apps/api` is a FastAPI backend behind JWT auth (see `docs/SECURITY.md`, or
+`app/api/routes/auth.py`). Every route below requires a bearer
 access token except `/api/health*` and `/api/auth/*`. All routes are
 mounted under `/api`.
 

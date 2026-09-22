@@ -1,6 +1,12 @@
 -e ../../packages/core-py
 
-fastapi==0.115.6
+# fastapi pinned >=0.135 (rather than the 0.115.x this project started on)
+# specifically so starlette resolves unbounded and can go past 0.42 — every
+# starlette<1.3.1 in that older range has an open CVE (see docs/SECURITY.md
+# section 8). starlette itself is pinned explicitly below so a future
+# fastapi bump can't silently downgrade it.
+fastapi==0.141.1
+starlette==1.6.0
 uvicorn[standard]==0.32.1
 alembic==1.14.0
-python-multipart==0.0.20
+python-multipart==0.0.32

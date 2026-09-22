@@ -30,6 +30,10 @@ mkdir -p "${BACKUP_DIR}"
 OUT_FILE="${BACKUP_DIR}/yonixalpha-${TIMESTAMP}.sql.gz"
 
 echo "==> Dumping database to ${OUT_FILE}"
+# shellcheck disable=SC2016 # deliberately single-quoted: $POSTGRES_USER/$POSTGRES_DB
+# must expand inside the container's own shell (populated by its env_file),
+# never on this host — see the file header comment and docs/SECURITY.md
+# section 5 for why .env is never sourced here.
 ${COMPOSE} exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' | gzip > "${OUT_FILE}"
 echo "    $(du -h "${OUT_FILE}" | cut -f1) written."
 

@@ -6,44 +6,62 @@ reference repositories this platform draws patterns from.
 
 ## Status
 
-**Phase 9 — deployment.** Phases 1-8 (foundation, data infrastructure,
+**Phase 10 — hardening.** Phases 1-9 (foundation, data infrastructure,
 three Solana engines, the Binance Futures execution engine, the shared
-risk/decision system, the ML pipeline, paper trading, the full dashboard)
-are done. Phase 9 makes this codebase genuinely deployable rather than
-just runnable in dev: a working TLS bootstrap (the reverse proxy's HTTPS
-block had sat commented out since Phase 1 — nginx refuses to start if the
-certificate file it references doesn't exist yet, which is exactly the
-state a fresh server is in before certbot has ever run), a certbot
-renewal service, deploy/backup/bootstrap scripts, and a CI pipeline.
-**See `docs/DEPLOYMENT.md` for the full runbook, including an explicit
-section on what's genuinely verified vs. not** — this sandbox has no
-DigitalOcean access, no real DNS, and (unlike GitHub's own CI runners)
-can't even pull images from Docker Hub, so this phase leaned hard on
-whatever *could* be verified for real: the actual nginx binary (via apt,
-which is reachable here) tested live against the real config, every
-certbot flag checked against the real CLI, every script shellchecked.
+risk/decision system, the ML pipeline, paper trading, the full dashboard,
+and a genuinely deployable stack with TLS/CI/backup/bootstrap) are done.
+Phase 10 is a security pass over what Phase 9 shipped, not new features:
+**see `docs/SECURITY.md`** (referenced-but-unwritten since Phase 1 — this
+is the first phase it exists) for the full threat model, and its own
+"What's verified vs. not" section for the same honesty standard every
+prior phase's docs have kept.
 
-- **`infra/nginx/`**: the HTTPS server block is live from the first
-  `docker compose up`, not something enabled by hand later — a custom
-  entrypoint (`docker-entrypoint.sh`) generates a short-lived self-signed
-  certificate at the exact Let's Encrypt path on first boot if no real
-  cert exists yet, so nginx always has something to bind to. Verified
-  live: built the real nginx config against fake upstreams and confirmed
-  the ACME challenge location, the HTTP→HTTPS redirect, and both TLS
-  proxy paths all work end-to-end.
-- **A `certbot` renewal service** in `docker-compose.prod.yml` checks
-  every 12h; the one-time `certonly --webroot` bootstrap command is
-  documented, not automated (it needs real DNS pointed at the box first).
-- **`scripts/`**: `bootstrap-server.sh` (fresh droplet → Docker + ufw +
-  clone), `deploy.sh` (fetch → build → up → health-check, migrations
-  already automatic via `apps/api`'s own Dockerfile `CMD`), `backup-db.sh`
-  (dumps via `docker compose exec`, deliberately never `source`s `.env` —
-  see the doc for the real `$`-in-secrets bug that taught this).
-- **`.github/workflows/ci.yml`**: lint + test for every Python project in
-  a matrix against real Postgres/Redis service containers, an Alembic
-  round-trip check, and frontend typecheck/lint/build — running on
-  GitHub's own infrastructure, the first place in this project's history
-  any of these Docker images have actually been pullable.
+- **Real dependency vulnerabilities, found and mostly fixed**: `pip-audit`
+  across all 11 Python projects and `npm audit` in `apps/web`, both run
+  against actual installed dependency sets (not requirements files parsed
+  in isolation). Fixed: `pyjwt` (2.10.1→2.13.0, propagates to every
+  project via `packages/core-py`), and in `apps/api` specifically
+  `fastapi` (0.115.6→0.141.1) + an explicit `starlette` pin (→1.6.0, the
+  actual vulnerable package — fastapi's own pin only allowed it in
+  indirectly) + `python-multipart` (0.0.20→0.0.32). Full test suite for
+  every affected project re-run and passing after each bump. **Deferred,
+  with reasoning written down**: the `next`/`postcss` finding in
+  `apps/web` (only fix is a major, untested-in-this-sandbox `next@16`
+  bump) and `pytest`'s local-`/tmp`-race finding (dev-only tool, no
+  production attack surface, its only fix is `pytest@9`, which drags in
+  `pytest-asyncio@1.x` across all 11 projects for close to zero real
+  risk) — see `docs/SECURITY.md` section 10 for why each was judged not
+  worth forcing blind.
+- **`infra/nginx/nginx.conf`**: every HTTPS response now carries HSTS,
+  `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, and a
+  CSP scoped to `'self'`; `/api/auth/login` specifically is rate-limited
+  per-IP at the nginx layer (5r/m, burst 5, HTTP 429) as defense-in-depth
+  in front of the existing per-username app-level lockout. Verified live
+  against the real nginx binary: all five headers present on a real
+  response, `/api/` proxying unaffected, and the rate limit actually
+  returns 429 on the 7th rapid request while unrelated routes in the same
+  burst are untouched.
+- **`.github/workflows/ci.yml`** gained three checks: `pip-audit` per
+  Python project (one deliberately ignored, documented finding — the
+  `pytest` one above), `npm audit` for the frontend (allow-listing only
+  the two documented, deferred findings so anything *new* still fails
+  the build), and a `gitleaks` job scanning full git history — confirmed
+  clean against this repo's real history before being wired in.
+- **`scripts/bootstrap-server.sh`** gained `unattended-upgrades` (security
+  patches only) and `fail2ban`'s SSH jail (1h ban after 5 failed
+  *password* attempts in 10m — never triggered by the key-based login the
+  rest of this repo's docs assume, so it can't lock out a real operator).
+  Both packages installed and their configs verified for real (`apt-get
+  install`, `fail2ban-client -t`, `dpkg-reconfigure`) in this session.
+- **CORS** (`cors_origins` in `config.py`) was reviewed and found already
+  correctly scoped — no code change, just the reasoning written down in
+  `docs/SECURITY.md` section 7.
+
+Phase 9 made this codebase genuinely deployable rather than just runnable
+in dev: a working TLS bootstrap (the reverse proxy's HTTPS block had sat
+commented out since Phase 1), a certbot renewal service,
+deploy/backup/bootstrap scripts, and a CI pipeline — see
+`docs/DEPLOYMENT.md` for the full runbook.
 
 Phase 8 gave every phase since 5 a real, authenticated dashboard view —
 `apps/api` gained read endpoints over candidates, signals, risk events,
@@ -195,16 +213,18 @@ infra/
   docker/                    docker-compose.yml + dev/prod overrides
   nginx/                     Reverse proxy: Dockerfile, nginx.conf, TLS-bootstrap entrypoint
 scripts/
-  bootstrap-server.sh        Fresh-droplet setup: Docker + ufw + clone
+  bootstrap-server.sh        Fresh-droplet setup: Docker + ufw + clone + unattended-upgrades + fail2ban
   deploy.sh                  Pull, build, up, health-check
   backup-db.sh               Timestamped pg_dump with retention
 .github/
-  workflows/ci.yml           Lint + test every project, migration check, frontend build
+  workflows/ci.yml           Lint + test + dependency audit per project, migration check,
+                              frontend build + audit, gitleaks secret scan
 docs/
   ML.md                      Why no model is trained yet, and what changes once one can be
   PAPER_TRADING.md           Why no paper position has ever opened, and what changes once one can
   API.md                     Full apps/api route reference
   DEPLOYMENT.md              Deploy runbook + what's genuinely verified vs. not
+  SECURITY.md                Threat model, auth/risk controls, dependency scanning, known limitations
 ```
 
 Every Python service depends on `packages/core-py` via an editable pip
@@ -323,13 +343,27 @@ access to.
 
 ## Security notes
 
+**See `docs/SECURITY.md` for the full threat model** — authentication,
+authorization, trading safety controls, auditing, secrets handling,
+transport security, CORS, dependency scanning, and server hardening, plus
+its own "what's verified vs. not" section. Summary:
+
 - `.env` is never committed (see `.gitignore`); only `.env.example` is.
-- Login is rate-limited: 5 failed attempts locks the account out for 15
-  minutes (`apps/api/app/api/routes/auth.py`).
+- Login is rate-limited two ways: 5 failed attempts locks the *account*
+  out for 15 minutes (`apps/api/app/api/routes/auth.py`), and
+  `/api/auth/login` is separately rate-limited per-*IP* at the nginx layer
+  (`infra/nginx/nginx.conf`, Phase 10).
 - Refresh tokens rotate on every use and are individually revocable
   (`sessions` table) — a leaked refresh token is usable exactly once.
 - Passwords are hashed with argon2 (`passlib`), never stored or logged in
   plaintext.
+- Every HTTPS response carries HSTS, `X-Content-Type-Options`,
+  `X-Frame-Options`, `Referrer-Policy`, and a CSP (Phase 10).
+- Dependencies are scanned on every CI run (`pip-audit` per Python
+  project, `npm audit` for the frontend, `gitleaks` for committed
+  secrets) — see `docs/SECURITY.md` section 10 for the two known,
+  deliberately-deferred findings and why each was judged not worth a
+  forced upgrade.
 - See `ARCHITECTURE_AUDIT.md` §3 for what was verified clean (and what
   wasn't) in the five reference repositories this codebase draws patterns
   from.
