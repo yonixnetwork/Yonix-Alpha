@@ -37,6 +37,9 @@ services:
   decision-engine:
     restart: unless-stopped
 
+  ml:
+    restart: unless-stopped
+
   engine-binance-futures:
     restart: unless-stopped
 

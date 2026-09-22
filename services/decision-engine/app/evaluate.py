@@ -7,14 +7,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from yonixalpha_core import kill_switch
 from yonixalpha_core.config import Settings
-from yonixalpha_core.db.models import RiskEvent, StrategySignal, Token, TradingCandidate
+from yonixalpha_core.db.models import MLFeatureSnapshot, RiskEvent, StrategySignal, Token, TradingCandidate
 from yonixalpha_core.decision import Decision, DecisionType, EntryType, no_trade
 from yonixalpha_core.logging import get_logger
+from yonixalpha_core.ml.registry import get_active_model
 from yonixalpha_core.risk import DataQuality, RiskConfig, RiskContext, evaluate as evaluate_risk
 from yonixalpha_core.state_machine import CandidateState, apply_transition
 
 from app.features import compute_candidate_features
-from app.signal import ENTRY_CONFIDENCE_THRESHOLD, score
+from app.ml_features import to_feature_vector
+from app.signal import ENTRY_CONFIDENCE_THRESHOLD, cap_for_data_quality, score
 
 log = get_logger("decision-engine.evaluate")
 
@@ -24,6 +26,13 @@ log = get_logger("decision-engine.evaluate")
 # trading signal, and the value is a conservative operational default rather
 # than anything derived from backtested data this codebase doesn't have.
 MAX_OBSERVATION_SECONDS = 3600
+
+# The ModelVersion `name` this engine trains and predicts against. A single
+# name today since there is exactly one candidate source (Solana momentum
+# candidates) feeding ml_features — a future engine with a genuinely
+# different feature space would register under its own name rather than
+# overload this one.
+MODEL_NAME = "solana_candidate_momentum"
 
 
 def _risk_config_from_settings(settings: Settings) -> RiskConfig:
@@ -85,7 +94,38 @@ async def evaluate_candidate(
     symbol = token.symbol or token.mint_address if token is not None else str(candidate.token_id)
 
     features = await compute_candidate_features(session, candidate, now)
-    confidence, score_reasons = score(features)
+    rule_confidence, score_reasons = score(features)
+    feature_vector = to_feature_vector(features)
+
+    # ML only gets a say when there's real feature data to score — blending
+    # a model's opinion into an already-STALE/UNAVAILABLE decision (which
+    # score() has already zeroed and no_trade() below will force to
+    # NO_TRADE regardless) would just be noise on a decision ML input
+    # never touched.
+    if features.data_quality in (DataQuality.STALE, DataQuality.UNAVAILABLE):
+        confidence = rule_confidence
+        reasons = score_reasons
+        ml_model_id = None
+        ml_score: Decimal | None = None
+    else:
+        model = await get_active_model(session, MODEL_NAME)
+        prediction = model.predict(feature_vector)
+        if prediction.model_version is not None:
+            blended = (rule_confidence + prediction.score) / 2
+            blended, cap_reasons = cap_for_data_quality(blended, features.data_quality)
+            confidence = blended
+            reasons = (
+                score_reasons
+                + [f"blended with ML model {prediction.model_name} v{prediction.model_version} (ml_score={prediction.score:.2f})"]
+                + cap_reasons
+            )
+            ml_model_id = prediction.model_id
+            ml_score = Decimal(str(round(prediction.score, 4)))
+        else:
+            confidence = rule_confidence
+            reasons = score_reasons + ["no active trained ML model — confidence is rule-based only"]
+            ml_model_id = None
+            ml_score = None
 
     kill_switch_engaged = await kill_switch.is_engaged(redis)
     open_position_count = await _count_open_positions(session)
@@ -113,7 +153,7 @@ async def evaluate_candidate(
     else:
         decision_type = DecisionType.WAIT
 
-    reasons = list(score_reasons)
+    reasons = list(reasons)
     if not verdict.approved:
         reasons.extend(verdict.reasons)
 
@@ -158,6 +198,18 @@ async def evaluate_candidate(
                 "open_position_count": open_position_count,
                 "data_quality": features.data_quality.value,
             },
+        )
+    )
+    session.add(
+        MLFeatureSnapshot(
+            candidate_id=candidate.id,
+            symbol=symbol,
+            features=feature_vector,
+            model_version_id=ml_model_id,
+            ml_score=ml_score,
+            # label stays NULL — this evaluation doesn't know the eventual
+            # outcome, and nothing in this codebase fabricates one. See
+            # docs/ML.md for who is expected to eventually set it.
         )
     )
 

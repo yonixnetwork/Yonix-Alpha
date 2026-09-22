@@ -41,11 +41,20 @@ def score(features: CandidateFeatures) -> tuple[float, list[str]]:
     if not reasons:
         reasons.append("no qualifying signal in available features")
 
-    if features.data_quality == DataQuality.DEGRADED and confidence > CONFIDENCE_CAP_DEGRADED_DATA:
-        confidence = CONFIDENCE_CAP_DEGRADED_DATA
-        reasons.append(
+    confidence, cap_reasons = cap_for_data_quality(confidence, features.data_quality)
+    return confidence, reasons + cap_reasons
+
+
+def cap_for_data_quality(confidence: float, data_quality: DataQuality) -> tuple[float, list[str]]:
+    """The DEGRADED-data ceiling, exposed standalone so a caller blending
+    in an ML prediction (services/decision-engine/app/evaluate.py) can
+    re-apply it *after* blending — a real trained model's opinion must
+    never be able to push a DEGRADED-data candidate's confidence back
+    above the cap this module exists to enforce.
+    """
+    if data_quality == DataQuality.DEGRADED and confidence > CONFIDENCE_CAP_DEGRADED_DATA:
+        return CONFIDENCE_CAP_DEGRADED_DATA, [
             f"confidence capped at {CONFIDENCE_CAP_DEGRADED_DATA} because data_quality is degraded "
             "(no Solana price/liquidity/wallet feed exists in this codebase)"
-        )
-
-    return confidence, reasons
+        ]
+    return confidence, []

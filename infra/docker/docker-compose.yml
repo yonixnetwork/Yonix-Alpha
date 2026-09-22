@@ -131,6 +131,17 @@ services:
         condition: service_healthy
     networks: [yonixalpha]
 
+  ml:
+    build:
+      context: ../..
+      dockerfile: services/ml/Dockerfile
+    env_file:
+      - ../../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [yonixalpha]
+
   engine-binance-futures:
     build:
       context: ../..

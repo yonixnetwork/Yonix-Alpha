@@ -6,58 +6,53 @@ reference repositories this platform draws patterns from.
 
 ## Status
 
-**Phase 5 — shared risk/decision system.** Phases 1-4 (foundation, data
-infrastructure, three Solana engines, the Binance Futures execution
-engine) are done. Phase 5 adds the centralized layer the spec requires
-sit between any signal and any exchange call: a pure Risk Engine, a
-shared kill switch, a structured `Decision` output, an execution router,
-and **`services/decision-engine`**, the process that actually runs
-Solana candidates through all of it.
+**Phase 6 — ML.** Phases 1-5 (foundation, data infrastructure, three
+Solana engines, the Binance Futures execution engine, the shared
+risk/decision system) are done. Phase 6 adds a real training/registry/
+inference pipeline — and, honestly, no trained model, because nothing in
+this database has ever closed a real or paper position, so there is no
+labeled outcome to train on. **See `docs/ML.md` for the full explanation
+and what changes once that data exists.**
 
-- **`packages/core-py/yonixalpha_core/risk.py`** — `evaluate(RiskConfig,
-  RiskContext) -> RiskVerdict`: pure, config-driven, every field in
-  `RiskConfig` optional (`None` = unenforced rather than silently assumed
-  configured). Checks the kill switch and the `TRADING_ENABLED`/
-  `LIVE_TRADING_ENABLED` flags first and unconditionally (spec section
-  37), then every configured limit — collecting *every* violated reason,
-  not just the first, so a rejection is fully explained. This is the
-  final authority over any trade; no signal source overrides it.
-- **`packages/core-py/yonixalpha_core/kill_switch.py`** — a single shared
-  Redis key (`engage`/`disengage`/`is_engaged`/`get_reason`) so tripping
-  it from anywhere (a future dashboard button, an operator CLI, a
-  risk-engine self-trip) stops every service immediately with no
-  per-process coordination needed.
-- **`packages/core-py/yonixalpha_core/decision.py`** — the exact
-  structured `Decision` output from spec section 51
-  (decision/confidence/entry/stop_loss/take_profit/risk_score/reason/
-  data_quality), plus `no_trade()`, the one correct way to build the "data
-  unavailable, don't guess" response (spec section 52).
-- **`packages/core-py/yonixalpha_core/execution_router.py`** — pure
-  classification of which executor should handle an approved trade.
-  Binance always routes to `BINANCE_FUTURES`. Solana routes to `JUPITER`
-  only when a *verified* migration parser actually confirmed an AMM pool
-  (never inferred from a candidate row merely existing) — and since
-  Engine B ships with zero registered parsers today (see below), Solana
-  candidates honestly route to `UNSUPPORTED`. No Jupiter/bonding-curve
-  executor exists in this codebase yet regardless — this is routing
-  logic, not an executor.
-- **`services/decision-engine`** — the evaluation loop: for every
-  `DISCOVERED`/`OBSERVING` `TradingCandidate`, computes features
-  (`app/features.py`, transaction-count acceleration from the same
-  `token_events` Engine C produces), scores confidence (`app/signal.py`),
-  checks risk, builds and persists a `Decision` (`strategy_signals` +
-  `risk_events`, both new Phase 5 tables), and advances the candidate's
-  state machine. **`data_quality` is always `DEGRADED`, never `HEALTHY`,
-  for any Solana candidate this codebase can evaluate** — there is no
-  Solana price, liquidity, or wallet-concentration feed anywhere in this
-  codebase (see `ARCHITECTURE_AUDIT.md`), and scoring "healthy" data that
-  doesn't structurally exist would be exactly the fabrication spec
-  section 53 forbids. Confidence for `DEGRADED` data is capped at `0.35`,
-  deliberately below the `0.6` entry threshold, so a `LONG` decision is
-  structurally unreachable today — the honest consequence of reporting
-  data quality truthfully, not a bug to fix later. Verified with 18 tests
-  against real local Postgres and Redis, including that no combination of
-  inputs ever produces `LONG`.
+- **`packages/core-py/yonixalpha_core/ml/`** — `MLModel` protocol,
+  `NullModel` (the honest default: `model_version=None`, so a caller
+  never blends in a fabricated "neutral" score), `SklearnModel` (wraps a
+  joblib-deserialized estimator, maps named features to the exact column
+  order it was trained on, raises rather than guesses on a missing
+  feature), and `registry.py` (register / activate / load the active
+  model for a given name — exactly one `active` `ModelVersion` per name,
+  demoted/promoted atomically).
+- **`model_versions` / `ml_features` tables** (migration 0006) — an
+  append-only model registry (every trained artifact kept, never
+  overwritten) and a genuine feature store (every `decision-engine`
+  evaluation persists its feature vector, which model scored it if any,
+  and a `label` column that starts and stays `NULL` until a future phase
+  sets it).
+- **`services/decision-engine` now blends in an active model's score**
+  when one exists — today, never — and always says so in the decision's
+  `reason` list either way. Phase 5's `DEGRADED`-data confidence cap is
+  **re-applied after blending**, so even a maximally confident model can
+  never push a DEGRADED-data candidate back above the safety ceiling
+  (tested directly: a model returning 0.99 still caps out at 0.35).
+- **`services/ml`** — the training job. Runs hourly, loads every labeled
+  `ml_features` row, and trains nothing unless there are at least 50
+  samples across both classes (there are zero today, so every run's
+  honest, expected outcome is `skipped_insufficient_samples`). Given
+  enough real data, it trains a `LogisticRegression`, registers the
+  result unconditionally, and only activates it if its held-out AUC
+  clears a minimum bar *and* beats whatever's currently active.
+
+Phase 5 added the centralized layer the spec requires sit between any
+signal and any exchange call: a pure Risk Engine
+(`yonixalpha_core/risk.py`, kill switch and `TRADING_ENABLED`/
+`LIVE_TRADING_ENABLED` checked first and unconditionally, every violated
+limit collected rather than stopping at the first), a shared Redis kill
+switch, the structured `Decision` output (`yonixalpha_core/decision.py`),
+an execution router (Solana routes to `UNSUPPORTED` unless a verified
+migration parser confirmed an AMM pool — none exist yet), and
+**`services/decision-engine`**, which runs every `DISCOVERED`/
+`OBSERVING` Solana candidate through all of it and persists the full
+audit trail (`strategy_signals`, `risk_events`).
 
 Phase 4 added **`services/engine-binance-futures`**: authenticated
 USDT-M Futures account/order/position management, separate from Phase
@@ -133,10 +128,11 @@ No order has ever been placed by this codebase and none will be by
 default: `TRADING_ENABLED`/`LIVE_TRADING_ENABLED` default false, and
 `decision-engine`'s own confidence cap keeps every Solana evaluation at
 `WAIT` or `NO_TRADE` regardless of those flags (see above) — even with
-everything enabled, no code path in this codebase today reaches a `LONG`
-decision or calls `engine-binance-futures`'s order-placement function.
-See the phase list in the original spec for what comes next (ML, paper
-trading, the full dashboard, deployment, hardening).
+everything enabled, and even with an ML model blended in (see `docs/ML.md`
+— there isn't one yet), no code path in this codebase today reaches a
+`LONG` decision or calls `engine-binance-futures`'s order-placement
+function. See the phase list in the original spec for what comes next
+(paper trading, the full dashboard, deployment, hardening).
 
 ## Repository layout
 
@@ -152,14 +148,18 @@ services/
   engine-solana-migration/   Engine B: scaffolding, no live detection yet (see Status)
   engine-binance-futures/    Authenticated account/order/position engine (Phase 4)
   decision-engine/           Feature/signal scoring + risk-gated Decision persistence (Phase 5)
+  ml/                        Training job: labeled-dataset loading, model registry writes (Phase 6)
 packages/
   core-py/                   Shared config, logging, security, DB models/schemas,
                               Solana RPC/WS transport, SPL Token Program parsing,
-                              risk engine, kill switch, Decision/execution router
+                              risk engine, kill switch, Decision/execution router,
+                              ML model registry + inference interface
                               (yonixalpha_core)
 infra/
   docker/                    docker-compose.yml + dev/prod overrides
   nginx/                     reverse proxy config (HTTP only until TLS is provisioned)
+docs/
+  ML.md                      Why no model is trained yet, and what changes once one can be
 ```
 
 Every Python service depends on `packages/core-py` via an editable pip
@@ -235,11 +235,11 @@ and `redis://localhost:6379/15` by default — override via `DATABASE_URL` /
 ### Running a data-ingestion or engine service without Docker
 
 Same pattern for `services/data-solana`, `services/data-binance`, all
-three `services/engine-solana-*`, `services/engine-binance-futures`, and
-`services/decision-engine`:
+three `services/engine-solana-*`, `services/engine-binance-futures`,
+`services/decision-engine`, and `services/ml`:
 
 ```
-cd services/engine-solana-discovery     # or any of the other six
+cd services/engine-solana-discovery     # or any of the other seven
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements-dev.txt
 ruff check app tests && pytest tests/ -v   # no live network needed — mocked transports/local WS server/real Postgres (+ Redis for decision-engine)

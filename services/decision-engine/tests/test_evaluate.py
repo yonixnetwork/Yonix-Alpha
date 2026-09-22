@@ -2,13 +2,44 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
-from app.evaluate import MAX_OBSERVATION_SECONDS, evaluate_candidate
+from app.evaluate import MAX_OBSERVATION_SECONDS, MODEL_NAME, evaluate_candidate
+from app.ml_features import FEATURE_NAMES
+from app.signal import CONFIDENCE_CAP_DEGRADED_DATA
 from yonixalpha_core.config import Settings
-from yonixalpha_core.db.models import RiskEvent, StrategySignal, Token, TradingCandidate
+from yonixalpha_core.db.models import MLFeatureSnapshot, RiskEvent, StrategySignal, Token, TradingCandidate
 from yonixalpha_core.decision import DecisionType
+from yonixalpha_core.ml import registry
 from yonixalpha_core.state_machine import CandidateState
 
 MINT = "TestMint111111111111111111111111111111111"
+
+
+class _FixedProbaEstimator:
+    """A picklable stand-in for a fitted sklearn classifier: joblib needs a
+    module-level class to serialize/deserialize (not a closure), and a
+    fixed probability makes the blending math in these tests deterministic
+    rather than depending on what a real fit happens to produce.
+    """
+
+    def __init__(self, positive_proba: float):
+        self.positive_proba = positive_proba
+
+    def predict_proba(self, vector):
+        return [[1 - self.positive_proba, self.positive_proba]]
+
+
+async def _activate_fixed_model(db_session, positive_proba: float):
+    model_version = await registry.register_trained_model(
+        db_session,
+        name=MODEL_NAME,
+        estimator=_FixedProbaEstimator(positive_proba),
+        feature_names=FEATURE_NAMES,
+        training_sample_count=10,
+        metrics={"holdout_auc": 0.9},
+    )
+    await registry.activate_model(db_session, model_version)
+    await db_session.commit()
+    return model_version
 
 
 def _settings(**overrides) -> Settings:
@@ -117,3 +148,55 @@ async def test_still_within_observation_window_stays_observing(db_session, redis
     await evaluate_candidate(db_session, redis_client, _settings(), candidate, now)
 
     assert candidate.state == CandidateState.OBSERVING.value
+
+
+async def test_no_active_model_notes_rule_based_only(db_session, redis_client):
+    candidate = await _make_candidate(db_session, state=CandidateState.DISCOVERED)
+    now = datetime.now(timezone.utc)
+
+    decision = await evaluate_candidate(db_session, redis_client, _settings(), candidate, now)
+
+    assert any("no active trained ML model" in r for r in decision.reason)
+
+
+async def test_active_model_score_is_blended_but_never_escapes_degraded_cap(db_session, redis_client):
+    """Even a maximally confident ML model must not be able to push a
+    DEGRADED-data candidate's confidence above the safety cap — the cap is
+    reapplied after blending specifically to guarantee this.
+    """
+    await _activate_fixed_model(db_session, positive_proba=0.99)
+    candidate = await _make_candidate(db_session, state=CandidateState.DISCOVERED)
+    now = datetime.now(timezone.utc)
+
+    decision = await evaluate_candidate(db_session, redis_client, _settings(), candidate, now)
+
+    assert decision.confidence <= CONFIDENCE_CAP_DEGRADED_DATA
+    assert any("blended with ML model" in r for r in decision.reason)
+    assert any("capped" in r for r in decision.reason)
+
+
+async def test_ml_feature_snapshot_persisted_with_model_link_when_active(db_session, redis_client):
+    model_version = await _activate_fixed_model(db_session, positive_proba=0.5)
+    candidate = await _make_candidate(db_session, state=CandidateState.DISCOVERED)
+    now = datetime.now(timezone.utc)
+
+    await evaluate_candidate(db_session, redis_client, _settings(), candidate, now)
+
+    rows = (await db_session.execute(select(MLFeatureSnapshot).where(MLFeatureSnapshot.candidate_id == candidate.id))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].model_version_id == model_version.id
+    assert rows[0].ml_score is not None
+    assert rows[0].label is None
+    assert set(rows[0].features.keys()) == set(FEATURE_NAMES)
+
+
+async def test_ml_feature_snapshot_persisted_without_model_link_by_default(db_session, redis_client):
+    candidate = await _make_candidate(db_session, state=CandidateState.DISCOVERED)
+    now = datetime.now(timezone.utc)
+
+    await evaluate_candidate(db_session, redis_client, _settings(), candidate, now)
+
+    rows = (await db_session.execute(select(MLFeatureSnapshot).where(MLFeatureSnapshot.candidate_id == candidate.id))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].model_version_id is None
+    assert rows[0].ml_score is None

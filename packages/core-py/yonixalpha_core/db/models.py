@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, LargeBinary, Numeric, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import INET, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -388,4 +388,73 @@ class RiskEvent(Base):
     approved: Mapped[bool] = mapped_column(Boolean, nullable=False, index=True)
     reasons: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     context: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: ML model registry + feature store. See docs/ML.md for why
+# model_versions starts (and, honestly, is very likely to stay for a long
+# time) empty of any `active` row: training requires labeled outcomes, and
+# nothing in this codebase has ever closed a real or paper position, so
+# ml_features.label is never anything but NULL yet — the column and the
+# training pipeline that reads it are real, waiting on that data rather
+# than inventing it (spec section 53).
+# ---------------------------------------------------------------------------
+
+
+class ModelVersion(Base):
+    """One row per trained model artifact, append-only — training never
+    overwrites a prior version, so a demoted model's metrics/artifact stay
+    inspectable. `status` is the only mutable field: exactly one row per
+    `name` may be `active` at a time (enforced by registry.activate_model,
+    which retires any previous holder before promoting a new one — not by
+    a DB constraint, since a brief multi-active window during that swap is
+    harmless and a constraint would need deferred uniqueness). `artifact`
+    is a joblib-serialized estimator stored directly in Postgres rather
+    than a new object-storage dependency (S3/MinIO) this phase doesn't
+    otherwise need.
+    """
+
+    __tablename__ = "model_versions"
+    __table_args__ = (UniqueConstraint("name", "version", name="uq_model_versions_name_version"),)
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, index=True, default="trained")  # trained|active|retired
+    feature_names: Mapped[list] = mapped_column(JSONB, nullable=False)
+    training_sample_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    metrics: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    artifact: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    artifact_format: Mapped[str] = mapped_column(String(16), nullable=False, default="joblib")
+    trained_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class MLFeatureSnapshot(Base):
+    """One row per feature vector computed for a candidate at evaluation
+    time — a genuine feature store: persisted independently of
+    StrategySignal so a future training job can read a stable, versioned
+    input space without recomputing from raw token_events. `label` is the
+    supervised target (1 = profitable exit, 0 = not) and is always NULL
+    today, set later by whatever future phase first closes a real
+    position with a known outcome (see docs/ML.md) — never fabricated
+    here to make training "work."
+    """
+
+    __tablename__ = "ml_features"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    candidate_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("trading_candidates.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    features: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    model_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("model_versions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    ml_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 4), nullable=True)
+    label: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    label_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
