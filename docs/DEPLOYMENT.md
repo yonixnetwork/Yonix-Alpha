@@ -25,18 +25,46 @@ explicit about the line.
   SSH access to.
 - `yonixalpha.com` and `www.yonixalpha.com` DNS A records pointed at that
   IP (needed before the TLS bootstrap step, not before).
-- This repository's `main`/deploy branch accessible via
-  `git clone https://github.com/yonixnetwork/Yonix-Alpha.git` from that
-  droplet (public repo — no deploy key needed unless that changes).
+- A way for the droplet to read this repository. **It is private** —
+  verified: `https://github.com/yonixnetwork/Yonix-Alpha` returns 404
+  unauthenticated, and so does every `raw.githubusercontent.com` path
+  under it. An earlier version of this document claimed the repo was
+  public and no deploy key was needed; that was wrong, and it made the
+  bootstrap step below impossible to run as written. Use a **read-only
+  deploy key** (step 2.1).
 
 ## 2. First deploy
 
 ### 2.1 Bootstrap the server
 
+Because the repository is private, there is no `curl … | bash` one-liner:
+`raw.githubusercontent.com` will 404 without credentials. Give the droplet
+a read-only deploy key first, then run the script from the clone.
+
 ```
 ssh root@<droplet-ip>
-curl -fsSL https://raw.githubusercontent.com/yonixnetwork/Yonix-Alpha/main/scripts/bootstrap-server.sh | bash
+
+# 1. Generate a key ON THE DROPLET (the private half never leaves it)
+ssh-keygen -t ed25519 -C "yonixalpha-droplet" -f ~/.ssh/id_ed25519 -N ""
+cat ~/.ssh/id_ed25519.pub
 ```
+
+Add that public key at **GitHub → the repo → Settings → Deploy keys →
+Add deploy key**. Leave "Allow write access" **unchecked** — the droplet
+only ever needs to read. Then:
+
+```
+ssh -T git@github.com          # accept the host key; "successfully authenticated" is expected
+git clone git@github.com:yonixnetwork/Yonix-Alpha.git /opt/yonixalpha
+cd /opt/yonixalpha
+YONIXALPHA_REPO_URL=git@github.com:yonixnetwork/Yonix-Alpha.git bash scripts/bootstrap-server.sh
+```
+
+`scripts/bootstrap-server.sh` is idempotent, so running it against the
+clone it is already sitting in is fine. `YONIXALPHA_REPO_URL` is what
+keeps `scripts/deploy.sh` pulling over SSH later; `YONIXALPHA_DEPLOY_BRANCH`
+(default `main`) and `YONIXALPHA_REPO_DIR` (default `/opt/yonixalpha`)
+are overridable the same way.
 
 This installs Docker Engine + the compose plugin, clones the repo into
 `/opt/yonixalpha`, and opens only 22/80/443 in `ufw`. It does **not**

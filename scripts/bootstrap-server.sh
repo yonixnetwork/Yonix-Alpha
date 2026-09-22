@@ -25,8 +25,13 @@
 # (1 hour, see below) rather than permanent.
 set -euo pipefail
 
-REPO_URL="https://github.com/yonixnetwork/Yonix-Alpha.git"
-REPO_DIR="/opt/yonixalpha"
+# Overridable because this repository is PRIVATE: the HTTPS URL below only
+# works if git already has a credential on the box, so a real deploy
+# normally sets YONIXALPHA_REPO_URL to the SSH form and uses a deploy key:
+#   YONIXALPHA_REPO_URL=git@github.com:yonixnetwork/Yonix-Alpha.git
+# See docs/DEPLOYMENT.md section 2.1.
+REPO_URL="${YONIXALPHA_REPO_URL:-https://github.com/yonixnetwork/Yonix-Alpha.git}"
+REPO_DIR="${YONIXALPHA_REPO_DIR:-/opt/yonixalpha}"
 REPO_BRANCH="${YONIXALPHA_DEPLOY_BRANCH:-main}"
 
 if [ "$(id -u)" -ne 0 ]; then
