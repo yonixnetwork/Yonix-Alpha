@@ -74,15 +74,22 @@ jobs:
       # (postgresql+asyncpg://yonixalpha:yonixalpha_test_pw@localhost:5432/yonixalpha_test,
       # redis://localhost:6379/15) as its own os.environ.setdefault(...)
       # default — matched exactly by the service containers above — so no
-      # DATABASE_URL/REDIS_URL overrides are needed here. Run before the
-      # test step: it needs a schema created via real migrations (not
-      # SQLAlchemy's Base.metadata.create_all, which is all pytest's own
-      # fixtures use), and running it after pytest would collide with
-      # whatever tables that left behind.
+      # DATABASE_URL/REDIS_URL overrides are needed for the Test step
+      # below. Alembic is different: it reads Settings.database_url
+      # directly (migrations/env.py), which without DATABASE_URL set
+      # falls back to POSTGRES_HOST's own default of "postgres" — a
+      # hostname that only resolves inside a Docker Compose network, not
+      # on this bare runner where the service container is reachable via
+      # localhost instead. Run before the Test step: Alembic needs a
+      # schema created via real migrations (not SQLAlchemy's
+      # Base.metadata.create_all, which is all pytest's own fixtures
+      # use), and running it after pytest would collide with whatever
+      # tables that left behind.
       - name: Alembic migration check
         if: matrix.project == 'apps/api'
         working-directory: apps/api
         env:
+          DATABASE_URL: postgresql+asyncpg://yonixalpha:yonixalpha_test_pw@localhost:5432/yonixalpha_test
           JWT_SECRET: ci-only-secret-not-used-for-anything-real
           ADMIN_PASSWORD_HASH: unused-in-this-step
         run: |
