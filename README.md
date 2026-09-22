@@ -6,36 +6,73 @@ reference repositories this platform draws patterns from.
 
 ## Status
 
-**Phase 4 — Binance Futures engine.** Phases 1-3 (foundation, data
-infrastructure, three Solana engines) are done. Phase 4 adds
-**`services/engine-binance-futures`**: authenticated USDT-M Futures
-account/order/position management, separate from Phase 2's
-`data-binance` (which stays public-data-only — keeping trading
-credentials confined to one service). It implements:
+**Phase 5 — shared risk/decision system.** Phases 1-4 (foundation, data
+infrastructure, three Solana engines, the Binance Futures execution
+engine) are done. Phase 5 adds the centralized layer the spec requires
+sit between any signal and any exchange call: a pure Risk Engine, a
+shared kill switch, a structured `Decision` output, an execution router,
+and **`services/decision-engine`**, the process that actually runs
+Solana candidates through all of it.
 
-- **Idempotent order placement** (`app/orders.py`): a client order ID is
-  generated and the order's intent committed to Postgres *before* the
-  exchange is ever called (spec section 21) — if the process dies between
-  submitting and hearing back, `reconcile_pending_orders()` asks Binance
-  what actually happened by that client order ID on the next pass, rather
-  than guessing or resubmitting.
-- **Position sync + the authenticated user-data WebSocket stream**
-  (`app/positions.py`, `app/user_stream.py`, `app/events.py`): REST
-  reconciliation of `positions` against `GET /fapi/v2/positionRisk`, plus
-  a WS client that never assumes the connection or its listenKey stay
-  valid forever — a disconnect or a failed keepalive discards the cached
-  listenKey and gets a fresh one on reconnect. `ACCOUNT_UPDATE` and
-  `ORDER_TRADE_UPDATE` events update positions/orders and record fills
-  idempotently.
-- **A hard safety gate**: `place_order_idempotent()` refuses outright
-  unless `TRADING_ENABLED` and `LIVE_TRADING_ENABLED` are *both*
-  explicitly true — both default false. Phase 5 owns the real risk
-  engine, but shipping order placement with no safety check at all would
-  be irresponsible regardless of phase boundaries. Nothing in this
-  codebase currently calls this function autonomously — there is no
-  strategy yet (deliberately: spec section 8 requires the strategy layer
-  stay independent from execution, and the shared decision system is
-  Phase 5's job). This engine is the mechanical capability only.
+- **`packages/core-py/yonixalpha_core/risk.py`** — `evaluate(RiskConfig,
+  RiskContext) -> RiskVerdict`: pure, config-driven, every field in
+  `RiskConfig` optional (`None` = unenforced rather than silently assumed
+  configured). Checks the kill switch and the `TRADING_ENABLED`/
+  `LIVE_TRADING_ENABLED` flags first and unconditionally (spec section
+  37), then every configured limit — collecting *every* violated reason,
+  not just the first, so a rejection is fully explained. This is the
+  final authority over any trade; no signal source overrides it.
+- **`packages/core-py/yonixalpha_core/kill_switch.py`** — a single shared
+  Redis key (`engage`/`disengage`/`is_engaged`/`get_reason`) so tripping
+  it from anywhere (a future dashboard button, an operator CLI, a
+  risk-engine self-trip) stops every service immediately with no
+  per-process coordination needed.
+- **`packages/core-py/yonixalpha_core/decision.py`** — the exact
+  structured `Decision` output from spec section 51
+  (decision/confidence/entry/stop_loss/take_profit/risk_score/reason/
+  data_quality), plus `no_trade()`, the one correct way to build the "data
+  unavailable, don't guess" response (spec section 52).
+- **`packages/core-py/yonixalpha_core/execution_router.py`** — pure
+  classification of which executor should handle an approved trade.
+  Binance always routes to `BINANCE_FUTURES`. Solana routes to `JUPITER`
+  only when a *verified* migration parser actually confirmed an AMM pool
+  (never inferred from a candidate row merely existing) — and since
+  Engine B ships with zero registered parsers today (see below), Solana
+  candidates honestly route to `UNSUPPORTED`. No Jupiter/bonding-curve
+  executor exists in this codebase yet regardless — this is routing
+  logic, not an executor.
+- **`services/decision-engine`** — the evaluation loop: for every
+  `DISCOVERED`/`OBSERVING` `TradingCandidate`, computes features
+  (`app/features.py`, transaction-count acceleration from the same
+  `token_events` Engine C produces), scores confidence (`app/signal.py`),
+  checks risk, builds and persists a `Decision` (`strategy_signals` +
+  `risk_events`, both new Phase 5 tables), and advances the candidate's
+  state machine. **`data_quality` is always `DEGRADED`, never `HEALTHY`,
+  for any Solana candidate this codebase can evaluate** — there is no
+  Solana price, liquidity, or wallet-concentration feed anywhere in this
+  codebase (see `ARCHITECTURE_AUDIT.md`), and scoring "healthy" data that
+  doesn't structurally exist would be exactly the fabrication spec
+  section 53 forbids. Confidence for `DEGRADED` data is capped at `0.35`,
+  deliberately below the `0.6` entry threshold, so a `LONG` decision is
+  structurally unreachable today — the honest consequence of reporting
+  data quality truthfully, not a bug to fix later. Verified with 18 tests
+  against real local Postgres and Redis, including that no combination of
+  inputs ever produces `LONG`.
+
+Phase 4 added **`services/engine-binance-futures`**: authenticated
+USDT-M Futures account/order/position management, separate from Phase
+2's `data-binance` (public-data-only). Idempotent order placement
+(`app/orders.py`) commits a client order ID to Postgres *before* calling
+the exchange (spec section 21), so a crash mid-submit is resolved by
+`reconcile_pending_orders()` asking Binance what actually happened
+rather than resubmitting; position sync and the authenticated user-data
+WebSocket stream (`app/positions.py`, `app/user_stream.py`,
+`app/events.py`) keep `positions`/`orders`/fills current. Phase 5's risk
+engine and decision-engine are the first things in this codebase that
+could call `place_order_idempotent()` — the execution router currently
+sends it every approved Binance decision, but since `decision-engine`
+only ever evaluates Solana candidates today, nothing calls it
+autonomously yet in practice.
 
 Phase 3 added a persisted candidate state machine (`trading_candidates`,
 DISCOVERED through CLOSED/REJECTED — see `yonixalpha_core.state_machine`)
@@ -93,13 +130,13 @@ code changes. Until then, the service runs, reports its health, and
 correctly does nothing else. See `services/engine-solana-migration/README.md`.
 
 No order has ever been placed by this codebase and none will be by
-default: `TRADING_ENABLED`/`LIVE_TRADING_ENABLED` default false, the three
-Solana engines only discover and persist candidates, and nothing calls
-`engine-binance-futures`'s order-placement function autonomously — there
-is no strategy or decision layer wired up to call it yet. See the phase
-list in the original spec for what comes next (the shared risk/decision
-system that actually evaluates candidates and would be the first thing to
-call it, ML, paper trading, the full dashboard, deployment, hardening).
+default: `TRADING_ENABLED`/`LIVE_TRADING_ENABLED` default false, and
+`decision-engine`'s own confidence cap keeps every Solana evaluation at
+`WAIT` or `NO_TRADE` regardless of those flags (see above) — even with
+everything enabled, no code path in this codebase today reaches a `LONG`
+decision or calls `engine-binance-futures`'s order-placement function.
+See the phase list in the original spec for what comes next (ML, paper
+trading, the full dashboard, deployment, hardening).
 
 ## Repository layout
 
@@ -114,9 +151,11 @@ services/
   engine-solana-momentum/    Engine C: transfer-acceleration detection
   engine-solana-migration/   Engine B: scaffolding, no live detection yet (see Status)
   engine-binance-futures/    Authenticated account/order/position engine (Phase 4)
+  decision-engine/           Feature/signal scoring + risk-gated Decision persistence (Phase 5)
 packages/
   core-py/                   Shared config, logging, security, DB models/schemas,
-                              Solana RPC/WS transport, SPL Token Program parsing
+                              Solana RPC/WS transport, SPL Token Program parsing,
+                              risk engine, kill switch, Decision/execution router
                               (yonixalpha_core)
 infra/
   docker/                    docker-compose.yml + dev/prod overrides
@@ -196,13 +235,14 @@ and `redis://localhost:6379/15` by default — override via `DATABASE_URL` /
 ### Running a data-ingestion or engine service without Docker
 
 Same pattern for `services/data-solana`, `services/data-binance`, all
-three `services/engine-solana-*`, and `services/engine-binance-futures`:
+three `services/engine-solana-*`, `services/engine-binance-futures`, and
+`services/decision-engine`:
 
 ```
-cd services/engine-solana-discovery     # or any of the other five
+cd services/engine-solana-discovery     # or any of the other six
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements-dev.txt
-ruff check app tests && pytest tests/ -v   # no live network needed — mocked transports/local WS server/real Postgres
+ruff check app tests && pytest tests/ -v   # no live network needed — mocked transports/local WS server/real Postgres (+ Redis for decision-engine)
 python -m app.main                         # the actual worker; needs real SOLANA_RPC_URL etc. in the environment
 ```
 

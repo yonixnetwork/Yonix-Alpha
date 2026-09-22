@@ -332,3 +332,60 @@ class PnlRecord(Base):
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     info: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: shared decision system audit trail (spec section 19/51). Both
+# tables are asset-class-agnostic — candidate_id is nullable because a
+# future Binance-side signal has no TradingCandidate to reference (that
+# table's FK is Solana-only, from Phase 3); `symbol` is always populated
+# so either side can be queried without an optional join.
+# ---------------------------------------------------------------------------
+
+
+class StrategySignal(Base):
+    """One row per Signal/Decision Engine evaluation — the structured
+    Decision output from spec section 51, persisted verbatim as the full
+    audit trail of "why did/didn't we trade." Never overwritten: a
+    candidate re-evaluated later gets a new row, so the history of
+    changing confidence/reason over time is preserved.
+    """
+
+    __tablename__ = "strategy_signals"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    candidate_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("trading_candidates.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    decision: Mapped[str] = mapped_column(String(16), nullable=False, index=True)  # LONG|SHORT|WAIT|NO_TRADE
+    confidence: Mapped[Decimal] = mapped_column(Numeric(5, 4), nullable=False)
+    entry_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    entry: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    stop_loss: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    take_profit: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    risk_score: Mapped[Decimal] = mapped_column(Numeric(5, 4), nullable=False)
+    reason: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    data_quality: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+
+
+class RiskEvent(Base):
+    """One row per Risk Engine evaluation, approved or rejected (spec
+    sections 15/37/42: risk decisions are audited events). Stands apart
+    from StrategySignal rather than being a column on it, since a risk
+    check can be triggered by more than a signal-engine proposal (e.g. a
+    future manual dashboard override).
+    """
+
+    __tablename__ = "risk_events"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    candidate_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("trading_candidates.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    symbol: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    approved: Mapped[bool] = mapped_column(Boolean, nullable=False, index=True)
+    reasons: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    context: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)

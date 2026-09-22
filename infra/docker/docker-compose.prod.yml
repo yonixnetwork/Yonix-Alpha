@@ -34,6 +34,9 @@ services:
   engine-solana-migration:
     restart: unless-stopped
 
+  decision-engine:
+    restart: unless-stopped
+
   engine-binance-futures:
     restart: unless-stopped
 
