@@ -91,3 +91,65 @@ async def test_kill_switch_requires_auth_to_mutate(client):
     assert resp.status_code == 401
     resp = await client.post("/api/risk/kill-switch/disengage")
     assert resp.status_code == 401
+
+
+async def test_engage_kill_switch_sends_telegram_alert(client, auth_headers, monkeypatch):
+    calls = []
+
+    async def fake_send(settings, text, client=None):
+        calls.append(text)
+        return True
+
+    import app.api.routes.risk as risk_module
+
+    monkeypatch.setattr(risk_module, "send_telegram_alert", fake_send)
+
+    resp = await client.post("/api/risk/kill-switch/engage", json={"reason": "manual stop for testing"}, headers=auth_headers)
+    assert resp.status_code == 200
+    assert len(calls) == 1
+    assert "ENGAGED" in calls[0]
+    assert "manual stop for testing" in calls[0]
+
+
+async def test_disengage_kill_switch_sends_telegram_alert(client, auth_headers, monkeypatch):
+    calls = []
+
+    async def fake_send(settings, text, client=None):
+        calls.append(text)
+        return True
+
+    import app.api.routes.risk as risk_module
+
+    monkeypatch.setattr(risk_module, "send_telegram_alert", fake_send)
+
+    await client.post("/api/risk/kill-switch/engage", json={"reason": "test"}, headers=auth_headers)
+    resp = await client.post("/api/risk/kill-switch/disengage", headers=auth_headers)
+
+    assert resp.status_code == 200
+    assert len(calls) == 2  # engage, then disengage
+    assert "disengaged" in calls[-1].lower()
+
+
+async def test_kill_switch_alert_failure_does_not_break_the_request(app, client, auth_headers, monkeypatch):
+    """send_telegram_alert itself is designed to never raise (see
+    yonixalpha_core.notify), but the kill switch is the single most
+    safety-critical write action in this system — engaging it must never
+    fail just because a notification call misbehaves. risk.py wraps the
+    call in its own try/except (`_alert`) as a second line of defense;
+    this proves that guard actually works even if a future change to
+    notify.py's contract slips and it starts raising.
+    """
+
+    async def failing_send(settings, text, client=None):
+        raise RuntimeError("simulated Telegram outage")
+
+    import app.api.routes.risk as risk_module
+
+    monkeypatch.setattr(risk_module, "send_telegram_alert", failing_send)
+
+    resp = await client.post("/api/risk/kill-switch/engage", json={"reason": "test"}, headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.json()["engaged"] is True
+
+    status_resp = await client.get("/api/risk/kill-switch", headers=auth_headers)
+    assert status_resp.json()["engaged"] is True

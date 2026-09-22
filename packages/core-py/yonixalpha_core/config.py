@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     BINANCE_API_SECRET: Optional[str] = None
     BINANCE_TESTNET: bool = True
 
-    # Telegram (Phase 4/8+)
+    # Telegram (wired up Phase 11 — yonixalpha_core.notify.send_telegram_alert)
     TELEGRAM_BOT_TOKEN: Optional[str] = None
     TELEGRAM_CHAT_ID: Optional[str] = None
 

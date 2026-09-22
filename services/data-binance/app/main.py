@@ -9,6 +9,7 @@ from yonixalpha_core.db.base import make_engine, make_session_factory
 from yonixalpha_core.db.models import SystemEvent
 from yonixalpha_core.db.writers import write_market_snapshot
 from yonixalpha_core.logging import configure_logging, get_logger
+from yonixalpha_core.notify import send_telegram_alert
 
 from app.ingest import normalize_stream_message
 from app.rest.client import BinanceMarketDataClient
@@ -29,6 +30,10 @@ async def _record_system_event(session_factory, event_type: str, severity: str, 
     async with session_factory() as session:
         session.add(SystemEvent(service="data-binance", event_type=event_type, severity=severity, detail=detail))
         await session.commit()
+    if severity in ("error", "critical"):
+        await send_telegram_alert(
+            get_settings(), f"⚠️ [data-binance] {severity.upper()}: {event_type}" + (f"\n{detail}" if detail else "")
+        )
 
 
 async def _rest_health_check_loop(client: BinanceMarketDataClient, session_factory, stop_event: asyncio.Event) -> None:

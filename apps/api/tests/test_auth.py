@@ -66,3 +66,30 @@ async def test_lockout_after_failed_attempts(client):
 
     locked = await client.post("/api/auth/login", json={"username": "admin", "password": "wrong"})
     assert locked.status_code == 429
+
+
+async def test_lockout_sends_exactly_one_telegram_alert(client, monkeypatch):
+    """Fires once, on the transition into lockout — not on every failed
+    attempt before it (would be noise) or after it (the account is already
+    locked; each further attempt this session doesn't call
+    _record_failed_attempt at all, since _is_locked_out short-circuits
+    first — see auth.py::login).
+    """
+    calls = []
+
+    async def fake_send(settings, text, client=None):
+        calls.append(text)
+        return True
+
+    import app.api.routes.auth as auth_module
+
+    monkeypatch.setattr(auth_module, "send_telegram_alert", fake_send)
+
+    for _ in range(5):
+        await client.post("/api/auth/login", json={"username": "admin", "password": "wrong"})
+    await client.post("/api/auth/login", json={"username": "admin", "password": "wrong"})
+    await client.post("/api/auth/login", json={"username": "admin", "password": "wrong"})
+
+    assert len(calls) == 1
+    assert "admin" in calls[0]
+    assert "locked out" in calls[0]

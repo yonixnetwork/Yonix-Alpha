@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_username, get_db, get_redis, get_settings
 from yonixalpha_core.config import Settings
 from yonixalpha_core.logging import get_logger
+from yonixalpha_core.notify import send_telegram_alert
 from yonixalpha_core.security import create_token, decode_token, verify_password
 from yonixalpha_core.db.models import AuditLog, Session as SessionModel, User
 from app.schemas.auth import LoginRequest, MeResponse, RefreshRequest, TokenResponse
@@ -30,13 +31,21 @@ async def _is_locked_out(redis: Redis, username: str) -> bool:
     return bool(await redis.get(f"auth:lockout:{username}"))
 
 
-async def _record_failed_attempt(redis: Redis, username: str) -> None:
+async def _record_failed_attempt(redis: Redis, username: str, settings: Settings, ip: str | None) -> None:
     key = f"auth:failed:{username}"
     attempts = await redis.incr(key)
     if attempts == 1:
         await redis.expire(key, ATTEMPT_WINDOW_SECONDS)
     if attempts >= MAX_FAILED_ATTEMPTS:
         await redis.set(f"auth:lockout:{username}", "1", ex=LOCKOUT_SECONDS)
+        # Only on the transition into lockout, not every attempt after —
+        # a real brute-force run would otherwise spam this channel for the
+        # full lockout window.
+        await send_telegram_alert(
+            settings,
+            f"⚠️ Login lockout: '{username}' locked out for {LOCKOUT_SECONDS // 60}m "
+            f"after {attempts} failed attempts from {ip or 'unknown IP'}",
+        )
 
 
 async def _clear_failed_attempts(redis: Redis, username: str) -> None:
@@ -69,7 +78,7 @@ async def login(
     user = result.scalar_one_or_none()
 
     if user is None or not verify_password(body.password, user.password_hash):
-        await _record_failed_attempt(redis, body.username)
+        await _record_failed_attempt(redis, body.username, settings, ip)
         await _write_audit(db, None, "login_failed", ip, {"username": body.username})
         log.warning("auth.login.failed", username=body.username, ip=ip)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")

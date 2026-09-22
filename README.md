@@ -6,56 +6,50 @@ reference repositories this platform draws patterns from.
 
 ## Status
 
-**Phase 10 — hardening.** Phases 1-9 (foundation, data infrastructure,
-three Solana engines, the Binance Futures execution engine, the shared
-risk/decision system, the ML pipeline, paper trading, the full dashboard,
-and a genuinely deployable stack with TLS/CI/backup/bootstrap) are done.
-Phase 10 is a security pass over what Phase 9 shipped, not new features:
-**see `docs/SECURITY.md`** (referenced-but-unwritten since Phase 1 — this
-is the first phase it exists) for the full threat model, and its own
-"What's verified vs. not" section for the same honesty standard every
-prior phase's docs have kept.
+**Phase 11 — Telegram alerting.** Phases 1-10 (foundation, data
+infrastructure, three Solana engines, the Binance Futures execution
+engine, the shared risk/decision system, the ML pipeline, paper trading,
+the full dashboard, a genuinely deployable stack, and a security hardening
+pass) are done. Phase 11 closes a real gap that had sat unfilled since
+Phase 4: `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` existed in `.env.example`
+and `config.py`, but no code anywhere ever actually sent a Telegram
+message. **See `docs/ALERTING.md`** for the full trigger list, setup
+instructions, and its own "what's verified vs. not" section.
 
-- **Real dependency vulnerabilities, found and mostly fixed**: `pip-audit`
-  across all 11 Python projects and `npm audit` in `apps/web`, both run
-  against actual installed dependency sets (not requirements files parsed
-  in isolation). Fixed: `pyjwt` (2.10.1→2.13.0, propagates to every
-  project via `packages/core-py`), and in `apps/api` specifically
-  `fastapi` (0.115.6→0.141.1) + an explicit `starlette` pin (→1.6.0, the
-  actual vulnerable package — fastapi's own pin only allowed it in
-  indirectly) + `python-multipart` (0.0.20→0.0.32). Full test suite for
-  every affected project re-run and passing after each bump. **Deferred,
-  with reasoning written down**: the `next`/`postcss` finding in
-  `apps/web` (only fix is a major, untested-in-this-sandbox `next@16`
-  bump) and `pytest`'s local-`/tmp`-race finding (dev-only tool, no
-  production attack surface, its only fix is `pytest@9`, which drags in
-  `pytest-asyncio@1.x` across all 11 projects for close to zero real
-  risk) — see `docs/SECURITY.md` section 10 for why each was judged not
-  worth forcing blind.
-- **`infra/nginx/nginx.conf`**: every HTTPS response now carries HSTS,
-  `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, and a
-  CSP scoped to `'self'`; `/api/auth/login` specifically is rate-limited
-  per-IP at the nginx layer (5r/m, burst 5, HTTP 429) as defense-in-depth
-  in front of the existing per-username app-level lockout. Verified live
-  against the real nginx binary: all five headers present on a real
-  response, `/api/` proxying unaffected, and the rate limit actually
-  returns 429 on the 7th rapid request while unrelated routes in the same
-  burst are untouched.
-- **`.github/workflows/ci.yml`** gained three checks: `pip-audit` per
-  Python project (one deliberately ignored, documented finding — the
-  `pytest` one above), `npm audit` for the frontend (allow-listing only
-  the two documented, deferred findings so anything *new* still fails
-  the build), and a `gitleaks` job scanning full git history — confirmed
-  clean against this repo's real history before being wired in.
-- **`scripts/bootstrap-server.sh`** gained `unattended-upgrades` (security
-  patches only) and `fail2ban`'s SSH jail (1h ban after 5 failed
-  *password* attempts in 10m — never triggered by the key-based login the
-  rest of this repo's docs assume, so it can't lock out a real operator).
-  Both packages installed and their configs verified for real (`apt-get
-  install`, `fail2ban-client -t`, `dpkg-reconfigure`) in this session.
-- **CORS** (`cors_origins` in `config.py`) was reviewed and found already
-  correctly scoped — no code change, just the reasoning written down in
-  `docs/SECURITY.md` section 7.
+- **`yonixalpha_core.notify.send_telegram_alert`**: the one shared function
+  every alert goes through (`packages/core-py/yonixalpha_core/notify.py`)
+  — best-effort, never raises, returns `False` on missing credentials, a
+  non-200 response, or a network error rather than propagating any of
+  them. Unit-tested against a real `httpx.MockTransport` asserting the
+  exact Bot API URL and JSON payload shape, not just that *some* HTTP call
+  happens.
+- **Four trigger points, chosen to be genuinely useful rather than noisy**:
+  kill switch engaged/disengaged (`apps/api/app/api/routes/risk.py` — the
+  single highest-value alert in the system, plus its own extra
+  try/except as a second line of defense so a Telegram outage can never
+  fail the one safety-critical write action here), a login lockout firing
+  once on the transition into lockout rather than on every attempt
+  (`apps/api/app/api/routes/auth.py`), and every service's `error`/
+  `critical`-severity `SystemEvent` rows across all 9 `services/*/app/main.py`
+  — `info`-severity rows (`service_started`/`service_stopped`) deliberately
+  don't alert, so a normal restart doesn't spam the channel.
+  `RiskEvent` rows (every WAIT/NO_TRADE decision) also deliberately don't
+  alert — see `docs/ALERTING.md` section 1 for why.
+- **Honestly verified only as far as this sandbox allows**: this sandbox's
+  own egress proxy actively rejects connections to `api.telegram.org`
+  (`CONNECT tunnel failed, response 403` — confirmed by testing it
+  directly, not assumed), so no message has ever actually reached a real
+  Telegram chat from this session. Every other layer — the Bot API request
+  shape, every failure path, every trigger point's call site — is real,
+  unit-tested code, not a stub; only the final "does a message actually
+  arrive" step needs a real bot token on an unrestricted host to confirm.
+
+Phase 10 was a security hardening pass over Phase 9's deployment stack —
+real `pip-audit`/`npm audit` findings fixed where safe (`pyjwt`, `fastapi`/
+`starlette`, `python-multipart`) and deferred with reasoning where not,
+nginx security headers + per-IP login rate-limiting, CI dependency/secret
+scanning, and conservative droplet hardening (`unattended-upgrades`,
+`fail2ban`) — see `docs/SECURITY.md` for the full threat model.
 
 Phase 9 made this codebase genuinely deployable rather than just runnable
 in dev: a working TLS bootstrap (the reverse proxy's HTTPS block had sat
@@ -207,8 +201,8 @@ packages/
   core-py/                   Shared config, logging, security, DB models/schemas,
                               Solana RPC/WS transport, SPL Token Program parsing,
                               risk engine, kill switch, Decision/execution router,
-                              ML model registry + inference interface
-                              (yonixalpha_core)
+                              ML model registry + inference interface,
+                              Telegram alerting (yonixalpha_core)
 infra/
   docker/                    docker-compose.yml + dev/prod overrides
   nginx/                     Reverse proxy: Dockerfile, nginx.conf, TLS-bootstrap entrypoint
@@ -225,6 +219,7 @@ docs/
   API.md                     Full apps/api route reference
   DEPLOYMENT.md              Deploy runbook + what's genuinely verified vs. not
   SECURITY.md                Threat model, auth/risk controls, dependency scanning, known limitations
+  ALERTING.md                Telegram alert triggers, setup, what's genuinely verified vs. not
 ```
 
 Every Python service depends on `packages/core-py` via an editable pip
@@ -364,6 +359,9 @@ its own "what's verified vs. not" section. Summary:
   secrets) — see `docs/SECURITY.md` section 10 for the two known,
   deliberately-deferred findings and why each was judged not worth a
   forced upgrade.
+- A kill-switch engage/disengage, a login lockout, or any service's
+  `error`/`critical` health event sends a real-time Telegram alert
+  (Phase 11) — see `docs/ALERTING.md` for the full trigger list and setup.
 - See `ARCHITECTURE_AUDIT.md` §3 for what was verified clean (and what
   wasn't) in the five reference repositories this codebase draws patterns
   from.

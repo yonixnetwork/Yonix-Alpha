@@ -8,6 +8,7 @@ from yonixalpha_core.config import get_settings
 from yonixalpha_core.db.base import make_engine, make_session_factory
 from yonixalpha_core.db.models import PaperPosition, SystemEvent, TradingCandidate
 from yonixalpha_core.logging import configure_logging, get_logger
+from yonixalpha_core.notify import send_telegram_alert
 from yonixalpha_core.state_machine import CandidateState
 
 from app.entry import try_open_position
@@ -24,6 +25,10 @@ async def _record_system_event(session_factory, event_type: str, severity: str, 
     async with session_factory() as session:
         session.add(SystemEvent(service=SERVICE_NAME, event_type=event_type, severity=severity, detail=detail))
         await session.commit()
+    if severity in ("error", "critical"):
+        await send_telegram_alert(
+            get_settings(), f"⚠️ [{SERVICE_NAME}] {severity.upper()}: {event_type}" + (f"\n{detail}" if detail else "")
+        )
 
 
 async def _open_qualified_candidates(session_factory, now: datetime) -> int:
