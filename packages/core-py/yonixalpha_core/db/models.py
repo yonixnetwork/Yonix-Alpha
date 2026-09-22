@@ -458,3 +458,47 @@ class MLFeatureSnapshot(Base):
     label: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     label_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+
+
+# ---------------------------------------------------------------------------
+# Phase 7: paper trading. See docs/PAPER_TRADING.md for why this table is
+# expected to stay empty for the same reason model_versions.active stays
+# empty (above): a paper position can only be opened at a real entry
+# price, and no Decision this codebase produces has ever had one (Solana
+# has no price feed to fill at — see decision-engine's own Phase 5 notes).
+# The mechanism is real and tested; there is nothing to fabricate a price
+# to make it "work" against.
+# ---------------------------------------------------------------------------
+
+
+class PaperPosition(Base):
+    """One simulated position per opened candidate, whole lifecycle in a
+    single row — unlike Binance's real Order/Fill split (Phase 4), there's
+    no live exchange whose state could diverge from what this process
+    itself decided, so there's nothing to reconcile after a crash: this
+    row IS the source of truth. Closing it is also what backfills
+    ml_features.label (see services/paper-trading/app/manage.py) — the
+    first and only thing in this codebase that ever does.
+    """
+
+    __tablename__ = "paper_positions"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    candidate_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("trading_candidates.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String(16), nullable=False)  # ExecutionProvider value at entry time
+    side: Mapped[str] = mapped_column(String(8), nullable=False)  # LONG|SHORT
+    entry_price: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    stop_loss: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    take_profit: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="open", index=True)  # open|closed
+    exit_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    exit_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    realized_pnl: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    realized_pnl_pct: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
+    entry_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    exit_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)

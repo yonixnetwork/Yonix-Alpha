@@ -73,6 +73,11 @@ services:
       - ../../services/ml/app:/app/app
       - ../../packages/core-py:/packages/core-py
 
+  paper-trading:
+    volumes:
+      - ../../services/paper-trading/app:/app/app
+      - ../../packages/core-py:/packages/core-py
+
   engine-binance-futures:
     volumes:
       - ../../services/engine-binance-futures/app:/app/app

@@ -6,41 +6,42 @@ reference repositories this platform draws patterns from.
 
 ## Status
 
-**Phase 6 — ML.** Phases 1-5 (foundation, data infrastructure, three
-Solana engines, the Binance Futures execution engine, the shared
-risk/decision system) are done. Phase 6 adds a real training/registry/
-inference pipeline — and, honestly, no trained model, because nothing in
-this database has ever closed a real or paper position, so there is no
-labeled outcome to train on. **See `docs/ML.md` for the full explanation
-and what changes once that data exists.**
+**Phase 7 — paper trading.** Phases 1-6 (foundation, data infrastructure,
+three Solana engines, the Binance Futures execution engine, the shared
+risk/decision system, the ML pipeline) are done. Phase 7 adds a real
+simulated-execution engine — and, honestly, it has never opened a single
+position, because every path into it is blocked by the same root cause
+every phase since 5 has run into: no Solana price feed exists anywhere in
+this codebase. **See `docs/PAPER_TRADING.md` for the full explanation.**
 
-- **`packages/core-py/yonixalpha_core/ml/`** — `MLModel` protocol,
-  `NullModel` (the honest default: `model_version=None`, so a caller
-  never blends in a fabricated "neutral" score), `SklearnModel` (wraps a
-  joblib-deserialized estimator, maps named features to the exact column
-  order it was trained on, raises rather than guesses on a missing
-  feature), and `registry.py` (register / activate / load the active
-  model for a given name — exactly one `active` `ModelVersion` per name,
-  demoted/promoted atomically).
-- **`model_versions` / `ml_features` tables** (migration 0006) — an
-  append-only model registry (every trained artifact kept, never
-  overwritten) and a genuine feature store (every `decision-engine`
-  evaluation persists its feature vector, which model scored it if any,
-  and a `label` column that starts and stays `NULL` until a future phase
-  sets it).
-- **`services/decision-engine` now blends in an active model's score**
-  when one exists — today, never — and always says so in the decision's
-  `reason` list either way. Phase 5's `DEGRADED`-data confidence cap is
-  **re-applied after blending**, so even a maximally confident model can
-  never push a DEGRADED-data candidate back above the safety ceiling
-  (tested directly: a model returning 0.99 still caps out at 0.35).
-- **`services/ml`** — the training job. Runs hourly, loads every labeled
-  `ml_features` row, and trains nothing unless there are at least 50
-  samples across both classes (there are zero today, so every run's
-  honest, expected outcome is `skipped_insufficient_samples`). Given
-  enough real data, it trains a `LogisticRegression`, registers the
-  result unconditionally, and only activates it if its held-out AUC
-  clears a minimum bar *and* beats whatever's currently active.
+- **`services/paper-trading`** watches for `QUALIFIED` candidates and
+  tries to simulate the position decision-engine approved. Two
+  independent gates always block it today: `decision-engine` never
+  populates `Decision.entry` for any decision (no price to fill at), and
+  even given one, `execution_router` only routes Solana to `JUPITER` on a
+  *verified* migration confirmation — never inferred from weaker evidence
+  — which Engine B's empty parser registry never produces. Both are
+  deterministically tested (`tests/test_entry.py`), not hand-waved.
+- **`app/manage.py` closes the Phase 6 loop**: when a paper position
+  closes (stop-loss/take-profit hit against a real price from
+  `market_snapshots` — populated for Binance if configured, never for
+  Solana today), it backfills every still-`NULL` `ml_features.label` for
+  that candidate with the real outcome. This is the only thing in this
+  codebase that has ever set that column to anything but `NULL`.
+- **`paper_positions` table** (migration 0007) — single-row lifecycle
+  (open through close); unlike Binance's real Order/Fill split there's no
+  live exchange to reconcile against, so this table is the source of
+  truth outright.
+
+Phase 6 added a real ML training/registry/inference pipeline
+(`packages/core-py/yonixalpha_core/ml/`, `model_versions`/`ml_features`
+tables) — and, per the above, still no trained model, since nothing had
+ever closed a position to label until this phase. `services/ml` trains
+nothing below 50 labeled two-class samples and only activates a model
+that beats whatever's currently active; `decision-engine` blends in an
+active model's score with Phase 5's `DEGRADED`-data cap re-applied
+*after* blending, so a confident model can never escape it. See
+`docs/ML.md`.
 
 Phase 5 added the centralized layer the spec requires sit between any
 signal and any exchange call: a pure Risk Engine
@@ -124,15 +125,16 @@ details registers a parser for it and detection activates with no other
 code changes. Until then, the service runs, reports its health, and
 correctly does nothing else. See `services/engine-solana-migration/README.md`.
 
-No order has ever been placed by this codebase and none will be by
-default: `TRADING_ENABLED`/`LIVE_TRADING_ENABLED` default false, and
-`decision-engine`'s own confidence cap keeps every Solana evaluation at
-`WAIT` or `NO_TRADE` regardless of those flags (see above) — even with
-everything enabled, and even with an ML model blended in (see `docs/ML.md`
-— there isn't one yet), no code path in this codebase today reaches a
-`LONG` decision or calls `engine-binance-futures`'s order-placement
-function. See the phase list in the original spec for what comes next
-(paper trading, the full dashboard, deployment, hardening).
+No order — real or paper — has ever been placed by this codebase and none
+will be by default: `TRADING_ENABLED`/`LIVE_TRADING_ENABLED` default
+false, `decision-engine`'s own confidence cap keeps every Solana
+evaluation at `WAIT` or `NO_TRADE` regardless of those flags (see above),
+and even a hypothetical `LONG` decision has no entry price for
+`paper-trading` to fill at (see `docs/PAPER_TRADING.md`). No code path in
+this codebase today reaches a `LONG` decision, opens a paper position, or
+calls `engine-binance-futures`'s order-placement function. See the phase
+list in the original spec for what comes next (the full dashboard,
+deployment, hardening).
 
 ## Repository layout
 
@@ -149,6 +151,7 @@ services/
   engine-binance-futures/    Authenticated account/order/position engine (Phase 4)
   decision-engine/           Feature/signal scoring + risk-gated Decision persistence (Phase 5)
   ml/                        Training job: labeled-dataset loading, model registry writes (Phase 6)
+  paper-trading/             Simulated entry/exit + ML label backfill (Phase 7)
 packages/
   core-py/                   Shared config, logging, security, DB models/schemas,
                               Solana RPC/WS transport, SPL Token Program parsing,
@@ -160,6 +163,7 @@ infra/
   nginx/                     reverse proxy config (HTTP only until TLS is provisioned)
 docs/
   ML.md                      Why no model is trained yet, and what changes once one can be
+  PAPER_TRADING.md           Why no paper position has ever opened, and what changes once one can
 ```
 
 Every Python service depends on `packages/core-py` via an editable pip
@@ -236,10 +240,10 @@ and `redis://localhost:6379/15` by default — override via `DATABASE_URL` /
 
 Same pattern for `services/data-solana`, `services/data-binance`, all
 three `services/engine-solana-*`, `services/engine-binance-futures`,
-`services/decision-engine`, and `services/ml`:
+`services/decision-engine`, `services/ml`, and `services/paper-trading`:
 
 ```
-cd services/engine-solana-discovery     # or any of the other seven
+cd services/engine-solana-discovery     # or any of the other eight
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements-dev.txt
 ruff check app tests && pytest tests/ -v   # no live network needed — mocked transports/local WS server/real Postgres (+ Redis for decision-engine)

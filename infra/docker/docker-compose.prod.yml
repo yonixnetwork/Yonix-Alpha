@@ -40,6 +40,9 @@ services:
   ml:
     restart: unless-stopped
 
+  paper-trading:
+    restart: unless-stopped
+
   engine-binance-futures:
     restart: unless-stopped
 
