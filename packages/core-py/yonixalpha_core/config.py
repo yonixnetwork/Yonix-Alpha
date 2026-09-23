@@ -7,7 +7,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=True)
+    # env_parse_none_str: an env var present but set to "" (as .env.example's
+    # optional fields document leaving them) is treated as unset (None)
+    # rather than failed-to-parse for non-str Optional fields like
+    # MAX_DAILY_LOSS/MAX_OPEN_POSITIONS.
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=True, env_parse_none_str="")
 
     # Application
     APP_ENV: str = "development"
