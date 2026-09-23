@@ -91,14 +91,35 @@ Fill in every value `.env.example` leaves blank. Where each one comes from:
 | `BINANCE_API_KEY` / `BINANCE_API_SECRET` | A Binance API key scoped to Futures trading only — leave `BINANCE_TESTNET=true` until you've verified the integration end-to-end |
 | `LETSENCRYPT_EMAIL` | Any address you control — Let's Encrypt uses it for expiry warnings |
 
-**A real bug this project hit once, worth repeating here**: `.env` values
-like `ADMIN_PASSWORD_HASH` contain literal `$` characters. Never `source
-.env` in a shell — bash tries to expand `$argon2id`, `$v`, etc. as
-variables and silently corrupts the value. Docker Compose's own
-`env_file:` directive does NOT have this problem (it reads the file
-literally, no shell involved), which is why every script here goes
-through `docker compose exec`/`env_file` rather than sourcing `.env`
-directly (see `scripts/backup-db.sh`'s own comment on this).
+**A real bug this project hit, worth repeating here**: `.env` values like
+`ADMIN_PASSWORD_HASH` contain literal `$` characters. Never `source .env`
+in a shell — bash tries to expand `$argon2id`, `$v`, etc. as variables and
+silently corrupts the value.
+
+The previous version of this doc claimed Docker Compose's own `env_file:`
+directive was immune to this because "it reads the file literally, no
+shell involved." That claim was **wrong** — verified false against a real
+`docker compose config` run: Compose's `env_file:` parser performs the
+same `$VAR`/`${VAR}` interpolation the shell does, so an unescaped
+`$argon2id$v=19$m=65536,t=3,p=4$...` hash is silently mangled into garbage
+(`argon2id`, `v`, `m`, and the salt are all undefined variables that
+resolve to `""`) with only a warning, not an error — the API then loads a
+broken hash and every login attempt fails with no indication why.
+
+**The fix**: escape every literal `$` in `.env` as `$$` for any value that
+contains one (in practice, only `ADMIN_PASSWORD_HASH` — `openssl rand
+-hex` output never contains `$`). For example:
+```
+ADMIN_PASSWORD_HASH=$$argon2id$$v=19$$m=65536,t=3,p=4$$fq91zrn3PgfgXCtFaC3lHA$$6qC7uRla6Z7eINxUTjwqlYvc/V4/9osHwWL0p2x9IEo
+```
+Verify it round-tripped correctly before starting the stack:
+```
+docker compose -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.prod.yml config | grep ADMIN_PASSWORD_HASH
+```
+The printed value should show `$$` at each escaped position (Compose's
+own output re-escapes literal `$` this way) — if you see bare `argon2id`,
+`v`, `m` with no leading `$`, or "variable is not set" warnings when you
+ran `up`, it wasn't escaped and login will fail.
 
 ### 2.3 Bring the stack up
 
