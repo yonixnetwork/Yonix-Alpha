@@ -165,9 +165,30 @@ docker compose --env-file .env -f infra/docker/docker-compose.yml -f infra/docke
 Only after DNS for your domain and its `www.` subdomain actually point at
 this server:
 
+**A third real bug, found running this against a real droplet for the
+first time**: the `certbot` service in `docker-compose.prod.yml` sets a
+fixed `entrypoint:` (the `certbot renew` auto-renewal loop, for the
+`docker compose up` case) that does not forward `"$@"` — so a plain
+`docker compose run --rm certbot certonly ...` silently ignores the
+`certonly ...` command entirely and just starts another copy of the
+renewal loop instead (confirmed with `docker ps`: the resulting
+container's own command was the loop, not `certonly`). Verified fix:
+override the entrypoint back to the plain `certbot` binary for this one
+invocation with `--entrypoint certbot` — this does not affect the
+persistent `certbot` service's own renewal loop from `docker compose up`,
+only this one-off `run`.
+
+First, remove the stray container from any earlier `run` attempt made
+before this fix (harmless — it's just another idle renewal loop, but no
+reason to leave it around):
+```
+docker ps -a --filter "name=yonixalpha-certbot-run" --format '{{.ID}}' | xargs -r docker rm -f
+```
+
+Then:
 ```
 docker compose --env-file .env -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.prod.yml \
-  run --rm certbot certonly --webroot -w /var/www/certbot \
+  run --rm --entrypoint certbot certbot certonly --webroot -w /var/www/certbot \
   -d yourdomain.com -d www.yourdomain.com \
   --email "$LETSENCRYPT_EMAIL" --agree-tos --no-eff-email
 
