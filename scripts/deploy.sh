@@ -9,9 +9,16 @@
 # doesn't need (and shouldn't have) a separate migration step.
 set -euo pipefail
 
-COMPOSE="docker compose -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.prod.yml"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
+# --env-file .env: Compose's default top-level .env lookup is relative to
+# the *first -f file's directory* (infra/docker/), not the repo root where
+# .env actually lives - without this flag, ${VAR} interpolation in
+# build.args (e.g. web's NEXT_PUBLIC_API_URL) silently resolves to "" even
+# though env_file: (a literal path, unaffected) supplies the right value to
+# the running container. Verified against a real `docker compose config`
+# run - see docs/DEPLOYMENT.md section 2.2.
+COMPOSE="docker compose --env-file .env -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.prod.yml"
 
 if [ ! -f .env ]; then
     echo "No .env in ${REPO_ROOT} — copy .env.example and fill in real values before deploying (see docs/DEPLOYMENT.md)." >&2

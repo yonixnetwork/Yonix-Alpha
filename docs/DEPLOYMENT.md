@@ -123,8 +123,28 @@ ran `up`, it wasn't escaped and login will fail.
 
 ### 2.3 Bring the stack up
 
+**A second real bug, found the first time this ever ran a real `docker
+build`** (the sandbox that built this codebase has no Docker Hub access —
+see "What's genuinely verified" below — so this specific step was never
+actually exercised until a real droplet/PC ran it): `apps/web`'s
+`NEXT_PUBLIC_API_URL` / `NEXT_PUBLIC_WS_URL` are inlined into the client
+JS bundle by `next build` itself, at *build* time — `env_file:` only
+reaches the *running* container, too late to affect what already got
+baked into the bundle. Compose's own `${VAR}` interpolation (what
+`build.args` needs to thread them into the build) has a separate,
+easy-to-miss gotcha: by default it resolves against a `.env` next to the
+*first `-f` file* (`infra/docker/`), not the repo root where `.env`
+actually lives — so without `--env-file`, `NEXT_PUBLIC_API_URL` silently
+resolves to `""` at build time regardless of what's in the real `.env`,
+and the deployed frontend calls relative/broken URLs instead of your real
+domain. Verified against a real `docker compose config` run: the
+`environment:` block (from `env_file:`) shows the correct value while
+`build.args` showed `""` until `--env-file .env` was added. **Always
+include `--env-file .env`**, run from `/opt/yonixalpha` (or wherever you
+cloned to):
+
 ```
-docker compose -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.prod.yml up -d --build
+docker compose --env-file .env -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.prod.yml up -d --build
 ```
 
 `apps/api`'s own container runs `alembic upgrade head` before starting —
@@ -137,21 +157,21 @@ browser certificate warning until the next step.
 Check everything is healthy:
 
 ```
-docker compose -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.prod.yml ps
+docker compose --env-file .env -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.prod.yml ps
 ```
 
 ### 2.4 Obtain a real TLS certificate
 
-Only after DNS for `yonixalpha.com`/`www.yonixalpha.com` actually points
-at this server:
+Only after DNS for your domain and its `www.` subdomain actually point at
+this server:
 
 ```
-docker compose -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.prod.yml \
+docker compose --env-file .env -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.prod.yml \
   run --rm certbot certonly --webroot -w /var/www/certbot \
-  -d yonixalpha.com -d www.yonixalpha.com \
+  -d yourdomain.com -d www.yourdomain.com \
   --email "$LETSENCRYPT_EMAIL" --agree-tos --no-eff-email
 
-docker compose -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.prod.yml restart reverse-proxy
+docker compose --env-file .env -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.prod.yml restart reverse-proxy
 ```
 
 The `certbot` service defined in `docker-compose.prod.yml` then renews
@@ -179,7 +199,7 @@ deploy running — see the script for exact behavior.
 cd /opt/yonixalpha
 git fetch origin
 git checkout <previous-known-good-sha>
-docker compose -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.prod.yml up -d --build
+docker compose --env-file .env -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.prod.yml up -d --build
 ```
 
 A migration that ran as part of the bad deploy does not automatically
