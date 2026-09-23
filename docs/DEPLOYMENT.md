@@ -185,6 +185,25 @@ reason to leave it around):
 docker ps -a --filter "name=yonixalpha-certbot-run" --format '{{.ID}}' | xargs -r docker rm -f
 ```
 
+**A fourth real bug, hit immediately after fixing the third**: `certbot
+certonly` then fails with `live directory exists for yonixalpha.com`.
+This is `infra/nginx/docker-entrypoint.sh` — it writes a temporary
+self-signed placeholder to `/etc/letsencrypt/live/yonixalpha.com/` on
+`reverse-proxy`'s very first boot (so nginx has *something* to bind to
+before a real certificate exists), at the exact path Let's Encrypt uses.
+Certbot sees that directory already populated and, since there's no
+matching `/etc/letsencrypt/renewal/yonixalpha.com.conf` proving it's a
+lineage certbot itself manages, refuses to touch it rather than guess.
+Delete the placeholder first — it's disposable, not a real certificate:
+```
+docker compose --env-file .env -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.prod.yml \
+  run --rm --entrypoint sh certbot -c "rm -rf /etc/letsencrypt/live/yonixalpha.com /etc/letsencrypt/archive/yonixalpha.com /etc/letsencrypt/renewal/yonixalpha.com.conf"
+```
+(If your domain isn't literally `yonixalpha.com`, note `docker-entrypoint.sh`
+currently hardcodes that name for the placeholder regardless of your real
+domain — substitute `yonixalpha.com` in the command above with whatever
+that file's `DOMAIN_PRIMARY` says, not your own domain.)
+
 Then:
 ```
 docker compose --env-file .env -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.prod.yml \
