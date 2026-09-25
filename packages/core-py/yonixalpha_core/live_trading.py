@@ -171,7 +171,8 @@ async def enter_live(session: AsyncSession, redis: Redis | None, account: PaperA
     if size > account.cash_balance - live.min_sol_reserve:
         raise ValueError(f"size {size} SOL exceeds wallet balance {account.cash_balance} minus reserve {live.min_sol_reserve}")
     busy = (await session.execute(select(PaperPosition.id).where(
-        PaperPosition.execution_mode == "LIVE", PaperPosition.asset_id == assessment.asset_id,
+        PaperPosition.execution_mode == "LIVE", PaperPosition.execution_provider == LIVE_PROVIDER,
+        PaperPosition.asset_id == assessment.asset_id,
         PaperPosition.status.in_(("pending_entry", "open", "needs_review"))))).first()
     if busy is not None:
         raise ValueError("a live position for this mint already exists")
@@ -446,7 +447,8 @@ async def reconcile(session_factory, redis: Redis | None, app_settings: Any, exe
             acct.starting_balance = sol
 
         stuck = (await session.execute(select(ExecutionOrder).where(
-            ExecutionOrder.mode == "LIVE", ExecutionOrder.status.in_(("SIGNED", "SUBMITTED"))))).scalars().all()
+            ExecutionOrder.mode == "LIVE", ExecutionOrder.provider == LIVE_PROVIDER,
+            ExecutionOrder.status.in_(("SIGNED", "SUBMITTED"))))).scalars().all()
         for order in stuck:
             age = (now - (order.submitted_at or order.created_at)).total_seconds()
             if age < SIGNED_RECHECK_SECONDS or not order.signature:
@@ -460,7 +462,7 @@ async def reconcile(session_factory, redis: Redis | None, app_settings: Any, exe
                                        {"signature": order.signature, "age_seconds": int(age)})
                 report["orders_resolved"] += 1
         stale = (await session.execute(select(ExecutionOrder).where(
-            ExecutionOrder.mode == "LIVE", ExecutionOrder.status == "PENDING",
+            ExecutionOrder.mode == "LIVE", ExecutionOrder.provider == LIVE_PROVIDER, ExecutionOrder.status == "PENDING",
             ExecutionOrder.created_at < now - timedelta(seconds=STALE_PENDING_SECONDS)))).scalars().all()
         for order in stale:
             await apply_outcome(session, redis, app_settings, order,
@@ -468,10 +470,12 @@ async def reconcile(session_factory, redis: Redis | None, app_settings: Any, exe
             order.status = "CANCELLED"
 
         positions = (await session.execute(select(PaperPosition).where(
-            PaperPosition.execution_mode == "LIVE", PaperPosition.status == "open"))).scalars().all()
+            PaperPosition.execution_mode == "LIVE", PaperPosition.execution_provider == LIVE_PROVIDER,
+            PaperPosition.status == "open"))).scalars().all()
         known = {p.asset_id for p in positions}
         known |= set((await session.execute(select(PaperPosition.asset_id).where(
-            PaperPosition.execution_mode == "LIVE", PaperPosition.status.in_(("pending_entry", "needs_review"))))).scalars())
+            PaperPosition.execution_mode == "LIVE", PaperPosition.execution_provider == LIVE_PROVIDER,
+            PaperPosition.status.in_(("pending_entry", "needs_review"))))).scalars())
         for p in positions:
             dec = Decimal(10) ** int(((p.plan or {}).get("venue") or {}).get("decimals") or 6)
             expected = int(((p.remaining_quantity or Decimal(0)) * dec).to_integral_value(ROUND_DOWN))

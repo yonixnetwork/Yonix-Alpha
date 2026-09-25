@@ -1,4 +1,5 @@
-"""Hyperliquid grid, paper only: the ported grid math (yonixalpha_core.
+"""Hyperliquid grid, paper (the LIVE grid is yonixalpha_core.grid_live, run by
+services/execution-futures): the ported grid math (yonixalpha_core.
 strategies.grid) stepped against live Hyperliquid mid prices, with state
 persisted in strategy_states and every fill recorded in paper_orders.
 
@@ -17,7 +18,7 @@ from typing import Any
 from redis.asyncio import Redis
 from sqlalchemy import select
 
-from yonixalpha_core import events, kill_switch
+from yonixalpha_core import events, grid_live, kill_switch
 from yonixalpha_core.db.models import AuditLog, PaperOrder, StrategyState
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.safety import pipeline, store
@@ -98,7 +99,12 @@ async def run_grid(session_factory, redis: Redis, app_settings: Any, venues: dic
         params = {**grid.DEFAULTS, **await store.load_strategy_config(session, STRATEGY)}
         mode = pipeline.effective_mode(await store.load_strategy_mode(session, STRATEGY), await store.load_strategy_mode(session, ENGINE))
         coin = params["coin"]
+        live, _ = await grid_live.live_intent(session, app_settings)
         row = await load_state(session, coin)
+        if live and (row is None or row.status not in ("running", "paused")):
+            # LIVE: the real grid is run by services/execution-futures (grid_live);
+            # the paper simulation stays out of its way.
+            return {"status": "live mode: run by execution-futures"}
         killed = await kill_switch.is_engaged(redis)
         command = await redis.getdel(grid.COMMAND_KEY)
         try:

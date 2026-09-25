@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 
 from app.api.router import api_router
+from yonixalpha_core import config_validation
 from yonixalpha_core.config import get_settings
 from yonixalpha_core.logging import configure_logging, get_logger
 from yonixalpha_core.db.base import make_engine, make_session_factory
@@ -36,6 +37,24 @@ async def _seed_admin_user(session_factory) -> None:
             log.info("admin.seed.password_rotated", username=settings.ADMIN_USERNAME)
 
 
+async def _validate_configuration(session_factory, redis, settings) -> None:
+    """Startup config validation per module (names of missing variables
+    only, never values). A module in CONFIGURATION_ERROR is reported and
+    cannot be switched to AUTO/LIVE; the others start normally."""
+    try:
+        async with session_factory() as session:
+            result = await config_validation.load_and_validate(session, settings)
+        await config_validation.store_result(redis, result)
+    except Exception as exc:  # noqa: BLE001 - validation must never stop the API from starting
+        log.warning("config.validation_failed", error=type(exc).__name__)
+        return
+    for name, r in result.items():
+        if r["status"] == config_validation.CONFIG_ERROR:
+            log.warning("config.module_error", module=name, errors=r["errors"])
+        else:
+            log.info("config.module", module=name, status=r["status"], live_missing=len(r["live_missing"]))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
@@ -55,6 +74,7 @@ async def lifespan(app: FastAPI):
     app.state.venues = build_venues(http, settings)
 
     await _seed_admin_user(session_factory)
+    await _validate_configuration(session_factory, redis, settings)
 
     log.info("api.startup", app_env=settings.APP_ENV, trading_enabled=settings.TRADING_ENABLED)
     yield

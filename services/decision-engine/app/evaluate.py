@@ -42,12 +42,10 @@ def _risk_config_from_settings(settings: Settings) -> RiskConfig:
         max_position_size=Decimal(str(settings.MAX_POSITION_SIZE)) if settings.MAX_POSITION_SIZE is not None else None,
         max_daily_loss=Decimal(str(settings.MAX_DAILY_LOSS)) if settings.MAX_DAILY_LOSS is not None else None,
         max_open_positions=settings.MAX_OPEN_POSITIONS,
-        # MAX_SLIPPAGE (Settings, Phase 1) is a plain fraction, not basis
-        # points, and nothing in this evaluation flow ever produces a
-        # proposed_slippage_bps for a Solana candidate (no Solana
-        # quote/slippage feed exists in this codebase) — mapping it here
-        # would imply a unit conversion never verified against a real
-        # execution venue, so max_slippage_bps is deliberately left unset.
+        # max_slippage_bps is deliberately left unset: this legacy flow never
+        # produces a proposed slippage for a Solana candidate. (The former
+        # MAX_SLIPPAGE setting was never consumed and has been removed;
+        # slippage limits are safety-gate risk settings in the database.)
     )
 
 

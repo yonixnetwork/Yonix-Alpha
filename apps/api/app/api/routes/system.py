@@ -9,7 +9,7 @@ from app.api import health_state
 from app.api.deps import get_current_username, get_db, get_redis, get_settings
 from app.schemas.common import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, Page
 from app.schemas.system import KillSwitchSummary, ServiceStatus, SystemEventOut, SystemStatusOut
-from yonixalpha_core import events, kill_switch
+from yonixalpha_core import config_validation, events, kill_switch
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import DataQualityEvent, Notification, RiskAssessment, SystemEvent
 
@@ -105,6 +105,22 @@ async def health(
 ) -> dict:
     items = await health_state.connections(db, redis, settings)
     return {"overall": health_state.worst([c["state"] for c in items]), "states": health_state.STATES, "connections": items}
+
+
+@router.get("/config-validation")
+async def config_check(
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+    _: str = Depends(get_current_username),
+) -> dict:
+    """Per-module configuration status (validated now, against the current
+    modes). Lists missing/invalid variable NAMES only — never values."""
+    result = await config_validation.load_and_validate(db, settings)
+    await config_validation.store_result(redis, result)
+    return {"modules": result, "statuses": [config_validation.DISABLED, config_validation.READY, config_validation.CONFIG_ERROR],
+            "note": ".env holds secrets and infrastructure; modes, risk limits and strategy parameters live in the "
+                    "database and are edited from the dashboard"}
 
 
 @router.get("/observability")

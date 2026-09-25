@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { AlertTriangle, CheckCircle2, CircleDashed, CircleOff, Clock } from "lucide-react";
+import { AlertTriangle, CheckCircle2, CircleDashed, CircleOff, Clock, MinusCircle } from "lucide-react";
 import type { ConnState } from "@/lib/cc";
 
 export function stateClass(state: string | undefined | null): string {
@@ -12,7 +12,7 @@ export function stateClass(state: string | undefined | null): string {
     case "DEGRADED":
     case "STALE":
       return "pill pill-warn";
-    case "OFFLINE":
+    case "UNAVAILABLE":
       return "pill pill-danger";
     default:
       return "pill pill-off";
@@ -23,7 +23,8 @@ const STATE_ICON: Record<ConnState, typeof CheckCircle2> = {
   CONNECTED: CheckCircle2,
   DEGRADED: AlertTriangle,
   STALE: Clock,
-  OFFLINE: CircleOff,
+  UNAVAILABLE: CircleOff,
+  "NOT CONFIGURED": MinusCircle,
   UNKNOWN: CircleDashed,
 };
 

@@ -41,8 +41,9 @@ async def _publish(redis, status: str, reason: str | None = None, **extra) -> No
 async def cancel_live_orders(session_factory, redis, app_settings, reason: str) -> int:
     now = datetime.now(timezone.utc)
     async with session_factory() as session:
-        orders = (await session.execute(select(ExecutionOrder).where(ExecutionOrder.mode == "LIVE",
-                                                                    ExecutionOrder.status == "PENDING"))).scalars().all()
+        orders = (await session.execute(select(ExecutionOrder).where(
+            ExecutionOrder.mode == "LIVE", ExecutionOrder.provider == live_trading.LIVE_PROVIDER,
+            ExecutionOrder.status == "PENDING"))).scalars().all()
         for order in orders:
             await live_trading.apply_outcome(session, redis, app_settings, order, ExecOutcome("FAILED", error=reason), now)
             order.status = "CANCELLED"
@@ -92,7 +93,8 @@ async def live_worker_loop(session_factory, redis, app_settings, rpc, http_clien
                                    wallet_max_age_seconds=live.wallet_max_age_seconds, account=LIVE_ACCOUNT)
                     async with session_factory() as session:
                         ids = (await session.execute(select(ExecutionOrder.id).where(
-                            ExecutionOrder.mode == "LIVE", ExecutionOrder.status == "PENDING")
+                            ExecutionOrder.mode == "LIVE", ExecutionOrder.provider == live_trading.LIVE_PROVIDER,
+                            ExecutionOrder.status == "PENDING")
                             .order_by(ExecutionOrder.side.desc(), ExecutionOrder.created_at))).scalars().all()  # SELLs first
                     for order_id in ids:
                         status = await live_trading.process_order(session_factory, redis, app_settings, executor, order_id)

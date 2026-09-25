@@ -3,16 +3,18 @@
 import Link from "next/link";
 import { Server } from "lucide-react";
 import { ErrorNotice, Loading, PageHeader, Section, Stat, StatePill } from "@/components/ui";
-import type { HealthOut } from "@/lib/cc";
+import type { ConfigValidationOut, HealthOut } from "@/lib/cc";
 import { useLiveStatus } from "@/lib/events";
 import { formatDate } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
 
-const CATEGORY_ORDER = ["infrastructure", "service", "solana", "exchange", "ml", "realtime"];
+const CATEGORY_ORDER = ["infrastructure", "service", "solana", "exchange", "execution", "control_api", "ml", "realtime"];
+const CONFIG_CLASS: Record<string, string> = { READY: "pill pill-ok", DISABLED: "pill pill-off", CONFIGURATION_ERROR: "pill pill-danger" };
 
 export default function HealthPage() {
   const { data, error, loading } = useApi<HealthOut>("/api/system/health", undefined, { refreshMs: 15000, reloadOn: ["system.health.updated"] });
   const obs = useApi<Record<string, any>>("/api/system/observability", undefined, { refreshMs: 30000 });
+  const cfg = useApi<ConfigValidationOut>("/api/system/config-validation", undefined, { refreshMs: 60000 });
   const live = useLiveStatus();
   return (
     <div>
@@ -65,6 +67,37 @@ export default function HealthPage() {
             );
           })}
         </>
+      )}
+      {cfg.data && (
+        <Section title="Configuration (per module)">
+          <p className="muted small">{cfg.data.note}. A module in CONFIGURATION_ERROR cannot be switched to AUTO/LIVE; disabled modules never block the others.</p>
+          <div className="table-wrap">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Module</th>
+                  <th>Status</th>
+                  <th>Mode</th>
+                  <th>Problems</th>
+                  <th>Live would still need</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(cfg.data.modules).map(([name, m]) => (
+                  <tr key={name}>
+                    <td>{m.label}</td>
+                    <td>
+                      <span className={CONFIG_CLASS[m.status] ?? "pill pill-off"}>{m.status.replace("_", " ")}</span>
+                    </td>
+                    <td>{m.mode ?? "—"}</td>
+                    <td className="small">{[...m.errors, ...m.warnings].join("; ") || "—"}</td>
+                    <td className="muted small">{m.live_missing.join("; ") || (m.live_ready ? "nothing — configured" : "—")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Section>
       )}
       {obs.data && (
         <Section title="Observability (24 h)">

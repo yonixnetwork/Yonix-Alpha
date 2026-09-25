@@ -10,7 +10,7 @@ export default function SolanaFunnel() {
   if (error) return <ErrorNotice error={error} />;
   if (!data) return null;
   const age = data.stream.heartbeat_age_seconds as number | null;
-  const state = age === null ? "UNKNOWN" : age <= 60 ? "CONNECTED" : age <= 300 ? "STALE" : "OFFLINE";
+  const state = age === null ? "UNKNOWN" : age <= 60 ? "CONNECTED" : age <= 300 ? "STALE" : "UNAVAILABLE";
   const counters = (data.stream.counters ?? {}) as Record<string, number>;
   return (
     <div className="card">

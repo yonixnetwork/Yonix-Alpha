@@ -28,11 +28,12 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 from redis.asyncio import Redis
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yonixalpha_core import events, live_trading, paper_engine, paper_execution
 from yonixalpha_core.db.models import PaperAccount, PaperPosition, RiskAssessment
+from yonixalpha_core.execution.registry import FUTURES_PROVIDERS
 from yonixalpha_core.exit_intel import solana_exit_decision
 from yonixalpha_core.safety.store import add_timeline_event
 from yonixalpha_core.logging import get_logger
@@ -205,7 +206,11 @@ async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterC
         # pending_entry (LIVE buy not yet confirmed) and needs_review
         # positions are not "open" and are therefore never managed here.
         ids = (await session.execute(
-            select(PaperPosition.id).where(PaperPosition.status == "open", PaperPosition.engine.is_not(None))
+            select(PaperPosition.id).where(
+                PaperPosition.status == "open", PaperPosition.engine.is_not(None),
+                # LIVE futures/FX positions are managed by services/execution-futures.
+                or_(PaperPosition.execution_provider.is_(None),
+                    PaperPosition.execution_provider.not_in(FUTURES_PROVIDERS)))
         )).scalars().all()
     for pid in ids:
         # Per-position isolation: one failing row must never stop the other

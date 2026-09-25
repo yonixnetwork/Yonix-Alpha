@@ -1,6 +1,6 @@
-"""Futures strategy runner: Meta Muse Crossover and Confluence Matrix on
-exchange market data, through the same safety gate and paper engine as the
-Solana engines.
+"""Futures strategy runner: Meta Muse Crossover, Gold vs BTC Dual Trend and
+Confluence Matrix on exchange (or MT5) market data, through the same safety
+gate and position engine as the Solana engines.
 
 Once per CLOSED candle per strategy (Redis-deduplicated, so restarts and
 overlapping loops can't double-evaluate):
@@ -14,8 +14,13 @@ overlapping loops can't double-evaluate):
      against a freshly fetched book, so a moved market can fail the order.
 
 Modes: the effective mode is the more restrictive of the strategy's mode
-and its venue's mode (binance_futures / bybit_futures / hyperliquid_perps).
-Live execution is not implemented; a LIVE target is refused.
+and its venue's mode (binance_futures / bybit_futures / hyperliquid_perps /
+mt5_fx). A LIVE target (global mode LIVE, strategy AUTO/MANUAL, all three
+environment locks open, the venue's execution worker ready) creates a
+pending LIVE position and entry order (futures_live.enter) that
+services/execution-futures executes; sizing then uses that exchange
+account's synced balance. A standalone bot running the same strategy
+(external control API reports a position) blocks LIVE for that strategy.
 """
 
 from datetime import datetime, timedelta
@@ -25,22 +30,25 @@ from typing import Any
 from redis.asyncio import Redis
 from sqlalchemy import select
 
-from yonixalpha_core import events, paper_engine
+from yonixalpha_core import events, external_bots, futures_live, paper_engine
 from yonixalpha_core.db.models import PaperPosition, RiskAssessment
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.safety import pipeline, store
 from yonixalpha_core.safety.gate import assess
-from yonixalpha_core.safety.models import AssessmentInput, MarketInfo, Observation, StrategyLevels, StrategyMode
+from yonixalpha_core.safety.models import (
+    AssessmentInput, GlobalMode, MarketInfo, Observation, StrategyLevels, StrategyMode,
+)
 from yonixalpha_core.safety.rules import evaluate_custom_rules, match_blacklist
-from yonixalpha_core.strategies import confluence, meta_muse
+from yonixalpha_core.strategies import confluence, gold_btc_trend, meta_muse
 from yonixalpha_core.strategies.indicators import log_returns, stdev
 from yonixalpha_core.venues.common import VenueError
 from yonixalpha_core.venues.registry import VENUE_ENGINE
 
 log = get_logger("decision-engine.futures")
 
-STRATEGIES = {"meta_muse": meta_muse, "confluence_matrix": confluence}
-DEFAULT_VENUE = {"meta_muse": "binance", "confluence_matrix": "binance"}
+STRATEGIES = {"meta_muse": meta_muse, "gold_btc_trend": gold_btc_trend, "confluence_matrix": confluence}
+PAIR_STRATEGIES = {"meta_muse", "gold_btc_trend"}  # asset 1 leads, asset 2 is traded
+DEFAULT_VENUE = {"meta_muse": "binance", "gold_btc_trend": "binance", "confluence_matrix": "binance"}
 INTERVAL_SECONDS = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400}
 VOL_LOOKBACK = 60
 
@@ -81,14 +89,15 @@ async def run_strategy(session_factory, redis: Redis, app_settings: Any, venues:
     adapter = venues[venue]
     interval = params["interval"]
 
-    if strategy == "meta_muse":
+    if strategy in PAIR_STRATEGIES:
         symbol = params["asset2"]
         c1 = await adapter.klines(params["asset1"], interval, int(params["candles"]), now)
         c2 = await adapter.klines(symbol, interval, int(params["candles"]), now)
         last_closed = [c for c in c2 if c.closed][-1].open_time
-        sig = meta_muse.evaluate(c1, c2, params)
+        sig = module.evaluate(c1, c2, params)
         side = sig.side
-        strategy_signal = meta_muse.as_strategy_signal(sig)
+        strategy_signal = (meta_muse.as_strategy_signal(sig) if strategy == "meta_muse"
+                           else gold_btc_trend.as_strategy_signal(sig, params))
         candles = c2
     else:
         symbol = params["symbol"]
@@ -105,8 +114,8 @@ async def run_strategy(session_factory, redis: Redis, app_settings: Any, venues:
     async with session_factory() as session:
         position = await open_position_for(session, strategy, engine, symbol)
         if position is not None:
-            if strategy == "meta_muse":
-                should, why = meta_muse.should_exit(position.side, sig)
+            if strategy in PAIR_STRATEGIES:
+                should, why = module.should_exit(position.side, sig)
                 if should and not position.exit_requested:
                     position.exit_requested = True
                     await store.add_timeline_event(session, "strategy_exit_signal", now, {"reason": why},
@@ -127,14 +136,24 @@ async def run_strategy(session_factory, redis: Redis, app_settings: Any, venues:
 
         book = await adapter.book(symbol)
         approval = await pipeline.approval_granted(session, now, engine=engine, asset_id=symbol, strategy=strategy)
-        controls, account, settings_meta = await pipeline.load_controls(session, redis, app_settings, engine, mode, symbol, now, approval)
+        live_intent = (await store.load_global_mode(session) == GlobalMode.LIVE
+                       and mode in (StrategyMode.AUTO, StrategyMode.MANUAL) and store.live_trading_permitted(app_settings))
+        controls, account, settings_meta = await pipeline.load_controls(session, redis, app_settings, engine, mode, symbol, now,
+                                                                        approval, live_venue=venue if live_intent else None)
+        live_ready, live_reason = (None, None)
+        if live_intent:
+            live_ready, live_reason = await futures_live.readiness(redis, app_settings, venue, now)
+            conflict = await external_bots.conflict(redis, app_settings, strategy)
+            if live_ready and conflict:
+                live_ready, live_reason = False, conflict
         mid = book.mid
-        if strategy == "meta_muse":
+        if strategy in PAIR_STRATEGIES:
             sign = Decimal(1) if side == "LONG" else Decimal(-1)
             levels = StrategyLevels(
                 stop_loss=mid * (1 - sign * Decimal(str(params["stop_pct"]))),
                 take_profits=[mid * (1 + sign * Decimal(str(params["target_pct"])))],
-                source="meta_muse 1% stop / 2% target",
+                source=f"{strategy} {Decimal(str(params['stop_pct'])) * 100:g}% stop / "
+                       f"{Decimal(str(params['target_pct'])) * 100:g}% target",
             )
         else:
             levels = confluence.levels(csig)
@@ -148,6 +167,7 @@ async def run_strategy(session_factory, redis: Redis, app_settings: Any, venues:
             global_mode=controls.global_mode, strategy_mode=mode, live_trading_permitted=controls.live_trading_permitted,
             manual_approval_granted=approval,
         )
+        inp.live_ready, inp.live_not_ready_reason = live_ready, live_reason
         inp.blacklisted_by = match_blacklist(controls.blacklist, engine, None, symbol, symbol)
         features = {"price": mid, "volatility": inp.market.volatility, "liquidity_quote": book.liquidity_quote,
                     "spread_bps": book.spread_bps, "side": side, "signal_strength": strategy_signal.strength}
@@ -170,8 +190,20 @@ async def run_strategy(session_factory, redis: Redis, app_settings: Any, venues:
 
         result = {"strategy": strategy, "status": a.decision.value, "side": side}
         if a.executable and a.execution_target.value == "LIVE":
-            await store.add_timeline_event(session, "live_refused", now, {"reason": "live futures execution is not implemented"},
-                                           assessment_id=row.id)
+            pipeline.record_ml_sample(session, a, row.id, None, {k: str(v) for k, v in features.items()},
+                                      *pipeline.ml_sample_args(inp.ml, ml_info))
+            try:
+                position = await futures_live.enter(
+                    session, account, a, row.id, venue, symbol, now,
+                    {"venue": {"strategy": strategy, "interval": interval}, "model_version": vers.get("ml_model"),
+                     "feature_version": ml_info.get("feature_version")})
+                await events.notify(session, redis, app_settings, "entry", f"LIVE entry submitted: {symbol} {a.plan.side}",
+                                    f"{venue}: notional {a.plan.position_size.value}, stop {a.plan.stop_loss.value}", "warning",
+                                    {"position_id": str(position.id)})
+                result["status"] = "LIVE entry submitted"
+            except ValueError as exc:
+                await store.add_timeline_event(session, "live_entry_refused", now, {"reason": str(exc)}, assessment_id=row.id)
+                result["status"] = f"live entry refused: {exc}"
         elif a.executable:
             pipeline.record_ml_sample(session, a, row.id, None, {k: str(v) for k, v in features.items()},
                                       *pipeline.ml_sample_args(inp.ml, ml_info))

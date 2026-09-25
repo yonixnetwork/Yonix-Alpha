@@ -112,6 +112,14 @@ class JupiterClient:
             "slippageBps": str(slippage_bps),
             "restrictIntermediateTokens": "true",
         }
+        result = await self._quote(params, headers)
+        # An answered "no route" is a working API; only errors count as failures.
+        from yonixalpha_core.venues.common import record_call
+
+        record_call("jupiter", result.status != "error", result.error)
+        return result
+
+    async def _quote(self, params: dict, headers: dict) -> QuoteResult:
         try:
             resp = await self.client.get(f"{self.base}/quote", params=params, headers=headers, timeout=10.0)
         except httpx.HTTPError as exc:

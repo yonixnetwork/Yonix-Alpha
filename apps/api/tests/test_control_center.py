@@ -114,7 +114,7 @@ async def test_strategies_catalog_config_validation_and_modes(client, auth_heade
     assert {"solana_fresh", "solana_migration", "solana_momentum", "meta_muse", "confluence_matrix", "hyperliquid_grid",
             "gold_vs_btc", "binance_futures", "bybit_futures", "hyperliquid_perps"} <= set(names)
     assert names["gold_vs_btc"].get("mode") is None and "ANALYTICS ONLY" in names["gold_vs_btc"]["status"]
-    assert "BLOCKED" in names["confluence_matrix"]["status"]
+    assert "MT5 bridge" in names["confluence_matrix"]["status"] and "awaiting" in names["confluence_matrix"]["status"]
 
     bad = await client.put("/api/strategies/meta_muse/config", headers=auth_headers,
                            json={"config": {"fast": 30, "slow": 21, "stop_pct": "5", "secret": "x"}})
@@ -148,7 +148,7 @@ async def test_venues_status_never_claims_unverified_accounts(app, client, auth_
     v = {x["venue"]: x for x in r.json()}
     assert v["bybit"]["account"]["status"] == "NOT CONNECTED"
     assert v["binance"]["market_data"]["state"] == "UNKNOWN"
-    assert "DISABLED" in v["binance"]["live_orders"]
+    assert v["binance"]["live_orders"]["state"] == "UNKNOWN" and v["mt5"]["live_orders"]["state"] == "UNKNOWN"
     assert (await client.get("/api/venues/bybit/account", headers=auth_headers)).status_code == 409
     app.state.venues["binance"] = FakeBinance()
     m = await client.get("/api/venues/binance/market?symbol=ETHUSDT", headers=auth_headers)
@@ -171,10 +171,10 @@ async def test_health_states_from_evidence(app, client, auth_headers):
     c = {x["name"]: x for x in r.json()["connections"]}
     assert c["postgres"]["state"] == "CONNECTED" and c["redis"]["state"] == "CONNECTED"
     assert c["decision-engine"]["state"] == "CONNECTED"
-    assert c["ml"]["state"] == "OFFLINE"  # ran before, heartbeat gone
+    assert c["ml"]["state"] == "UNAVAILABLE"  # ran before, heartbeat gone
     assert c["paper-trading"]["state"] == "UNKNOWN"  # never seen
-    assert c["binance"]["state"] == "CONNECTED" and c["bybit"]["state"] == "OFFLINE" and c["hyperliquid"]["state"] == "UNKNOWN"
-    assert r.json()["overall"] == "OFFLINE"
+    assert c["binance"]["state"] == "CONNECTED" and c["bybit"]["state"] == "UNAVAILABLE" and c["hyperliquid"]["state"] == "UNKNOWN"
+    assert r.json()["overall"] == "UNAVAILABLE"
     obs = await client.get("/api/system/observability", headers=auth_headers)
     assert obs.status_code == 200 and "redis_memory" in obs.json()
 
@@ -186,7 +186,7 @@ async def test_summary_topbar(app, client, auth_headers):
     fut = next(a for a in b["accounts"] if a["name"] == "binance_futures")
     assert fut["currency"] == "USDT" and Decimal(fut["realized_pnl_today"]) in (Decimal(10), Decimal(0))
     assert b["open_positions"] == 1 and b["env"]["live_permitted"] is False and b["global_mode"] == "PAPER"
-    assert b["system_status"] in ("CONNECTED", "DEGRADED", "STALE", "OFFLINE", "UNKNOWN")
+    assert b["system_status"] in ("CONNECTED", "DEGRADED", "STALE", "UNAVAILABLE", "UNKNOWN")
 
 
 async def test_notifications_feed_and_prefs(app, client, auth_headers):

@@ -34,7 +34,7 @@ VERIFIED_KEY = "yx:venue:verified:{}"
 NOT_CONNECTED = "NOT CONNECTED"
 AWAITING = "IMPLEMENTED — AWAITING CREDENTIAL VERIFICATION"
 VERIFIED = "VERIFIED (READ-ONLY)"
-ACCOUNTS = {"binance": "binance_futures", "bybit": "bybit_futures", "hyperliquid": "hyperliquid"}
+ACCOUNTS = {"binance": "binance_futures", "bybit": "bybit_futures", "hyperliquid": "hyperliquid", "mt5": "mt5"}
 
 
 def _configured(venue: str, settings: Settings) -> bool:
@@ -42,6 +42,8 @@ def _configured(venue: str, settings: Settings) -> bool:
         return bool(settings.BINANCE_API_KEY and settings.BINANCE_API_SECRET)
     if venue == "bybit":
         return bool(settings.BYBIT_API_KEY and settings.BYBIT_API_SECRET)
+    if venue == "mt5":
+        return bool(settings.MT5_BRIDGE_URL and settings.MT5_BRIDGE_TOKEN)
     return bool(settings.HYPERLIQUID_ACCOUNT_ADDRESS)
 
 
@@ -61,7 +63,7 @@ async def _account_status(venue: str, settings: Settings, redis: Redis, db: Asyn
 def _venue(request: Request, venue: str):
     v = request.app.state.venues.get(venue)
     if v is None:
-        raise HTTPException(404, "unknown venue; one of binance, bybit, hyperliquid")
+        raise HTTPException(404, "unknown venue; one of binance, bybit, hyperliquid, mt5")
     return v
 
 
@@ -78,7 +80,7 @@ async def list_venues(db: AsyncSession = Depends(get_db), redis: Redis = Depends
             "account": await _account_status(venue, settings, redis, db),
             "market_data": conns.get(venue),
             "paper_account": {"name": acct.name, "currency": acct.quote_currency, "cash": str(acct.cash_balance)},
-            "live_orders": "DISABLED — live execution is not implemented; environment locks keep trading off",
+            "live_orders": conns.get(f"{venue}_execution"),
         })
     await db.commit()
     return out

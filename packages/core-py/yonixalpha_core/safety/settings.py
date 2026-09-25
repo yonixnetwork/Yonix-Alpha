@@ -232,6 +232,7 @@ ENGINE_DEFAULTS: dict[str, dict[str, Any]] = {
     "binance_futures": dict(_FUTURES_DEFAULTS),
     "bybit_futures": dict(_FUTURES_DEFAULTS),
     "hyperliquid_perps": dict(_FUTURES_DEFAULTS),
+    "mt5_fx": dict(_FUTURES_DEFAULTS),
 }
 
 

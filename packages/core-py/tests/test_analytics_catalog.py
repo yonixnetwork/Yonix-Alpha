@@ -31,7 +31,7 @@ def test_performance_edge_cases_are_null_not_invented():
 
 def test_catalog_covers_every_strategy_and_venue():
     assert {"solana_fresh", "solana_migration", "solana_momentum", "meta_muse", "confluence_matrix", "hyperliquid_grid",
-            "gold_vs_btc", "binance_futures", "bybit_futures", "hyperliquid_perps"} == set(CATALOG)
+            "gold_vs_btc", "gold_btc_trend", "binance_futures", "bybit_futures", "hyperliquid_perps", "mt5_fx"} == set(CATALOG)
     assert "gold_vs_btc" not in MODE_KEYS
 
 

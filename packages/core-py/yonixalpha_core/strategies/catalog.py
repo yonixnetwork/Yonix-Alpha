@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from yonixalpha_core.strategies import confluence, gold_btc, grid, meta_muse
+from yonixalpha_core.strategies import confluence, gold_btc, gold_btc_trend, grid, meta_muse
 
 FUTURES_INTERVALS = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h"]
 SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,20}$")
@@ -73,21 +73,33 @@ CATALOG: dict[str, Entry] = {e.name: e for e in [
           "PAPER — acceleration signal on pump.fun tokens older than 30 min; unvalidated heuristic",
           {}, SOLANA_MANUAL_RULES),
     Entry("meta_muse", "Meta Muse Crossover", "futures", None, "binance_futures",
-          "PAPER — ported from the user's repository; BTC/ETH 9/21 EMA divergence on closed candles",
+          "PAPER by default — ported from the user's repository; BTC/ETH 9/21 EMA divergence on closed candles. LIVE "
+          "path (Binance/Bybit/Hyperliquid providers, exchange-side stop, reconciliation) implemented — awaiting "
+          "credential verification",
           meta_muse.DEFAULTS,
           {"asset1": ("symbol",), "asset2": ("symbol",), "interval": ("choice", FUTURES_INTERVALS),
            "fast": _int(2, 100), "slow": _int(3, 400), "trend_threshold": _dec("0.0001", "0.05"),
            "stop_pct": _dec("0.002", "0.2"), "target_pct": _dec("0.002", "0.5"), "candles": _int(50, 1000),
            "venue": ("choice", ["binance", "bybit", "hyperliquid"])}),
+    Entry("gold_btc_trend", "Gold vs BTC Dual Trend", "futures", None, "binance_futures",
+          "PAPER by default — ported from goldvsbtc-binance-future; gold/BTC 9/21 EMA divergence (per-asset "
+          "thresholds), trades BTC. LIVE path implemented — awaiting credential verification",
+          gold_btc_trend.DEFAULTS,
+          {"asset1": ("symbol",), "asset2": ("symbol",), "interval": ("choice", FUTURES_INTERVALS),
+           "fast": _int(2, 100), "slow": _int(3, 400), "trend_threshold": _dec("0.00001", "0.05"),
+           "trend_threshold1": _dec("0.00001", "0.05"), "trend_threshold2": _dec("0.00001", "0.05"),
+           "stop_pct": _dec("0.002", "0.2"), "target_pct": _dec("0.002", "0.5"), "candles": _int(50, 1000),
+           "venue": ("choice", ["binance", "bybit", "hyperliquid"])}),
     Entry("confluence_matrix", "Confluence Matrix", "futures", None, "binance_futures",
-          "PAPER — ported scoring on Binance XAUUSDT; MT5/forex execution BLOCKED (no MT5 bridge)",
+          "PAPER by default — ported scoring (default Binance XAUUSDT). Forex through the MT5 bridge (venue mt5) "
+          "implemented — awaiting bridge/credential verification",
           confluence.DEFAULTS,
           {"symbol": ("symbol",), "interval": ("choice", FUTURES_INTERVALS), "mode": ("choice", ["V1", "V2"]),
            "threshold": _int(0, 100), "pivot_lookback": _int(3, 100), "tp1_extension": _dec("0.1", "5"),
            "tp2_extension": _dec("0.1", "10"), "sl_buffer_pct": _dec("0", "1"), "rsi_period": _int(2, 100),
            "atr_period": _int(2, 100), "liquidity_stdev_len": _int(5, 200), "use_killzones": ("bool",),
            "killzones": ("hours",), "cooldown_bars": _int(0, 100), "candles": _int(100, 1500),
-           "venue": ("choice", ["binance", "bybit", "hyperliquid"])}),
+           "venue": ("choice", ["binance", "bybit", "hyperliquid", "mt5"])}),
     Entry("hyperliquid_grid", "Hyperliquid Grid", "grid", "hyperliquid_perps", "hyperliquid",
           "PAPER — ported grid math against live Hyperliquid mids; maker fills simulated",
           grid.DEFAULTS,
@@ -103,14 +115,21 @@ CATALOG: dict[str, Entry] = {e.name: e for e in [
            "candles": _int(50, 1500), "z_window": _int(10, 1000), "corr_window": _int(10, 1000)},
           has_mode=False),
     Entry("binance_futures", "Binance Futures", "venue", "binance_futures", "binance_futures",
-          "PAPER — public market data; account sync implemented, awaiting credential verification; live orders disabled"),
+          "Public market data; BinanceProvider (signed orders, Algo-service stops, fills, reconciliation) implemented — "
+          "awaiting credential verification"),
     Entry("bybit_futures", "Bybit", "venue", "bybit_futures", "bybit_futures",
-          "PAPER — V5 public data and signed read-only account calls implemented; awaiting credential verification"),
+          "V5 public data and account views; BybitProvider (orders, position stop, fills, reconciliation) implemented — "
+          "awaiting credential verification"),
     Entry("hyperliquid_perps", "Hyperliquid", "venue", "hyperliquid_perps", "hyperliquid",
-          "PAPER — info API (mids, books, candles, account by address) implemented; no signing / order placement"),
+          "Info API; HyperliquidProvider (API-wallet signed orders, trigger stops, fills) implemented — awaiting "
+          "credential verification"),
+    Entry("mt5_fx", "MetaTrader 5 (FX)", "venue", "mt5_fx", "mt5",
+          "Rates, depth of market and execution through services/mt5-bridge on the MT5 Windows host — awaiting "
+          "bridge/credential verification"),
 ]}
 
-STRATEGY_VENUE_ENGINE = {"binance": "binance_futures", "bybit": "bybit_futures", "hyperliquid": "hyperliquid_perps"}
+STRATEGY_VENUE_ENGINE = {"binance": "binance_futures", "bybit": "bybit_futures", "hyperliquid": "hyperliquid_perps",
+                         "mt5": "mt5_fx"}
 MODE_KEYS = [n for n, e in CATALOG.items() if e.has_mode]
 
 
@@ -183,9 +202,9 @@ def validate_config(name: str, data: dict[str, Any]) -> tuple[dict[str, Any], li
         else:
             clean[key] = v
     merged = {**entry.defaults, **clean}
-    if name == "meta_muse" and int(merged["fast"]) >= int(merged["slow"]):
+    if name in ("meta_muse", "gold_btc_trend") and int(merged["fast"]) >= int(merged["slow"]):
         errors.append("fast EMA must be shorter than slow EMA")
-    if name == "meta_muse" and merged["asset1"] == merged["asset2"]:
+    if name in ("meta_muse", "gold_btc_trend") and merged["asset1"] == merged["asset2"]:
         errors.append("asset1 and asset2 must differ")
     if name == "confluence_matrix" and Decimal(str(merged["tp2_extension"])) <= Decimal(str(merged["tp1_extension"])):
         errors.append("tp2_extension must be greater than tp1_extension")

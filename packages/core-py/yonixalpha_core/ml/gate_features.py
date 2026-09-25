@@ -28,6 +28,7 @@ MODEL_FOR_ENGINE = {
     "binance_futures": "gate_futures",
     "bybit_futures": "gate_futures",
     "hyperliquid_perps": "gate_futures",
+    "mt5_fx": "gate_futures",
 }
 FEATURES_FOR_MODEL = {
     "gate_solana_fresh": SOLANA_FEATURES,

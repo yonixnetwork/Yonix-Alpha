@@ -60,11 +60,19 @@ async def rules_version(session: AsyncSession) -> str:
 
 
 async def load_controls(session: AsyncSession, redis: Redis, app_settings: Any, engine: str, strategy_mode: StrategyMode,
-                        asset_id: str, now: datetime, approval: bool, live: bool = False) -> tuple[Controls, Any, dict]:
+                        asset_id: str, now: datetime, approval: bool, live: bool = False,
+                        live_venue: str | None = None) -> tuple[Controls, Any, dict]:
     """`live=True` sizes against the live wallet's book (synced from chain)
-    instead of the engine's paper book."""
+    instead of the engine's paper book; `live_venue` (binance / bybit /
+    hyperliquid / mt5) against that exchange account's live book (synced
+    from the exchange by services/execution-futures)."""
     safety, settings_meta = await store.load_settings(session, engine)
-    if live:
+    if live_venue:
+        from yonixalpha_core.futures_live import get_live_account as futures_live_account
+
+        quote = store.DEFAULT_PAPER_ACCOUNTS.get(store.ENGINE_ACCOUNT.get(engine, ""), ("USDT", None))[0]
+        account = await futures_live_account(session, live_venue, quote)
+    elif live:
         from yonixalpha_core.live_trading import get_live_account
 
         account = await get_live_account(session)

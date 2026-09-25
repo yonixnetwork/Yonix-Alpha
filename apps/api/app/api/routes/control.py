@@ -37,7 +37,7 @@ from app.schemas.control import (
     SettingsVersionOut,
     TimelineEventOut,
 )
-from yonixalpha_core import kill_switch
+from yonixalpha_core import config_validation, kill_switch
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import (
     AuditLog,
@@ -62,7 +62,8 @@ from yonixalpha_core.state_machine import CandidateState, apply_transition
 
 router = APIRouter(prefix="/control", tags=["control"])
 
-SCOPES = ["GLOBAL", "solana_fresh", "solana_migration", "solana_momentum", "binance_futures", "bybit_futures", "hyperliquid_perps"]
+SCOPES = ["GLOBAL", "solana_fresh", "solana_migration", "solana_momentum", "binance_futures", "bybit_futures", "hyperliquid_perps",
+          "mt5_fx"]
 STRATEGIES = MODE_KEYS
 APPROVAL_WINDOW = timedelta(minutes=10)
 FUNNEL_KEY = f"{pump_stream.PREFIX}:funnel"
@@ -147,6 +148,8 @@ async def put_global_mode(body: ModeUpdate, request: Request, db: AsyncSession =
         raise HTTPException(409, "LIVE refused: environment locks are closed (TRADING_ENABLED, LIVE_TRADING_ENABLED, "
                                  "PAPER_TRADING=false are all required and are set on the server, not here)")
     await store.set_global_mode(db, mode, await _user_id(db, username))
+    if mode == GlobalMode.LIVE:
+        await _refuse_on_config_errors(db, settings, None)
     await db.commit()
     return await get_modes(db, settings, username)
 
@@ -161,8 +164,27 @@ async def put_strategy_mode(strategy: str, body: ModeUpdate, request: Request, d
     except ValueError as exc:
         raise HTTPException(422, f"mode must be one of {[m.value for m in StrategyMode]}") from exc
     await store.set_strategy_mode(db, strategy, mode, await _user_id(db, username))
+    if mode in (StrategyMode.AUTO, StrategyMode.MANUAL):
+        await _refuse_on_config_errors(db, settings, strategy)
     await db.commit()
     return await get_modes(db, settings, username)
+
+
+async def _refuse_on_config_errors(db: AsyncSession, settings: Settings, mode_key: str | None) -> None:
+    """Validates the module configuration as it would be after this (not
+    yet committed) change: a module that would then run AUTO/MANUAL (and,
+    with global LIVE, live) while in CONFIGURATION_ERROR refuses the change.
+    Switching to OFF or PAPER, or anything that leaves such modules
+    untouched, is never refused."""
+    result = await config_validation.load_and_validate(db, settings)
+    affected = [name for name, r in result.items()
+                if r["mode"] in (StrategyMode.AUTO.value, StrategyMode.MANUAL.value)
+                and (mode_key is None or mode_key in r["mode_keys"])]
+    errors = [e for name in affected for e in config_validation.blocking_errors(result, name)]
+    if errors:
+        await db.rollback()
+        raise HTTPException(409, {"detail": "CONFIGURATION_ERROR: the change needs configuration that is missing in .env",
+                                  "errors": errors})
 
 
 # --- blacklist ----------------------------------------------------------------

@@ -34,11 +34,12 @@ REQUIREMENTS: dict[str, set[str]] = {
     "binance_futures": {"market", "execution"},
     "bybit_futures": {"market", "execution"},
     "hyperliquid_perps": {"market", "execution"},
+    "mt5_fx": {"market", "execution"},
 }
 
 # Engines that trade derivatives and may therefore open shorts. Spot engines
 # (Solana) can only buy what they later sell.
-SHORTABLE_ENGINES = {"binance_futures", "bybit_futures", "hyperliquid_perps"}
+SHORTABLE_ENGINES = {"binance_futures", "bybit_futures", "hyperliquid_perps", "mt5_fx"}
 
 # Token-2022 extensions whose mere presence gives an authority power over
 # holders' ability to sell. Presence alone is a REJECT: this codebase can't

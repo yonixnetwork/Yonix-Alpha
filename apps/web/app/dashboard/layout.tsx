@@ -3,37 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import {
-  Activity,
-  ArrowRightLeft,
-  Bell,
-  Brain,
-  CandlestickChart,
-  ClipboardCheck,
-  Coins,
-  Filter,
-  Gauge,
-  Grid3x3,
-  LayoutDashboard,
-  Layers,
-  ListChecks,
-  LogOut,
-  Send,
-  Menu,
-  PanelLeftClose,
-  PanelLeftOpen,
-  Radio,
-  Rocket,
-  Scale,
-  Server,
-  Settings,
-  ShieldAlert,
-  Sparkles,
-  TrendingUp,
-  Wallet,
-  Waves,
-  type LucideIcon,
-} from "lucide-react";
+import { Activity, ArrowRightLeft, Bell, Bot, Brain, CandlestickChart, ClipboardCheck, Coins, Filter, Gauge, Grid3x3, Layers, LayoutDashboard, ListChecks, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Radio, Rocket, Scale, Send, Server, Settings, ShieldAlert, Sparkles, TrendingUp, Wallet, Waves, type LucideIcon } from "lucide-react";
 import NotificationsBell from "@/components/NotificationsBell";
 import { modeClass, stateClass } from "@/components/ui";
 import { getAccessToken, logout } from "@/lib/api";
@@ -99,6 +69,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     title: "System",
     items: [
       { href: "/dashboard/health", label: "System Health", icon: Server },
+      { href: "/dashboard/bots", label: "External Bots", icon: Bot },
       { href: "/dashboard/notifications", label: "Notifications", icon: Bell },
       { href: "/dashboard/settings", label: "Settings", icon: Settings },
     ],

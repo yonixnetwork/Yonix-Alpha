@@ -71,11 +71,15 @@ def trend(closes: list[float], fast: int, slow: int, threshold: float) -> Trend:
 def evaluate(asset1: list[Candle], asset2: list[Candle], params: dict | None = None) -> MetaMuseSignal:
     p = {**DEFAULTS, **(params or {})}
     c1, c2 = closed(asset1), closed(asset2)
-    if len(c1) < p["slow"] * 2 or len(c2) < p["slow"] * 2:
+    if len(c1) < int(p["slow"]) * 2 or len(c2) < int(p["slow"]) * 2:
         raise ValueError("not enough closed candles for stable EMAs")
     thr = float(p["trend_threshold"])
-    t1 = trend([float(c.close) for c in c1], p["fast"], p["slow"], thr)
-    t2 = trend([float(c.close) for c in c2], p["fast"], p["slow"], thr)
+    # Per-asset thresholds (Gold vs BTC: gold is far less volatile than BTC);
+    # Meta Muse uses one threshold for both.
+    thr1 = float(p.get("trend_threshold1") or thr)
+    thr2 = float(p.get("trend_threshold2") or thr)
+    t1 = trend([float(c.close) for c in c1], int(p["fast"]), int(p["slow"]), thr1)
+    t2 = trend([float(c.close) for c in c2], int(p["fast"]), int(p["slow"]), thr2)
     side = None
     if t1.strong and t2.strong:
         if t1.direction == "up" and t2.direction == "down":
@@ -100,7 +104,9 @@ def should_exit(position_side: str, sig: MetaMuseSignal) -> tuple[bool, str]:
     return False, "divergence intact"
 
 
-def as_strategy_signal(sig: MetaMuseSignal) -> StrategySignal:
-    strength = min(sig.trend1.separation, sig.trend2.separation) / float(DEFAULTS["trend_threshold"])
-    return StrategySignal(NAME, VERSION, sig.side is not None, min(strength, 3.0) / 3.0,
-                          sig.reasons + ["no backtested edge in source repository; paper only"])
+def as_strategy_signal(sig: MetaMuseSignal, name: str = NAME, version: str = VERSION,
+                       thresholds: tuple[float, float] | None = None) -> StrategySignal:
+    t1, t2 = thresholds or (float(DEFAULTS["trend_threshold"]),) * 2
+    strength = min(sig.trend1.separation / t1, sig.trend2.separation / t2)
+    return StrategySignal(name, version, sig.side is not None, min(strength, 3.0) / 3.0,
+                          sig.reasons + ["no backtested edge in source repository"])

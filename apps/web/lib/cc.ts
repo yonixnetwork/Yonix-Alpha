@@ -3,7 +3,7 @@
  * ml/review, paper, tokens). Decimals arrive as strings and stay strings
  * until formatted, so no precision is lost to floats. */
 
-export type ConnState = "CONNECTED" | "DEGRADED" | "STALE" | "OFFLINE" | "UNKNOWN";
+export type ConnState = "CONNECTED" | "DEGRADED" | "STALE" | "UNAVAILABLE" | "NOT CONFIGURED" | "UNKNOWN";
 
 export interface Connection {
   name: string;
@@ -137,7 +137,22 @@ export interface VenueOut {
   account: { status: string; verified_at: string | null };
   market_data: Connection | null;
   paper_account: { name: string; currency: string; cash: string };
-  live_orders: string;
+  live_orders: Connection | null;
+}
+
+export interface ConfigModule {
+  label: string;
+  status: "DISABLED" | "READY" | "CONFIGURATION_ERROR";
+  mode: string | null;
+  errors: string[];
+  live_missing: string[];
+  live_ready: boolean | null;
+  warnings: string[];
+}
+
+export interface ConfigValidationOut {
+  modules: Record<string, ConfigModule>;
+  note: string;
 }
 
 export interface NotificationOut {

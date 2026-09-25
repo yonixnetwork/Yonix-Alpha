@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from app.api.routes import (
     analytics,
     auth,
+    bots,
     candidates,
     control,
     health,
@@ -37,4 +38,5 @@ api_router.include_router(venues.router)
 api_router.include_router(summary.router)
 api_router.include_router(notifications.router)
 api_router.include_router(tokens.router)
+api_router.include_router(bots.router)
 api_router.include_router(ws.router)

@@ -80,7 +80,8 @@ async def measured_live_rates(session: AsyncSession) -> dict[str, dict[str, Any]
     """Failure rate of LIVE orders per side, from final outcomes only."""
     rows = (await session.execute(
         select(ExecutionOrder.side, ExecutionOrder.status, func.count())
-        .where(ExecutionOrder.mode == "LIVE", ExecutionOrder.status.in_(FINAL_STATUSES))
+        .where(ExecutionOrder.mode == "LIVE", ExecutionOrder.provider == "pumpportal_local",
+               ExecutionOrder.status.in_(FINAL_STATUSES))
         .group_by(ExecutionOrder.side, ExecutionOrder.status))).all()
     out: dict[str, dict[str, Any]] = {}
     for side in ("BUY", "SELL"):

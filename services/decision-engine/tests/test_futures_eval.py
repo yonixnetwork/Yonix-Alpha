@@ -145,3 +145,21 @@ async def test_confluence_breakout_uses_pivot_levels(db_session, redis_client):
     assert plan["stop_loss"]["provenance"] == "STRATEGY" and plan["move_stop_to_breakeven_at_tp1"] is True
     assert [tp["exit_fraction"] for tp in plan["take_profits"]] == ["0.5", "0.5"]
     assert r["status"] in ("EXECUTE", "REDUCE_SIZE", "NO_TRADE"), r
+
+
+async def test_gold_vs_btc_trend_shorts_btc_when_gold_rises_and_btc_falls(db_session, redis_client):
+    sf = make_session_factory(db_session.bind)
+    # FakeVenue: BTCUSDT falls (btc_pct), any other symbol (here XAUUSDT, gold) rises.
+    r = await run_strategy(sf, redis_client, ENV, {"binance": FakeVenue()}, "gold_btc_trend", NOW)
+    assert r["status"] == "EXECUTE" and r["side"] == "SHORT", r
+    async with sf() as s:
+        pos = (await s.execute(select(PaperPosition))).scalar_one()
+        a = (await s.execute(select(RiskAssessment))).scalar_one()
+    assert pos.asset_id == "BTCUSDT" and pos.side == "SHORT" and a.strategy == "gold_btc_trend"
+    assert a.assessment["plan"]["stop_loss"]["provenance"] == "STRATEGY"
+
+
+async def test_gold_vs_btc_same_direction_is_no_trade(db_session, redis_client):
+    sf = make_session_factory(db_session.bind)
+    r = await run_strategy(sf, redis_client, ENV, {"binance": FakeVenue(btc_pct=0.002)}, "gold_btc_trend", NOW)
+    assert r["status"] == "no signal"

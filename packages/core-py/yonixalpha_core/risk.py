@@ -21,7 +21,7 @@ class RiskConfig:
     """Every field is optional — None means "not enforced," per the spec's
     own instruction not to assume every limit is configured. Named to
     mirror yonixalpha_core.config.Settings' TRADING_ENABLED/
-    LIVE_TRADING_ENABLED/MAX_DAILY_LOSS/MAX_POSITION_SIZE/MAX_SLIPPAGE/
+    LIVE_TRADING_ENABLED/MAX_DAILY_LOSS/MAX_POSITION_SIZE/
     MAX_OPEN_POSITIONS fields (declared in Phase 1, unused until now) —
     callers build this from Settings rather than inventing a second
     config surface. min_liquidity/max_price_impact_bps/max_leverage/

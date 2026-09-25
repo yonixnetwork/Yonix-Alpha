@@ -27,6 +27,8 @@ jobs:
           - services/decision-engine
           - services/ml
           - services/paper-trading
+          - services/execution-futures
+          - services/mt5-bridge
     services:
       postgres:
         image: postgres:16-alpine

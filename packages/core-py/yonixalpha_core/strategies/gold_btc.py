@@ -1,6 +1,6 @@
-"""Gold vs BTC — ratio analytics. No reference implementation exists in the
-user's repositories (goldvsbtc-binance-future was excluded), so this is
-built separately and says so.
+"""Gold vs BTC — ratio analytics (descriptive). The TRADING strategy from
+yonixnetwork/goldvsbtc-binance-future is strategies/gold_btc_trend.py;
+this module only describes the BTC/gold ratio for the analytics page.
 
 Data: Binance USDⓈ-M perpetuals, BTCUSDT and a gold contract — XAUUSDT
 (tracks spot gold per troy ounce) or PAXGUSDT (a token backed 1:1 by one

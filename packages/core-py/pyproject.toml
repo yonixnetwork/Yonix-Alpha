@@ -35,5 +35,11 @@ ml = [
     "joblib==1.4.2",
 ]
 
+# Only services/execution-futures needs this: Hyperliquid order signing
+# (EIP-712 L1 actions) from the official SDK.
+hyperliquid = [
+    "hyperliquid-python-sdk==0.24.0",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["yonixalpha_core"]

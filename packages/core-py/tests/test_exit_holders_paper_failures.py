@@ -81,7 +81,7 @@ async def session():
 
 
 def _order(i: int, side: str, status: str) -> ExecutionOrder:
-    return ExecutionOrder(mode="LIVE", side=side, reason="t", mint="M" * 32, provider="p", route="pump", amount="1",
+    return ExecutionOrder(mode="LIVE", side=side, reason="t", mint="M" * 32, provider="pumpportal_local", route="pump", amount="1",
                           amount_kind="sol", slippage_pct=10, priority_fee_sol=0, status=status, idempotency_key=f"{side}{i}")
 
 

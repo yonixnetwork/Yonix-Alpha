@@ -66,7 +66,8 @@ async def _describe(db: AsyncSession, e: Entry) -> dict:
         return out
     if e.kind == "grid":
         rows = (await db.execute(select(StrategyState).where(StrategyState.strategy == e.name))).scalars().all()
-        out["grid_sessions"] = [{"coin": r.key, **grid.session_summary(r.status, r.state or {})} for r in rows]
+        out["grid_sessions"] = [{"coin": r.key.removeprefix("live:"), "mode": "LIVE" if r.key.startswith("live:") else "PAPER",
+                                 **grid.session_summary(r.status, r.state or {})} for r in rows]
         return out
     acct = await store.get_paper_account(db, e.account) if e.account else None
     base = select(PaperPosition).outerjoin(RiskAssessment, RiskAssessment.id == PaperPosition.assessment_id).where(
@@ -146,7 +147,8 @@ async def _grid_command(cmd: str, request: Request, db: AsyncSession, redis: Red
     await redis.set(grid.COMMAND_KEY, cmd, ex=600)
     await audit(db, username, request, f"grid.{cmd}_requested", {"at": datetime.now().isoformat()})
     await db.commit()
-    return {"requested": cmd, "note": "the paper-trading grid loop applies this on its next tick (≈15 s) using the live mid"}
+    return {"requested": cmd, "note": "applied on the next tick using the current mid — by the paper grid loop (≈15 s), or "
+                                      "in LIVE mode by execution-futures (≈5 s)"}
 
 
 @router.post("/hyperliquid_grid/start")

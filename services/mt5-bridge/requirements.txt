@@ -1,0 +1,5 @@
+# Runs on the WINDOWS host next to the MetaTrader 5 terminal, not in the
+# YonixAlpha Docker stack. MetaTrader5 is Windows-only (official package).
+fastapi==0.115.6
+uvicorn==0.34.0
+MetaTrader5==5.0.6180; sys_platform == "win32"

@@ -60,21 +60,55 @@ class Settings(BaseSettings):
     WALLET_PRIVATE_KEY: Optional[SecretStr] = Field(
         None, validation_alias=AliasChoices("WALLET_PRIVATE_KEY", "SOLANA_WALLET_PRIVATE_KEY"))
 
-    # Binance (Phase 4+)
+    # PumpPortal data WebSocket (wss://pumpportal.fun/api/data). New-token
+    # and migration subscriptions are free and need no key; the key is only
+    # sent for the metered token-trade subscriptions (PumpPortal charges
+    # per message from the key's linked wallet). Trading uses PumpPortal's
+    # Local Transaction API, which needs no key: YonixAlpha signs locally.
+    PUMPPORTAL_API_KEY: Optional[SecretStr] = None
+
+    # Binance USDⓈ-M futures. Read + trade permission when live futures
+    # execution is used; never enable withdrawals. BINANCE_TESTNET=true
+    # points every signed call at testnet.binancefuture.com.
     BINANCE_API_KEY: Optional[str] = None
     BINANCE_API_SECRET: Optional[str] = None
     BINANCE_TESTNET: bool = True
 
-    # Bybit V5 — read-only account views (balance, positions, orders, fills).
-    # Create the key with READ-ONLY permission; this codebase never trades.
+    # Bybit V5 linear perpetuals. A READ-ONLY key is enough for account
+    # views; live execution needs Contract "Orders" + "Positions" trade
+    # permission. Never enable withdrawals.
     BYBIT_API_KEY: Optional[str] = None
     BYBIT_API_SECRET: Optional[str] = None
     BYBIT_TESTNET: bool = False
 
-    # Hyperliquid — a public account address is enough for read-only views.
-    # No private key is ever read.
+    # Hyperliquid. The public account address is enough for read-only
+    # views. Live execution signs with an API ("agent") wallet approved for
+    # that account at app.hyperliquid.xyz/API — an agent wallet can trade
+    # but cannot withdraw. Never put the main wallet's key here.
     HYPERLIQUID_ACCOUNT_ADDRESS: Optional[str] = None
+    HYPERLIQUID_API_WALLET_PRIVATE_KEY: Optional[SecretStr] = None
     HYPERLIQUID_TESTNET: bool = False
+
+    # MetaTrader 5, through services/mt5-bridge on the Windows host that
+    # runs the MT5 terminal. MT5_LOGIN / MT5_PASSWORD / MT5_SERVER live in
+    # the BRIDGE's environment only; this server knows just the bridge URL
+    # and its bearer token.
+    MT5_BRIDGE_URL: Optional[str] = None
+    MT5_BRIDGE_TOKEN: Optional[SecretStr] = None
+
+    # External bots' control APIs (CONTROL_API_CONTRACT v1 of
+    # trading-command-center): status / close / config of the standalone
+    # bots, if they still run. Each token equals THAT bot's own
+    # CONTROL_API_TOKEN. Leave unset when the bots are not deployed —
+    # YonixAlpha runs these strategies natively.
+    META_MUSE_CONTROL_URL: Optional[str] = None
+    META_MUSE_TOKEN: Optional[SecretStr] = None
+    GOLDVSBTC_CONTROL_URL: Optional[str] = None
+    GOLDVSBTC_TOKEN: Optional[SecretStr] = None
+    MEME_BOT_CONTROL_URL: Optional[str] = None
+    MEME_BOT_TOKEN: Optional[SecretStr] = None
+    HYPERLIQUID_GRID_CONTROL_URL: Optional[str] = None
+    HYPERLIQUID_GRID_TOKEN: Optional[SecretStr] = None
 
     # Telegram (wired up Phase 11 — yonixalpha_core.notify.send_telegram_alert)
     TELEGRAM_BOT_TOKEN: Optional[str] = None
@@ -114,7 +148,6 @@ class Settings(BaseSettings):
     PAPER_TRADING: bool = True
     MAX_DAILY_LOSS: Optional[float] = None
     MAX_POSITION_SIZE: Optional[float] = None
-    MAX_SLIPPAGE: Optional[float] = None
     MAX_OPEN_POSITIONS: Optional[int] = None
 
     @model_validator(mode="after")

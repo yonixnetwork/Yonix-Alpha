@@ -175,7 +175,10 @@ export default function VenuePage() {
             </Stat>
           </div>
           <div className="muted">{v.market_data?.detail}</div>
-          <div className="notice notice-warn">{v.live_orders}</div>
+          <div className="notice">
+            Live execution: {v.live_orders ? <StatePill state={v.live_orders.state} /> : "—"}{" "}
+            <span className="muted small">{v.live_orders?.detail}</span>
+          </div>
         </div>
       )}
       {strat.data && <StrategyPanel s={strat.data} onChange={strat.setData} />}

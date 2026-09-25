@@ -82,3 +82,8 @@ services:
     volumes:
       - ../../services/engine-binance-futures/app:/app/app
       - ../../packages/core-py:/packages/core-py
+
+  execution-futures:
+    volumes:
+      - ../../services/execution-futures/app:/app/app
+      - ../../packages/core-py:/packages/core-py

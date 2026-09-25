@@ -46,6 +46,9 @@ services:
   engine-binance-futures:
     restart: unless-stopped
 
+  execution-futures:
+    restart: unless-stopped
+
   reverse-proxy:
     build:
       context: ../nginx

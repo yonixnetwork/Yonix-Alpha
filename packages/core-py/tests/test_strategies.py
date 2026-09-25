@@ -215,3 +215,29 @@ def test_wallet_indicators():
     assert synchronized_buy_cluster(sync, NOW, 300) == 5
     rt = [t(100, "a", True), t(90, "a", False), t(80, "b", True)]
     assert round_trip_volume_share(rt, NOW, 300) == Decimal(2) / Decimal(3)
+
+
+def test_gold_btc_trend_uses_per_asset_thresholds_and_repo_exit_rules():
+    from datetime import datetime, timedelta, timezone
+    from decimal import Decimal
+
+    from yonixalpha_core.strategies import gold_btc_trend
+    from yonixalpha_core.venues.common import Candle
+
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    def s(start, pct, n=80):
+        return [Candle(t0 + timedelta(minutes=15 * i), *(Decimal(str(start * (1 + pct) ** i)),) * 4, Decimal(1), True)
+                for i in range(n)]
+
+    # Gold creeping up 0.002%/bar is STRONG for gold (0.005% gap) though it would be
+    # flat by BTC's 0.03% threshold; BTC falling 0.1%/bar is strong -> SHORT BTC.
+    sig = gold_btc_trend.evaluate(s(2000, 0.00002), s(60000, -0.001))
+    assert sig.trend1.strong and sig.trend2.strong and sig.side == "SHORT"
+    assert gold_btc_trend.should_exit("SHORT", sig) == (False, "divergence intact")
+    assert gold_btc_trend.should_exit("LONG", sig) == (True, "signal reversal")
+    same = gold_btc_trend.evaluate(s(2000, 0.00002), s(60000, 0.001))
+    assert same.side is None and gold_btc_trend.should_exit("SHORT", same) == (True, "inverse correlation broke")
+    weak = gold_btc_trend.evaluate(s(2000, 0.0000001), s(60000, -0.001))
+    assert gold_btc_trend.should_exit("SHORT", weak) == (True, "trend weakened")
+    assert gold_btc_trend.as_strategy_signal(sig).name == "gold_btc_trend"

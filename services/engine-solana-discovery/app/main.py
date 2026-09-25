@@ -12,7 +12,10 @@ from yonixalpha_core.db.redis import make_redis
 from yonixalpha_core.logging import configure_logging, get_logger
 from yonixalpha_core.notify import send_telegram_alert
 from yonixalpha_core.safety import store
-from yonixalpha_core.solana import pump_stream
+from sqlalchemy import select
+
+from yonixalpha_core.db.models import PaperPosition
+from yonixalpha_core.solana import pump_stream, pumpportal_ws
 from yonixalpha_core.solana.pumpfun import PUMP_PROGRAM_ID
 from yonixalpha_core.solana.rpc import RpcManager
 from yonixalpha_core.solana.ws import SolanaWsClient
@@ -131,6 +134,21 @@ async def run() -> None:
             on_message=handle_message,
         )
 
+        async def held_mints() -> set[str]:
+            async with session_factory() as session:
+                rows = await session.execute(select(PaperPosition.asset_id).where(
+                    PaperPosition.status.in_(("open", "pending_entry")),
+                    PaperPosition.engine.in_(("solana_fresh", "solana_migration", "solana_momentum"))))
+                return {m for m in rows.scalars() if m}
+
+        # Independent cross-check of the on-chain stream (coverage, migrations)
+        # and, with PUMPPORTAL_API_KEY, trade events for held mints.
+        pumpportal = pumpportal_ws.PumpPortalFeed(redis, settings.PUMPPORTAL_API_KEY, held_mints)
+
+        async def stream_stats() -> dict:
+            return {**await pump_stream.stats(redis), "pumpportal_coverage": await pumpportal_ws.coverage(redis),
+                    "pumpportal_heartbeat": await pumpportal_ws.heartbeat(redis)}
+
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -141,8 +159,9 @@ async def run() -> None:
 
         try:
             await asyncio.gather(
-                heartbeat_loop(settings, "engine-solana-discovery", stop_event, lambda: pump_stream.stats(redis)),
+                heartbeat_loop(settings, "engine-solana-discovery", stop_event, stream_stats),
                 ws_client.run(stop_event),
+                pumpportal.run(stop_event),
                 _health_check_loop(rpc, session_factory, stop_event),
                 _funnel_loop(redis, session_factory, stop_event),
             )

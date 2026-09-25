@@ -98,6 +98,20 @@ async def tracked(venue: str, coro) -> Any:
     return out
 
 
+def record_call(venue: str, ok: bool, error: str | None = None) -> None:
+    """For clients that report failures as values instead of raising
+    (e.g. the Jupiter quote client)."""
+    h = _health(venue)
+    h["calls"] += 1
+    if ok:
+        h["last_ok_at"] = datetime.now(timezone.utc).isoformat()
+        h["consecutive_failures"] = 0
+    else:
+        h["last_error_at"] = datetime.now(timezone.utc).isoformat()
+        h["last_error"] = (error or "error")[:200]
+        h["consecutive_failures"] += 1
+
+
 def venue_health_snapshot() -> dict[str, dict[str, Any]]:
     return {k: dict(v) for k, v in VENUE_HEALTH.items()}
 

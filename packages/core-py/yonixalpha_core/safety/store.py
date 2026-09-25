@@ -51,6 +51,7 @@ DEFAULT_PAPER_ACCOUNTS = {
     "binance_futures": ("USDT", Decimal("1000")),
     "bybit_futures": ("USDT", Decimal("1000")),
     "hyperliquid": ("USDC", Decimal("1000")),
+    "mt5": ("USD", Decimal("1000")),
 }
 ENGINE_ACCOUNT = {
     "solana_fresh": "solana",
@@ -59,6 +60,7 @@ ENGINE_ACCOUNT = {
     "binance_futures": "binance_futures",
     "bybit_futures": "bybit_futures",
     "hyperliquid_perps": "hyperliquid",
+    "mt5_fx": "mt5",
 }
 
 
