@@ -11,7 +11,9 @@ from app.api.util import audit, jsonable
 from app.schemas.common import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, Page
 from app.schemas.paper import PaperPositionOut
 from yonixalpha_core import events
-from yonixalpha_core.db.models import PaperAccount, PaperOrder, PaperPosition, RiskAssessment, TradeTimelineEvent
+from yonixalpha_core.db.models import (
+    ExecutionOrder, PaperAccount, PaperOrder, PaperPosition, RiskAssessment, TradeTimelineEvent,
+)
 from yonixalpha_core.safety import store
 
 router = APIRouter(prefix="/paper", tags=["paper"])
@@ -59,6 +61,8 @@ async def get_position(position_id: UUID, db: AsyncSession = Depends(get_db), _:
         q = select(TradeTimelineEvent).where((TradeTimelineEvent.position_id == p.id) |
                                              (TradeTimelineEvent.assessment_id == p.assessment_id))
     timeline = (await db.execute(q.order_by(TradeTimelineEvent.occurred_at).limit(500))).scalars().all()
+    orders = (await db.execute(select(ExecutionOrder).where(ExecutionOrder.position_id == p.id)
+                               .order_by(ExecutionOrder.created_at))).scalars().all()
     return jsonable({
         "position": PaperPositionOut.model_validate(p).model_dump(),
         "account": {"name": acct.name, "currency": acct.quote_currency} if acct else None,
@@ -69,6 +73,10 @@ async def get_position(position_id: UUID, db: AsyncSession = Depends(get_db), _:
                        "ml": ((a.assessment or {}).get("inputs_snapshot") or {}).get("ml"),
                        "evaluated_at": a.evaluated_at} if a else None,
         "timeline": [{"type": t.event_type, "at": t.occurred_at, "detail": t.detail} for t in timeline],
+        "orders": [{"id": o.id, "side": o.side, "reason": o.reason, "status": o.status, "route": o.route, "provider": o.provider,
+                    "amount": o.amount, "amount_kind": o.amount_kind, "slippage_pct": o.slippage_pct, "signature": o.signature,
+                    "error": o.error, "fill": (o.result or {}).get("fill"), "created_at": o.created_at,
+                    "confirmed_at": o.confirmed_at} for o in orders],
     })
 
 

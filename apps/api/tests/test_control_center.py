@@ -122,7 +122,11 @@ async def test_strategies_catalog_config_validation_and_modes(client, auth_heade
     assert bad.status_code == 422 and any("unknown" in e for e in errors) and any("stop_pct" in e for e in errors)
     ok = await client.put("/api/strategies/meta_muse/config", headers=auth_headers, json={"config": {"stop_pct": "0.015"}})
     assert ok.status_code == 200 and ok.json()["config"]["stop_pct"] == "0.015"
-    assert (await client.put("/api/strategies/solana_fresh/config", headers=auth_headers, json={"config": {}})).status_code == 422
+    ok = await client.put("/api/strategies/solana_fresh/config", headers=auth_headers,
+                          json={"config": {"manual_stop_loss_pct": "0.2"}})
+    assert ok.status_code == 200 and ok.json()["config"]["manual_stop_loss_pct"] == "0.2"
+    assert (await client.put("/api/strategies/solana_fresh/config", headers=auth_headers,
+                             json={"config": {"manual_stop_loss_pct": "2"}})).status_code == 422
 
     r = await client.put("/api/strategies/binance_futures/mode", headers=auth_headers, json={"mode": "OFF"})
     assert r.status_code == 200

@@ -3,7 +3,11 @@ from enum import StrEnum
 
 
 class ExecutionProvider(StrEnum):
-    """Per spec section 20: ExecutionProvider -> SolanaBondingCurveExecutor
+    """Legacy (pre-gate) routing, used only by paper-trading's app/entry.py
+    for Phase 5 candidates. Gate-driven Pump.fun trades do not use it: PAPER
+    fills come from paper_engine and LIVE fills from live_trading.
+
+    Per spec section 20: ExecutionProvider -> SolanaBondingCurveExecutor
     | JupiterExecutor | BinanceFuturesExecutor. UNSUPPORTED is this
     codebase's honest fourth option — see route()'s docstring for why it's
     the common case for Solana candidates today.

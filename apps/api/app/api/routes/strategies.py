@@ -4,7 +4,8 @@ results; grid start/stop requests.
 
 Config never holds secrets (those stay in .env). A mode can never exceed
 what the environment locks allow: LIVE needs the global mode AND the
-environment flags, and live execution is not implemented for any venue.
+environment flags; live execution exists only for the Pump.fun strategies
+(yonixalpha_core.live_trading), futures venues stay paper-only.
 """
 
 from datetime import datetime

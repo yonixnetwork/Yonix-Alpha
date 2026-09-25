@@ -40,13 +40,38 @@ def _int(lo: int, hi: int) -> tuple:
     return ("int", lo, hi)
 
 
+def _opt(lo: str, hi: str) -> tuple:
+    return ("optional_range", Decimal(lo), Decimal(hi))
+
+
+# Operator-set exit plan for the Pump.fun strategies (fractions of the entry
+# price: 0.2 = 20%). Unset keys are calculated automatically. Every value is
+# validated again by the safety gate against the risk settings (a stop
+# outside min/max_stop_pct, TPs out of order, a size above any cap ... are
+# refused or reduced, never trusted blindly).
+SOLANA_MANUAL_RULES = {
+    "manual_stop_loss_pct": _opt("0.01", "0.9"),
+    "manual_tp1_pct": _opt("0.01", "100"),
+    "manual_tp2_pct": _opt("0.01", "100"),
+    "manual_tp3_pct": _opt("0.01", "100"),
+    "manual_trailing_pct": _opt("0.01", "0.9"),
+    "manual_position_size_sol": _opt("0.001", "1000"),
+    "manual_max_risk_sol": _opt("0.0001", "1000"),
+}
+
+
 CATALOG: dict[str, Entry] = {e.name: e for e in [
     Entry("solana_fresh", "Fresh Tokens (pump.fun)", "solana", "solana_fresh", "solana",
-          "PAPER — live pump.fun stream, safety gate, curve-simulated fills; live execution not implemented"),
-    Entry("solana_migration", "Migrated Tokens", "solana", "solana_migration", "solana",
-          "PAPER — Jupiter-quoted fills; wallet-level data unavailable, so the gate requires approval"),
+          "PAPER by default — pump.fun program stream, safety gate, curve-simulated fills. LIVE path (PumpPortal local "
+          "transactions, guard, confirm, reconcile) implemented — awaiting credential verification",
+          {}, SOLANA_MANUAL_RULES),
+    Entry("solana_migration", "Migrated Tokens (pump.fun → PumpSwap)", "solana", "solana_migration", "solana",
+          "PAPER by default — canonical PumpSwap pool read from chain, pool-simulated fills, trader flow from pool "
+          "events. LIVE path implemented — awaiting credential verification",
+          {}, SOLANA_MANUAL_RULES),
     Entry("solana_momentum", "Solana Momentum", "solana", "solana_momentum", "solana",
-          "PAPER — acceleration signal on tokens older than 30 min; unvalidated heuristic"),
+          "PAPER — acceleration signal on pump.fun tokens older than 30 min; unvalidated heuristic",
+          {}, SOLANA_MANUAL_RULES),
     Entry("meta_muse", "Meta Muse Crossover", "futures", None, "binance_futures",
           "PAPER — ported from the user's repository; BTC/ETH 9/21 EMA divergence on closed candles",
           meta_muse.DEFAULTS,
@@ -104,6 +129,18 @@ def _check(key: str, value: Any, rule: tuple) -> tuple[Any, str | None]:
         if isinstance(value, bool) or not isinstance(value, int):
             return None, f"{key}: must be a whole number"
         return (value, None) if rule[1] <= value <= rule[2] else (None, f"{key}: must be between {rule[1]} and {rule[2]}")
+    if kind == "optional_range":
+        if value is None or value == "":
+            return None, None
+        if isinstance(value, bool):
+            return None, f"{key}: must be a number"
+        try:
+            d = Decimal(str(value))
+        except InvalidOperation:
+            return None, f"{key}: must be a number"
+        if not d.is_finite() or not rule[1] <= d <= rule[2]:
+            return None, f"{key}: must be empty (automatic) or between {rule[1]} and {rule[2]}"
+        return str(d), None
     if kind in ("decimal", "optional_decimal"):
         if value is None and kind == "optional_decimal":
             return None, None
@@ -156,6 +193,11 @@ def validate_config(name: str, data: dict[str, Any]) -> tuple[dict[str, Any], li
         lo, hi = merged.get("range_lower"), merged.get("range_upper")
         if lo is None or hi is None or Decimal(str(lo)) >= Decimal(str(hi)):
             errors.append("manual range needs range_lower < range_upper")
+    if name in ("solana_fresh", "solana_migration", "solana_momentum"):
+        tps = [merged.get(f"manual_tp{i}_pct") for i in (1, 2, 3)]
+        given = [Decimal(str(t)) for t in tps if t is not None]
+        if any(t is None for t in tps[:len(given)]) or given != sorted(set(given)):
+            errors.append("manual take-profits must be set in order (TP1, then TP2, then TP3) and strictly increasing")
     if name == "gold_vs_btc" and max(int(merged["z_window"]), int(merged["corr_window"])) >= int(merged["candles"]):
         errors.append("z_window and corr_window must be smaller than candles")
     return clean, errors

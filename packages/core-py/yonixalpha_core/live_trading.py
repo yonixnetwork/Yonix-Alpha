@@ -100,6 +100,8 @@ def parse_live_settings(data: dict[str, Any]) -> tuple[LiveExecutionSettings, li
         setattr(base, key, int(d) if isinstance(getattr(base, key), int) else d)
     if base.priority_fee_sol > base.max_priority_fee_sol:
         errors.append("priority_fee_sol cannot exceed max_priority_fee_sol")
+    if base.exit_slippage_pct > base.max_exit_slippage_pct:
+        errors.append("exit_slippage_pct cannot exceed max_exit_slippage_pct")
     return base, errors
 
 

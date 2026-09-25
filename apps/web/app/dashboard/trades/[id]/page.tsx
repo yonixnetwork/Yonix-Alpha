@@ -60,6 +60,20 @@ export default function TradeDetailPage() {
         <Stat label="Opened">{formatDate(p.entry_at)}</Stat>
         <Stat label="Closed">{formatDate(p.exit_at)}</Stat>
         <Stat label="Venue">{String(venue.venue ?? venue.type ?? "—")}</Stat>
+        <Stat label="Execution">
+          <span className={p.execution_mode === "LIVE" ? "pill pill-danger" : "pill pill-ok"}>{p.execution_mode ?? "PAPER"}</span>{" "}
+          <span className="muted">{p.execution_provider ?? "—"}</span>
+        </Stat>
+        <Stat label="Source / lifecycle">
+          {p.source ?? "—"} / {p.lifecycle ?? "—"}
+        </Stat>
+        <Stat label="Route / pool">
+          {p.execution_route ?? "—"}
+          {p.pool ? <span className="mono muted"> {String(p.pool).slice(0, 8)}…</span> : null}
+        </Stat>
+        <Stat label="Strategy / model / features">
+          {p.strategy ?? "—"} / {p.model_version ?? "no model"} / {p.feature_version ?? "—"}
+        </Stat>
         <Stat label="Management">{p.management_paused ? "paused (stop still enforced)" : p.exit_requested ? "exit requested" : "active"}</Stat>
       </div>
       {a && (
@@ -80,6 +94,53 @@ export default function TradeDetailPage() {
               </div>
             )}
           </div>
+        </Section>
+      )}
+      {(data.orders ?? []).length > 0 && (
+        <Section title="On-chain orders">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Side</th>
+                <th>Reason</th>
+                <th>Status</th>
+                <th>Amount</th>
+                <th>Fill (SOL / tokens raw)</th>
+                <th>Transaction</th>
+                <th>Created</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(data.orders ?? []).map((o) => (
+                <tr key={o.id}>
+                  <td>{o.side}</td>
+                  <td>{o.reason}</td>
+                  <td>
+                    <span className={o.status === "CONFIRMED" ? "pill pill-ok" : o.status === "PENDING" || o.status === "SIGNED" || o.status === "SUBMITTED" ? "pill pill-warn" : "pill pill-danger"}>
+                      {o.status}
+                    </span>
+                    {o.error && <div className="muted">{o.error}</div>}
+                  </td>
+                  <td>
+                    {o.amount} {o.amount_kind}
+                  </td>
+                  <td className="mono">
+                    {o.fill ? `${(o.fill.sol_change_lamports / 1e9).toFixed(6)} / ${o.fill.token_change_raw}` : "— (no fill)"}
+                  </td>
+                  <td className="mono">
+                    {o.signature ? (
+                      <a href={`https://solscan.io/tx/${o.signature}`} target="_blank" rel="noreferrer">
+                        {o.signature.slice(0, 10)}…
+                      </a>
+                    ) : (
+                      "—"
+                    )}
+                  </td>
+                  <td>{formatDate(o.created_at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </Section>
       )}
       <Section title="Timeline">

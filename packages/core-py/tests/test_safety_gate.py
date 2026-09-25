@@ -277,6 +277,7 @@ def test_token_tax_above_limit_is_no_trade_and_reported():
     assert a.decision == FinalDecision.NO_TRADE and {"BUY_TAX_EXCESSIVE", "SELL_TAX_EXCESSIVE"} <= codes(a)
     tax = a.reports["tax"]
     assert (tax["buy_tax_pct"], tax["sell_tax_pct"], tax["confidence"]) == ("9", "9", "HIGH") and tax["buy_limit_pct"] == "5"
+    assert tax["decision"] == "NO_TRADE"
 
 
 def test_tax_within_limit_executes_and_protocol_fees_are_not_tax():
@@ -285,15 +286,17 @@ def test_tax_within_limit_executes_and_protocol_fees_are_not_tax():
     assert a.decision == FinalDecision.EXECUTE and a.reports["tax"]["sell_tax_pct"] == "3"
     plain = decide(healthy())  # SPL Token mint: the curve's 1%+ trading fee is not a token tax
     assert plain.reports["tax"]["buy_tax_pct"] == "0" and plain.reports["tax"]["confidence"] == "HIGH"
+    assert a.reports["tax"]["decision"] == plain.reports["tax"]["decision"] == "PASS"
 
 
 def test_unknown_tax_is_no_trade_in_auto_and_approval_in_manual():
     t = replace(healthy().token, unparseable_extension=True)
     auto = decide(healthy(token=t, strategy_mode=StrategyMode.AUTO))
     assert auto.decision == FinalDecision.NO_TRADE and "AUTO_NO_APPROVAL" in codes(auto) and "TAX_UNKNOWN" in codes(auto)
-    assert auto.reports["tax"]["confidence"] == "UNKNOWN"
+    assert auto.reports["tax"]["confidence"] == "UNKNOWN" and auto.reports["tax"]["decision"] == "NO_TRADE"
     manual = decide(healthy(token=t, strategy_mode=StrategyMode.MANUAL))
     assert manual.decision == FinalDecision.REQUIRE_MANUAL_APPROVAL
+    assert manual.reports["tax"]["decision"] == "REQUIRE_MANUAL_APPROVAL"
 
 
 def test_auto_mode_never_waits_for_approval():

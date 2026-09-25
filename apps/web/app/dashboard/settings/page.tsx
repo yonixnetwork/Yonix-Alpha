@@ -31,8 +31,8 @@ export default function SettingsPage() {
             </div>
             <div className="notice">
               The environment flags live in the server&apos;s .env and cannot be changed from the dashboard. LIVE is refused while
-              they are closed, and live execution is not implemented for any venue. To stop everything, use the kill switch or set
-              strategies to OFF.
+              they are closed. Live execution exists only for Pump.fun tokens (fresh and PumpSwap-migrated, see Live Execution);
+              futures venues remain paper-only. To stop everything, use the kill switch or set strategies to OFF.
             </div>
             <div className="btn-row" role="group" aria-label="Global mode">
               {GLOBAL_MODES.map((g) => (

@@ -206,6 +206,7 @@ export interface BlacklistOut {
   scope: string;
   field: string;
   match_type: string;
+  action: "BLOCK" | "ALLOW";
   value: string;
   reason: string | null;
   enabled: boolean;
@@ -292,6 +293,11 @@ export interface AssessmentDetail extends AssessmentSummary {
     settings_snapshot: Record<string, unknown>;
     inputs_snapshot: Record<string, unknown>;
     qualified: boolean;
+    reports?: {
+      tax?: Record<string, string | null>;
+      sellability?: Record<string, unknown>;
+      liquidity?: Record<string, unknown>;
+    };
   };
   approved_at: string | null;
   timeline: TimelineEvent[];

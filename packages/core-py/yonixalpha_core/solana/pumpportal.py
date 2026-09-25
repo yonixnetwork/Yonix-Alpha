@@ -1,5 +1,6 @@
 """PumpPortal (third-party, unofficial Pump.fun API) — local-transaction
-trading and the data WebSocket.
+trading. (Token discovery does not use PumpPortal: it decodes Pump.fun's own
+program logs from our RPC WebSocket.)
 
 Execution uses the **Local Transaction API** (`POST /api/trade-local`): it
 returns an unsigned, serialized `VersionedTransaction` that is inspected
@@ -24,7 +25,6 @@ from decimal import Decimal
 import httpx
 
 TRADE_LOCAL_URL = "https://pumpportal.fun/api/trade-local"
-DATA_WS_URL = "wss://pumpportal.fun/api/data"
 POOLS = ("pump", "pump-amm", "auto")
 MAX_TX_BYTES = 1232  # Solana packet limit
 
@@ -77,6 +77,3 @@ class PumpPortalClient:
             raise PumpPortalError(f"trade-local returned no transaction ({len(data)} bytes)")
         return data
 
-
-def data_ws_url(api_key: str | None) -> str:
-    return f"{DATA_WS_URL}?api-key={api_key}" if api_key else DATA_WS_URL

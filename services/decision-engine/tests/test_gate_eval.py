@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from types import SimpleNamespace
 
 from sqlalchemy import select
@@ -106,3 +107,93 @@ async def test_momentum_candidate_uses_momentum_strategy(db_session, redis_clien
     assert any("solana_momentum" in f.message for f in a.findings if f.code == "SIGNAL_NOT_QUALIFIED") or a.qualified
     row = (await db_session.execute(select(RiskAssessment))).scalar_one()
     assert row.assessment["versions"]["feature_set"] and row.assessment["versions"]["rules"]
+
+
+# --- LIVE path (provider boundaries mocked: no transaction is built here) ----
+
+LIVE_ENV = SimpleNamespace(TRADING_ENABLED=True, LIVE_TRADING_ENABLED=True, PAPER_TRADING=False, TELEGRAM_BOT_TOKEN=None,
+                           TELEGRAM_CHAT_ID=None)
+
+
+async def _live_mode(db, redis, ready: bool, sol: str = "5"):
+    import json
+
+    from yonixalpha_core import live_trading
+
+    await store.set_global_mode(db, GlobalMode.LIVE, None)
+    await store.set_strategy_mode(db, "solana_fresh", StrategyMode.AUTO, None)
+    acct = await live_trading.get_live_account(db)
+    acct.cash_balance = Decimal(sol)
+    await db.commit()
+    if ready:
+        await redis.set(live_trading.READY_KEY, json.dumps({"status": "ready", "min_sol_reserve": "0.05",
+                                                            "wallet_max_age_seconds": "120"}))
+        await redis.set(live_trading.WALLET_KEY, json.dumps({"sol": sol, "at": datetime.now(timezone.utc).isoformat()}))
+
+
+async def test_live_auto_creates_a_pending_buy_order_not_a_position(db_session, redis_client):
+    from yonixalpha_core.db.models import ExecutionOrder
+
+    curve = await seed_healthy_launch(redis_client, NOW)
+    await _live_mode(db_session, redis_client, ready=True)
+    cand = await make_candidate(db_session)
+    a = await evaluate_with_gate(db_session, redis_client, LIVE_ENV, Sources(redis_client, FakeRpc(curve)), cand, NOW)
+    assert a.decision.value == "EXECUTE" and a.execution_target.value == "LIVE", a.reasons
+    pos = (await db_session.execute(select(PaperPosition))).scalar_one()
+    order = (await db_session.execute(select(ExecutionOrder))).scalar_one()
+    assert pos.execution_mode == "LIVE" and pos.status == "pending_entry" and pos.quantity == 0
+    assert (pos.source, pos.lifecycle, pos.execution_provider, pos.execution_route) == ("PUMPFUN", "FRESH", "pumpportal_local", "pump")
+    assert order.side == "BUY" and order.status == "PENDING" and order.signature is None
+    assert Decimal(order.amount) == a.plan.position_size.value and order.idempotency_key == f"entry:{pos.assessment_id}"
+    assert order.limits["max_sol_in_lamports"] > 0 and order.limits["max_priority_fee_lamports"] > 0
+    assert cand.state == CandidateState.ENTRY_PENDING.value
+    # No simulated paper fill is booked for a live decision.
+    assert (await db_session.execute(select(MLFeatureSnapshot))).scalar_one().label is None
+
+
+async def test_live_without_a_ready_worker_is_no_trade(db_session, redis_client):
+    from yonixalpha_core.db.models import ExecutionOrder
+
+    curve = await seed_healthy_launch(redis_client, NOW)
+    await _live_mode(db_session, redis_client, ready=False)
+    cand = await make_candidate(db_session)
+    a = await evaluate_with_gate(db_session, redis_client, LIVE_ENV, Sources(redis_client, FakeRpc(curve)), cand, NOW)
+    assert a.decision.value == "NO_TRADE" and "LIVE_NOT_READY" in {f.code for f in a.findings}
+    assert (await db_session.execute(select(ExecutionOrder))).scalars().all() == []
+    assert (await db_session.execute(select(PaperPosition))).scalars().all() == []
+
+
+async def test_live_mode_with_locks_closed_never_goes_live(db_session, redis_client):
+    from yonixalpha_core.db.models import ExecutionOrder
+
+    curve = await seed_healthy_launch(redis_client, NOW)
+    await _live_mode(db_session, redis_client, ready=True)
+    cand = await make_candidate(db_session)
+    a = await evaluate_with_gate(db_session, redis_client, ENV, Sources(redis_client, FakeRpc(curve)), cand, NOW)
+    assert a.execution_target.value != "LIVE"
+    assert (await db_session.execute(select(ExecutionOrder))).scalars().all() == []
+
+
+async def test_operator_exit_plan_is_validated_and_used(db_session, redis_client):
+    curve = await seed_healthy_launch(redis_client, NOW)
+    await store.save_strategy_config(db_session, "solana_fresh", {
+        "manual_stop_loss_pct": "0.15", "manual_tp1_pct": "0.3", "manual_tp2_pct": "0.6", "manual_trailing_pct": "0.08"}, None)
+    await db_session.commit()
+    cand = await make_candidate(db_session)
+    a = await evaluate_with_gate(db_session, redis_client, ENV, Sources(redis_client, FakeRpc(curve)), cand, NOW)
+    assert a.decision.value == "EXECUTE", a.reasons
+    p = a.plan
+    assert p.stop_loss.provenance.value == "MANUAL" and p.stop_loss.value == p.entry_price * Decimal("0.85")
+    assert [tp.price.value for tp in p.take_profits] == [p.entry_price * Decimal("1.3"), p.entry_price * Decimal("1.6")]
+    assert p.trailing.provenance.value == "MANUAL" and p.trailing.distance_pct == Decimal("0.08")
+    assert p.position_size.provenance.value == "AUTO"  # not set -> calculated
+
+
+async def test_operator_stop_outside_risk_limits_is_refused(db_session, redis_client):
+    curve = await seed_healthy_launch(redis_client, NOW)
+    await store.save_strategy_config(db_session, "solana_fresh", {"manual_stop_loss_pct": "0.6"}, None)  # max_stop_pct 0.30
+    await db_session.commit()
+    cand = await make_candidate(db_session)
+    a = await evaluate_with_gate(db_session, redis_client, ENV, Sources(redis_client, FakeRpc(curve)), cand, NOW)
+    assert not a.executable and "MANUAL_SL_TOO_WIDE" in {f.code for f in a.findings}
+    assert (await db_session.execute(select(PaperPosition))).scalars().all() == []

@@ -6,6 +6,7 @@ from app.api.routes import (
     candidates,
     control,
     health,
+    live,
     ml,
     notifications,
     paper,
@@ -28,6 +29,7 @@ api_router.include_router(signals.router)
 api_router.include_router(risk.router)
 api_router.include_router(ml.router)
 api_router.include_router(paper.router)
+api_router.include_router(live.router)
 api_router.include_router(control.router)
 api_router.include_router(analytics.router)
 api_router.include_router(strategies.router)

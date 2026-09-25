@@ -12,7 +12,7 @@ const MODE_HELP: Record<string, string> = {
   OFF: "No evaluation, no entries.",
   MANUAL: "Every entry waits for your approval; approval never bypasses a safety check.",
   PAPER: "Qualified trades are simulated in the paper book automatically.",
-  AUTO: "Automatic within the gate. Still paper: live execution needs the server's environment locks and is not implemented.",
+  AUTO: "Automatic within the gate, never waits for approval. Paper unless the global mode is LIVE, the server's environment locks are open and the live worker is ready (Pump.fun strategies only).",
 };
 
 function asText(v: unknown): string {
@@ -111,7 +111,12 @@ export default function StrategyPanel({ s, onChange }: { s: StrategyOut; onChang
           <div className="form-grid">
             {s.editable.map((k) => (
               <div className="form-row" key={k}>
-                <label htmlFor={`cfg-${s.name}-${k}`}>{k.replace(/_/g, " ")}</label>
+                <label htmlFor={`cfg-${s.name}-${k}`}>
+                  {k.replace(/_/g, " ")}
+                  {k.startsWith("manual_") && (
+                    <span className="muted">{k.endsWith("_sol") ? " (SOL; empty = automatic)" : " (fraction, 0.2 = 20%; empty = automatic)"}</span>
+                  )}
+                </label>
                 {typeof s.config[k] === "boolean" ? (
                   <select id={`cfg-${s.name}-${k}`} value={draft[k] ?? ""} onChange={(e) => setDraft({ ...draft, [k]: e.target.value })}>
                     <option value="true">true</option>

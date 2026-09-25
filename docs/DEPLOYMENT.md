@@ -87,7 +87,8 @@ Fill in every value `.env.example` leaves blank. Where each one comes from:
 | `POSTGRES_PASSWORD` | `openssl rand -hex 24` (or any strong random string — this database is never exposed to the host in production, see `docker-compose.prod.yml`) |
 | `REDIS_PASSWORD` | `openssl rand -hex 24` |
 | `SOLANA_RPC_URL` / `SOLANA_WS_URL` (+ backups) | A real RPC provider (Helius, Triton, etc.) — verify the endpoint against current provider docs before use, per `ARCHITECTURE_AUDIT.md` |
-| `HELIUS_API_KEY` / `HELIUS_WEBHOOK_SECRET` | From your Helius account, if using Helius |
+| `HELIUS_API_KEY` | From your Helius account, if using Helius (the RPC/WS URLs are derived from it when not set) |
+| `WALLET_PRIVATE_KEY` / `WALLET_PUBLIC_KEY` | Only for live Pump.fun execution: a dedicated trading-only wallet holding only what you can lose. See `docs/CONFIGURATION.md` |
 | `BINANCE_API_KEY` / `BINANCE_API_SECRET` | A Binance API key scoped to Futures trading only — leave `BINANCE_TESTNET=true` until you've verified the integration end-to-end |
 | `LETSENCRYPT_EMAIL` | Any address you control — Let's Encrypt uses it for expiry warnings |
 
@@ -127,7 +128,8 @@ ran `up`, it wasn't escaped and login will fail.
 build`** (the sandbox that built this codebase has no Docker Hub access —
 see "What's genuinely verified" below — so this specific step was never
 actually exercised until a real droplet/PC ran it): `apps/web`'s
-`NEXT_PUBLIC_API_URL` / `NEXT_PUBLIC_WS_URL` are inlined into the client
+`NEXT_PUBLIC_API_URL` (the realtime WebSocket URL is derived from it;
+there is no separate WS variable) is inlined into the client
 JS bundle by `next build` itself, at *build* time — `env_file:` only
 reaches the *running* container, too late to affect what already got
 baked into the bundle. Compose's own `${VAR}` interpolation (what

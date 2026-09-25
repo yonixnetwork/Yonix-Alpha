@@ -94,6 +94,9 @@ async def evaluate_with_gate(
     else:
         inp, evidence = await assemble_fresh(sources, mint, now, controls, engine=engine)
     inp.live_ready, inp.live_not_ready_reason = live_ready, live_reason
+    # Operator exit plan (dashboard strategy config); unset parts are automatic.
+    inp.overrides = pipeline.manual_overrides(await store.load_strategy_config(session, engine),
+                                              inp.market.price if inp.market else None, inp.side)
     lifecycle = "MIGRATED" if engine == "solana_migration" else "FRESH"
     if inp.liquidity_model is not None:
         adapter = "pumpswap_pool" if lifecycle == "MIGRATED" else "pump_curve"

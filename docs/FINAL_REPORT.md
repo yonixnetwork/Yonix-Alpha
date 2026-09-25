@@ -288,7 +288,8 @@ All blocked by the build environment's proxy (403).
 - Every live-data path is **NOT VERIFIED** until run on the droplet.
 - **No strategy has a demonstrated edge.** There are no backtests. Paper results will be
   the first evidence, and they are simulations: no latency, same-slot competition or MEV.
-- Live execution is not implemented for any venue, by design.
+- Live execution: Pump.fun only, IMPLEMENTED — AWAITING CREDENTIAL VERIFICATION (see
+  `docs/AUDIT_REPORT.md`); futures venues are not implemented.
 - Confluence on MT5 is BLOCKED.
 - Grid results are per session, not per trade (win rate doesn't apply).
 - Tokens are kept in `localStorage` (pre-existing; see `SECURITY.md`).
@@ -425,4 +426,5 @@ Everything marked VERIFIED in `CONTROL_CENTER.md` §4:
 - Model quality (no model exists).
 - Behaviour under real market load on the 2 GB droplet.
 
-Live execution is NOT IMPLEMENTED. Confluence MT5 is BLOCKED.
+Live execution: Pump.fun only, IMPLEMENTED — AWAITING CREDENTIAL VERIFICATION (superseded
+by `docs/AUDIT_REPORT.md`). Confluence MT5 is BLOCKED.

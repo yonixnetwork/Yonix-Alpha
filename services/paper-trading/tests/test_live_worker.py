@@ -367,3 +367,17 @@ async def test_worker_reconciles_before_processing_and_then_reports_ready(sessio
         assert (await s.get(PaperPosition, pid)).status == "open"
         n = (await s.execute(select(func.count()).select_from(ReconciliationEvent))).scalar_one()
     assert n == 0
+
+
+async def test_migrated_live_entry_routes_to_pumpswap(session_factory, redis_client):
+    _, a, aid, cid = await live_assessment(session_factory, redis_client)
+    async with session_factory() as s:
+        acct = await live_trading.get_live_account(s)
+        acct.cash_balance = Decimal(5)
+        p = await live_trading.enter_live(s, redis_client, acct, a, aid, None, NOW, "MIGRATED", 6,
+                                          {"pool": "Pool1111", "venue": {"pool": "Pool1111"}})
+        order = await s.get(ExecutionOrder, p.pending_order_id)
+        await s.commit()
+    assert (p.lifecycle, p.execution_route, p.pool, p.plan["venue"]["type"]) == ("MIGRATED", "pump-amm", "Pool1111", "pumpswap_pool")
+    req, exp = live_trading._trade_request(order, WALLET)
+    assert req.pool == "pump-amm" and req.action == "buy" and exp.side == "buy"

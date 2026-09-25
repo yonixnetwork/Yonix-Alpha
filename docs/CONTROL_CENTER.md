@@ -4,11 +4,13 @@ This document covers what the control-center pass added, how it fits together, h
 deploy it, and **what has and has not been verified**. Design decisions and research
 sources are in `IMPLEMENTATION_MATRIX.md`.
 
-Live trading stays off. Nothing in this pass places a real order, signs a transaction, or
-reads a wallet key. The server's `.env` keeps `TRADING_ENABLED=false`,
+Live trading stays off. The server's `.env` keeps `TRADING_ENABLED=false`,
 `LIVE_TRADING_ENABLED=false` and `PAPER_TRADING=true`. Live execution needs all three
-flipped *on the server*; the dashboard can only display them. Even with the locks open,
-live Solana execution is not implemented: a LIVE target is refused and logged.
+flipped *on the server*; the dashboard can only display them. Live execution exists for
+Pump.fun tokens only (fresh and PumpSwap-migrated): PumpPortal local transactions, checked
+by a transaction guard, signed locally, confirmed and reconciled. It is **IMPLEMENTED —
+AWAITING CREDENTIAL VERIFICATION**. See `docs/AUDIT_REPORT.md` and the dashboard's
+Live Execution page. Futures venues remain paper-only.
 
 ## 1. How a pump.fun token flows through the system
 
@@ -158,7 +160,8 @@ Solana data, because the build environment blocks every external API (proxy 403)
 | Dashboard (23 routes) | VERIFIED (browser) | Chromium 1440 px + 390 px, DB seeded by the real pipeline; no page overflow |
 | Live data on the server | NOT VERIFIED | run §3 and `yonixalpha_core.tools.verify_live` |
 | Any strategy's profitability | NOT VERIFIED | no backtest; paper results will be the first evidence |
-| Live execution (any venue) | NOT IMPLEMENTED | LIVE targets are refused; environment locks closed |
+| Live execution (Pump.fun) | IMPLEMENTED — AWAITING CREDENTIAL VERIFICATION | mocked-boundary tests only; no real transaction sent |
+| Live execution (futures venues) | NOT IMPLEMENTED | LIVE targets are refused |
 | Confluence on MT5 / forex | BLOCKED | MetaTrader5 is Windows-only |
 
 ## 5. Behaviour worth knowing before reading the results
@@ -168,8 +171,9 @@ Solana data, because the build environment blocks every external API (proxy 403)
   allowance is counted as an exit cost. The Solana engines start with a 10% minimum stop
   (`ENGINE_DEFAULTS`) so the stop sits outside those costs; sizing shrinks the position so the
   loss at the stop stays at 1% of paper equity.
-- **Post-migration trades always need approval**: DexScreener transaction counts carry no
-  wallet identities, so manipulation checks can't run (`NO_WALLET_DATA`).
+- **Post-migration trades are assessed from the canonical PumpSwap pool**: reserves and fee
+  are read on chain and trader wallets come from the pool's Buy/Sell events, so the same
+  wallet-level checks run as for bonding-curve tokens. No pool yet means `MIGRATION_PENDING`.
 - **Equity marks open positions at the last price**, before exit costs. Realized PnL is net of
   every simulated fee and impact.
 - **"What happened afterwards"** on rejected items ignores costs and whether an exit was

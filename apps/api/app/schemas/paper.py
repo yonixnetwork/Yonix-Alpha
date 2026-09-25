@@ -46,3 +46,15 @@ class PaperPositionOut(BaseModel):
     management_paused: bool = False
     exit_requested: bool = False
     account_id: UUID | None = None
+    # Provenance (migration 0011)
+    execution_mode: str = "PAPER"
+    source: str | None = None
+    lifecycle: str | None = None
+    execution_provider: str | None = None
+    execution_route: str | None = None
+    pool: str | None = None
+    strategy: str | None = None
+    model_version: str | None = None
+    feature_version: str | None = None
+    pending_order_id: UUID | None = None
+    exit_failures: int = 0

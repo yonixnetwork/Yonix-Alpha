@@ -89,8 +89,14 @@ def logs_of(*events: bytes) -> list[str]:
 
 
 class FakeRpc:
-    def __init__(self, curve: Curve, mint_authority: str | None = None, fail: set[str] | frozenset = frozenset()):
+    def __init__(self, curve: Curve, mint_authority: str | None = None, fail: set[str] | frozenset = frozenset(),
+                 funders: dict[str, str] | None = None, busy: set[str] | frozenset = frozenset()):
+        """`funders` maps a buyer wallet to the wallet that funded it (the
+        buyer then looks fresh); funders have a short history unless listed
+        in `busy` (an exchange-like wallet); every other wallet has a long
+        history."""
         self.curve, self.mint_authority, self.fail, self.calls = curve, mint_authority, set(fail), []
+        self.funders, self.busy = funders or {}, set(busy)
 
     async def call(self, method, params=None):
         self.calls.append(method)
@@ -108,6 +114,17 @@ class FakeRpc:
         if method == "getMultipleAccounts":
             owners = [CURVE] + [wallet(i) for i in range(12)]
             return {"value": [{"data": {"parsed": {"info": {"owner": o}}}} for o in owners]}
+        if method == "getSignaturesForAddress":
+            addr = params[0]
+            if addr in self.funders:
+                return [{"signature": f"fund-{addr}", "err": None}]
+            if addr in self.funders.values() and addr not in self.busy:
+                return [{"signature": f"f-{addr}-{i}", "err": None} for i in range(5)]
+            return [{"signature": f"old-{addr}-{i}", "err": None} for i in range(params[1].get("limit", 25))]
+        if method == "getTransaction" and str(params[0]).startswith("fund-"):
+            buyer = params[0][len("fund-"):]
+            ix = {"parsed": {"type": "transfer", "info": {"source": self.funders[buyer], "destination": buyer, "lamports": 10**8}}}
+            return {"transaction": {"message": {"instructions": [ix]}}, "meta": {"innerInstructions": []}}
         raise AssertionError(f"unexpected RPC {method}")
 
 

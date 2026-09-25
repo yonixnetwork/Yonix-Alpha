@@ -9,7 +9,15 @@ import { apiDelete, apiGet, apiPatch, apiPost, apiPut, ApiError } from "@/lib/ap
 import { formatDate } from "@/lib/format";
 import type { BlacklistOut, CustomRuleOut } from "@/lib/types";
 
-const SCOPES = ["GLOBAL", "solana_fresh", "solana_migration", "solana_momentum"];
+const SCOPES = ["GLOBAL", "FRESH", "MIGRATED", "solana_fresh", "solana_migration", "solana_momentum"];
+const FIELDS = ["name", "symbol", "metadata", "any", "mint"];
+const MATCH = [
+  { value: "word", label: "word (whole word)" },
+  { value: "exact", label: "exact" },
+  { value: "substring", label: "substring" },
+  { value: "pattern", label: "pattern (glob)" },
+  { value: "regex", label: "regex" },
+];
 const RULE_SCOPES = ["GLOBAL", "solana_fresh", "solana_migration", "solana_momentum", "binance_futures", "bybit_futures", "hyperliquid_perps"];
 const OPS = ["<", "<=", ">", ">=", "==", "!="];
 const ACTIONS = ["WAIT", "REQUIRE_MANUAL_APPROVAL", "NO_TRADE", "REJECT", "ALLOW"];
@@ -20,7 +28,7 @@ export default function RulesPage() {
   const [rules, setRules] = useState<CustomRuleOut[]>([]);
   const [fields, setFields] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [bl, setBl] = useState({ scope: "GLOBAL", field: "symbol", match_type: "exact", value: "", reason: "" });
+  const [bl, setBl] = useState({ scope: "GLOBAL", field: "name", match_type: "word", action: "BLOCK", value: "", reason: "" });
   const [rule, setRule] = useState({ name: "", scope: "GLOBAL", field: "", op: ">", threshold: "", action: "WAIT" });
   const [editingBl, setEditingBl] = useState<string | null>(null);
   const [editingRule, setEditingRule] = useState<string | null>(null);
@@ -58,17 +66,22 @@ export default function RulesPage() {
 
   return (
     <div>
-      <PageHeader title="Blacklist & Filters" icon={<Filter size={20} aria-hidden />} />
+      <PageHeader title="Word Filters & Rules" icon={<Filter size={20} aria-hidden />} />
       {error && (
         <div className="error" role="alert">
           {error}
         </div>
       )}
 
-      <div className="section-title">Blacklist</div>
+      <div className="section-title">Word filters</div>
       <p className="muted">
-        A match rejects the token outright. Patterns are shell-style globs (<span className="mono">*</span> any text,{" "}
-        <span className="mono">?</span> one character), case-insensitive; a pattern of only wildcards is refused.
+        Case-insensitive. A <strong>BLOCK</strong> match rejects the token; an <strong>ALLOW</strong> match waives word
+        blocks for that token (it never waives the built-in safety checks — authorities, tax, sellability, liquidity,
+        risk). Scope <span className="mono">FRESH</span> applies to bonding-curve launches, <span className="mono">MIGRATED</span>{" "}
+        to PumpSwap tokens, <span className="mono">GLOBAL</span> to both. <em>word</em> matches whole words (“rug” matches “Rug
+        Pull” but not “rugby”); <em>pattern</em> is a glob (<span className="mono">*</span>, <span className="mono">?</span>);{" "}
+        <em>regex</em> is checked for catastrophic patterns. <span className="mono">metadata</span> is the token’s metadata URI;{" "}
+        <span className="mono">any</span> checks name, symbol and metadata.
       </p>
       <div className="inline-form">
         <select aria-label="Blacklist scope" value={bl.scope} onChange={(e) => setBl({ ...bl, scope: e.target.value })}>
@@ -76,16 +89,23 @@ export default function RulesPage() {
             <option key={s}>{s}</option>
           ))}
         </select>
+        <select aria-label="Action" value={bl.action} onChange={(e) => setBl({ ...bl, action: e.target.value })}>
+          <option value="BLOCK">BLOCK</option>
+          <option value="ALLOW">ALLOW</option>
+        </select>
         <select aria-label="Field" value={bl.field} onChange={(e) => setBl({ ...bl, field: e.target.value })}>
-          <option value="symbol">symbol</option>
-          <option value="name">name</option>
-          <option value="mint">mint</option>
+          {FIELDS.map((f) => (
+            <option key={f}>{f}</option>
+          ))}
         </select>
         <select aria-label="Match type" value={bl.match_type} onChange={(e) => setBl({ ...bl, match_type: e.target.value })}>
-          <option value="exact">exact</option>
-          <option value="pattern">pattern</option>
+          {MATCH.map((m) => (
+            <option key={m.value} value={m.value}>
+              {m.label}
+            </option>
+          ))}
         </select>
-        <input aria-label="Value" placeholder="value, e.g. *SCAM*" value={bl.value} onChange={(e) => setBl({ ...bl, value: e.target.value })} />
+        <input aria-label="Value" placeholder="word, e.g. rug" value={bl.value} onChange={(e) => setBl({ ...bl, value: e.target.value })} />
         <input aria-label="Reason" placeholder="reason (optional)" value={bl.reason} onChange={(e) => setBl({ ...bl, reason: e.target.value })} />
         <button
           className="btn btn-sm"
@@ -107,12 +127,13 @@ export default function RulesPage() {
         )}
       </div>
       {blacklist.length === 0 ? (
-        <div className="muted">No blacklist entries.</div>
+        <div className="muted">No word filters.</div>
       ) : (
         <table className="data-table">
           <thead>
             <tr>
               <th>Scope</th>
+              <th>Action</th>
               <th>Field</th>
               <th>Match</th>
               <th>Value</th>
@@ -126,6 +147,9 @@ export default function RulesPage() {
             {blacklist.map((b) => (
               <tr key={b.id}>
                 <td>{b.scope}</td>
+                <td>
+                  <span className={b.action === "ALLOW" ? "pill pill-ok" : "pill pill-danger"}>{b.action}</span>
+                </td>
                 <td>{b.field}</td>
                 <td>{b.match_type}</td>
                 <td className="mono">{b.value}</td>
@@ -146,7 +170,7 @@ export default function RulesPage() {
                       aria-label={`Edit blacklist entry ${b.value}`}
                       onClick={() => {
                         setEditingBl(b.id);
-                        setBl({ scope: b.scope, field: b.field, match_type: b.match_type, value: b.value, reason: b.reason ?? "" });
+                        setBl({ scope: b.scope, field: b.field, match_type: b.match_type, action: b.action, value: b.value, reason: b.reason ?? "" });
                       }}
                     >
                       <Pencil size={14} aria-hidden />
@@ -155,7 +179,7 @@ export default function RulesPage() {
                       label={<Trash2 size={14} aria-hidden />}
                       ariaLabel={`Delete blacklist entry ${b.value}`}
                       title="Delete this blacklist entry?"
-                      body={`${b.scope} ${b.field} ${b.match_type} "${b.value}" stops blocking tokens. The deletion is audited.`}
+                      body={`${b.scope} ${b.action} ${b.field} ${b.match_type} "${b.value}" is removed. The deletion is audited.`}
                       danger
                       onConfirm={() => run(() => apiDelete(`/api/control/blacklist/${b.id}`))}
                     />

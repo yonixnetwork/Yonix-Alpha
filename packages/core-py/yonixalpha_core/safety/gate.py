@@ -381,6 +381,12 @@ def _check_flow(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) -> 
         out.append(_finding(RiskCategory.HOLDER, "RELATED_WALLETS", RiskLevel.HIGH,
                             f"{fl.related_wallet_groups} fresh early buyers share one funding source — RELATED-WALLET INDICATOR",
                             FinalDecision.REQUIRE_MANUAL_APPROVAL))
+    if fl.funding_checked_wallets == 0:
+        # Attempted but no wallet could be checked: the indicators above are
+        # unavailable, which is stated rather than read as "no links".
+        out.append(_finding(RiskCategory.HOLDER, "FUNDING_UNCHECKED", RiskLevel.MODERATE,
+                            "early buyers' funding sources could not be checked; creator-linked and related-wallet "
+                            "indicators are unavailable for this decision", FinalDecision.EXECUTE))
     if fl.creator_launches_24h is not None and fl.creator_launches_24h > s.max_creator_launches_24h:
         out.append(_finding(RiskCategory.HOLDER, "SERIAL_CREATOR", RiskLevel.HIGH,
                             f"creator launched {fl.creator_launches_24h} tokens in the last 24 h", FinalDecision.REQUIRE_MANUAL_APPROVAL))
@@ -659,9 +665,21 @@ def assess(inp: AssessmentInput, settings: SafetySettings, versions: dict[str, A
         evaluated_at=inp.now,
         versions={"risk_engine": RISK_ENGINE_VERSION, **(versions or {})},
         settings_snapshot=settings_to_dict(settings),
-        reports={"tax": tax_report(inp.token, settings), "sellability": _sellability(inp, plan, findings),
-                 "liquidity": _liquidity(inp, plan)},
+        reports={"tax": {**tax_report(inp.token, settings), "decision": _tax_decision(inp, findings)},
+                 "sellability": _sellability(inp, plan, findings), "liquidity": _liquidity(inp, plan)},
     )
+
+
+def _tax_decision(inp: AssessmentInput, findings: list[Finding]) -> str:
+    """What the tax check alone decided: NO_TRADE above the limit; an unknown
+    tax is NO_TRADE in AUTO (no approval step) and needs approval otherwise."""
+    codes = {f.code for f in findings}
+    if codes & {"BUY_TAX_EXCESSIVE", "SELL_TAX_EXCESSIVE"}:
+        return FinalDecision.NO_TRADE.value
+    if "TAX_UNKNOWN" in codes:
+        auto = inp.strategy_mode == StrategyMode.AUTO and inp.global_mode != GlobalMode.MANUAL
+        return FinalDecision.NO_TRADE.value if auto else FinalDecision.REQUIRE_MANUAL_APPROVAL.value
+    return "PASS"
 
 
 def format_summary(a: Assessment) -> list[str]:

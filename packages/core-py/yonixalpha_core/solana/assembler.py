@@ -162,6 +162,7 @@ async def _wallet_analysis(src: Sources, inp: AssessmentInput, trades, creator: 
         res = await funding.funding_links(src.rpc, src.redis, funding.early_buyers(trades, n), creator, n)
     except Exception as exc:  # noqa: BLE001
         ev["errors"].append(f"funding analysis: {type(exc).__name__}")
+        inp.flow.funding_checked_wallets = 0
         return
     inp.flow.funding_checked_wallets = res["checked"]
     inp.flow.creator_linked_buyers = res["creator_linked"] if res["checked"] else None

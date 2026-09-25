@@ -18,6 +18,7 @@ import {
   Layers,
   ListChecks,
   LogOut,
+  Send,
   Menu,
   PanelLeftClose,
   PanelLeftOpen,
@@ -75,6 +76,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     items: [
       { href: "/dashboard/decisions", label: "Decisions", icon: ClipboardCheck },
       { href: "/dashboard/paper", label: "Paper Trading", icon: Wallet },
+      { href: "/dashboard/live", label: "Live Execution", icon: Send },
       { href: "/dashboard/candidates", label: "Candidates", icon: Coins },
     ],
   },
@@ -89,7 +91,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     title: "Risk",
     items: [
       { href: "/dashboard/risk-settings", label: "Risk Settings", icon: ShieldAlert },
-      { href: "/dashboard/rules", label: "Blacklist & Filters", icon: Filter },
+      { href: "/dashboard/rules", label: "Word Filters & Rules", icon: Filter },
       { href: "/dashboard/risk", label: "Kill Switch", icon: Radio },
     ],
   },

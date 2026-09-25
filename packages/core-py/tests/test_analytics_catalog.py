@@ -46,4 +46,11 @@ def test_config_validation_rejects_bad_input_without_coercion():
     assert validate_config("hyperliquid_grid", {"range_mode": "manual", "range_lower": "90", "range_upper": "110"})[1] == []
     assert validate_config("confluence_matrix", {"killzones": [[7, 10], [12, 15]]})[1] == []
     assert validate_config("confluence_matrix", {"killzones": [[10, 7]]})[1]
-    assert validate_config("solana_fresh", {})[1]
+    # Pump.fun strategies: optional operator exit plan, empty = automatic.
+    assert validate_config("solana_fresh", {})[1] == []
+    clean, errors = validate_config("solana_fresh", {"manual_stop_loss_pct": "0.2", "manual_tp1_pct": "0.5",
+                                                     "manual_tp2_pct": "1", "manual_position_size_sol": None})
+    assert errors == [] and clean["manual_stop_loss_pct"] == "0.2" and clean["manual_position_size_sol"] is None
+    for bad in ({"manual_stop_loss_pct": "0.95"}, {"manual_stop_loss_pct": "abc"}, {"manual_stop_loss_pct": True},
+                {"manual_tp2_pct": "0.5"}, {"manual_tp1_pct": "1", "manual_tp2_pct": "0.5"}, {"stop_pct": "0.1"}):
+        assert validate_config("solana_migration", bad)[1], bad

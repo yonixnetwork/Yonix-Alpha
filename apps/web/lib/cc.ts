@@ -190,4 +190,25 @@ export interface TradeDetail {
   strategy: string | null;
   assessment: Record<string, any> | null;
   timeline: { type: string; at: string; detail: Record<string, unknown> | null }[];
+  orders?: ExecutionOrderRow[];
+}
+
+export interface ExecutionOrderRow {
+  id: string;
+  side: "BUY" | "SELL";
+  reason: string;
+  status: string;
+  route: string;
+  provider: string;
+  amount: string;
+  amount_kind: string;
+  slippage_pct: string;
+  signature: string | null;
+  error: string | null;
+  fill: { sol_change_lamports: number; token_change_raw: number; fee_lamports: number } | null;
+  created_at: string;
+  confirmed_at: string | null;
+  mint?: string;
+  attempts?: number;
+  position_id?: string | null;
 }

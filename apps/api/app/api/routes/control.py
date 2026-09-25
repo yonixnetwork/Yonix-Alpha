@@ -177,16 +177,16 @@ async def list_blacklist(db: AsyncSession = Depends(get_db), _: str = Depends(ge
 async def add_blacklist(body: BlacklistIn, request: Request, db: AsyncSession = Depends(get_db),
                         username: str = Depends(get_current_username)):
     value = body.value.strip()
-    errors = validate_blacklist_rule(body.scope, body.field, value, body.match_type)
+    errors = validate_blacklist_rule(body.scope, body.field, value, body.match_type, body.action)
     if errors:
         raise HTTPException(422, {"errors": errors})
     dup = await db.execute(select(BlacklistEntry.id).where(
-        BlacklistEntry.scope == body.scope, BlacklistEntry.field == body.field,
+        BlacklistEntry.scope == body.scope, BlacklistEntry.field == body.field, BlacklistEntry.action == body.action,
         BlacklistEntry.match_type == body.match_type, func.lower(BlacklistEntry.value) == value.lower()))
     if dup.first() is not None:
         raise HTTPException(409, "an identical rule already exists")
-    row = BlacklistEntry(scope=body.scope, field=body.field, match_type=body.match_type, value=value, reason=body.reason,
-                         created_by=await _user_id(db, username))
+    row = BlacklistEntry(scope=body.scope, field=body.field, match_type=body.match_type, action=body.action, value=value,
+                         reason=body.reason, created_by=await _user_id(db, username))
     db.add(row)
     await db.flush()
     await _audit(db, username, request, "blacklist.added", {"id": str(row.id), **body.model_dump()})
@@ -214,11 +214,13 @@ async def edit_blacklist(rule_id: UUID, body: BlacklistIn, request: Request, db:
     if row is None:
         raise HTTPException(404, "rule not found")
     value = body.value.strip()
-    errors = validate_blacklist_rule(body.scope, body.field, value, body.match_type)
+    errors = validate_blacklist_rule(body.scope, body.field, value, body.match_type, body.action)
     if errors:
         raise HTTPException(422, {"errors": errors})
-    before = {"scope": row.scope, "field": row.field, "match_type": row.match_type, "value": row.value, "reason": row.reason}
+    before = {"scope": row.scope, "field": row.field, "match_type": row.match_type, "action": row.action, "value": row.value,
+              "reason": row.reason}
     row.scope, row.field, row.match_type, row.value, row.reason = body.scope, body.field, body.match_type, value, body.reason
+    row.action = body.action
     row.updated_at = datetime.now(timezone.utc)
     await _audit(db, username, request, "blacklist.edited", {"id": str(rule_id), "before": before, "after": body.model_dump()})
     await db.commit()

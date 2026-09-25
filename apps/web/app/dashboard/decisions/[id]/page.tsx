@@ -22,6 +22,86 @@ function Provenance({ v }: { v: PlannedValue | null }) {
   );
 }
 
+function Reports({ reports }: { reports: NonNullable<AssessmentDetail["assessment"]["reports"]> }) {
+  const tax = reports.tax;
+  const sell = reports.sellability as Record<string, unknown> | undefined;
+  const liq = reports.liquidity as Record<string, unknown> | undefined;
+  const pctOrUnknown = (v: string | null | undefined) => (v === null || v === undefined ? "UNKNOWN" : `${v}%`);
+  const list = (v: unknown) => (Array.isArray(v) && v.length ? v.join(", ") : "none");
+  return (
+    <div className="card-grid">
+      {tax && (
+        <div className="card">
+          <div className="status-label">Token tax</div>
+          <dl className="kv">
+            <dt>Buy tax</dt>
+            <dd>{pctOrUnknown(tax.buy_tax_pct)}</dd>
+            <dt>Sell tax</dt>
+            <dd>{pctOrUnknown(tax.sell_tax_pct)}</dd>
+            <dt>Tax limit</dt>
+            <dd>
+              buy ≤ {tax.buy_limit_pct}% · sell ≤ {tax.sell_limit_pct}%
+            </dd>
+            <dt>Tax source</dt>
+            <dd>{tax.source}</dd>
+            <dt>Tax confidence</dt>
+            <dd className={tax.confidence === "HIGH" ? "level-LOW" : "level-HIGH"}>{tax.confidence}</dd>
+            <dt>Decision</dt>
+            <dd>
+              <span className={tax.decision === "PASS" ? "pill pill-ok" : "pill pill-danger"}>{tax.decision ?? "—"}</span>
+            </dd>
+          </dl>
+          <div className="form-hint">Venue/protocol trading fees are costs, not token tax; they are counted in entry/exit cost.</div>
+        </div>
+      )}
+      {sell && (
+        <div className="card">
+          <div className="status-label">Sellability</div>
+          <dl className="kv">
+            <dt>Status</dt>
+            <dd>
+              <span className={sell.status === "SELLABLE" ? "pill pill-ok" : sell.status === "UNKNOWN" ? "pill pill-warn" : "pill pill-danger"}>
+                {String(sell.status)}
+              </span>
+            </dd>
+            <dt>Route</dt>
+            <dd>{String(sell.route ?? "none")}</dd>
+            <dt>Sell simulated</dt>
+            <dd>{sell.sell_simulated ? "yes" : "no"}</dd>
+            <dt>Expected sell price</dt>
+            <dd>{sell.expected_sell_price ? formatDecimal(String(sell.expected_sell_price), 12) : "—"}</dd>
+            <dt>Exit impact</dt>
+            <dd>{formatBps((sell.exit_impact_bps as string | null) ?? null)}</dd>
+            <dt>Transfer restrictions</dt>
+            <dd>{list(sell.transfer_restrictions)}</dd>
+            <dt>Blocking</dt>
+            <dd>{list(sell.blocking)}</dd>
+          </dl>
+        </div>
+      )}
+      {liq && (
+        <div className="card">
+          <div className="status-label">Liquidity &amp; size</div>
+          <dl className="kv">
+            <dt>Usable liquidity</dt>
+            <dd>{liq.usable_liquidity ? formatDecimal(String(liq.usable_liquidity), 4) : "—"}</dd>
+            <dt>Position size</dt>
+            <dd>{liq.position_size ? formatDecimal(String(liq.position_size), 6) : "—"}</dd>
+            <dt>Position / liquidity</dt>
+            <dd>{liq.position_to_liquidity ? formatPct(String(liq.position_to_liquidity)) : "—"}</dd>
+            <dt>Entry impact</dt>
+            <dd>{formatBps((liq.entry_impact_bps as string | null) ?? null)}</dd>
+            <dt>Exit impact</dt>
+            <dd>{formatBps((liq.exit_impact_bps as string | null) ?? null)}</dd>
+            <dt>Binding size cap</dt>
+            <dd>{String(liq.binding_cap ?? "—")}</dd>
+          </dl>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function DecisionDetailPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -179,6 +259,13 @@ export default function DecisionDetailPage() {
           </dl>
         </div>
       </div>
+
+      {d.reports && (
+        <>
+          <div className="section-title">Tax, sellability and liquidity</div>
+          <Reports reports={d.reports} />
+        </>
+      )}
 
       <div className="section-title">Findings</div>
       <table className="data-table">

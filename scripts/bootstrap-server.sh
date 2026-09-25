@@ -107,7 +107,7 @@ cat <<EOF
 ==> Bootstrap complete. Next steps (see docs/DEPLOYMENT.md):
     1. cd ${REPO_DIR}
     2. cp .env.example .env && edit .env with real secrets (including
-       NEXT_PUBLIC_API_URL/NEXT_PUBLIC_WS_URL for your real domain)
+       NEXT_PUBLIC_API_URL for your real domain)
     3. docker compose --env-file .env -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.prod.yml up -d --build
     4. Run the certbot TLS bootstrap command once DNS for your domain points at this server.
 EOF

@@ -59,9 +59,6 @@ class Settings(BaseSettings):
     WALLET_PUBLIC_KEY: Optional[str] = None
     WALLET_PRIVATE_KEY: Optional[SecretStr] = Field(
         None, validation_alias=AliasChoices("WALLET_PRIVATE_KEY", "SOLANA_WALLET_PRIVATE_KEY"))
-    # Optional: appended to the PumpPortal data WebSocket (their paid
-    # PumpSwap data tier). Not needed for local-signed trading.
-    PUMPPORTAL_API_KEY: Optional[SecretStr] = None
 
     # Binance (Phase 4+)
     BINANCE_API_KEY: Optional[str] = None
@@ -99,7 +96,6 @@ class Settings(BaseSettings):
 
     # Frontend / domain
     NEXT_PUBLIC_API_URL: str = "http://localhost:8000"
-    NEXT_PUBLIC_WS_URL: str = "ws://localhost:8000"
     PUBLIC_DOMAIN: str = "http://localhost:3000"
 
     # Logging

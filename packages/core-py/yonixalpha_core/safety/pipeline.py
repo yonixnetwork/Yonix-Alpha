@@ -8,6 +8,7 @@ import hashlib
 import json
 import uuid
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 from redis.asyncio import Redis
@@ -19,7 +20,7 @@ from yonixalpha_core.db.models import BlacklistEntry, CustomRuleEntry, MLFeature
 from yonixalpha_core.ml.gate_features import DRIFT_FLAG_PREFIX, FEATURE_VERSION, MODEL_FOR_ENGINE, explain, vector
 from yonixalpha_core.safety import store
 from yonixalpha_core.safety.gate import Assessment
-from yonixalpha_core.safety.models import FinalDecision, MLInput, StrategyMode
+from yonixalpha_core.safety.models import FinalDecision, ManualOverrides, MLInput, StrategyMode
 from yonixalpha_core.solana.assembler import Controls
 
 APPROVAL_VALID_SECONDS = 10 * 60
@@ -78,6 +79,28 @@ async def load_controls(session: AsyncSession, redis: Redis, app_settings: Any, 
         manual_approval_granted=approval,
     )
     return controls, account, settings_meta
+
+
+def manual_overrides(config: dict[str, Any], price: Decimal | None, side: str = "LONG") -> ManualOverrides:
+    """The operator's percentage exit plan for a Pump.fun strategy (strategy
+    config, validated by strategies.catalog) as prices around the entry
+    reference. Unset values stay None and are calculated automatically; the
+    planner validates every value it receives."""
+    def d(key):
+        v = config.get(key)
+        return Decimal(str(v)) if v not in (None, "") else None
+
+    o = ManualOverrides(position_size_quote=d("manual_position_size_sol"), max_risk_quote=d("manual_max_risk_sol"),
+                        trailing_distance_pct=d("manual_trailing_pct"))
+    if price is None or price <= 0:
+        return o  # price-relative values cannot be placed; the planner reports the missing price
+    sign = Decimal(1) if side == "LONG" else Decimal(-1)
+    if (sl := d("manual_stop_loss_pct")) is not None:
+        o.stop_loss = price * (1 - sign * sl)
+    tps = [d(f"manual_tp{i}_pct") for i in (1, 2, 3)]
+    if any(t is not None for t in tps):
+        o.take_profits = [price * (1 + sign * t) for t in tps if t is not None]
+    return o
 
 
 async def versions(session: AsyncSession, settings_meta: dict, signal, adapter: str | None) -> dict[str, Any]:

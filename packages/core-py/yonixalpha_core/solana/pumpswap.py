@@ -8,10 +8,14 @@ idl/pump.json `migrate` accounts):
   pool_authority = PDA ["pool-authority", mint] under the Pump program;
 - quotes use effective quote reserves = quote vault balance +
   Pool.virtual_quote_reserves; base reserves are the base vault balance;
-- fees depend on market-cap tiers (fee program), so the fee actually
-  charged is read from the pool's own latest BuyEvent/SellEvent (each event
-  carries lp, protocol and coin-creator fee bps). Without an event the pool
-  is not treated as priced.
+- fees depend on market-cap tiers (fee program) and on the coin (buyback,
+  cashback, holder rewards), so the fee actually charged is read from the
+  pool's own latest BuyEvent/SellEvent, derived from the amounts the trader
+  paid/received. Without an event the pool is not treated as priced.
+
+Verified against real mainnet data from pump-public-docs (PUMP_SWAP_README's
+example pool): pool_authority, canonical_pool and both vault ATAs derive to
+the documented addresses (tests/test_pumpswap.py).
 
 Trade events also carry the trader's wallet, which gives migrated tokens the
 same wallet-level flow analysis as bonding-curve tokens — without it the
@@ -99,7 +103,7 @@ class PoolTrade:
     quote_lamports: int  # SOL paid (buy, incl. fees) or received (sell, after fees)
     pool_base: int  # pool reserves as reported by the event
     pool_quote: int
-    fee_bps: int  # lp + protocol + coin creator
+    fee_bps: int  # total fee actually paid (see decode_trade_event)
     pool: str
 
 
@@ -113,7 +117,7 @@ def decode_trade_event(data: bytes) -> PoolTrade | None:
     r.u64()  # max_quote_amount_in / min_quote_amount_out
     r.u64(), r.u64()  # user reserves
     pool_base, pool_quote = r.u64(), r.u64()
-    r.u64()  # quote_amount_in / quote_amount_out
+    swap_quote = r.u64()  # buy: quote_amount_in (before fees); sell: quote_amount_out (before fees)
     lp_bps = r.u64()
     r.u64()  # lp_fee
     protocol_bps = r.u64()
@@ -126,10 +130,22 @@ def decode_trade_event(data: bytes) -> PoolTrade | None:
     r.pubkey()  # coin_creator
     creator_bps = r.u64()
     is_buy = disc == BUY_EVENT_DISC
+    # The fee this trader actually paid, from the event's own amounts: buy
+    # pays user_quote_amount_in for swap_quote reaching the pool; a sell's
+    # swap_quote leaves the pool and user_quote_amount_out arrives. This
+    # covers every component (lp, protocol, coin creator, buyback, cashback)
+    # without double counting re-routed ones (holder rewards report the
+    # creator fee again). The declared lp+protocol+creator bps is a floor.
+    declared = int(lp_bps + protocol_bps + creator_bps)
+    effective = 0
+    if is_buy and user_quote > 0 and user_quote >= swap_quote:
+        effective = -(-(user_quote - swap_quote) * 10_000 // user_quote)
+    elif not is_buy and swap_quote > 0 and swap_quote >= user_quote:
+        effective = -(-(swap_quote - user_quote) * 10_000 // swap_quote)
     # Reserves exactly as the event reports them (the values the program
     # priced this swap against); used for price-response analysis only.
     return PoolTrade(datetime.fromtimestamp(ts, tz=timezone.utc), user, is_buy, base_amount, user_quote,
-                     pool_base, pool_quote, int(lp_bps + protocol_bps + creator_bps), pool)
+                     pool_base, pool_quote, max(declared, effective), pool)
 
 
 def trades_from_logs(logs: list[str], pool: str) -> list[PoolTrade]:

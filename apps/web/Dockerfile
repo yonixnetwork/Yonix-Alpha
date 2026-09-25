@@ -12,9 +12,7 @@ COPY . .
 # affects the running container) can never reach them. They must arrive as
 # build args instead (see docker-compose.yml's web.build.args).
 ARG NEXT_PUBLIC_API_URL
-ARG NEXT_PUBLIC_WS_URL
 ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
-ENV NEXT_PUBLIC_WS_URL=${NEXT_PUBLIC_WS_URL}
 RUN npm run build
 
 FROM node:22-slim AS run

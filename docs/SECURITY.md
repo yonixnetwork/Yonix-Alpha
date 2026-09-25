@@ -91,7 +91,7 @@ surface this without needing direct DB access.
   Docker Compose's `env_file:` (reads the file literally) or reads secrets
   from a container's already-populated environment via `docker compose
   exec` — see `scripts/backup-db.sh` and `docs/DEPLOYMENT.md` section 2.2.
-- `SOLANA_WALLET_PRIVATE_KEY` and `BINANCE_API_SECRET` are the two highest-
+- `WALLET_PRIVATE_KEY` (older name `SOLANA_WALLET_PRIVATE_KEY`) and `BINANCE_API_SECRET` are the two highest-
   value secrets in `.env` — a leak of either means real funds are at risk
   the moment `TRADING_ENABLED`/`LIVE_TRADING_ENABLED` are set. Rotate both
   immediately if `.env` is ever exposed (e.g. committed by accident, or a

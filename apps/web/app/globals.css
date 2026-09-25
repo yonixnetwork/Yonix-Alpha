@@ -1060,3 +1060,7 @@ li.unread {
     grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
   }
 }
+/* live execution */
+.warn-card {
+  border-color: var(--warn, #d9a441);
+}

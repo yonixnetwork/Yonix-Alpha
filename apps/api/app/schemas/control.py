@@ -45,9 +45,13 @@ class ModeUpdate(BaseModel):
 
 
 class BlacklistIn(BaseModel):
+    """A word filter. scope GLOBAL / FRESH / MIGRATED (or one engine);
+    BLOCK rules reject, ALLOW rules waive word blocks (never the immutable
+    system safety checks). Matching is case-insensitive."""
     scope: str = "GLOBAL"
-    field: Literal["name", "symbol", "mint"]
-    match_type: Literal["exact", "pattern"] = "exact"
+    field: Literal["name", "symbol", "mint", "metadata", "any"]
+    match_type: Literal["exact", "word", "substring", "pattern", "regex"] = "exact"
+    action: Literal["BLOCK", "ALLOW"] = "BLOCK"
     value: str = Field(min_length=1, max_length=128)
     reason: str | None = Field(None, max_length=256)
 
@@ -59,6 +63,7 @@ class BlacklistOut(BaseModel):
     scope: str
     field: str
     match_type: str
+    action: str
     value: str
     reason: str | None
     enabled: bool
