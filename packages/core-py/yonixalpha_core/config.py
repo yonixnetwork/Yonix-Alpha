@@ -56,6 +56,17 @@ class Settings(BaseSettings):
     BINANCE_API_SECRET: Optional[str] = None
     BINANCE_TESTNET: bool = True
 
+    # Bybit V5 — read-only account views (balance, positions, orders, fills).
+    # Create the key with READ-ONLY permission; this codebase never trades.
+    BYBIT_API_KEY: Optional[str] = None
+    BYBIT_API_SECRET: Optional[str] = None
+    BYBIT_TESTNET: bool = False
+
+    # Hyperliquid — a public account address is enough for read-only views.
+    # No private key is ever read.
+    HYPERLIQUID_ACCOUNT_ADDRESS: Optional[str] = None
+    HYPERLIQUID_TESTNET: bool = False
+
     # Telegram (wired up Phase 11 — yonixalpha_core.notify.send_telegram_alert)
     TELEGRAM_BOT_TOKEN: Optional[str] = None
     TELEGRAM_CHAT_ID: Optional[str] = None
