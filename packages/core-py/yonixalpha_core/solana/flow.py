@@ -95,3 +95,55 @@ def acceleration(trades: list[Trade], now: datetime, window_seconds: int) -> tup
     current = len(in_window(trades, now, window_seconds))
     prior = len(in_window(trades, now - timedelta(seconds=window_seconds), window_seconds))
     return current, prior, (current / prior) if prior else None
+
+
+# --- wallet-behaviour indicators (spec §20-23) ---------------------------------
+# Every indicator below is computed only from on-chain trades this system
+# observed. They are reported as indicators ("RELATED-WALLET INDICATOR",
+# "SUSPICIOUS CLUSTER"), never as proof that wallets share an owner.
+
+EARLY_WINDOW_SECONDS = 30
+SYNC_TOLERANCE = Decimal("0.05")
+SYNC_MIN_CLUSTER = 4
+
+
+def early_buy_share(trades: list[Trade], created_at: datetime | None, supply_raw: int | None) -> Decimal | None:
+    """Share of total supply bought in the first 30 s after the create
+    event (sniper concentration). None when creation time or supply is
+    unknown."""
+    if created_at is None or not supply_raw:
+        return None
+    end = created_at + timedelta(seconds=EARLY_WINDOW_SECONDS)
+    bought = sum(t.token_raw for t in trades if t.is_buy and created_at <= t.at <= end)
+    return Decimal(bought) / Decimal(supply_raw)
+
+
+def synchronized_buy_cluster(trades: list[Trade], now: datetime, window_seconds: int) -> int:
+    """Largest group of DISTINCT wallets buying in the same second with SOL
+    amounts within 5% of each other — a pattern typical of scripted,
+    coordinated buying. Returns the group size (0 or 1 means none)."""
+    by_second: dict[int, list[Trade]] = {}
+    for t in in_window(trades, now, window_seconds):
+        if t.is_buy:
+            by_second.setdefault(int(t.at.timestamp()), []).append(t)
+    best = 0
+    for group in by_second.values():
+        amounts = sorted(group, key=lambda t: t.sol_lamports)
+        for i, anchor in enumerate(amounts):
+            lo = Decimal(anchor.sol_lamports)
+            cluster = {t.trader for t in amounts[i:] if lo > 0 and Decimal(t.sol_lamports) <= lo * (1 + SYNC_TOLERANCE)}
+            best = max(best, len(cluster))
+    return best
+
+
+def round_trip_volume_share(trades: list[Trade], now: datetime, window_seconds: int) -> Decimal | None:
+    """Share of window volume from wallets that both bought and sold inside
+    the window (repeated in-and-out behaviour, a wash-trading indicator)."""
+    window = in_window(trades, now, window_seconds)
+    total = sum(t.sol_lamports for t in window)
+    if total == 0:
+        return None
+    buyers = {t.trader for t in window if t.is_buy}
+    sellers = {t.trader for t in window if not t.is_buy}
+    both = buyers & sellers
+    return Decimal(sum(t.sol_lamports for t in window if t.trader in both)) / Decimal(total)

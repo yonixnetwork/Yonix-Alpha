@@ -186,10 +186,33 @@ def validate(settings: SafetySettings) -> list[str]:
 # trade would be refused as STOP_INSIDE_COSTS. 10% keeps the stop outside
 # them; sizing then shrinks the position so the loss at that stop still
 # equals risk_per_trade_pct of equity.
+#
+# Futures engines are denominated in USDT against a 1,000 USDT paper book and
+# trade deep order books, so their thresholds differ in scale: tight stops
+# are meaningful (Meta Muse's own stop is 1%), impact limits are in single
+# basis points, and "liquidity" is visible book depth within 2% of mid.
+_FUTURES_DEFAULTS: dict[str, Any] = {
+    "min_stop_pct": "0.005",
+    "max_stop_pct": "0.10",
+    "max_position_size_quote": "200",
+    "min_position_size_quote": "10",
+    "max_total_exposure_quote": "600",
+    "max_token_exposure_quote": "200",
+    "max_daily_loss_quote": "50",
+    "min_liquidity_quote": "50000",
+    "max_pool_fraction": "0.01",
+    "max_entry_impact_bps": "20",
+    "max_exit_impact_bps": "30",
+    "max_round_trip_loss_bps": "60",
+    "max_slippage_bps": "10",
+}
 ENGINE_DEFAULTS: dict[str, dict[str, Any]] = {
     "solana_fresh": {"min_stop_pct": "0.10"},
     "solana_migration": {"min_stop_pct": "0.10"},
     "solana_momentum": {"min_stop_pct": "0.10"},
+    "binance_futures": dict(_FUTURES_DEFAULTS),
+    "bybit_futures": dict(_FUTURES_DEFAULTS),
+    "hyperliquid_perps": dict(_FUTURES_DEFAULTS),
 }
 
 

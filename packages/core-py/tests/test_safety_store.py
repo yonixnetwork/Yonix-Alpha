@@ -47,8 +47,10 @@ async def test_settings_default_then_versioned_and_audited(db):
     settings, meta = await store.load_settings(db, "solana_fresh")
     assert settings == default_settings_for("solana_fresh") and meta["scope"] == "DEFAULT"
     assert settings.min_stop_pct == Decimal("0.10")  # pump.fun costs push the stop floor up
-    generic, _ = await store.load_settings(db, "binance_futures")
+    generic, _ = await store.load_settings(db, "some_other_engine")
     assert generic == SafetySettings()
+    futures, _ = await store.load_settings(db, "binance_futures")
+    assert futures.min_liquidity_quote == Decimal("50000")
 
     row, notes = await store.save_settings(db, "GLOBAL", {"max_position_size_quote": "0.5"}, None, "tighter")
     assert row.version == 1 and notes == []

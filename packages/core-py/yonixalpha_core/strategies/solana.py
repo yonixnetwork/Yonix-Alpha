@@ -9,7 +9,7 @@ gate decides whether a trade is allowed at all, and a qualified signal
 cannot override any of its findings.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from yonixalpha_core.safety.models import StrategySignal, TradeFlow
@@ -68,3 +68,65 @@ def post_migration_signal(buys_h1: int | None, sells_h1: int | None, age_seconds
     qualified = not reasons
     return StrategySignal(MIGRATION_NAME, MIGRATION_VERSION, qualified, 1.0 if qualified else 0.3,
                           (reasons or [f"h1 buys {buys_h1} > sells {sells_h1}"]) + [VALIDATION_NOTE])
+
+
+MOMENTUM_NAME = "solana_momentum"
+MOMENTUM_VERSION = "1"
+MOMENTUM_MIN_AGE_SECONDS = 30 * 60
+
+
+def _window_stats(window: list[Trade], decimals: int) -> dict:
+    buys = [t for t in window if t.is_buy]
+    sells = [t for t in window if not t.is_buy]
+    vol = sum(t.sol_lamports for t in window)
+    return {
+        "trades": len(window),
+        "volume": vol,
+        "buy_volume": sum(t.sol_lamports for t in buys),
+        "sell_volume": sum(t.sol_lamports for t in sells),
+        "buyers": len({t.trader for t in buys}),
+        "sellers": len({t.trader for t in sells}),
+        "first_price": window[0].price(decimals) if window else None,
+        "last_price": window[-1].price(decimals) if window else None,
+        "real_sol_last": window[-1].virtual_sol if window else None,
+    }
+
+
+def _ratio(a: float, b: float) -> float | None:
+    return a / b if b else (float("inf") if a else None)
+
+
+def momentum_signal(trades: list[Trade], now: datetime, window_seconds: int, decimals: int) -> StrategySignal:
+    """Established-token momentum (spec §12). Compares the current window
+    with the previous one on every axis at once; any single axis failing
+    keeps it unqualified. High volume alone never qualifies."""
+    cur = _window_stats(in_window(trades, now, window_seconds), decimals)
+    prev = _window_stats(in_window(trades, now - timedelta(seconds=window_seconds), window_seconds), decimals)
+    reasons_ok: list[str] = []
+    reasons_no: list[str] = []
+
+    def check(ok: bool, text: str) -> None:
+        (reasons_ok if ok else reasons_no).append(text)
+
+    if cur["trades"] < 2 or prev["trades"] < 2:
+        return StrategySignal(MOMENTUM_NAME, MOMENTUM_VERSION, False, 0.0,
+                              ["fewer than 2 trades in the current or previous window — no baseline", VALIDATION_NOTE])
+    price_now = (cur["last_price"] / cur["first_price"] - 1) if cur["first_price"] else Decimal(0)
+    price_prev = (prev["last_price"] / prev["first_price"] - 1) if prev["first_price"] else Decimal(0)
+    vol_acc = _ratio(cur["volume"], prev["volume"])
+    tx_acc = _ratio(cur["trades"], prev["trades"])
+    buyer_acc = _ratio(cur["buyers"], prev["buyers"])
+    seller_acc = _ratio(cur["sellers"], prev["sellers"])
+    imbalance = _ratio(cur["buy_volume"], cur["sell_volume"])
+
+    check(price_now > 0 and price_now > price_prev, f"price change {price_now:+.1%} vs previous {price_prev:+.1%}")
+    check(vol_acc is not None and vol_acc >= 1.5, f"volume acceleration {vol_acc if vol_acc is None else round(vol_acc, 2)}x (need ≥ 1.5)")
+    check(tx_acc is not None and tx_acc >= 1.5, f"transaction acceleration {tx_acc if tx_acc is None else round(tx_acc, 2)}x (need ≥ 1.5)")
+    check(buyer_acc is not None and buyer_acc >= 1.3, f"unique-buyer acceleration {buyer_acc if buyer_acc is None else round(buyer_acc, 2)}x (need ≥ 1.3)")
+    check(seller_acc is None or buyer_acc is None or buyer_acc >= seller_acc,
+          f"buyers growing at least as fast as sellers ({buyer_acc} vs {seller_acc})")
+    check(imbalance is not None and imbalance >= 1.3, f"buy/sell volume imbalance {imbalance if imbalance is None else round(imbalance, 2)} (need ≥ 1.3)")
+    qualified = not reasons_no
+    strength = len(reasons_ok) / (len(reasons_ok) + len(reasons_no))
+    return StrategySignal(MOMENTUM_NAME, MOMENTUM_VERSION, qualified, strength,
+                          (reasons_ok if qualified else reasons_no) + [VALIDATION_NOTE])
