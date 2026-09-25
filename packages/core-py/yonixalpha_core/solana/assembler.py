@@ -30,11 +30,17 @@ from yonixalpha_core.safety.models import (
 from yonixalpha_core.safety.rules import BlacklistRule, CustomRule, evaluate_custom_rules, match_blacklist
 from yonixalpha_core.safety.settings import SafetySettings
 from yonixalpha_core.solana import pump_stream
-from yonixalpha_core.solana.flow import realized_volatility, trade_flow
+from yonixalpha_core.solana.flow import (
+    early_buy_share,
+    realized_volatility,
+    round_trip_volume_share,
+    synchronized_buy_cluster,
+    trade_flow,
+)
 from yonixalpha_core.solana.market_data import DexScreenerClient, JupiterClient
 from yonixalpha_core.solana.pumpfun import BondingCurveState, decode_bonding_curve
 from yonixalpha_core.solana.token_safety import UnexpectedShape, parse_holders, parse_mint_account
-from yonixalpha_core.strategies.solana import fresh_launch_signal, post_migration_signal
+from yonixalpha_core.strategies.solana import fresh_launch_signal, momentum_signal, post_migration_signal
 
 FLOW_WINDOW_SECONDS = 300
 VOLATILITY_WINDOW_SECONDS = 900
@@ -44,6 +50,7 @@ VOLATILITY_WINDOW_SECONDS = 900
 RULE_FIELDS = {
     "price", "liquidity_quote", "age_seconds", "volatility", "top1_share", "top10_share", "creator_share",
     "unique_buyers", "trade_count", "buy_sell_volume_ratio", "top3_wallet_volume_share", "transfer_fee_bps",
+    "early_buy_share", "sync_buy_cluster", "round_trip_share", "creator_launches_24h", "window_volume",
 }
 
 
@@ -130,6 +137,11 @@ def rule_features(inp: AssessmentInput) -> dict[str, Any]:
         "buy_sell_volume_ratio": ratio,
         "top3_wallet_volume_share": fl.top3_wallet_volume_share if fl else None,
         "transfer_fee_bps": t.transfer_fee_bps if t else None,
+        "early_buy_share": fl.early_buy_share if fl else None,
+        "sync_buy_cluster": fl.sync_buy_cluster if fl else None,
+        "round_trip_share": fl.round_trip_share if fl else None,
+        "creator_launches_24h": fl.creator_launches_24h if fl else None,
+        "window_volume": (fl.buy_volume_quote + fl.sell_volume_quote) if fl else None,
     }
 
 
@@ -147,10 +159,12 @@ def _base_input(engine: str, strategy: str, mint: str, symbol: str, now: datetim
     )
 
 
-async def assemble_fresh(src: Sources, mint: str, now: datetime, c: Controls) -> tuple[AssessmentInput, dict[str, Any]]:
+async def assemble_fresh(src: Sources, mint: str, now: datetime, c: Controls,
+                         engine: str = "solana_fresh") -> tuple[AssessmentInput, dict[str, Any]]:
     """Bonding-curve (pre-migration) token. Venue: the pump.fun curve itself,
     simulated with its exact constant-product model and the fee rates the
-    stream's most recent trade reported."""
+    stream's most recent trade reported. `engine` selects the strategy:
+    solana_fresh (launch flow) or solana_momentum (acceleration)."""
     meta = await pump_stream.load_meta(src.redis, mint) or {}
     stream_curve = await pump_stream.load_curve(src.redis, mint)
     trades = await pump_stream.load_trades(src.redis, mint)
@@ -158,8 +172,10 @@ async def assemble_fresh(src: Sources, mint: str, now: datetime, c: Controls) ->
     symbol = meta.get("symbol") or mint[:8]
     creator = meta.get("creator") or None
     curve_addr = meta.get("bonding_curve") or None
-    ev: dict[str, Any] = {"errors": [], "stream_trades": len(trades), "stream_heartbeat": hb.isoformat() if hb else None}
-    inp = _base_input("solana_fresh", "fresh_launch_flow", mint, symbol, now, c)
+    ev: dict[str, Any] = {"errors": [], "stream_trades": len(trades), "stream_heartbeat": hb.isoformat() if hb else None,
+                          "creator": creator}
+    strategy = "fresh_launch_flow" if engine == "solana_fresh" else "solana_momentum"
+    inp = _base_input(engine, strategy, mint, symbol, now, c)
 
     token, err = await fetch_mint(src.rpc, mint, now)
     if err:
@@ -212,13 +228,23 @@ async def assemble_fresh(src: Sources, mint: str, now: datetime, c: Controls) ->
         }
 
     inp.flow = trade_flow(trades, now, FLOW_WINDOW_SECONDS, creator, "pump_stream", hb)
+    created_dt = datetime.fromtimestamp(created_at, tz=timezone.utc) if created_at else None
+    inp.flow.early_buy_share = early_buy_share(trades, created_dt, token.supply_raw if token else None) if engine == "solana_fresh" else None
+    inp.flow.sync_buy_cluster = synchronized_buy_cluster(trades, now, FLOW_WINDOW_SECONDS)
+    inp.flow.round_trip_share = round_trip_volume_share(trades, now, FLOW_WINDOW_SECONDS)
+    inp.flow.creator_launches_24h = await pump_stream.creator_launches(src.redis, creator, now)
 
     if token is not None and curve_addr:
         inp.holders, err = await fetch_holders(src.rpc, mint, token.supply_raw, {curve_addr}, creator, now)
         if err:
             ev["errors"].append(err)
 
-    inp.signal = fresh_launch_signal(inp.flow, trades, now, decimals) if decimals is not None else None
+    if decimals is None:
+        inp.signal = None
+    elif engine == "solana_momentum":
+        inp.signal = momentum_signal(trades, now, FLOW_WINDOW_SECONDS, decimals)
+    else:
+        inp.signal = fresh_launch_signal(inp.flow, trades, now, decimals)
     _apply_controls(inp, c, meta.get("name"), meta.get("symbol"))
     ev["features"] = {k: (str(v) if v is not None else None) for k, v in rule_features(inp).items()}
     return inp, ev

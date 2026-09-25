@@ -106,3 +106,7 @@ class HyperliquidInfo:
 
     async def fills(self) -> list[dict]:
         return list(await self._info({"type": "userFills", "user": self._require_address()}) or [])
+
+    async def klines(self, symbol: str, interval: str, limit: int = 200, now: datetime | None = None) -> list[Candle]:
+        """Same call shape as the other venues' klines."""
+        return await self.candles(symbol, interval, limit, now)

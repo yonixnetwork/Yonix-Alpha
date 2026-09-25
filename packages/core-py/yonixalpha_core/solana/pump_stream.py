@@ -27,6 +27,8 @@ STATS = f"{PREFIX}:stats"
 RECENT = f"{PREFIX}:recent"  # zset mint -> create timestamp
 PROMOTED = f"{PREFIX}:promoted"  # zset mint -> promotion timestamp
 MIGRATED = f"{PREFIX}:migrated"  # zset mint -> migration timestamp
+ACTIVE = f"{PREFIX}:active"  # zset mint -> last trade timestamp (momentum scan)
+CREATOR_TTL = 7 * 86400
 
 META_TTL = 6 * 3600
 CURVE_TTL = 6 * 3600
@@ -46,6 +48,10 @@ def curve_key(mint: str) -> str:
 
 def trades_key(mint: str) -> str:
     return f"{PREFIX}:trades:{mint}"
+
+
+def creator_key(creator: str) -> str:
+    return f"{PREFIX}:creator:{creator}"
 
 
 def _ts(fields: dict[str, Any]) -> int | None:
@@ -85,6 +91,9 @@ async def ingest_logs(redis: Redis, logs: list[str], signature: str | None, rece
             pipe.hset(meta_key(mint), mapping=meta)
             pipe.expire(meta_key(mint), META_TTL)
             pipe.zadd(RECENT, {mint: meta["created_at"]})
+            if meta["creator"]:
+                pipe.zadd(creator_key(meta["creator"]), {mint: meta["created_at"]})
+                pipe.expire(creator_key(meta["creator"]), CREATOR_TTL)
         elif kind == "trade":
             if ts is None or "virtual_sol_reserves" not in f:
                 continue
@@ -106,6 +115,7 @@ async def ingest_logs(redis: Redis, logs: list[str], signature: str | None, rece
                 curve["fee_bps"] = fee
             pipe.hset(curve_key(mint), mapping=curve)
             pipe.expire(curve_key(mint), CURVE_TTL)
+            pipe.zadd(ACTIVE, {mint: ts})
         elif kind == "complete":
             pipe.hset(curve_key(mint), mapping={"complete": 1, "completed_at": ts or int(received_at.timestamp())})
             pipe.expire(curve_key(mint), CURVE_TTL)
@@ -203,9 +213,24 @@ async def migrated_since(redis: Redis, since_ts: int) -> list[tuple[str, int]]:
     return [(m, int(s)) for m, s in rows]
 
 
+async def creator_launches(redis: Redis, creator: str | None, now: datetime, window_seconds: int = 86400) -> int | None:
+    """Launches by `creator` observed by this stream in the window. None if
+    the creator is unknown; a stream that just started undercounts."""
+    if not creator:
+        return None
+    t = int(now.timestamp())
+    return int(await redis.zcount(creator_key(creator), t - window_seconds, t))
+
+
+async def active_mints(redis: Redis, now: datetime, within_seconds: int, limit: int = 500) -> list[str]:
+    lo = int(now.timestamp()) - within_seconds
+    return list(await redis.zrevrangebyscore(ACTIVE, "+inf", lo, start=0, num=limit))
+
+
 async def prune(redis: Redis, now: datetime) -> None:
     t = int(now.timestamp())
     pipe = redis.pipeline(transaction=False)
+    pipe.zremrangebyscore(ACTIVE, "-inf", t - TRADES_TTL)
     pipe.zremrangebyscore(RECENT, "-inf", t - RECENT_RETENTION)
     pipe.zremrangebyscore(PROMOTED, "-inf", t - PROMOTED_RETENTION)
     pipe.zremrangebyscore(MIGRATED, "-inf", t - PROMOTED_RETENTION)

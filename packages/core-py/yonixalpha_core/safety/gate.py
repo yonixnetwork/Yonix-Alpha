@@ -313,6 +313,25 @@ def _check_flow(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) -> 
     if fl.creator_sold:
         out.append(_finding(RiskCategory.TRADING, "CREATOR_SELLING", RiskLevel.HIGH,
                             "creator wallet sold in the observation window", FinalDecision.REQUIRE_MANUAL_APPROVAL))
+    total_volume = fl.buy_volume_quote + fl.sell_volume_quote
+    if s.min_window_volume_quote > 0 and total_volume < s.min_window_volume_quote:
+        out.append(_finding(RiskCategory.TRADING, "LOW_VOLUME", RiskLevel.MODERATE,
+                            f"window volume {total_volume:.4f} below minimum {s.min_window_volume_quote}", FinalDecision.WAIT))
+    if fl.early_buy_share is not None and fl.early_buy_share > s.max_early_buy_share:
+        out.append(_finding(RiskCategory.HOLDER, "SNIPER_CONCENTRATION", RiskLevel.HIGH,
+                            f"{fl.early_buy_share:.0%} of supply was bought in the first 30 s after launch — "
+                            "RELATED-WALLET INDICATOR (possible coordinated sniping)", FinalDecision.REQUIRE_MANUAL_APPROVAL))
+    if fl.sync_buy_cluster is not None and fl.sync_buy_cluster >= s.max_sync_buy_cluster:
+        out.append(_finding(RiskCategory.TRADING, "SUSPICIOUS_CLUSTER", RiskLevel.HIGH,
+                            f"{fl.sync_buy_cluster} distinct wallets bought near-identical amounts in the same second — "
+                            "SUSPICIOUS CLUSTER (possible scripted buying)", FinalDecision.REQUIRE_MANUAL_APPROVAL))
+    if fl.round_trip_share is not None and fl.round_trip_share > s.max_round_trip_share:
+        out.append(_finding(RiskCategory.TRADING, "ROUND_TRIP_VOLUME", RiskLevel.HIGH,
+                            f"{fl.round_trip_share:.0%} of volume came from wallets that both bought and sold in the window — "
+                            "possible wash trading", FinalDecision.REQUIRE_MANUAL_APPROVAL))
+    if fl.creator_launches_24h is not None and fl.creator_launches_24h > s.max_creator_launches_24h:
+        out.append(_finding(RiskCategory.HOLDER, "SERIAL_CREATOR", RiskLevel.HIGH,
+                            f"creator launched {fl.creator_launches_24h} tokens in the last 24 h", FinalDecision.REQUIRE_MANUAL_APPROVAL))
 
 
 def _check_account(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) -> None:

@@ -20,13 +20,16 @@ from redis.asyncio import Redis
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yonixalpha_core import paper_engine
+from yonixalpha_core import events, paper_engine
 from yonixalpha_core.db.models import PaperAccount, PaperPosition, RiskAssessment
+from yonixalpha_core.exit_intel import solana_exit_decision
+from yonixalpha_core.safety.store import add_timeline_event
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.safety.liquidity import ConstantProductModel
 from yonixalpha_core.solana import pump_stream
 from yonixalpha_core.solana.market_data import JupiterClient
 from yonixalpha_core.solana.pumpfun import WSOL_MINT
+from yonixalpha_core.venues.common import VenueError
 
 log = get_logger("paper-trading.gate_manage")
 
@@ -47,9 +50,18 @@ def curve_price_and_model(curve: pump_stream.StreamCurve, decimals: int) -> tupl
     return price, ConstantProductModel(q, t, Decimal(curve.fee_bps), real)
 
 
-async def price_position(redis: Redis, jupiter: JupiterClient | None, p: PaperPosition, now: datetime):
+async def price_position(redis: Redis, jupiter: JupiterClient | None, p: PaperPosition, now: datetime, venues: dict | None = None):
     """Returns (price, model, exit_cost_bps, source) or (None, None, None, reason)."""
     venue = (p.plan or {}).get("venue") or {}
+    if venue.get("kind") == "futures":
+        adapter = (venues or {}).get(venue.get("venue"))
+        if adapter is None:
+            return None, None, None, f"venue {venue.get('venue')} not configured"
+        try:
+            book = await adapter.book(venue.get("symbol") or p.asset_id)
+        except VenueError as exc:
+            return None, None, None, f"order book unavailable: {exc}"
+        return book.mid, book, None, f"{venue.get('venue')}:book"
     decimals = venue.get("decimals")
     if decimals is None:
         return None, None, None, "token decimals unknown"
@@ -74,7 +86,36 @@ async def price_position(redis: Redis, jupiter: JupiterClient | None, p: PaperPo
     return price, None, Decimal(0), "jupiter:sell_quote"
 
 
-async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterClient | None, now: datetime) -> dict[str, int]:
+NOTIFY_KIND = {"take_profit_1": "tp1", "take_profit_2": "tp2", "take_profit_3": "tp3", "stop_loss": "stop_loss",
+               "trailing_stop": "trailing_stop"}
+REDUCE_COOLDOWN_SECONDS = 300
+
+
+async def _exit_intelligence(redis: Redis, p: PaperPosition, model, now: datetime, session) -> tuple | None:
+    """For live curve positions: HOLD / REDUCE / EXIT from flow, liquidity and
+    creator behaviour. Returns an `extra_exit` for apply_step, or None."""
+    venue = (p.plan or {}).get("venue") or {}
+    if venue.get("type") != "pump_curve" or model is None or p.side != "LONG":
+        return None
+    trades = await pump_stream.load_trades(redis, p.asset_id)
+    entry_liq = Decimal(venue["real_liquidity_at_entry"]) if venue.get("real_liquidity_at_entry") else None
+    d = solana_exit_decision(trades, now, venue.get("creator"), entry_liq, model.liquidity_quote)
+    if d.action == "HOLD":
+        return None
+    remaining = p.remaining_quantity if p.remaining_quantity is not None else p.quantity
+    if d.action == "REDUCE":
+        if not await redis.set(f"yx:exit_reduce:{p.id}", "1", nx=True, ex=REDUCE_COOLDOWN_SECONDS):
+            return None
+        qty = remaining * d.fraction
+    else:
+        qty = remaining
+    await add_timeline_event(session, f"exit_intelligence.{d.action.lower()}", now, {"reasons": d.reasons, **d.metrics},
+                             candidate_id=p.candidate_id, assessment_id=p.assessment_id, position_id=p.id)
+    return qty, f"exit_intel_{d.action.lower()}"
+
+
+async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterClient | None, now: datetime,
+                                venues: dict | None = None, app_settings=None) -> dict[str, int]:
     counts = {"managed": 0, "closed": 0, "unpriced": 0}
     async with session_factory() as session:
         ids = (await session.execute(
@@ -88,19 +129,35 @@ async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterC
                 p = await session.get(PaperPosition, pid)
                 if p is None or p.status != "open":
                     continue
-                price, model, exit_cost, source = await price_position(redis, jupiter, p, now)
+                price, model, exit_cost, source = await price_position(redis, jupiter, p, now, venues)
                 if price is None:
                     counts["unpriced"] += 1
                     log.warning("gate_manage.unpriced", position_id=str(pid), asset=p.asset_id, reason=source)
                     continue
                 account = await session.get(PaperAccount, p.account_id)
                 tfee = ((p.plan or {}).get("venue") or {}).get("transfer_fee_bps")
+                extra = None if p.exit_requested or p.management_paused else await _exit_intelligence(redis, p, model, now, session)
                 result = await paper_engine.apply_step(
                     session, p, account, price, model, None if source.startswith("jupiter") else tfee, now,
-                    exit_cost_bps=exit_cost,
+                    exit_cost_bps=exit_cost, extra_exit=extra,
                 )
+                for _, reason in result.exits:
+                    kind = NOTIFY_KIND.get(reason)
+                    if kind:
+                        await events.notify(session, redis, app_settings, kind, f"{p.symbol}: {reason.replace('_', ' ')}",
+                                            f"price {price}", "info", {"position_id": str(p.id)})
+                if result.closed:
+                    await events.notify(session, redis, app_settings, "close", f"Paper position closed: {p.symbol}",
+                                        f"{p.exit_reason}, realized {p.realized_pnl:.6f}", "info", {"position_id": str(p.id)})
                 await session.commit()
                 counts["managed"] += 1
+                if result.exits:
+                    await events.publish(redis, "trade.closed" if result.closed else "trade.updated",
+                                         {"position_id": str(p.id), "symbol": p.symbol, "exits": [r for _, r in result.exits],
+                                          "realized_pnl": str(p.realized_pnl) if p.realized_pnl is not None else None}, "paper")
+                    await events.publish(redis, "balance.updated", {"account_id": str(p.account_id)}, "paper")
+                else:
+                    await events.publish(redis, "position.updated", {"position_id": str(p.id), "price": str(price)}, "paper")
                 if result.closed:
                     counts["closed"] += 1
                     log.info("gate_manage.closed", position_id=str(pid), reason=p.exit_reason, pnl=str(p.realized_pnl),

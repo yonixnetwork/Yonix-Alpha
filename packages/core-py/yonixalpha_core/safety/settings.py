@@ -55,6 +55,14 @@ class SafetySettings:
     min_unique_buyers: int = 10
     max_top3_volume_share: Decimal = Decimal("0.60")
     min_trades_in_window: int = 10
+    # Minimum traded volume (quote) in the flow window. 0 disables.
+    min_window_volume_quote: Decimal = Decimal("0")
+    # Wallet-behaviour indicators: above these, operator approval is needed.
+    # They are indicators of possible coordination, not proof of it.
+    max_early_buy_share: Decimal = Decimal("0.30")
+    max_sync_buy_cluster: int = 5
+    max_round_trip_share: Decimal = Decimal("0.50")
+    max_creator_launches_24h: int = 3
 
     # Stops and targets
     stop_volatility_multiple: Decimal = Decimal("2")

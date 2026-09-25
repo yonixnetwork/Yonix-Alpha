@@ -15,9 +15,11 @@ from yonixalpha_core.logging import configure_logging, get_logger
 from yonixalpha_core.notify import send_telegram_alert
 from yonixalpha_core.solana.market_data import JupiterClient, RateBudget
 from yonixalpha_core.state_machine import CandidateState
+from yonixalpha_core.venues.registry import build_venues
 
 from app.entry import try_open_position
 from app.gate_manage import manage_gate_positions, track_outcomes
+from app.grid_engine import run_grid
 from app.manage import evaluate_open_position
 from app.pricing import latest_price
 
@@ -101,7 +103,8 @@ async def _manage_open_positions(session_factory, now: datetime, per_leg_cost_bp
 
 
 async def _paper_trading_loop(
-    session_factory, stop_event: asyncio.Event, per_leg_cost_bps: Decimal = Decimal(0), redis=None, jupiter=None
+    session_factory, stop_event: asyncio.Event, per_leg_cost_bps: Decimal = Decimal(0), redis=None, jupiter=None,
+    venues=None, app_settings=None,
 ) -> None:
     while not stop_event.is_set():
         now = datetime.now(timezone.utc)
@@ -115,13 +118,17 @@ async def _paper_trading_loop(
             await _record_system_event(session_factory, "paper_trading_loop_failed", "error", {"error": str(exc)})
         if redis is not None:
             try:
-                counts = await manage_gate_positions(session_factory, redis, jupiter, now)
+                counts = await manage_gate_positions(session_factory, redis, jupiter, now, venues, app_settings)
                 if counts.get("failed"):
                     await _record_system_event(session_factory, "gate_manage_failed", "error", counts)
                 elif counts["closed"]:
                     log.info("gate_loop.completed", **counts)
                 async with session_factory() as session:
                     await track_outcomes(session, redis, now)
+                if venues is not None:
+                    grid_status = await run_grid(session_factory, redis, app_settings, venues, now)
+                    if grid_status.get("fills"):
+                        log.info("grid.step", **{k: str(v) for k, v in grid_status.items()})
             except Exception as exc:  # noqa: BLE001
                 log.error("gate_loop.failed", error=str(exc))
                 await _record_system_event(session_factory, "gate_loop_failed", "error", {"error": str(exc)})
@@ -150,9 +157,11 @@ async def run() -> None:
     redis = make_redis(settings)
     http_client = httpx.AsyncClient()
     jupiter = JupiterClient(http_client, settings.JUPITER_API_KEY, RateBudget(JUPITER_REQUESTS_PER_MINUTE))
+    venues = build_venues(http_client, settings)
     try:
         await asyncio.gather(
-            _paper_trading_loop(session_factory, stop_event, settings.PAPER_TRADING_PER_LEG_COST_BPS, redis, jupiter),
+            _paper_trading_loop(session_factory, stop_event, settings.PAPER_TRADING_PER_LEG_COST_BPS, redis, jupiter,
+                                venues, settings),
             heartbeat_loop(settings, "paper-trading", stop_event),
         )
     finally:

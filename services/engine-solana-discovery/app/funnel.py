@@ -22,11 +22,12 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from yonixalpha_core import events
 from yonixalpha_core.db.models import Token, TokenEvent, TradingCandidate
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.safety.settings import SafetySettings
 from yonixalpha_core.solana import pump_stream
-from yonixalpha_core.solana.flow import in_window
+from yonixalpha_core.solana.flow import acceleration, in_window
 from yonixalpha_core.state_machine import CandidateState
 
 log = get_logger("engine-solana-discovery.funnel")
@@ -37,8 +38,15 @@ MAX_CANDIDATE_AGE_SECONDS = 30 * 60
 MIN_AGE_SECONDS = 60
 PREFILTER_WINDOW_SECONDS = 300
 MAX_ACTIVE_CANDIDATES = 25
-ACTIVE_STATES = [CandidateState.DISCOVERED.value, CandidateState.OBSERVING.value]
-ENGINE_STRATEGY = {"discovery": "solana_fresh", "migration": "solana_migration"}
+ACTIVE_STATES = [
+    CandidateState.DISCOVERED.value, CandidateState.OBSERVING.value, CandidateState.ANALYZING.value,
+    CandidateState.WAITING_FOR_LIQUIDITY.value, CandidateState.WAITING_FOR_APPROVAL.value,
+]
+ENGINE_STRATEGY = {"discovery": "solana_fresh", "migration": "solana_migration", "momentum": "solana_momentum"}
+MOMENTUM_MIN_AGE_SECONDS = 30 * 60
+MOMENTUM_ACTIVE_WITHIN_SECONDS = 120
+MOMENTUM_MIN_TX_ACCELERATION = 1.5
+MOMENTUM_REPROMOTE_SECONDS = 3600
 
 
 def prefilter(trades: list, now: datetime, created_ts: int, settings: SafetySettings) -> tuple[bool, dict[str, Any]]:
@@ -109,8 +117,22 @@ async def create_candidate(
     return candidate
 
 
+def momentum_prefilter(trades: list, now: datetime, created_ts: int | None, settings: SafetySettings) -> tuple[bool, dict[str, Any]]:
+    """Cheap stream-only screen for established tokens: old enough not to be
+    a launch, active now, and trading faster than in the previous window.
+    The full multi-factor momentum signal runs later inside the gate."""
+    age = now.timestamp() - created_ts if created_ts else None
+    current, prior, ratio = acceleration(trades, now, PREFILTER_WINDOW_SECONDS)
+    stats = {"age_seconds": int(age) if age else None, "trades": current, "prior_trades": prior,
+             "tx_acceleration": round(ratio, 2) if ratio else None}
+    ok = (age is not None and age >= MOMENTUM_MIN_AGE_SECONDS and current >= settings.min_trades_in_window
+          and prior > 0 and ratio is not None and ratio >= MOMENTUM_MIN_TX_ACCELERATION)
+    return ok, stats
+
+
 async def run_funnel(redis: Redis, session_factory, settings: SafetySettings, now: datetime) -> dict[str, int]:
-    counts = {"considered": 0, "prefilter_failed": 0, "promoted": 0, "budget_full": 0, "migrations": 0}
+    counts = {"considered": 0, "prefilter_failed": 0, "promoted": 0, "budget_full": 0, "migrations": 0,
+              "momentum_considered": 0, "momentum_promoted": 0}
     async with session_factory() as session:
         active = await active_candidate_count(session)
 
@@ -133,6 +155,8 @@ async def run_funnel(redis: Redis, session_factory, settings: SafetySettings, no
             active += 1
             counts["promoted"] += 1
             log.info("funnel.promoted", mint=mint, **stats)
+            await events.publish(redis, "token.discovered", {"mint": mint, "symbol": meta.get("symbol"), "engine": "solana_fresh",
+                                                             "candidate_id": str(cand.id), **stats}, "funnel")
 
     since = int((now - timedelta(seconds=MAX_CANDIDATE_AGE_SECONDS)).timestamp())
     for mint, migrated_ts in await pump_stream.migrated_since(redis, since):
@@ -149,6 +173,39 @@ async def run_funnel(redis: Redis, session_factory, settings: SafetySettings, no
         if cand is not None:
             active += 1
             counts["migrations"] += 1
+            await events.publish(redis, "migration.detected", {"mint": mint, "symbol": meta.get("symbol"),
+                                                               "pool": curve.pool if curve else None,
+                                                               "candidate_id": str(cand.id)}, "funnel")
+
+    # Momentum: established tokens (not launches) trading faster right now.
+    for mint in await pump_stream.active_mints(redis, now, MOMENTUM_ACTIVE_WITHIN_SECONDS):
+        meta = await pump_stream.load_meta(redis, mint)
+        if not meta or not meta.get("bonding_curve"):
+            continue  # launched before this stream started: curve address unknown
+        created_ts = int(meta["created_at"]) if meta.get("created_at") else None
+        if created_ts and now.timestamp() - created_ts < MOMENTUM_MIN_AGE_SECONDS:
+            continue  # still a fresh launch; the discovery engine owns it
+        curve = await pump_stream.load_curve(redis, mint)
+        if curve is None or curve.complete:
+            continue
+        counts["momentum_considered"] += 1
+        ok, stats = momentum_prefilter(await pump_stream.load_trades(redis, mint), now, created_ts, settings)
+        if not ok:
+            continue
+        if active >= MAX_ACTIVE_CANDIDATES:
+            counts["budget_full"] += 1
+            continue
+        if not await redis.set(f"{pump_stream.PREFIX}:mom_seen:{mint}", "1", nx=True, ex=MOMENTUM_REPROMOTE_SECONDS):
+            continue
+        async with session_factory() as session:
+            cand = await create_candidate(session, "momentum", mint, meta, now, "momentum prefilter: accelerating activity",
+                                          {"prefilter": stats})
+        if cand is not None:
+            active += 1
+            counts["momentum_promoted"] += 1
+            await events.publish(redis, "token.discovered", {"mint": mint, "symbol": meta.get("symbol"),
+                                                             "engine": "solana_momentum", "candidate_id": str(cand.id), **stats},
+                                 "funnel")
 
     pipe = redis.pipeline(transaction=False)
     for k, v in counts.items():

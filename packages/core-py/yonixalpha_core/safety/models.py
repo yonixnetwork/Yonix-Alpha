@@ -178,6 +178,11 @@ class TradeFlow:
     # False when counts come from an aggregator without wallet identities
     # (e.g. DexScreener txns), so per-wallet manipulation checks are impossible.
     wallet_level: bool = True
+    # Wallet-behaviour indicators (spec §20-23); None = not measurable.
+    early_buy_share: Decimal | None = None  # supply bought in the first 30 s
+    sync_buy_cluster: int | None = None  # distinct wallets buying in lockstep
+    round_trip_share: Decimal | None = None  # volume from wallets that bought AND sold
+    creator_launches_24h: int | None = None  # launches by this creator seen in 24 h
 
 
 @dataclass

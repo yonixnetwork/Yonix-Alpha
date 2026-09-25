@@ -22,7 +22,7 @@ async def send_telegram_alert(settings: Settings, text: str, client: httpx.Async
     wired to `httpx.MockTransport`; real callers omit it and a short-lived
     client is created and closed here.
     """
-    if not settings.TELEGRAM_BOT_TOKEN or not settings.TELEGRAM_CHAT_ID:
+    if not getattr(settings, "TELEGRAM_BOT_TOKEN", None) or not getattr(settings, "TELEGRAM_CHAT_ID", None):
         log.debug("telegram.alert.skipped_not_configured")
         return False
 

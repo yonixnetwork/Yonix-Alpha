@@ -60,3 +60,26 @@ async def test_migration_event_creates_one_migration_candidate(redis, session_fa
     assert (await run_funnel(redis, session_factory, SETTINGS, NOW))["migrations"] == 0
     [c] = await candidates(session_factory)
     assert c.engine == "migration" and c.detail["pool"] == "POOL" and c.detail["strategy"] == "solana_migration"
+
+
+async def test_momentum_promotes_established_accelerating_tokens_only(redis, session_factory):
+    async def add_established(mint, recent, prior):
+        created = int((NOW - timedelta(hours=2)).timestamp())
+        await redis.hset(pump_stream.meta_key(mint), mapping={"symbol": mint, "created_at": created, "bonding_curve": "BC",
+                                                              "creator": "C"})
+        await redis.hset(pump_stream.curve_key(mint), mapping={"vsol": 1, "vtok": 1, "updated_at": 1})
+        for i in range(prior):
+            row = [int((NOW - timedelta(seconds=590 - i * 10)).timestamp()), f"p{i}", 1, 10**8, 10**12, 3 * 10**10, 10**15]
+            await redis.rpush(pump_stream.trades_key(mint), json.dumps(row))
+        for i in range(recent):
+            row = [int((NOW - timedelta(seconds=290 - i * 5)).timestamp()), f"r{i}", 1, 10**8, 10**12, 3 * 10**10, 10**15]
+            await redis.rpush(pump_stream.trades_key(mint), json.dumps(row))
+        await redis.zadd(pump_stream.ACTIVE, {mint: int(NOW.timestamp()) - 10})
+
+    await add_established("HOT", recent=30, prior=10)
+    await add_established("STEADY", recent=12, prior=12)
+    counts = await run_funnel(redis, session_factory, SETTINGS, NOW)
+    assert counts["momentum_considered"] == 2 and counts["momentum_promoted"] == 1
+    [c] = await candidates(session_factory)
+    assert c.engine == "momentum" and c.detail["mint"] == "HOT" and c.detail["strategy"] == "solana_momentum"
+    assert (await run_funnel(redis, session_factory, SETTINGS, NOW))["momentum_promoted"] == 0

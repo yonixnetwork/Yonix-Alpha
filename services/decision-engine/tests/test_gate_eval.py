@@ -64,7 +64,7 @@ async def test_manual_mode_waits_for_approval_then_re_checks_everything(db_sessi
     cand = await make_candidate(db_session)
     src = Sources(redis_client, FakeRpc(curve))
     a = await evaluate_with_gate(db_session, redis_client, ENV, src, cand, NOW)
-    assert a.decision.value == "REQUIRE_MANUAL_APPROVAL" and cand.state == CandidateState.OBSERVING.value
+    assert a.decision.value == "REQUIRE_MANUAL_APPROVAL" and cand.state == CandidateState.WAITING_FOR_APPROVAL.value
     row = (await db_session.execute(select(RiskAssessment))).scalar_one()
     assert row.approval_state == "PENDING"
 
@@ -92,7 +92,17 @@ async def test_waiting_candidate_times_out(db_session, redis_client):
     cand = await make_candidate(db_session)
     src = Sources(redis_client, FakeRpc(None, fail={"getAccountInfo", "getTokenLargestAccounts"}))
     a = await evaluate_with_gate(db_session, redis_client, ENV, src, cand, NOW)
-    assert a.decision.value == "NO_TRADE" and cand.state == CandidateState.OBSERVING.value
+    assert a.decision.value == "NO_TRADE" and cand.state == CandidateState.ANALYZING.value
     await redis_client.delete(f"yx:gate:pace:{cand.id}")
     await evaluate_with_gate(db_session, redis_client, ENV, src, cand, NOW + timedelta(minutes=31))
     assert cand.state == CandidateState.REJECTED.value
+
+
+async def test_momentum_candidate_uses_momentum_strategy(db_session, redis_client):
+    curve = await seed_healthy_launch(redis_client, NOW)
+    cand = await make_candidate(db_session, engine="momentum")
+    a = await evaluate_with_gate(db_session, redis_client, ENV, Sources(redis_client, FakeRpc(curve)), cand, NOW)
+    assert a.engine == "solana_momentum" and a.strategy == "solana_momentum"
+    assert any("solana_momentum" in f.message for f in a.findings if f.code == "SIGNAL_NOT_QUALIFIED") or a.qualified
+    row = (await db_session.execute(select(RiskAssessment))).scalar_one()
+    assert row.assessment["versions"]["feature_set"] and row.assessment["versions"]["rules"]

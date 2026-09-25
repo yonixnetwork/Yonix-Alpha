@@ -49,12 +49,16 @@ GLOBAL_MODE_KEY = "global_mode"
 DEFAULT_PAPER_ACCOUNTS = {
     "solana": ("SOL", Decimal("10")),
     "binance_futures": ("USDT", Decimal("1000")),
+    "bybit_futures": ("USDT", Decimal("1000")),
+    "hyperliquid": ("USDC", Decimal("1000")),
 }
 ENGINE_ACCOUNT = {
     "solana_fresh": "solana",
     "solana_migration": "solana",
     "solana_momentum": "solana",
     "binance_futures": "binance_futures",
+    "bybit_futures": "bybit_futures",
+    "hyperliquid_perps": "hyperliquid",
 }
 
 
@@ -367,3 +371,23 @@ async def add_timeline_event(
             occurred_at=occurred_at,
         )
     )
+
+
+async def load_strategy_config(session: AsyncSession, strategy: str) -> dict[str, Any]:
+    row = await session.get(StrategyConfig, strategy)
+    return dict(row.config or {}) if row else {}
+
+
+async def save_strategy_config(session: AsyncSession, strategy: str, config: dict[str, Any], user_id: uuid.UUID | None) -> None:
+    """Stores non-secret strategy parameters (validated by the caller) and
+    audits the change with a diff."""
+    before = await load_strategy_config(session, strategy)
+    mode = (await load_strategy_mode(session, strategy)).value
+    stmt = (
+        insert(StrategyConfig)
+        .values(strategy=strategy, mode=mode, config=config, updated_by=user_id)
+        .on_conflict_do_update(index_elements=["strategy"], set_={"config": config, "updated_by": user_id, "updated_at": func.now()})
+    )
+    await session.execute(stmt)
+    session.add(AuditLog(user_id=user_id, event_type="strategy_config.updated",
+                         detail={"strategy": strategy, "changed": _diff(before, config)}))
