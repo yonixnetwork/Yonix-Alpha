@@ -89,3 +89,17 @@ async def test_word_filters_support_scopes_actions_and_match_types(client, auth_
     assert edited.status_code == 200 and edited.json()["field"] == "metadata" and edited.json()["scope"] == "GLOBAL"
     assert (await client.post("/api/control/blacklist", headers=auth_headers,
                               json={"field": "name", "match_type": "fuzzy", "value": "x"})).status_code == 422
+
+
+async def test_paper_execution_failure_settings(app, client, auth_headers):
+    assert (await client.get("/api/paper/execution-settings")).status_code == 401
+    r = (await client.get("/api/paper/execution-settings", headers=auth_headers)).json()
+    assert (r["entry_pct"], r["exit_pct"], r["entry_source"]) == ("0", "0", "operator setting")
+    assert r["measured"]["BUY"]["orders"] == 0 and r["measured"]["BUY"]["failure_pct"] is None
+    ok = await client.put("/api/paper/execution-settings", headers=auth_headers, json={"exit_failure_pct": "8"})
+    assert ok.status_code == 200 and ok.json()["exit_pct"] == "8" and ok.json()["entry_pct"] == "0"
+    for bad in ({"exit_failure_pct": "75"}, {"entry_failure_pct": "x"}, {"use_measured_live_rates": "no"}, {"x": 1}):
+        assert (await client.put("/api/paper/execution-settings", headers=auth_headers, json=bad)).status_code == 422, bad
+    async with app.state.db_session_factory() as s:
+        kinds = [a.event_type for a in (await s.execute(select(AuditLog))).scalars()]
+    assert kinds.count("paper_execution.updated") == 1

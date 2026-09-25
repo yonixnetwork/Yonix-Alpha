@@ -23,6 +23,7 @@ If neither is available now, the position is left untouched and the gap
 is reported — never marked at a guessed price.
 """
 
+import json
 from datetime import datetime, timedelta
 from decimal import Decimal
 
@@ -30,13 +31,14 @@ from redis.asyncio import Redis
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yonixalpha_core import events, live_trading, paper_engine
+from yonixalpha_core import events, live_trading, paper_engine, paper_execution
 from yonixalpha_core.db.models import PaperAccount, PaperPosition, RiskAssessment
 from yonixalpha_core.exit_intel import solana_exit_decision
 from yonixalpha_core.safety.store import add_timeline_event
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.safety.liquidity import ConstantProductModel
 from yonixalpha_core.solana import pump_stream, pumpswap
+from yonixalpha_core.solana.assembler import fetch_holders
 from yonixalpha_core.solana.market_data import JupiterClient
 from yonixalpha_core.solana.pumpfun import WSOL_MINT
 from yonixalpha_core.venues.common import VenueError
@@ -120,13 +122,45 @@ async def price_position(redis: Redis, jupiter: JupiterClient | None, p: PaperPo
     return price, None, Decimal(0), "jupiter:sell_quote"
 
 
+HOLDER_CHECK_SECONDS = 60
+MAX_SIMULATED_EXIT_FAILURES = 5  # a misconfigured rate can delay an exit, never block it
+
+
+async def holders_now(rpc, redis: Redis, p: PaperPosition, now: datetime) -> dict | None:
+    """Current holder shares for an open position, re-read from chain at
+    most once per HOLDER_CHECK_SECONDS (cached in Redis between reads).
+    None when there is no RPC, no entry snapshot, or the read failed."""
+    venue = (p.plan or {}).get("venue") or {}
+    if rpc is None or not venue.get("holders_at_entry") or not venue.get("supply_raw"):
+        return None
+    key = f"yx:holders:{p.id}"
+    cached = await redis.get(key)
+    if cached is not None:
+        return json.loads(cached)
+    h, err = await fetch_holders(rpc, p.asset_id, int(venue["supply_raw"]), set(venue.get("holder_excluded") or []),
+                                 venue.get("creator"), now)
+    if h is None:
+        log.warning("gate_manage.holders_unavailable", position_id=str(p.id), error=err)
+        return None
+    snap = {"top1_share": str(h.top1_share), "top10_share": str(h.top10_share),
+            "creator_share": str(h.creator_share) if h.creator_share is not None else None, "at": now.isoformat()}
+    await redis.set(key, json.dumps(snap), ex=HOLDER_CHECK_SECONDS)
+    return snap
+
+
+def _would_exit(p: PaperPosition, price: Decimal, extra) -> tuple[bool, paper_engine.PositionState]:
+    s = paper_engine.state_of(p)
+    r = paper_engine.manage_step(s, price, exit_now=bool(p.exit_requested))
+    return bool(r.exits) or bool(extra and extra[0] > 0), s
+
+
 NOTIFY_KIND = {"take_profit_1": "tp1", "take_profit_2": "tp2", "take_profit_3": "tp3", "stop_loss": "stop_loss",
                "trailing_stop": "trailing_stop"}
 REDUCE_COOLDOWN_SECONDS = 300
 
 
 async def _exit_intelligence(redis: Redis, p: PaperPosition, model, now: datetime, session,
-                             pool_trades: list | None = None) -> tuple | None:
+                             pool_trades: list | None = None, rpc=None) -> tuple | None:
     """For curve and PumpSwap positions: HOLD / REDUCE / EXIT from flow,
     liquidity and creator behaviour. Returns an `extra_exit`, or None."""
     venue = (p.plan or {}).get("venue") or {}
@@ -134,7 +168,9 @@ async def _exit_intelligence(redis: Redis, p: PaperPosition, model, now: datetim
         return None
     trades = pool_trades if pool_trades is not None else await pump_stream.load_trades(redis, p.asset_id)
     entry_liq = Decimal(venue["real_liquidity_at_entry"]) if venue.get("real_liquidity_at_entry") else None
-    d = solana_exit_decision(trades, now, venue.get("creator"), entry_liq, model.liquidity_quote)
+    holders = await holders_now(rpc, redis, p, now)
+    d = solana_exit_decision(trades, now, venue.get("creator"), entry_liq, model.liquidity_quote,
+                             venue.get("holders_at_entry"), holders)
     if d.action == "HOLD":
         return None
     remaining = p.remaining_quantity if p.remaining_quantity is not None else p.quantity
@@ -164,6 +200,7 @@ async def _manage_live(session, redis: Redis, app_settings, p: PaperPosition, pr
 async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterClient | None, now: datetime,
                                 venues: dict | None = None, app_settings=None, rpc=None) -> dict[str, int]:
     counts = {"managed": 0, "closed": 0, "unpriced": 0}
+    rates = None  # paper execution failure rates, loaded once per pass when needed
     async with session_factory() as session:
         # pending_entry (LIVE buy not yet confirmed) and needs_review
         # positions are not "open" and are therefore never managed here.
@@ -185,17 +222,41 @@ async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterC
                     log.warning("gate_manage.unpriced", position_id=str(pid), asset=p.asset_id, reason=source)
                     continue
                 extra = None if p.exit_requested or p.management_paused else await _exit_intelligence(
-                    redis, p, model, now, session, ctx.get("pool_trades"))
+                    redis, p, model, now, session, ctx.get("pool_trades"), rpc)
                 if p.execution_mode == "LIVE":  # a paused position still honours its stop (manage_step)
                     await _manage_live(session, redis, app_settings, p, price, model, extra, now, source)
                     counts["managed"] += 1
                     continue
+                if rates is None:
+                    rates = await paper_execution.effective_rates(session)
+                if rates["exit_pct"] > 0 and p.exit_failures < MAX_SIMULATED_EXIT_FAILURES:
+                    exiting, s = _would_exit(p, price, extra)
+                    key = f"exit:{p.id}:{len(p.tp_hits or [])}:{p.exit_failures}"
+                    if exiting and paper_execution.simulated_failure(key, rates["exit_pct"]):
+                        # As with a live sell that never lands: the position stays
+                        # open, the decision state moves on, and the exit is
+                        # attempted again next tick at that tick's price.
+                        p.highest_price, p.lowest_price = s.highest_price, s.lowest_price
+                        p.trailing_stop, p.stop_loss = s.trailing_stop, s.stop_loss
+                        p.last_price, p.last_marked_at = price, now
+                        p.exit_failures += 1
+                        await add_timeline_event(session, "paper_exit_failed", now,
+                                                 {"simulated": True, "price": str(price), "attempt": p.exit_failures,
+                                                  "failure_pct": str(rates["exit_pct"]), "source": rates["exit_source"]},
+                                                 candidate_id=p.candidate_id, assessment_id=p.assessment_id, position_id=p.id)
+                        await session.commit()
+                        counts["exit_failed"] = counts.get("exit_failed", 0) + 1
+                        await events.publish(redis, "position.updated", {"position_id": str(p.id), "price": str(price),
+                                                                         "exit_failed": True}, "paper")
+                        continue
                 account = await session.get(PaperAccount, p.account_id)
                 tfee = ((p.plan or {}).get("venue") or {}).get("transfer_fee_bps")
                 result = await paper_engine.apply_step(
                     session, p, account, price, model, None if source.startswith("jupiter") else tfee, now,
                     exit_cost_bps=exit_cost, extra_exit=extra,
                 )
+                if result.exits:
+                    p.exit_failures = 0
                 for _, reason in result.exits:
                     kind = NOTIFY_KIND.get(reason)
                     if kind:

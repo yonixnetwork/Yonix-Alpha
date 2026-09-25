@@ -17,7 +17,7 @@ No, not in the sense of "verified against real services". The answer is split be
 | Status | Items |
 |---|---|
 | **COMPLETED** (code path traced end to end, tested with byte-exact synthetic data or fakes at the provider boundary) | Pump.fun-only scope; fresh-token path; migration detection (Pump.fun migration event) and the canonical PumpSwap pool; AUTO never waits for approval (MANUAL is the only approval mode); tax gate 5%/5% with UNKNOWN → NO_TRADE in AUTO; mandatory sellability; size-relative liquidity (REDUCE_SIZE / NO_TRADE); word filters (scopes, BLOCK/ALLOW, 5 match types, 5 fields, dashboard CRUD, immutable system checks); creator/holder/funding indicators with neutral wording; fake-volume metrics; automatic risk plan plus a validated operator exit plan; exits TP1–3 / trailing / stop / REDUCE / EXIT, executed automatically; paper and live sharing the gate, `manage_step` and `close_position`; the order lifecycle (build → guard → sign → persist signature → simulate → send → confirm → fill from wallet balance deltas → realized PnL); reconciliation (wallet SOL, token balances, stuck orders, missing tokens, unknown holdings, duplicate prevention); provenance on every position; .env inventory; full E2E paper scenario; LIVE architecture tests with mocked provider boundaries |
-| **PARTIALLY COMPLETED** | Exit engine: no ML exit probability, and holder-distribution changes are not re-read after entry. Paper "failed execution": only insufficient liquidity and fill errors are simulated, not network or confirmation failures. Automatic TP: volatility/R-multiple based; no resistance or historical-behaviour input |
+| **PARTIALLY COMPLETED** | Exit engine: no ML exit probability (there is no closed-trade history to train one honestly). Automatic TP: volatility/R-multiple based; no resistance or historical-behaviour input |
 | **MISSING** | ML-driven exit model; any live execution for non-Pump.fun venues (intentionally out of scope) |
 | **BLOCKED** | Real PumpPortal trade-local responses, Solana mainnet RPC/WS, Helius: no network egress from the build sandbox, and no credentials |
 | **UNVERIFIED** | That PumpPortal's current transactions pass the transaction guard's allowlist (derived from the official Pump/PumpSwap IDLs). If PumpPortal adds an unknown instruction, the guard refuses the trade (fail closed) and the allowlist must be extended. Also unverified: real-world confirmation latency and slippage. PumpSwap addresses **are** verified against real mainnet data: pool authority, canonical pool and both vault ATAs match the pool documented in pump-public-docs. The account/event decoders are tested against encodings built from the current official IDL, not against live accounts |
@@ -45,6 +45,8 @@ VERIFIED = exercised by a test in this repository (fakes at the network boundary
 | Monitoring / pricing | curve (stream) or PumpSwap pool (RPC) | same | yes | |
 | TP1–3, trailing, stop, manual exit | `manage_step` | same `manage_step`, exits become SELL orders | yes | |
 | Exit intelligence (REDUCE/EXIT) | yes | same | yes | curve and PumpSwap flow |
+| Holder monitoring after entry | yes | same | yes | holders re-read from chain at most once a minute; a creator dump, insider distribution or concentration jump since entry counts only together with sell pressure, seller dominance or a liquidity drop |
+| Execution failures | simulated: entry/exit failure rate (operator setting, or the measured live rate once 20+ live orders of that side have a final outcome); deterministic per attempt | real | yes | failed paper entry opens nothing; failed paper exit is retried next tick at that tick's price; at most 5 simulated failures in a row |
 | Failed exit handling | n/a | retried with +10% slippage per failure (capped), critical alert from the 2nd failure | yes | |
 | Realized PnL | proceeds − cost (simulated) | proceeds − cost (confirmed) | yes | same `close_position` |
 | ML sample + label | yes | yes (`live_execution_realized_pnl`) | yes | |
@@ -171,10 +173,10 @@ VERIFIED = exercised by a test in this repository (fakes at the network boundary
 
     | Suite | Passed |
     |---|---|
-    | core | 319 |
-    | API | 97 |
-    | decision-engine | 45 |
-    | paper-trading | 56 |
+    | core | 326 |
+    | API | 98 |
+    | decision-engine | 47 |
+    | paper-trading | 61 |
     | engine-binance-futures | 48 |
     | ml | 23 |
     | data-binance | 14 |
@@ -182,7 +184,7 @@ VERIFIED = exercised by a test in this repository (fakes at the network boundary
     | discovery | 8 |
     | migration | 11 |
     | momentum | 11 |
-    | **Total** | **642** |
+    | **Total** | **657** |
 
 38. **Tests failed**: none in the final run. During the audit, tests and the IDL cross-check found these real bugs, all fixed:
     - a DB check forbade the pre-fill LIVE row;
@@ -226,5 +228,5 @@ VERIFIED = exercised by a test in this repository (fakes at the network boundary
        - confirm the preflight on the Live Execution page;
        - observe one buy and one sell and compare the fill with Solscan.
     2. Extend the guard allowlist if PumpPortal's transactions contain an instruction it refuses; the refusal reason is stored on the order.
-    3. An ML exit model, and holder-change monitoring after entry.
-    4. Simulating failed network or confirmation paths in paper mode.
+    3. An ML exit model, once enough closed trades exist to train and validate one.
+    4. Set the paper failure rates from your first live results (or leave "use measured live rates" on: it switches automatically after 20 live orders per side).

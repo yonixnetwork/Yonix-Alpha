@@ -25,7 +25,7 @@ from datetime import datetime
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yonixalpha_core import live_trading, paper_engine
+from yonixalpha_core import live_trading, paper_engine, paper_execution
 from yonixalpha_core.ml.gate_features import FEATURE_VERSION
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import TradingCandidate
@@ -33,6 +33,7 @@ from yonixalpha_core.logging import get_logger
 from yonixalpha_core.safety import pipeline, store
 from yonixalpha_core.safety.gate import Assessment, assess
 from yonixalpha_core.safety.models import FinalDecision, GlobalMode, StrategyMode
+from yonixalpha_core.solana import pump_stream, pumpswap
 from yonixalpha_core.solana.assembler import Sources, assemble_fresh, assemble_migrated
 from yonixalpha_core.state_machine import CandidateState, apply_transition
 
@@ -49,6 +50,19 @@ GATE_STATES = [
 
 def is_gate_candidate(candidate: TradingCandidate) -> bool:
     return (candidate.detail or {}).get("source") == "pump_stream" and candidate.engine in ENGINE_OF
+
+
+async def _holder_snapshot(redis, mint: str, inp) -> dict:
+    """What exit intelligence compares holder changes against: shares at
+    entry, supply, and the curve/pool accounts that are not holders."""
+    h, t = inp.holders, inp.token
+    if h is None or t is None:
+        return {}
+    meta = await pump_stream.load_meta(redis, mint) or {}
+    excluded = [a for a in (meta.get("bonding_curve"), pumpswap.canonical_pool(mint)) if a]
+    return {"holders_at_entry": {"top1_share": str(h.top1_share), "top10_share": str(h.top10_share),
+                                 "creator_share": str(h.creator_share) if h.creator_share is not None else None},
+            "supply_raw": str(t.supply_raw), "holder_excluded": excluded}
 
 
 def _analysis_started(candidate: TradingCandidate) -> datetime | None:
@@ -122,7 +136,8 @@ async def evaluate_with_gate(
     provenance = {"source": "PUMPFUN", "lifecycle": lifecycle, "pool": pool, "strategy": a.strategy,
                   "model_version": a.versions.get("ml_model"), "feature_version": FEATURE_VERSION,
                   "venue": {"pool": pool, "creator": evidence.get("creator") or None,
-                            "real_liquidity_at_entry": str(inp.market.liquidity_quote) if inp.market else None}}
+                            "real_liquidity_at_entry": str(inp.market.liquidity_quote) if inp.market else None,
+                            **await _holder_snapshot(redis, mint, inp)}}
     if a.executable and a.execution_target.value == "LIVE":
         try:
             position = await live_trading.enter_live(session, redis, account, a, row.id, candidate, now, lifecycle,
@@ -139,6 +154,16 @@ async def evaluate_with_gate(
         await store.add_timeline_event(session, "risk_calculated", now,
                                        {"size": str(a.plan.position_size.value), "stop": str(a.plan.stop_loss.value),
                                         "max_loss": str(a.plan.max_loss.value)}, candidate_id=candidate.id, assessment_id=row.id)
+        rates = await paper_execution.effective_rates(session)
+        if paper_execution.simulated_failure(f"entry:{row.id}", rates["entry_pct"]):
+            # Same outcome as a live buy that never lands: no position.
+            await store.add_timeline_event(session, "paper_entry_failed", now,
+                                           {"simulated": True, "reason": "simulated network/confirmation failure",
+                                            "failure_pct": str(rates["entry_pct"]), "source": rates["entry_source"]},
+                                           candidate_id=candidate.id, assessment_id=row.id)
+            apply_transition(candidate, CandidateState.REJECTED, reason="paper entry failed (simulated execution failure)")
+            await session.commit()
+            return a
         try:
             position = await paper_engine.open_position(
                 session, account, a, row.id, candidate, inp.liquidity_model, inp.quote,

@@ -197,3 +197,30 @@ async def test_operator_stop_outside_risk_limits_is_refused(db_session, redis_cl
     a = await evaluate_with_gate(db_session, redis_client, ENV, Sources(redis_client, FakeRpc(curve)), cand, NOW)
     assert not a.executable and "MANUAL_SL_TOO_WIDE" in {f.code for f in a.findings}
     assert (await db_session.execute(select(PaperPosition))).scalars().all() == []
+
+
+async def test_simulated_paper_entry_failure_opens_nothing(db_session, redis_client, monkeypatch):
+    from yonixalpha_core import paper_execution
+    from yonixalpha_core.db.models import PlatformSetting, TradeTimelineEvent
+
+    curve = await seed_healthy_launch(redis_client, NOW)
+    db_session.add(PlatformSetting(key=paper_execution.SETTINGS_KEY, value={"entry_failure_pct": "25"}))
+    await db_session.commit()
+    monkeypatch.setattr(paper_execution, "draw", lambda key: Decimal(0))
+    cand = await make_candidate(db_session)
+    a = await evaluate_with_gate(db_session, redis_client, ENV, Sources(redis_client, FakeRpc(curve)), cand, NOW)
+    assert a.decision.value == "EXECUTE"  # the decision stands; the (simulated) execution failed
+    assert (await db_session.execute(select(PaperPosition))).scalars().all() == []
+    assert cand.state == CandidateState.REJECTED.value
+    ev = (await db_session.execute(select(TradeTimelineEvent).where(
+        TradeTimelineEvent.event_type == "paper_entry_failed"))).scalar_one()
+    assert ev.detail["simulated"] is True and ev.detail["source"] == "operator setting"
+
+
+async def test_entry_records_the_holder_snapshot_for_exit_monitoring(db_session, redis_client):
+    curve = await seed_healthy_launch(redis_client, NOW)
+    cand = await make_candidate(db_session)
+    await evaluate_with_gate(db_session, redis_client, ENV, Sources(redis_client, FakeRpc(curve)), cand, NOW)
+    venue = (await db_session.execute(select(PaperPosition))).scalar_one().plan["venue"]
+    assert set(venue["holders_at_entry"]) == {"top1_share", "top10_share", "creator_share"}
+    assert int(venue["supply_raw"]) > 0 and len(venue["holder_excluded"]) == 2

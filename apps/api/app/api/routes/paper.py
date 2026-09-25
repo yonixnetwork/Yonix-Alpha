@@ -10,9 +10,9 @@ from app.api.deps import get_current_username, get_db, get_redis
 from app.api.util import audit, jsonable
 from app.schemas.common import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, Page
 from app.schemas.paper import PaperPositionOut
-from yonixalpha_core import events
+from yonixalpha_core import events, paper_execution
 from yonixalpha_core.db.models import (
-    ExecutionOrder, PaperAccount, PaperOrder, PaperPosition, RiskAssessment, TradeTimelineEvent,
+    ExecutionOrder, PaperAccount, PaperOrder, PaperPosition, PlatformSetting, RiskAssessment, TradeTimelineEvent,
 )
 from yonixalpha_core.safety import store
 
@@ -135,3 +135,27 @@ async def list_orders(strategy: str | None = None, limit: int = Query(100, ge=1,
     return jsonable([{"id": o.id, "strategy": o.strategy, "venue": o.venue, "symbol": o.symbol, "side": o.side,
                       "type": o.order_type, "price": o.price, "quantity": o.quantity, "fill_price": o.fill_price, "fee": o.fee,
                       "status": o.status, "filled_at": o.filled_at, "detail": o.detail} for o in rows])
+
+
+@router.get("/execution-settings")
+async def get_execution_settings(db: AsyncSession = Depends(get_db), _: str = Depends(get_current_username)) -> dict:
+    """Simulated entry/exit failure rates for paper trades: the operator's
+    setting, the rate measured from live orders, and which one applies."""
+    return jsonable(await paper_execution.effective_rates(db))
+
+
+@router.put("/execution-settings")
+async def put_execution_settings(body: dict, request: Request, db: AsyncSession = Depends(get_db),
+                                 username: str = Depends(get_current_username)) -> dict:
+    current = (await paper_execution.load_settings(db)).to_dict()
+    s, errors = paper_execution.parse_settings({**current, **body})
+    if errors:
+        raise HTTPException(422, {"errors": errors})
+    row = await db.get(PlatformSetting, paper_execution.SETTINGS_KEY)
+    if row is None:
+        db.add(PlatformSetting(key=paper_execution.SETTINGS_KEY, value=s.to_dict()))
+    else:
+        row.value = s.to_dict()
+    await audit(db, username, request, "paper_execution.updated", {"before": current, "after": s.to_dict()})
+    await db.commit()
+    return jsonable(await paper_execution.effective_rates(db))

@@ -80,6 +80,7 @@ any fee transfer above `max_platform_fee_bps` (default 100 bps).
 | Settings → modes | global mode (OFF/PAPER/MANUAL/LIVE) and per-strategy mode (OFF/MANUAL/PAPER/AUTO); LIVE refused while locks are closed | `safety/store.py`, API |
 | Word Filters & Rules | BLOCK/ALLOW word filters, scope GLOBAL/FRESH/MIGRATED, fields name/symbol/metadata/any/mint, match exact/word/substring/pattern/regex; custom threshold rules | `safety/rules.py` (regex safety, min lengths) |
 | Fresh / Migrated / Momentum pages | optional operator exit plan: `manual_stop_loss_pct`, `manual_tp1..3_pct`, `manual_trailing_pct`, `manual_position_size_sol`, `manual_max_risk_sol` (empty = automatic) | `strategies/catalog.py`, then re-validated by the planner against risk settings |
+| Paper Trading → Simulated execution failures | entry and exit failure % (0–50, default 0), use measured live rates when 20+ live orders exist | `paper_execution.parse_settings` |
 | Live Execution | entry/exit slippage, per-failure exit slippage step, max exit slippage, priority fee and guard maximum, max provider fee, SOL reserve, wallet-sync max age | `live_trading.LIMITS` |
 
 The built-in safety checks cannot be configured away: authorities, tax limits
