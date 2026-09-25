@@ -77,6 +77,7 @@ class TradePlan:
     entry_cost_bps: Decimal | None = None
     exit_cost_bps: Decimal | None = None
     binding_cap: str | None = None
+    caps: dict = field(default_factory=dict)
     side: str = "LONG"
     breakeven_price: Decimal | None = None
     move_stop_to_breakeven_at_tp1: bool = False
@@ -349,6 +350,7 @@ def plan_trade(
         return plan
 
     binding = min(caps, key=lambda k: caps[k])
+    plan.caps = dict(caps)
     plan.binding_cap = "risk" if risk_size is not None and risk_size <= caps[binding] else binding
 
     if overrides.position_size_quote is not None:

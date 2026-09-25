@@ -15,12 +15,14 @@ from yonixalpha_core.venues.common import venue_health_snapshot
 from yonixalpha_core.logging import configure_logging, get_logger
 from yonixalpha_core.notify import send_telegram_alert
 from yonixalpha_core.solana.market_data import JupiterClient, RateBudget
+from yonixalpha_core.solana.rpc import RpcManager
 from yonixalpha_core.state_machine import CandidateState
 from yonixalpha_core.venues.registry import build_venues
 
 from app.entry import try_open_position
 from app.gate_manage import manage_gate_positions, track_outcomes
 from app.grid_engine import run_grid
+from app.live_worker import live_worker_loop
 from app.manage import evaluate_open_position
 from app.pricing import latest_price
 
@@ -105,7 +107,7 @@ async def _manage_open_positions(session_factory, now: datetime, per_leg_cost_bp
 
 async def _paper_trading_loop(
     session_factory, stop_event: asyncio.Event, per_leg_cost_bps: Decimal = Decimal(0), redis=None, jupiter=None,
-    venues=None, app_settings=None,
+    venues=None, app_settings=None, rpc=None,
 ) -> None:
     while not stop_event.is_set():
         now = datetime.now(timezone.utc)
@@ -119,7 +121,7 @@ async def _paper_trading_loop(
             await _record_system_event(session_factory, "paper_trading_loop_failed", "error", {"error": str(exc)})
         if redis is not None:
             try:
-                counts = await manage_gate_positions(session_factory, redis, jupiter, now, venues, app_settings)
+                counts = await manage_gate_positions(session_factory, redis, jupiter, now, venues, app_settings, rpc)
                 if counts.get("failed"):
                     await _record_system_event(session_factory, "gate_manage_failed", "error", counts)
                 elif counts["closed"]:
@@ -159,10 +161,15 @@ async def run() -> None:
     http_client = httpx.AsyncClient()
     jupiter = JupiterClient(http_client, settings.JUPITER_API_KEY, RateBudget(JUPITER_REQUESTS_PER_MINUTE))
     venues = build_venues(http_client, settings)
+    # Pool pricing for migrated positions and the LIVE worker both need RPC;
+    # without it pumpswap positions report "unpriced" and LIVE is disabled.
+    rpc = (RpcManager.create(client=http_client, primary_url=settings.SOLANA_RPC_URL, backup_url=settings.SOLANA_RPC_BACKUP_URL)
+           if settings.SOLANA_RPC_URL else None)
     try:
         await asyncio.gather(
             _paper_trading_loop(session_factory, stop_event, settings.PAPER_TRADING_PER_LEG_COST_BPS, redis, jupiter,
-                                venues, settings),
+                                venues, settings, rpc),
+            live_worker_loop(session_factory, redis, settings, rpc, http_client, stop_event),
             heartbeat_loop(settings, "paper-trading", stop_event, lambda: {"venues": venue_health_snapshot()}),
         )
     finally:

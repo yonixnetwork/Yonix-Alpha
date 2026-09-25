@@ -19,6 +19,9 @@ dependencies = [
     "structlog==24.4.0",
     "httpx==0.28.1",
     "websockets==14.1",
+    # Keypairs, PDAs and versioned transactions for PumpSwap pool derivation
+    # and local signing of live orders.
+    "solders==0.29.0",
 ]
 
 [project.optional-dependencies]

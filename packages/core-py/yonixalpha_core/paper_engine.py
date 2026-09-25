@@ -449,34 +449,43 @@ async def apply_step(
     position.last_marked_at = now
 
     if result.closed:
-        position.status = "closed"
-        position.exit_at = now
-        position.exit_reason = result.exits[-1][1] if result.exits else "closed"
-        position.exit_price = price
-        position.realized_pnl = position.proceeds_quote - position.entry_cost_quote
-        position.realized_pnl_pct = position.realized_pnl / position.entry_cost_quote if position.entry_cost_quote else None
-        labels = outcome_labels(position)
-        if position.candidate_id is not None:
-            await session.execute(
-                update(MLFeatureSnapshot)
-                .where(MLFeatureSnapshot.candidate_id == position.candidate_id, MLFeatureSnapshot.label.is_(None))
-                .values(label=1 if position.realized_pnl > 0 else 0, label_source=LABEL_SOURCE, outcome=labels)
-            )
-            candidate = await session.get(TradingCandidate, position.candidate_id)
-            if candidate is not None and candidate.state == CandidateState.MANAGING.value:
-                apply_transition(candidate, CandidateState.EXIT_SIGNAL, reason=position.exit_reason)
-                apply_transition(candidate, CandidateState.EXITING, reason=position.exit_reason)
-                apply_transition(candidate, CandidateState.CLOSED,
-                                 reason=f"paper closed: {position.exit_reason}, pnl {position.realized_pnl:.6f}")
-        elif position.assessment_id is not None:
-            await session.execute(
-                update(MLFeatureSnapshot)
-                .where(MLFeatureSnapshot.assessment_id == position.assessment_id, MLFeatureSnapshot.label.is_(None))
-                .values(label=1 if position.realized_pnl > 0 else 0, label_source=LABEL_SOURCE, outcome=labels)
-            )
-        await add_timeline_event(session, "paper_closed", now,
-                                 {"realized_pnl": str(position.realized_pnl), "pnl_pct": str(position.realized_pnl_pct),
-                                  "fees": str(position.fees_paid_quote), "mfe_price": str(position.highest_price),
-                                  "mae_price": str(position.lowest_price), "outcome": labels},
-                                 candidate_id=position.candidate_id, assessment_id=position.assessment_id, position_id=position.id)
+        await close_position(session, position, now, result.exits[-1][1] if result.exits else "closed", price)
     return result
+
+
+async def close_position(session: AsyncSession, position: PaperPosition, now: datetime, reason: str, price: Decimal | None) -> None:
+    """Books realized PnL (proceeds − entry cost, both actual), writes the
+    explicit ML outcome labels and closes the candidate. Shared by the paper
+    simulator and live execution, so both record outcomes identically."""
+    position.status = "closed"
+    position.exit_at = now
+    position.exit_reason = reason
+    position.exit_price = price
+    position.realized_pnl = (position.proceeds_quote or Decimal(0)) - (position.entry_cost_quote or Decimal(0))
+    position.realized_pnl_pct = position.realized_pnl / position.entry_cost_quote if position.entry_cost_quote else None
+    labels = outcome_labels(position)
+    source = LABEL_SOURCE if getattr(position, "execution_mode", "PAPER") != "LIVE" else "live_execution_realized_pnl"
+    if position.candidate_id is not None:
+        await session.execute(
+            update(MLFeatureSnapshot)
+            .where(MLFeatureSnapshot.candidate_id == position.candidate_id, MLFeatureSnapshot.label.is_(None))
+            .values(label=1 if position.realized_pnl > 0 else 0, label_source=source, outcome=labels)
+        )
+        candidate = await session.get(TradingCandidate, position.candidate_id)
+        if candidate is not None and candidate.state == CandidateState.MANAGING.value:
+            apply_transition(candidate, CandidateState.EXIT_SIGNAL, reason=position.exit_reason)
+            apply_transition(candidate, CandidateState.EXITING, reason=position.exit_reason)
+            apply_transition(candidate, CandidateState.CLOSED,
+                             reason=f"{position.execution_mode.lower() if getattr(position, 'execution_mode', None) else 'paper'} closed: "
+                                    f"{position.exit_reason}, pnl {position.realized_pnl:.6f}")
+    elif position.assessment_id is not None:
+        await session.execute(
+            update(MLFeatureSnapshot)
+            .where(MLFeatureSnapshot.assessment_id == position.assessment_id, MLFeatureSnapshot.label.is_(None))
+            .values(label=1 if position.realized_pnl > 0 else 0, label_source=source, outcome=labels)
+        )
+    await add_timeline_event(session, "live_closed" if getattr(position, "execution_mode", "PAPER") == "LIVE" else "paper_closed", now,
+                             {"realized_pnl": str(position.realized_pnl), "pnl_pct": str(position.realized_pnl_pct),
+                              "fees": str(position.fees_paid_quote), "mfe_price": str(position.highest_price),
+                              "mae_price": str(position.lowest_price), "outcome": labels},
+                             candidate_id=position.candidate_id, assessment_id=position.assessment_id, position_id=position.id)

@@ -513,7 +513,10 @@ class PaperPosition(Base):
     # other open position's stop-loss) before this constraint existed.
     __table_args__ = (
         CheckConstraint("entry_price > 0", name="ck_paper_positions_entry_price_positive"),
-        CheckConstraint("quantity > 0", name="ck_paper_positions_quantity_positive"),
+        # A LIVE position exists before its fill (pending_entry, quantity 0);
+        # it keeps 0 if the buy fails or confirms without tokens.
+        CheckConstraint("quantity > 0 OR status IN ('pending_entry', 'failed', 'needs_review')",
+                        name="ck_paper_positions_quantity_positive"),
     )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
@@ -564,6 +567,79 @@ class PaperPosition(Base):
     # its stop; exit_requested is consumed by the next management tick.
     management_paused: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     exit_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # Migration 0011: execution provenance. PAPER positions fill in the
+    # simulator; LIVE positions fill only from confirmed on-chain transactions
+    # (status pending_entry until the buy confirms, needs_review when
+    # the wallet disagrees with the record and a human must look).
+    execution_mode: Mapped[str] = mapped_column(String(8), nullable=False, default="PAPER", server_default="PAPER", index=True)
+    source: Mapped[str | None] = mapped_column(String(16), nullable=True)  # PUMPFUN | BINANCE | ...
+    lifecycle: Mapped[str | None] = mapped_column(String(16), nullable=True)  # FRESH | MIGRATED
+    execution_provider: Mapped[str | None] = mapped_column(String(32), nullable=True)  # paper_simulator | pumpportal_local
+    execution_route: Mapped[str | None] = mapped_column(String(32), nullable=True)  # pump | pump-amm | binance_book ...
+    pool: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    strategy: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    model_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    feature_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    pending_order_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    exit_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+
+
+class ExecutionOrder(Base):
+    """One real (or simulated) execution request and its outcome. A LIVE
+    order's signature is stored before the transaction is sent, so a crash
+    at any point can be reconciled by looking the signature up on chain.
+    `idempotency_key` makes a repeated decision unable to buy twice."""
+
+    __tablename__ = "execution_orders"
+    __table_args__ = (
+        CheckConstraint("side IN ('BUY','SELL')", name="ck_execution_orders_side"),
+        CheckConstraint("mode IN ('PAPER','LIVE')", name="ck_execution_orders_mode"),
+        CheckConstraint("status IN ('PENDING','SIGNED','SUBMITTED','CONFIRMED','FAILED','EXPIRED','CANCELLED')",
+                        name="ck_execution_orders_status"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    position_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("paper_positions.id", ondelete="SET NULL"), nullable=True, index=True)
+    assessment_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("risk_assessments.id", ondelete="SET NULL"), nullable=True)
+    mode: Mapped[str] = mapped_column(String(8), nullable=False)
+    side: Mapped[str] = mapped_column(String(4), nullable=False)
+    reason: Mapped[str] = mapped_column(String(32), nullable=False)  # entry | stop_loss | take_profit_1 | ...
+    mint: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    route: Mapped[str] = mapped_column(String(16), nullable=False)  # pump | pump-amm
+    amount: Mapped[str] = mapped_column(String(48), nullable=False)  # SOL for buys, raw token units for sells
+    amount_kind: Mapped[str] = mapped_column(String(8), nullable=False)  # sol | tokens
+    slippage_pct: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False)
+    priority_fee_sol: Mapped[Decimal] = mapped_column(Numeric(20, 9), nullable=False)
+    limits: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # guard bounds used
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING", index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    signature: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    guard: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class ReconciliationEvent(Base):
+    """What reconciliation found when it compared the wallet with the
+    database: balance syncs, mismatches, unknown holdings, late
+    confirmations, expired orders."""
+
+    __tablename__ = "reconciliation_events"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    kind: Mapped[str] = mapped_column(String(48), nullable=False, index=True)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False, default="info")
+    mint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    position_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("paper_positions.id", ondelete="SET NULL"), nullable=True)
+    order_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("execution_orders.id", ondelete="SET NULL"), nullable=True)
+    detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
 
 
 # ---------------------------------------------------------------------------
@@ -625,8 +701,9 @@ class BlacklistEntry(Base):
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     scope: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
-    field: Mapped[str] = mapped_column(String(16), nullable=False)  # name|symbol|mint
-    match_type: Mapped[str] = mapped_column(String(16), nullable=False)  # exact|pattern
+    field: Mapped[str] = mapped_column(String(16), nullable=False)  # name|symbol|mint|metadata|any
+    match_type: Mapped[str] = mapped_column(String(16), nullable=False)  # exact|word|substring|pattern|regex
+    action: Mapped[str] = mapped_column(String(8), nullable=False, default="BLOCK", server_default="BLOCK")  # BLOCK|ALLOW
     value: Mapped[str] = mapped_column(String(128), nullable=False)
     reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

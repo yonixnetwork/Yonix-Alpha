@@ -147,3 +147,37 @@ def round_trip_volume_share(trades: list[Trade], now: datetime, window_seconds: 
     sellers = {t.trader for t in window if not t.is_buy}
     both = buyers & sellers
     return Decimal(sum(t.sol_lamports for t in window if t.trader in both)) / Decimal(total)
+
+
+def demand_quality(trades: list[Trade], now: datetime, window_seconds: int, decimals: int | None) -> dict:
+    """Signals that volume is real demand rather than churn:
+    - unique buyers in each half of the window (organic interest grows);
+    - share of trades from wallets that traded >= 3 times (bots/wash);
+    - volume churn: gross volume / |net buy volume| (wash trading moves a lot
+      of SOL without moving net demand);
+    - price change across the window (volume without price response).
+    Raw volume alone is never treated as demand."""
+    window = in_window(trades, now, window_seconds)
+    out: dict = {"unique_buyers_first_half": None, "unique_buyers_second_half": None, "repeated_wallet_share": None,
+                 "volume_churn": None, "price_change": None}
+    if not window:
+        return out
+    mid = now - timedelta(seconds=window_seconds / 2)
+    out["unique_buyers_first_half"] = len({t.trader for t in window if t.is_buy and t.at <= mid})
+    out["unique_buyers_second_half"] = len({t.trader for t in window if t.is_buy and t.at > mid})
+    counts: dict[str, int] = {}
+    for t in window:
+        counts[t.trader] = counts.get(t.trader, 0) + 1
+    out["repeated_wallet_share"] = Decimal(sum(1 for t in window if counts[t.trader] >= 3)) / Decimal(len(window))
+    gross = sum(t.sol_lamports for t in window)
+    net = abs(sum(t.sol_lamports if t.is_buy else -t.sol_lamports for t in window))
+    out["volume_churn"] = (Decimal(gross) / Decimal(max(net, 1))) if gross else None
+    if decimals is not None and len(window) >= 2 and window[0].virtual_token and window[-1].virtual_token:
+        p0, p1 = window[0].price(decimals), window[-1].price(decimals)
+        out["price_change"] = (p1 / p0 - 1) if p0 > 0 else None
+    return out
+
+
+def apply_demand_quality(flow, trades: list[Trade], now: datetime, window_seconds: int, decimals: int | None) -> None:
+    for k, v in demand_quality(trades, now, window_seconds, decimals).items():
+        setattr(flow, k, v)

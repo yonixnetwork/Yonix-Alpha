@@ -14,8 +14,10 @@ including rejections and waits), and act on it:
   WAIT / NO_TRADE         -> ANALYZING until the engine's time limit
   REJECT                  -> REJECTED now
 
-Live execution of Solana trades is not implemented; a LIVE target (which
-needs all three environment locks open) is refused and recorded.
+A LIVE target (global mode LIVE, strategy AUTO/MANUAL, all three
+environment locks open, live readiness confirmed) creates a pending LIVE
+position and BUY order for the paper-trading service's order worker; the
+position only fills when the transaction confirms on chain.
 """
 
 from datetime import datetime
@@ -23,13 +25,14 @@ from datetime import datetime
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yonixalpha_core import paper_engine
+from yonixalpha_core import live_trading, paper_engine
+from yonixalpha_core.ml.gate_features import FEATURE_VERSION
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import TradingCandidate
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.safety import pipeline, store
 from yonixalpha_core.safety.gate import Assessment, assess
-from yonixalpha_core.safety.models import FinalDecision, StrategyMode
+from yonixalpha_core.safety.models import FinalDecision, GlobalMode, StrategyMode
 from yonixalpha_core.solana.assembler import Sources, assemble_fresh, assemble_migrated
 from yonixalpha_core.state_machine import CandidateState, apply_transition
 
@@ -81,12 +84,21 @@ async def evaluate_with_gate(
         return None
 
     approval = await pipeline.approval_granted(session, now, candidate_id=candidate.id)
-    controls, account, settings_meta = await pipeline.load_controls(session, redis, settings, engine, strategy_mode, mint, now, approval)
+    live_intent = (await store.load_global_mode(session) == GlobalMode.LIVE and strategy_mode in (StrategyMode.AUTO, StrategyMode.MANUAL)
+                   and store.live_trading_permitted(settings))
+    controls, account, settings_meta = await pipeline.load_controls(session, redis, settings, engine, strategy_mode, mint, now,
+                                                                    approval, live=live_intent)
+    live_ready, live_reason = await live_trading.live_readiness(redis, settings, now) if live_intent else (None, None)
     if engine == "solana_migration":
         inp, evidence = await assemble_migrated(sources, mint, now, controls)
     else:
         inp, evidence = await assemble_fresh(sources, mint, now, controls, engine=engine)
-    adapter = "pump_curve" if inp.liquidity_model is not None else ("jupiter" if inp.quote is not None else None)
+    inp.live_ready, inp.live_not_ready_reason = live_ready, live_reason
+    lifecycle = "MIGRATED" if engine == "solana_migration" else "FRESH"
+    if inp.liquidity_model is not None:
+        adapter = "pumpswap_pool" if lifecycle == "MIGRATED" else "pump_curve"
+    else:
+        adapter = "jupiter" if inp.quote is not None else None
     inp.ml, ml_info = await pipeline.champion_prediction(session, redis, engine, evidence.get("features") or {})
     vers = await pipeline.versions(session, settings_meta, inp.signal, adapter)
     vers["ml_model"] = f"{ml_info['model']} v{ml_info['version']}" if inp.ml else None
@@ -103,11 +115,22 @@ async def evaluate_with_gate(
     await pipeline.after_ml(redis, a, row, ml_info)
 
     codes = {f.code for f in a.findings if f.action == a.decision}
+    pool = ((evidence.get("pool") or {}).get("address")) if lifecycle == "MIGRATED" else None
+    provenance = {"source": "PUMPFUN", "lifecycle": lifecycle, "pool": pool, "strategy": a.strategy,
+                  "model_version": a.versions.get("ml_model"), "feature_version": FEATURE_VERSION,
+                  "venue": {"pool": pool, "creator": evidence.get("creator") or None,
+                            "real_liquidity_at_entry": str(inp.market.liquidity_quote) if inp.market else None}}
     if a.executable and a.execution_target.value == "LIVE":
-        await store.add_timeline_event(session, "live_refused", now,
-                                       {"reason": "live Solana execution is not implemented"},
-                                       candidate_id=candidate.id, assessment_id=row.id)
-        apply_transition(candidate, CandidateState.REJECTED, reason="LIVE target but live Solana execution is not implemented")
+        try:
+            position = await live_trading.enter_live(session, redis, account, a, row.id, candidate, now, lifecycle,
+                                                     inp.token.decimals if inp.token else None, provenance)
+            pipeline.record_ml_sample(session, a, row.id, candidate.id, evidence.get("features") or {},
+                                      *pipeline.ml_sample_args(inp.ml, ml_info))
+            await pipeline.after_entry(session, redis, settings, a, position)
+        except ValueError as exc:
+            await store.add_timeline_event(session, "live_entry_refused", now, {"reason": str(exc)},
+                                           candidate_id=candidate.id, assessment_id=row.id)
+            apply_transition(candidate, CandidateState.REJECTED, reason=f"live entry refused: {exc}")
     elif a.executable:
         pipeline.record_ml_sample(session, a, row.id, candidate.id, evidence.get("features") or {}, *pipeline.ml_sample_args(inp.ml, ml_info))
         await store.add_timeline_event(session, "risk_calculated", now,
@@ -118,10 +141,14 @@ async def evaluate_with_gate(
                 session, account, a, row.id, candidate, inp.liquidity_model, inp.quote,
                 inp.token.transfer_fee_bps if inp.token else None, now,
                 venue={"type": adapter, "kind": "spot", "decimals": inp.token.decimals if inp.token else None,
-                       "real_liquidity_at_entry": str(inp.market.liquidity_quote) if inp.market else None,
-                       "creator": (evidence.get("creator") or None)},
+                       **provenance["venue"]},
                 max_slippage_bps=controls.settings.max_slippage_bps,
             )
+            position.execution_mode, position.source, position.lifecycle = "PAPER", "PUMPFUN", lifecycle
+            position.execution_provider = live_trading.PAPER_PROVIDER
+            position.execution_route = "pump-amm" if lifecycle == "MIGRATED" else "pump"
+            position.pool, position.strategy = pool, a.strategy
+            position.model_version, position.feature_version = provenance["model_version"], FEATURE_VERSION
             await pipeline.after_entry(session, redis, settings, a, position)
         except paper_engine.FillError as exc:
             await store.add_timeline_event(session, "paper_entry_failed", now, {"reason": str(exc)},

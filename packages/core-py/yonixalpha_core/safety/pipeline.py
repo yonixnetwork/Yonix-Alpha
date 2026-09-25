@@ -57,9 +57,16 @@ async def rules_version(session: AsyncSession) -> str:
 
 
 async def load_controls(session: AsyncSession, redis: Redis, app_settings: Any, engine: str, strategy_mode: StrategyMode,
-                        asset_id: str, now: datetime, approval: bool) -> tuple[Controls, Any, dict]:
+                        asset_id: str, now: datetime, approval: bool, live: bool = False) -> tuple[Controls, Any, dict]:
+    """`live=True` sizes against the live wallet's book (synced from chain)
+    instead of the engine's paper book."""
     safety, settings_meta = await store.load_settings(session, engine)
-    account = await store.get_paper_account(session, store.ENGINE_ACCOUNT[engine])
+    if live:
+        from yonixalpha_core.live_trading import get_live_account
+
+        account = await get_live_account(session)
+    else:
+        account = await store.get_paper_account(session, store.ENGINE_ACCOUNT[engine])
     controls = Controls(
         settings=safety,
         account=await store.account_state(session, account, asset_id, now, await kill_switch.is_engaged(redis)),

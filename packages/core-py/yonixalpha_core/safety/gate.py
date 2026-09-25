@@ -75,6 +75,7 @@ class Assessment:
     versions: dict[str, Any]
     settings_snapshot: dict[str, Any]
     inputs_snapshot: dict[str, Any] = field(default_factory=dict)
+    reports: dict[str, Any] = field(default_factory=dict)  # tax, sellability, liquidity
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -97,6 +98,7 @@ class Assessment:
             "versions": self.versions,
             "settings_snapshot": self.settings_snapshot,
             "inputs_snapshot": self.inputs_snapshot,
+            "reports": self.reports,
         }
 
 
@@ -143,6 +145,30 @@ def _check_data(inp: AssessmentInput, s: SafetySettings, required: set[str], out
     return statuses
 
 
+def tax_report(t, s: SafetySettings) -> dict[str, Any]:
+    """Token-specific buy/sell tax. On Solana the only protocol-level token
+    tax is the Token-2022 TransferFeeConfig extension, withheld on every
+    transfer — so it applies to both the buy (pool → wallet) and the sell
+    (wallet → pool). Pump.fun / PumpSwap trading fees are protocol fees,
+    costed in execution, and are NOT token tax. A transfer hook or an
+    extension the RPC couldn't parse makes the tax unknowable."""
+    limits = {"buy_limit_pct": str(s.max_buy_tax_pct), "sell_limit_pct": str(s.max_sell_tax_pct)}
+    if t is None:
+        return {"buy_tax_pct": None, "sell_tax_pct": None, "source": "mint account unavailable",
+                "confidence": "UNKNOWN", **limits}
+    if "transferHook" in t.extensions or t.unparseable_extension:
+        why = "transfer hook program can charge or block on any transfer" if "transferHook" in t.extensions \
+            else "unparseable Token-2022 extension"
+        return {"buy_tax_pct": None, "sell_tax_pct": None, "source": why, "confidence": "UNKNOWN", **limits}
+    if t.transfer_fee_bps:
+        pct = str(Decimal(t.transfer_fee_bps) / 100)
+        return {"buy_tax_pct": pct, "sell_tax_pct": pct, "source": "Token-2022 TransferFeeConfig (on-chain, max of current/next epoch)",
+                "confidence": "HIGH", **limits}
+    program = "Token-2022 without a transfer fee" if t.token_program == "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" \
+        else "SPL Token program (no transfer fee possible)"
+    return {"buy_tax_pct": "0", "sell_tax_pct": "0", "source": program, "confidence": "HIGH", **limits}
+
+
 def _check_token(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) -> None:
     if inp.blacklisted_by:
         out.append(_finding(RiskCategory.TOKEN, "BLACKLISTED", RiskLevel.CRITICAL,
@@ -174,18 +200,24 @@ def _check_token(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) ->
     elif "pausableConfig" in t.extensions:
         out.append(_finding(RiskCategory.TOKEN, "PAUSABLE", RiskLevel.HIGH,
                             "an authority can pause all transfers", FinalDecision.REQUIRE_MANUAL_APPROVAL))
-    if t.transfer_fee_bps is not None and t.transfer_fee_bps > 0:
-        if t.transfer_fee_bps > s.max_transfer_fee_bps:
-            out.append(_finding(RiskCategory.TOKEN, "TRANSFER_FEE_EXCESSIVE", RiskLevel.CRITICAL,
-                                f"transfer fee {t.transfer_fee_bps}bps exceeds max {s.max_transfer_fee_bps}bps",
-                                FinalDecision.REJECT, True))
-        else:
-            out.append(_finding(RiskCategory.TOKEN, "TRANSFER_FEE", RiskLevel.MODERATE,
-                                f"transfer fee {t.transfer_fee_bps}bps is charged on every sell (included in exit costs)",
-                                FinalDecision.EXECUTE))
-        if t.transfer_fee_authority:
-            out.append(_finding(RiskCategory.TOKEN, "TRANSFER_FEE_MUTABLE", RiskLevel.HIGH,
-                                "an authority can raise the transfer fee", FinalDecision.REQUIRE_MANUAL_APPROVAL))
+    tax = tax_report(t, s)
+    if tax["buy_tax_pct"] is not None and Decimal(tax["buy_tax_pct"]) > s.max_buy_tax_pct:
+        out.append(_finding(RiskCategory.TOKEN, "BUY_TAX_EXCESSIVE", RiskLevel.CRITICAL,
+                            f"buy tax {tax['buy_tax_pct']}% exceeds limit {s.max_buy_tax_pct}% ({tax['source']})",
+                            FinalDecision.NO_TRADE, True))
+    if tax["sell_tax_pct"] is not None and Decimal(tax["sell_tax_pct"]) > s.max_sell_tax_pct:
+        out.append(_finding(RiskCategory.TOKEN, "SELL_TAX_EXCESSIVE", RiskLevel.CRITICAL,
+                            f"sell tax {tax['sell_tax_pct']}% exceeds limit {s.max_sell_tax_pct}% ({tax['source']})",
+                            FinalDecision.NO_TRADE, True))
+    if tax["confidence"] == "UNKNOWN":
+        out.append(_finding(RiskCategory.TOKEN, "TAX_UNKNOWN", RiskLevel.HIGH,
+                            f"token tax cannot be established: {tax['source']}", FinalDecision.REQUIRE_MANUAL_APPROVAL))
+    elif t.transfer_fee_bps:
+        out.append(_finding(RiskCategory.TOKEN, "TRANSFER_FEE", RiskLevel.MODERATE,
+                            f"token tax {tax['sell_tax_pct']}% on every buy and sell (included in costs)", FinalDecision.EXECUTE))
+    if t.transfer_fee_bps and t.transfer_fee_authority:
+        out.append(_finding(RiskCategory.TOKEN, "TRANSFER_FEE_MUTABLE", RiskLevel.HIGH,
+                            "an authority can raise the transfer fee", FinalDecision.REQUIRE_MANUAL_APPROVAL))
     if "mintCloseAuthority" in t.extensions:
         out.append(_finding(RiskCategory.TOKEN, "MINT_CLOSE_AUTHORITY", RiskLevel.MODERATE,
                             "mint close authority present", FinalDecision.EXECUTE))
@@ -329,6 +361,26 @@ def _check_flow(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) -> 
         out.append(_finding(RiskCategory.TRADING, "ROUND_TRIP_VOLUME", RiskLevel.HIGH,
                             f"{fl.round_trip_share:.0%} of volume came from wallets that both bought and sold in the window — "
                             "possible wash trading", FinalDecision.REQUIRE_MANUAL_APPROVAL))
+    if fl.volume_churn is not None and fl.volume_churn > s.max_volume_churn and fl.trade_count >= 10:
+        out.append(_finding(RiskCategory.TRADING, "VOLUME_CHURN", RiskLevel.HIGH,
+                            f"gross volume is {fl.volume_churn:.0f}x net demand — volume without net buying (possible wash trading)",
+                            FinalDecision.REQUIRE_MANUAL_APPROVAL))
+    if fl.repeated_wallet_share is not None and fl.repeated_wallet_share > s.max_repeated_wallet_share and fl.trade_count >= 10:
+        out.append(_finding(RiskCategory.TRADING, "REPEATED_WALLETS", RiskLevel.HIGH,
+                            f"{fl.repeated_wallet_share:.0%} of trades come from wallets trading 3+ times — low wallet diversity",
+                            FinalDecision.REQUIRE_MANUAL_APPROVAL))
+    if (fl.unique_buyers_first_half is not None and fl.unique_buyers_second_half is not None
+            and fl.unique_buyers_first_half >= 5 and fl.unique_buyers_second_half == 0):
+        out.append(_finding(RiskCategory.TRADING, "BUYERS_STOPPED", RiskLevel.MODERATE,
+                            "no new buyers in the second half of the window", FinalDecision.WAIT))
+    if fl.creator_linked_buyers is not None and fl.creator_linked_buyers > s.max_creator_linked_buyers:
+        out.append(_finding(RiskCategory.HOLDER, "CREATOR_LINKED", RiskLevel.HIGH,
+                            f"{fl.creator_linked_buyers} early buyer(s) were funded by the creator — CREATOR-LINKED INDICATOR",
+                            FinalDecision.REQUIRE_MANUAL_APPROVAL))
+    if fl.related_wallet_groups is not None and fl.related_wallet_groups >= s.max_related_wallet_group:
+        out.append(_finding(RiskCategory.HOLDER, "RELATED_WALLETS", RiskLevel.HIGH,
+                            f"{fl.related_wallet_groups} fresh early buyers share one funding source — RELATED-WALLET INDICATOR",
+                            FinalDecision.REQUIRE_MANUAL_APPROVAL))
     if fl.creator_launches_24h is not None and fl.creator_launches_24h > s.max_creator_launches_24h:
         out.append(_finding(RiskCategory.HOLDER, "SERIAL_CREATOR", RiskLevel.HIGH,
                             f"creator launched {fl.creator_launches_24h} tokens in the last 24 h", FinalDecision.REQUIRE_MANUAL_APPROVAL))
@@ -395,6 +447,10 @@ def _mode_findings(inp: AssessmentInput, out: list[Finding]) -> None:
         out.append(_finding(RiskCategory.ACCOUNT, "LIVE_NOT_PERMITTED", RiskLevel.CRITICAL,
                             "LIVE mode requested but TRADING_ENABLED and LIVE_TRADING_ENABLED are not both true",
                             FinalDecision.NO_TRADE, True))
+    elif live_requested and inp.live_ready is not True:
+        out.append(_finding(RiskCategory.ACCOUNT, "LIVE_NOT_READY", RiskLevel.CRITICAL,
+                            f"live execution not ready: {inp.live_not_ready_reason or 'readiness not established'}",
+                            FinalDecision.NO_TRADE, True))
 
 
 def _resolve(findings: list[Finding]) -> FinalDecision:
@@ -419,6 +475,67 @@ def _status_label(decision: FinalDecision, findings: list[Finding], qualified: b
     if qualified:
         return "QUALIFIED — NOT EXECUTABLE"
     return decision.value
+
+
+_TRANSFER_BLOCKERS = {"FREEZE_AUTHORITY", "DEFAULT_FROZEN", "PAUSED", "EXT_NONTRANSFERABLE", "EXT_TRANSFERHOOK",
+                      "EXT_PERMANENTDELEGATE"}
+_ROUTE_BLOCKERS = {"NO_SELL_ROUTE", "ROUTE_UNVERIFIED", "BOOK_TOO_THIN", "EXIT_IMPACT", "EXECUTION_UNAVAILABLE",
+                   "LIQUIDITY_UNKNOWN", "MIGRATION_PENDING"}
+
+
+def _sellability(inp: AssessmentInput, plan: TradePlan, findings: list[Finding]) -> dict[str, Any]:
+    """Can the position realistically be sold? SELLABLE only when a sell was
+    simulated or quoted at the planned size and nothing restricts transfers."""
+    codes = {f.code for f in findings}
+    size = plan.position_size.value if plan.position_size else None
+    out: dict[str, Any] = {"route": None, "expected_sell_price": None, "exit_impact_bps": None, "exit_cost_bps":
+                           str(plan.exit_cost_bps) if plan.exit_cost_bps is not None else None,
+                           "transfer_restrictions": sorted(codes & _TRANSFER_BLOCKERS),
+                           "blocking": sorted(codes & (_ROUTE_BLOCKERS | _TRANSFER_BLOCKERS | {"SELL_TAX_EXCESSIVE", "TAX_UNKNOWN"}))}
+    if inp.liquidity_model is not None and size:
+        o = open_fill(inp.liquidity_model, size, inp.side)
+        c = close_fill(inp.liquidity_model, o.quantity, inp.side) if o.complete else None
+        out["route"] = "exact pool/curve simulation"
+        if c is not None and c.complete and o.quantity > 0:
+            out["expected_sell_price"] = str((c.quote - c.fee) / o.quantity) if inp.side == "LONG" else None
+            out["exit_impact_bps"] = str(c.impact_bps)
+            out["sell_simulated"] = True
+        else:
+            out["sell_simulated"] = False
+    elif inp.quote is not None:
+        out["route"] = f"{inp.quote.venue.value} quote"
+        out["sell_simulated"] = inp.quote.sell_route_available is True
+        out["exit_impact_bps"] = str(inp.quote.exit_impact_bps) if inp.quote.exit_impact_bps is not None else None
+    else:
+        out["sell_simulated"] = False
+    if out["blocking"]:
+        out["status"] = "NOT SELLABLE"
+    elif out.get("sell_simulated"):
+        out["status"] = "SELLABLE"
+    else:
+        out["status"] = "UNKNOWN"
+    return out
+
+
+def _liquidity(inp: AssessmentInput, plan: TradePlan) -> dict[str, Any]:
+    m = inp.market
+    size = plan.position_size.value if plan.position_size else None
+    liq = m.liquidity_quote if m else None
+    out: dict[str, Any] = {
+        "usable_liquidity": str(liq) if liq is not None else None,
+        "position_size": str(size) if size is not None else None,
+        "position_to_liquidity": str(size / liq) if size and liq else None,
+        "entry_cost_bps": str(plan.entry_cost_bps) if plan.entry_cost_bps is not None else None,
+        "exit_cost_bps": str(plan.exit_cost_bps) if plan.exit_cost_bps is not None else None,
+        "binding_cap": plan.binding_cap,
+        "caps": {k: str(v) for k, v in (getattr(plan, "caps", None) or {}).items()},
+    }
+    if inp.liquidity_model is not None and size:
+        o = open_fill(inp.liquidity_model, size, inp.side)
+        c = close_fill(inp.liquidity_model, o.quantity, inp.side) if o.complete else None
+        out["entry_impact_bps"] = str(o.impact_bps)
+        out["exit_impact_bps"] = str(c.impact_bps) if c is not None and c.complete else None
+    return out
 
 
 def assess(inp: AssessmentInput, settings: SafetySettings, versions: dict[str, Any] | None = None) -> Assessment:
@@ -497,6 +614,15 @@ def assess(inp: AssessmentInput, settings: SafetySettings, versions: dict[str, A
         findings.append(_finding(RiskCategory.STRATEGY, "MANUAL_APPROVAL_GRANTED", RiskLevel.LOW,
                                  "operator approved; all safety gates re-checked", decision))
 
+    if decision == FinalDecision.REQUIRE_MANUAL_APPROVAL and inp.strategy_mode == StrategyMode.AUTO \
+            and inp.global_mode != GlobalMode.MANUAL:
+        # AUTO has no approval step: anything that would need a human is a no-trade.
+        waiting = [f.code for f in findings if f.action == FinalDecision.REQUIRE_MANUAL_APPROVAL]
+        findings.append(_finding(RiskCategory.STRATEGY, "AUTO_NO_APPROVAL", RiskLevel.HIGH,
+                                 "AUTO mode never waits for approval; not executable because: " + ", ".join(waiting),
+                                 FinalDecision.NO_TRADE))
+        decision = FinalDecision.NO_TRADE
+
     executable = decision in (FinalDecision.EXECUTE, FinalDecision.REDUCE_SIZE)
     safety_blocking = any(
         f.action in (FinalDecision.REJECT, FinalDecision.NO_TRADE, FinalDecision.WAIT)
@@ -533,6 +659,8 @@ def assess(inp: AssessmentInput, settings: SafetySettings, versions: dict[str, A
         evaluated_at=inp.now,
         versions={"risk_engine": RISK_ENGINE_VERSION, **(versions or {})},
         settings_snapshot=settings_to_dict(settings),
+        reports={"tax": tax_report(inp.token, settings), "sellability": _sellability(inp, plan, findings),
+                 "liquidity": _liquidity(inp, plan)},
     )
 
 

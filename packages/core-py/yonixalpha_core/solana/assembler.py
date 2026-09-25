@@ -25,18 +25,19 @@ from yonixalpha_core.safety.models import (
     Observation,
     StrategyMode,
     TokenProgramInfo,
-    TradeFlow,
 )
 from yonixalpha_core.safety.rules import BlacklistRule, CustomRule, evaluate_custom_rules, match_blacklist
 from yonixalpha_core.safety.settings import SafetySettings
 from yonixalpha_core.solana import pump_stream
 from yonixalpha_core.solana.flow import (
+    apply_demand_quality,
     early_buy_share,
     realized_volatility,
     round_trip_volume_share,
     synchronized_buy_cluster,
     trade_flow,
 )
+from yonixalpha_core.solana import funding
 from yonixalpha_core.solana.market_data import DexScreenerClient, JupiterClient
 from yonixalpha_core.solana.pumpfun import BondingCurveState, decode_bonding_curve
 from yonixalpha_core.solana.token_safety import UnexpectedShape, parse_holders, parse_mint_account
@@ -145,9 +146,27 @@ def rule_features(inp: AssessmentInput) -> dict[str, Any]:
     }
 
 
-def _apply_controls(inp: AssessmentInput, c: Controls, name: str | None, symbol: str | None) -> None:
-    inp.blacklisted_by = match_blacklist(c.blacklist, inp.engine, name, symbol, inp.asset_id)
+def _apply_controls(inp: AssessmentInput, c: Controls, name: str | None, symbol: str | None,
+                    metadata: str | None = None, lifecycle: str | None = None) -> None:
+    inp.blacklisted_by = match_blacklist(c.blacklist, inp.engine, name, symbol, inp.asset_id, metadata)
     inp.rule_actions = evaluate_custom_rules(c.custom_rules, inp.engine, rule_features(inp))
+
+
+async def _wallet_analysis(src: Sources, inp: AssessmentInput, trades, creator: str | None, now: datetime,
+                           decimals: int | None, c: Controls, ev: dict) -> None:
+    apply_demand_quality(inp.flow, trades, now, FLOW_WINDOW_SECONDS, decimals)
+    n = c.settings.funding_check_wallets
+    if n <= 0 or not trades:
+        return
+    try:
+        res = await funding.funding_links(src.rpc, src.redis, funding.early_buyers(trades, n), creator, n)
+    except Exception as exc:  # noqa: BLE001
+        ev["errors"].append(f"funding analysis: {type(exc).__name__}")
+        return
+    inp.flow.funding_checked_wallets = res["checked"]
+    inp.flow.creator_linked_buyers = res["creator_linked"] if res["checked"] else None
+    inp.flow.related_wallet_groups = res["largest_group"] if res["checked"] else None
+    ev["funding"] = {k: v for k, v in res.items() if k != "groups"} | {"groups": {f[:8] + "…": len(w) for f, w in res["groups"].items()}}
 
 
 def _base_input(engine: str, strategy: str, mint: str, symbol: str, now: datetime, c: Controls) -> AssessmentInput:
@@ -233,6 +252,7 @@ async def assemble_fresh(src: Sources, mint: str, now: datetime, c: Controls,
     inp.flow.sync_buy_cluster = synchronized_buy_cluster(trades, now, FLOW_WINDOW_SECONDS)
     inp.flow.round_trip_share = round_trip_volume_share(trades, now, FLOW_WINDOW_SECONDS)
     inp.flow.creator_launches_24h = await pump_stream.creator_launches(src.redis, creator, now)
+    await _wallet_analysis(src, inp, trades, creator, now, decimals, c, ev)
 
     if token is not None and curve_addr:
         inp.holders, err = await fetch_holders(src.rpc, mint, token.supply_raw, {curve_addr}, creator, now)
@@ -245,94 +265,104 @@ async def assemble_fresh(src: Sources, mint: str, now: datetime, c: Controls,
         inp.signal = momentum_signal(trades, now, FLOW_WINDOW_SECONDS, decimals)
     else:
         inp.signal = fresh_launch_signal(inp.flow, trades, now, decimals)
-    _apply_controls(inp, c, meta.get("name"), meta.get("symbol"))
+    _apply_controls(inp, c, meta.get("name"), meta.get("symbol"), meta.get("uri"), "FRESH")
+    ev["source"], ev["lifecycle"] = "PUMPFUN", "FRESH"
     ev["features"] = {k: (str(v) if v is not None else None) for k, v in rule_features(inp).items()}
     return inp, ev
 
 
 async def assemble_migrated(src: Sources, mint: str, now: datetime, c: Controls) -> tuple[AssessmentInput, dict[str, Any]]:
-    """Migrated token trading on PumpSwap/other AMMs. Execution is measured
-    with real Jupiter quotes in both directions; pool state comes from
-    DexScreener, whose transaction counts carry no wallet identities, so the
-    gate requires operator approval for these (NO_WALLET_DATA)."""
+    """Migrated Pump.fun token trading on its canonical PumpSwap pool.
+
+    Pump.fun-only by construction: the canonical pool is a PDA of the Pump
+    program's pool authority for this mint, which only a Pump.fun migration
+    creates. The pool is verified on chain (owner, mints, vault reserves),
+    execution is simulated exactly with its constant-product math and the
+    fee rate its own latest trade event charged, and trader wallets from
+    its recent Buy/Sell events give wallet-level flow. A Jupiter quote, when
+    configured, is recorded as an independent cross-check of both routes.
+    """
+    from yonixalpha_core.solana import pumpswap
+
     meta = await pump_stream.load_meta(src.redis, mint) or {}
-    stream_curve = await pump_stream.load_curve(src.redis, mint)
-    trades = await pump_stream.load_trades(src.redis, mint)
+    curve_trades = await pump_stream.load_trades(src.redis, mint)
     symbol = meta.get("symbol") or mint[:8]
     creator = meta.get("creator") or None
-    ev: dict[str, Any] = {"errors": []}
+    ev: dict[str, Any] = {"errors": [], "source": "PUMPFUN", "lifecycle": "MIGRATED", "creator": creator}
     inp = _base_input("solana_migration", "post_migration_flow", mint, symbol, now, c)
 
     token, err = await fetch_mint(src.rpc, mint, now)
     if err:
         ev["errors"].append(err)
     inp.token = token
-    ev["token_decimals"] = token.decimals if token else None
+    decimals = token.decimals if token else None
+    ev["token_decimals"] = decimals
 
-    pool = None
-    if src.dexscreener is not None:
-        pool, err = await src.dexscreener.pool(mint)
-        if err:
-            ev["errors"].append(f"dexscreener: {err}")
-    else:
-        ev["errors"].append("dexscreener client not configured")
+    pool_addr = pumpswap.canonical_pool(mint)
+    ev["pool"] = {"address": pool_addr, "program": pumpswap.PUMP_AMM_PROGRAM}
+    trades = []
+    pool_state = None
+    if decimals is not None:
+        try:
+            pool_trades = await pumpswap.recent_pool_trades(src.rpc, src.redis, pool_addr)
+            fee_bps = pool_trades[-1].fee_bps if pool_trades else None
+            pool_state = await pumpswap.fetch_pool(src.rpc, mint, now, fee_bps, decimals)
+            trades = [pumpswap.as_flow_trade(t) for t in pool_trades]
+            ev["pool"].update(verified=True, base_reserve_raw=pool_state.base_reserve_raw,
+                              quote_reserve_lamports=pool_state.quote_reserve_lamports, fee_bps=fee_bps,
+                              recent_trades=len(pool_trades), coin_creator=pool_state.account.coin_creator)
+        except pumpswap.PoolUnavailable as exc:
+            ev["errors"].append(f"pumpswap: {exc}")
+            ev["pool"]["verified"] = False
+        except Exception as exc:  # noqa: BLE001 - RPC failure is data unavailability
+            ev["errors"].append(f"pumpswap rpc: {type(exc).__name__}: {exc}")
+            ev["pool"]["verified"] = False
 
-    pool_addr = (stream_curve.pool if stream_curve else None) or (pool.pair_address if pool else None)
-    if pool is not None and token is not None:
-        age = (now - pool.pair_created_at).total_seconds() if pool.pair_created_at else None
-        # Volatility from the pre-migration curve trades: the only per-trade
-        # prices this system observes for the token. Recorded as such.
-        vol = realized_volatility(trades, now, VOLATILITY_WINDOW_SECONDS, token.decimals)
-        ev["volatility_source"] = "pre-migration bonding-curve trades" if vol is not None else None
+    if pool_state is not None:
+        pool_trades_at = [t.at for t in trades]
+        age = (now - min(pool_trades_at)).total_seconds() if pool_trades_at else None
+        vol = realized_volatility(trades or curve_trades, now, VOLATILITY_WINDOW_SECONDS, decimals)
+        ev["volatility_source"] = "pumpswap pool trades" if trades else "pre-migration bonding-curve trades"
         inp.market = MarketInfo(
-            observation=Observation("dexscreener", pool.observed_at),
-            price=pool.price_sol,
+            observation=Observation("rpc:pumpswap_pool", now),
+            price=pool_state.price,
             volatility=vol,
-            liquidity_quote=pool.liquidity_sol,
+            liquidity_quote=pool_state.liquidity_sol,
             age_seconds=age,
             curve_complete=True,
             migrated=True,
         )
-        buys, sells = pool.buys_m5, pool.sells_m5
-        inp.flow = TradeFlow(
-            observation=Observation("dexscreener", pool.observed_at),
-            window_seconds=300,
-            trade_count=(buys or 0) + (sells or 0),
-            buy_count=buys or 0,
-            sell_count=sells or 0,
-            unique_buyers=None,
-            unique_sellers=None,
-            buy_volume_quote=Decimal(0),
-            sell_volume_quote=Decimal(0),
-            top3_wallet_volume_share=None,
-            creator_sold=None,
-            wallet_level=False,
-        )
-        ev["pool"] = {"pair": pool.pair_address, "dex": pool.dex_id, "liquidity_sol": str(pool.liquidity_sol),
-                      "price_sol": str(pool.price_sol), "buys_h1": pool.buys_h1, "sells_h1": pool.sells_h1}
-        inp.signal = post_migration_signal(pool.buys_h1, pool.sells_h1, age)
-    elif stream_curve is not None:
-        # Curve done, no pool data yet: the gate reports MIGRATION_PENDING.
-        inp.market = MarketInfo(
-            observation=Observation("pump_stream:curve", stream_curve.updated_at),
-            price=None, volatility=None, liquidity_quote=None, age_seconds=None,
-            curve_complete=True, migrated=False,
-        )
+        if pool_state.fee_bps is not None:
+            inp.liquidity_model = pool_state.model()
+        else:
+            ev["errors"].append("pool fee unknown (no trade event yet) — execution cannot be simulated")
+        hb = now if trades else None
+        inp.flow = trade_flow(trades, now, FLOW_WINDOW_SECONDS, creator, "rpc:pumpswap_events", hb)
+        inp.flow.sync_buy_cluster = synchronized_buy_cluster(trades, now, FLOW_WINDOW_SECONDS)
+        inp.flow.round_trip_share = round_trip_volume_share(trades, now, FLOW_WINDOW_SECONDS)
+        inp.flow.creator_launches_24h = await pump_stream.creator_launches(src.redis, creator, now)
+        await _wallet_analysis(src, inp, trades, creator, now, decimals, c, ev)
+        hour = [t for t in trades if (now - t.at).total_seconds() <= 3600]
+        inp.signal = post_migration_signal(sum(1 for t in hour if t.is_buy), sum(1 for t in hour if not t.is_buy), age)
+    else:
+        # Curve completed but no verified pool: the gate reports MIGRATION_PENDING.
+        inp.market = MarketInfo(observation=Observation("pump_stream", now), price=None, volatility=None,
+                                liquidity_quote=None, age_seconds=None, curve_complete=True, migrated=False)
 
-    if src.jupiter is not None and token is not None and pool is not None:
+    if src.jupiter is not None and token is not None and pool_state is not None:
         quote, qev = await src.jupiter.execution_quote(
             mint, c.settings.max_position_size_quote, Decimal("0.01"), c.settings.max_slippage_bps
         )
-        inp.quote = quote
-        ev["jupiter"] = qev
-    elif src.jupiter is None:
-        ev["errors"].append("jupiter client not configured")
+        ev["jupiter_cross_check"] = qev
+        if quote is not None and (quote.buy_route_available is False or quote.sell_route_available is False):
+            # An aggregator that can't route the pool is a warning sign; use its (failing) quote so the gate blocks.
+            inp.quote = quote
 
-    if token is not None and pool_addr:
+    if token is not None and pool_state is not None:
         inp.holders, err = await fetch_holders(src.rpc, mint, token.supply_raw, {pool_addr}, creator, now)
         if err:
             ev["errors"].append(err)
 
-    _apply_controls(inp, c, meta.get("name"), meta.get("symbol"))
+    _apply_controls(inp, c, meta.get("name"), meta.get("symbol"), meta.get("uri"), "MIGRATED")
     ev["features"] = {k: (str(v) if v is not None else None) for k, v in rule_features(inp).items()}
     return inp, ev

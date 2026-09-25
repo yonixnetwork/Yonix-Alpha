@@ -2,7 +2,7 @@ from decimal import Decimal
 from functools import lru_cache
 from typing import Optional
 
-from pydantic import field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -42,14 +42,26 @@ class Settings(BaseSettings):
     REDIS_URL: Optional[str] = None
 
     # Solana (Phase 2/3+)
-    SOLANA_RPC_URL: Optional[str] = None
-    SOLANA_WS_URL: Optional[str] = None
+    # HELIUS_RPC_URL / HELIUS_WS_URL are accepted as aliases (the names the
+    # reference migration bot uses); with only HELIUS_API_KEY set, the
+    # Helius mainnet endpoints are derived from it.
+    SOLANA_RPC_URL: Optional[str] = Field(None, validation_alias=AliasChoices("SOLANA_RPC_URL", "HELIUS_RPC_URL"))
+    SOLANA_WS_URL: Optional[str] = Field(None, validation_alias=AliasChoices("SOLANA_WS_URL", "HELIUS_WS_URL"))
     SOLANA_RPC_BACKUP_URL: Optional[str] = None
     SOLANA_WS_BACKUP_URL: Optional[str] = None
     HELIUS_API_KEY: Optional[str] = None
-    HELIUS_WEBHOOK_SECRET: Optional[str] = None
     JUPITER_API_KEY: Optional[str] = None
-    SOLANA_WALLET_PRIVATE_KEY: Optional[str] = None
+
+    # Live Solana execution (only used when every live lock is open).
+    # The private key signs transactions locally and never leaves the
+    # process; it is a SecretStr so it can't be printed by accident.
+    # SOLANA_WALLET_PRIVATE_KEY is the older name, still accepted.
+    WALLET_PUBLIC_KEY: Optional[str] = None
+    WALLET_PRIVATE_KEY: Optional[SecretStr] = Field(
+        None, validation_alias=AliasChoices("WALLET_PRIVATE_KEY", "SOLANA_WALLET_PRIVATE_KEY"))
+    # Optional: appended to the PumpPortal data WebSocket (their paid
+    # PumpSwap data tier). Not needed for local-signed trading.
+    PUMPPORTAL_API_KEY: Optional[SecretStr] = None
 
     # Binance (Phase 4+)
     BINANCE_API_KEY: Optional[str] = None
@@ -108,6 +120,15 @@ class Settings(BaseSettings):
     MAX_POSITION_SIZE: Optional[float] = None
     MAX_SLIPPAGE: Optional[float] = None
     MAX_OPEN_POSITIONS: Optional[int] = None
+
+    @model_validator(mode="after")
+    def derive_helius_endpoints(self) -> "Settings":
+        if self.HELIUS_API_KEY:
+            if not self.SOLANA_RPC_URL:
+                self.SOLANA_RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={self.HELIUS_API_KEY}"
+            if not self.SOLANA_WS_URL:
+                self.SOLANA_WS_URL = f"wss://mainnet.helius-rpc.com/?api-key={self.HELIUS_API_KEY}"
+        return self
 
     @field_validator("JWT_SECRET")
     @classmethod

@@ -271,9 +271,46 @@ def test_small_transfer_fee_is_allowed_but_charged_on_exit():
     assert a.plan.exit_cost_bps >= base_exit + 50 - Decimal("1")
 
 
-def test_excessive_transfer_fee_rejects():
+def test_token_tax_above_limit_is_no_trade_and_reported():
     t = replace(healthy().token, transfer_fee_bps=900, extensions=["transferFeeConfig"])
-    assert decide(healthy(token=t)).decision == FinalDecision.REJECT
+    a = decide(healthy(token=t))
+    assert a.decision == FinalDecision.NO_TRADE and {"BUY_TAX_EXCESSIVE", "SELL_TAX_EXCESSIVE"} <= codes(a)
+    tax = a.reports["tax"]
+    assert (tax["buy_tax_pct"], tax["sell_tax_pct"], tax["confidence"]) == ("9", "9", "HIGH") and tax["buy_limit_pct"] == "5"
+
+
+def test_tax_within_limit_executes_and_protocol_fees_are_not_tax():
+    t = replace(healthy().token, transfer_fee_bps=300, extensions=["transferFeeConfig"])
+    a = decide(healthy(token=t))
+    assert a.decision == FinalDecision.EXECUTE and a.reports["tax"]["sell_tax_pct"] == "3"
+    plain = decide(healthy())  # SPL Token mint: the curve's 1%+ trading fee is not a token tax
+    assert plain.reports["tax"]["buy_tax_pct"] == "0" and plain.reports["tax"]["confidence"] == "HIGH"
+
+
+def test_unknown_tax_is_no_trade_in_auto_and_approval_in_manual():
+    t = replace(healthy().token, unparseable_extension=True)
+    auto = decide(healthy(token=t, strategy_mode=StrategyMode.AUTO))
+    assert auto.decision == FinalDecision.NO_TRADE and "AUTO_NO_APPROVAL" in codes(auto) and "TAX_UNKNOWN" in codes(auto)
+    assert auto.reports["tax"]["confidence"] == "UNKNOWN"
+    manual = decide(healthy(token=t, strategy_mode=StrategyMode.MANUAL))
+    assert manual.decision == FinalDecision.REQUIRE_MANUAL_APPROVAL
+
+
+def test_auto_mode_never_waits_for_approval():
+    m = replace(healthy().market, volatility=Decimal("0.12"))
+    a = decide(healthy(market=m, strategy_mode=StrategyMode.AUTO), SafetySettings(max_stop_pct=Decimal("0.30")))
+    assert a.decision == FinalDecision.NO_TRADE and "AUTO_NO_APPROVAL" in codes(a)
+    ok = decide(healthy(strategy_mode=StrategyMode.AUTO))
+    assert ok.decision == FinalDecision.EXECUTE and ok.execution_target == ExecutionTarget.PAPER
+
+
+def test_sellability_and_liquidity_reports():
+    a = decide(healthy())
+    assert a.reports["sellability"]["status"] == "SELLABLE" and a.reports["sellability"]["sell_simulated"] is True
+    assert a.reports["liquidity"]["entry_impact_bps"] is not None and a.reports["liquidity"]["binding_cap"]
+    frozen = decide(healthy(token=replace(healthy().token, freeze_authority="F" * 32)))
+    assert frozen.reports["sellability"]["status"] == "NOT SELLABLE"
+    assert "FREEZE_AUTHORITY" in frozen.reports["sellability"]["transfer_restrictions"]
 
 
 def test_default_frozen_accounts_reject():
@@ -394,7 +431,10 @@ def test_live_without_env_permission_is_no_trade():
 
 
 def test_live_target_only_with_every_permission():
-    a = decide(healthy(global_mode=GlobalMode.LIVE, strategy_mode=StrategyMode.AUTO, live_trading_permitted=True))
+    not_ready = decide(healthy(global_mode=GlobalMode.LIVE, strategy_mode=StrategyMode.AUTO, live_trading_permitted=True,
+                               live_ready=False, live_not_ready_reason="wallet not configured"))
+    assert not_ready.decision == FinalDecision.NO_TRADE and "LIVE_NOT_READY" in codes(not_ready)
+    a = decide(healthy(global_mode=GlobalMode.LIVE, strategy_mode=StrategyMode.AUTO, live_trading_permitted=True, live_ready=True))
     assert a.execution_target == ExecutionTarget.LIVE
     b = decide(healthy(global_mode=GlobalMode.PAPER, strategy_mode=StrategyMode.AUTO, live_trading_permitted=True))
     assert b.execution_target == ExecutionTarget.PAPER

@@ -183,6 +183,17 @@ class TradeFlow:
     sync_buy_cluster: int | None = None  # distinct wallets buying in lockstep
     round_trip_share: Decimal | None = None  # volume from wallets that bought AND sold
     creator_launches_24h: int | None = None  # launches by this creator seen in 24 h
+    # Demand-quality indicators (spec: fake volume / manipulation).
+    unique_buyers_first_half: int | None = None
+    unique_buyers_second_half: int | None = None
+    repeated_wallet_share: Decimal | None = None  # trades from wallets trading >= 3 times
+    volume_churn: Decimal | None = None  # gross volume / |net buy volume|
+    price_change: Decimal | None = None  # first→last traded price in window
+    # Funding relationships of early buyers (RPC, bounded). Indicators only —
+    # never a claim of common ownership.
+    creator_linked_buyers: int | None = None  # early buyers funded by the creator
+    related_wallet_groups: int | None = None  # largest set of buyers sharing one funder
+    funding_checked_wallets: int | None = None
 
 
 @dataclass
@@ -290,6 +301,10 @@ class AssessmentInput:
     strategy_mode: StrategyMode = StrategyMode.PAPER
     live_trading_permitted: bool = False
     manual_approval_granted: bool = False
+    # Live execution readiness (wallet, executor heartbeat, RPC); None when
+    # not evaluated. A LIVE target with anything but True is refused.
+    live_ready: bool | None = None
+    live_not_ready_reason: str | None = None
     # LONG for spot (Solana); futures strategies may request SHORT.
     side: str = "LONG"
     strategy_levels: StrategyLevels | None = None

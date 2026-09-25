@@ -6,9 +6,19 @@ Pricing, by venue recorded at entry:
   The curve price only moves when someone trades, so with a live stream
   the last reserves ARE the current price, and exits are simulated
   exactly against them.
-- migrated (curve complete) or a quoted venue: a real Jupiter sell quote
-  for the remaining quantity; its effective price already includes impact
-  and fees, so no further exit cost is charged.
+- pumpswap_pool, or a pump_curve position whose curve has completed (the
+  token migrated): the canonical PumpSwap pool, read from chain — vault
+  reserves + virtual quote reserves, and the fee charged by the pool's
+  latest trade event — so exits are simulated against the same AMM the
+  live path sells into.
+- otherwise (no RPC configured, or a quoted venue): a real Jupiter sell
+  quote for the remaining quantity; its effective price already includes
+  impact and fees, so no further exit cost is charged.
+
+LIVE positions (execution_mode == "LIVE") use the same pricing and the
+same exit decisions, but an exit becomes a SELL order for the live worker
+(live_trading.manage_live_position); the position only changes when the
+on-chain fill is confirmed.
 If neither is available now, the position is left untouched and the gap
 is reported — never marked at a guessed price.
 """
@@ -20,13 +30,13 @@ from redis.asyncio import Redis
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yonixalpha_core import events, paper_engine
+from yonixalpha_core import events, live_trading, paper_engine
 from yonixalpha_core.db.models import PaperAccount, PaperPosition, RiskAssessment
 from yonixalpha_core.exit_intel import solana_exit_decision
 from yonixalpha_core.safety.store import add_timeline_event
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.safety.liquidity import ConstantProductModel
-from yonixalpha_core.solana import pump_stream
+from yonixalpha_core.solana import pump_stream, pumpswap
 from yonixalpha_core.solana.market_data import JupiterClient
 from yonixalpha_core.solana.pumpfun import WSOL_MINT
 from yonixalpha_core.venues.common import VenueError
@@ -50,8 +60,20 @@ def curve_price_and_model(curve: pump_stream.StreamCurve, decimals: int) -> tupl
     return price, ConstantProductModel(q, t, Decimal(curve.fee_bps), real)
 
 
-async def price_position(redis: Redis, jupiter: JupiterClient | None, p: PaperPosition, now: datetime, venues: dict | None = None):
-    """Returns (price, model, exit_cost_bps, source) or (None, None, None, reason)."""
+async def pool_price(rpc, redis: Redis, mint: str, decimals: int, now: datetime):
+    """(price, model, flow trades) from the canonical PumpSwap pool. The
+    model is None when the pool's fee is not yet known (no trade seen)."""
+    trades = await pumpswap.recent_pool_trades(rpc, redis, pumpswap.canonical_pool(mint), limit=15)
+    fee = trades[-1].fee_bps if trades else None
+    state = await pumpswap.fetch_pool(rpc, mint, now, fee, decimals)
+    model = state.model() if fee is not None else None
+    return state.price, model, [pumpswap.as_flow_trade(t) for t in trades]
+
+
+async def price_position(redis: Redis, jupiter: JupiterClient | None, p: PaperPosition, now: datetime, venues: dict | None = None,
+                         rpc=None, ctx: dict | None = None):
+    """Returns (price, model, exit_cost_bps, source) or (None, None, None, reason).
+    `ctx` receives the pool's recent trades when priced from PumpSwap."""
     venue = (p.plan or {}).get("venue") or {}
     if venue.get("kind") == "futures":
         adapter = (venues or {}).get(venue.get("venue"))
@@ -75,6 +97,18 @@ async def price_position(redis: Redis, jupiter: JupiterClient | None, p: PaperPo
         if not curve.complete:
             price, model = curve_price_and_model(curve, int(decimals))
             return price, model, None, "pump_stream:curve"
+    if venue.get("type") in ("pump_curve", "pumpswap_pool") and rpc is not None:
+        try:
+            price, model, trades = await pool_price(rpc, redis, p.asset_id, int(decimals), now)
+        except pumpswap.PoolUnavailable as exc:
+            return None, None, None, f"pumpswap pool: {exc}"
+        if model is None:
+            return None, None, None, "pumpswap pool fee unknown (no trade event yet)"
+        if ctx is not None:
+            ctx["pool_trades"] = trades
+        return price, model, None, "rpc:pumpswap_pool"
+    if venue.get("type") == "pumpswap_pool":
+        return None, None, None, "pumpswap position and no Solana RPC configured"
     if jupiter is None:
         return None, None, None, "migrated and no Jupiter client configured"
     qty = p.remaining_quantity if p.remaining_quantity is not None else p.quantity
@@ -91,13 +125,14 @@ NOTIFY_KIND = {"take_profit_1": "tp1", "take_profit_2": "tp2", "take_profit_3": 
 REDUCE_COOLDOWN_SECONDS = 300
 
 
-async def _exit_intelligence(redis: Redis, p: PaperPosition, model, now: datetime, session) -> tuple | None:
-    """For live curve positions: HOLD / REDUCE / EXIT from flow, liquidity and
-    creator behaviour. Returns an `extra_exit` for apply_step, or None."""
+async def _exit_intelligence(redis: Redis, p: PaperPosition, model, now: datetime, session,
+                             pool_trades: list | None = None) -> tuple | None:
+    """For curve and PumpSwap positions: HOLD / REDUCE / EXIT from flow,
+    liquidity and creator behaviour. Returns an `extra_exit`, or None."""
     venue = (p.plan or {}).get("venue") or {}
-    if venue.get("type") != "pump_curve" or model is None or p.side != "LONG":
+    if venue.get("type") not in ("pump_curve", "pumpswap_pool") or model is None or p.side != "LONG":
         return None
-    trades = await pump_stream.load_trades(redis, p.asset_id)
+    trades = pool_trades if pool_trades is not None else await pump_stream.load_trades(redis, p.asset_id)
     entry_liq = Decimal(venue["real_liquidity_at_entry"]) if venue.get("real_liquidity_at_entry") else None
     d = solana_exit_decision(trades, now, venue.get("creator"), entry_liq, model.liquidity_quote)
     if d.action == "HOLD":
@@ -114,10 +149,24 @@ async def _exit_intelligence(redis: Redis, p: PaperPosition, model, now: datetim
     return qty, f"exit_intel_{d.action.lower()}"
 
 
+async def _manage_live(session, redis: Redis, app_settings, p: PaperPosition, price, model, extra, now: datetime,
+                       source: str) -> None:
+    out = await live_trading.manage_live_position(session, p, price, model, now, extra)
+    if out["requested"]:
+        await events.notify(session, redis, app_settings, NOTIFY_KIND.get(out["requested"], "close"),
+                            f"LIVE exit requested: {p.symbol}", f"{out['requested'].replace('_', ' ')} at {price}", "warning",
+                            {"position_id": str(p.id)})
+    await session.commit()
+    await events.publish(redis, "position.updated", {"position_id": str(p.id), "price": str(price), "source": source,
+                                                     "exit_requested": out["requested"]}, "live")
+
+
 async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterClient | None, now: datetime,
-                                venues: dict | None = None, app_settings=None) -> dict[str, int]:
+                                venues: dict | None = None, app_settings=None, rpc=None) -> dict[str, int]:
     counts = {"managed": 0, "closed": 0, "unpriced": 0}
     async with session_factory() as session:
+        # pending_entry (LIVE buy not yet confirmed) and needs_review
+        # positions are not "open" and are therefore never managed here.
         ids = (await session.execute(
             select(PaperPosition.id).where(PaperPosition.status == "open", PaperPosition.engine.is_not(None))
         )).scalars().all()
@@ -129,14 +178,20 @@ async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterC
                 p = await session.get(PaperPosition, pid)
                 if p is None or p.status != "open":
                     continue
-                price, model, exit_cost, source = await price_position(redis, jupiter, p, now, venues)
+                ctx: dict = {}
+                price, model, exit_cost, source = await price_position(redis, jupiter, p, now, venues, rpc, ctx)
                 if price is None:
                     counts["unpriced"] += 1
                     log.warning("gate_manage.unpriced", position_id=str(pid), asset=p.asset_id, reason=source)
                     continue
+                extra = None if p.exit_requested or p.management_paused else await _exit_intelligence(
+                    redis, p, model, now, session, ctx.get("pool_trades"))
+                if p.execution_mode == "LIVE":  # a paused position still honours its stop (manage_step)
+                    await _manage_live(session, redis, app_settings, p, price, model, extra, now, source)
+                    counts["managed"] += 1
+                    continue
                 account = await session.get(PaperAccount, p.account_id)
                 tfee = ((p.plan or {}).get("venue") or {}).get("transfer_fee_bps")
-                extra = None if p.exit_requested or p.management_paused else await _exit_intelligence(redis, p, model, now, session)
                 result = await paper_engine.apply_step(
                     session, p, account, price, model, None if source.startswith("jupiter") else tfee, now,
                     exit_cost_bps=exit_cost, extra_exit=extra,

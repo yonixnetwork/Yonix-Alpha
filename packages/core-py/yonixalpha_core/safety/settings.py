@@ -42,7 +42,10 @@ class SafetySettings:
 
     # Token safety (Solana)
     reject_active_mint_authority: bool = True
-    max_transfer_fee_bps: int = 100
+    # Token-specific taxes (Token-2022 transfer fee), in percent. Pump.fun /
+    # PumpSwap trading fees are protocol fees and are costed separately.
+    max_buy_tax_pct: Decimal = Decimal("5")
+    max_sell_tax_pct: Decimal = Decimal("5")
 
     # Holder concentration (shares of supply, pool accounts excluded)
     max_top1_share: Decimal = Decimal("0.15")
@@ -63,6 +66,12 @@ class SafetySettings:
     max_sync_buy_cluster: int = 5
     max_round_trip_share: Decimal = Decimal("0.50")
     max_creator_launches_24h: int = 3
+    # Demand quality and wallet relationships (indicators, never accusations)
+    max_volume_churn: Decimal = Decimal("20")  # gross / |net| volume in the window
+    max_repeated_wallet_share: Decimal = Decimal("0.60")  # trades from wallets trading >= 3 times
+    funding_check_wallets: int = 6  # early buyers whose funding source is checked (0 = off)
+    max_creator_linked_buyers: int = 0
+    max_related_wallet_group: int = 3
 
     # Stops and targets
     stop_volatility_multiple: Decimal = Decimal("2")
@@ -89,7 +98,9 @@ HARD_LIMITS: dict[str, tuple[str, Any]] = {
     "max_round_trip_loss_bps": ("max", Decimal("2500")),
     "max_slippage_bps": ("max", Decimal("1000")),
     "max_data_age_seconds": ("max", 300),
-    "max_transfer_fee_bps": ("max", 500),
+    "max_buy_tax_pct": ("max", Decimal("25")),
+    "funding_check_wallets": ("max", 12),
+    "max_sell_tax_pct": ("max", Decimal("25")),
     "reject_top1_share": ("max", Decimal("0.60")),
     "reject_top10_share": ("max", Decimal("0.95")),
     "max_stop_pct": ("max", Decimal("0.50")),
