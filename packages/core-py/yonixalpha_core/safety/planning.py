@@ -10,6 +10,7 @@ from yonixalpha_core.safety.models import (
     Finding,
     ManualOverrides,
     Provenance,
+    TargetContext,
     RiskCategory,
     RiskLevel,
     StrategyLevels,
@@ -170,6 +171,41 @@ def _loss_fraction(stop_pct: Decimal, entry_cost_bps: Decimal, exit_cost_bps: De
     return 1 - (1 - c_in) * (1 - stop_pct) * (1 - c_out)
 
 
+RESISTANCE_BUFFER = Decimal("0.005")  # sell just below the level, before the supply there
+MIN_HISTORY_SAMPLES = 30
+
+
+def _adjust_targets(tps: list, entry_price: Decimal, t: TargetContext) -> list:
+    """Automatic LONG targets refined by evidence, each change recorded:
+    - TP2 moves just below recent resistance when that level sits between
+      TP1 and TP2 (supply from earlier, higher buyers);
+    - the last target is capped at the strategy's 75th-percentile maximum
+      favourable excursion when at least MIN_HISTORY_SAMPLES closed trades
+      exist, so it is not set beyond what the strategy has reached.
+    TP1 is never moved (it is the risk-based first target and must clear
+    costs); the order of targets is always preserved."""
+    prices = [tp.price.value for tp in tps]
+    notes: list[tuple[int, str, dict]] = []
+    if t.resistance is not None and len(prices) >= 2 and prices[0] < t.resistance < prices[1]:
+        below = t.resistance * (1 - RESISTANCE_BUFFER)
+        if below > prices[0]:
+            prices[1] = below
+            notes.append((1, "just below recent resistance", {"resistance": t.resistance, "source": t.resistance_source}))
+    if t.historical_mfe is not None and t.samples >= MIN_HISTORY_SAMPLES and len(prices) >= 2:
+        cap = entry_price * (1 + t.historical_mfe)
+        last = len(prices) - 1
+        if cap < prices[last] and cap > prices[last - 1]:
+            prices[last] = cap
+            notes.append((last, "capped at the strategy's 75th-percentile favourable move",
+                          {"p75_mfe": t.historical_mfe, "closed_trades": t.samples}))
+    out = list(tps)
+    for i, method, inputs in notes:
+        old = tps[i].price
+        out[i] = TakeProfit(PlannedValue(prices[i], Provenance.AUTO, f"{old.method}; {method}",
+                                         {**(old.inputs or {}), **inputs}), tps[i].exit_fraction)
+    return out
+
+
 def plan_trade(
     *,
     entry_price: Decimal | None,
@@ -185,6 +221,7 @@ def plan_trade(
     side: str = "LONG",
     strategy_levels: StrategyLevels | None = None,
     leverage: Decimal = Decimal(1),
+    targets: TargetContext | None = None,
 ) -> TradePlan:
     """Builds the full risk plan or explains exactly why it can't. Every
     missing input that the plan depends on is a NO_TRADE finding: per the
@@ -448,6 +485,8 @@ def plan_trade(
             price = entry_price * (1 + sign * r * stop_pct)
             method = "entry * (1 + R * stop_distance)" if side == "LONG" else "entry * (1 - R * stop_distance)"
             tps.append(TakeProfit(PlannedValue(price, Provenance.AUTO, method, {"R": r, "stop_distance": stop_pct}), fr))
+        if targets is not None and side == "LONG":
+            tps = _adjust_targets(tps, entry_price, targets)
         if not clears(tps[0].price.value):
             f.append(
                 _block(

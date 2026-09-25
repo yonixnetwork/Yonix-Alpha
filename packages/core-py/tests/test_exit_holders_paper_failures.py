@@ -102,3 +102,28 @@ async def test_operator_rate_until_enough_live_orders_then_measured(session):
     assert m["orders"] == 25 and m["failed"] == 5 + 5 and r["entry_pct"] == Decimal("40.00")
     assert r["entry_source"] == "measured from 25 live BUY orders"
     assert (r["exit_pct"], r["exit_source"]) == (Decimal(3), "operator setting")
+
+
+async def test_historical_excursion_needs_enough_closed_trades(session):
+    from yonixalpha_core.db.models import PaperAccount, PaperPosition
+    from yonixalpha_core.safety.pipeline import historical_excursion
+
+    acct = PaperAccount(name="h", quote_currency="SOL", starting_balance=10, cash_balance=10, reset_at=NOW)
+    session.add(acct)
+    await session.flush()
+
+    def pos(i, high, engine="solana_fresh", status="closed"):
+        return PaperPosition(symbol="T", provider="paper", side="LONG", entry_price=Decimal(1), quantity=Decimal(1),
+                             stop_loss=Decimal("0.9"), take_profit=[], status=status, entry_at=NOW, exit_at=NOW + timedelta(i),
+                             account_id=acct.id, engine=engine, highest_price=Decimal(high))
+
+    for i in range(29):
+        session.add(pos(i, 1 + Decimal(i) / 100))  # excursions 0%..28%
+    session.add(pos(99, 5, engine="solana_migration"))  # other engine: ignored
+    session.add(pos(98, 5, status="open"))  # open: ignored
+    await session.commit()
+    assert await historical_excursion(session, "solana_fresh") == (None, 29)
+    session.add(pos(29, "1.29"))
+    await session.commit()
+    p75, n = await historical_excursion(session, "solana_fresh")
+    assert n == 30 and p75 == Decimal("0.22")  # sorted[22] of 0.00..0.29

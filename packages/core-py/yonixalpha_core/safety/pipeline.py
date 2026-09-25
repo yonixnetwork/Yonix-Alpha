@@ -16,7 +16,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yonixalpha_core import events, kill_switch
-from yonixalpha_core.db.models import BlacklistEntry, CustomRuleEntry, MLFeatureSnapshot, ModelVersion, RiskAssessment
+from yonixalpha_core.db.models import (
+    BlacklistEntry, CustomRuleEntry, MLFeatureSnapshot, ModelVersion, PaperPosition, RiskAssessment,
+)
 from yonixalpha_core.ml.gate_features import DRIFT_FLAG_PREFIX, FEATURE_VERSION, MODEL_FOR_ENGINE, explain, vector
 from yonixalpha_core.safety import store
 from yonixalpha_core.safety.gate import Assessment
@@ -79,6 +81,27 @@ async def load_controls(session: AsyncSession, redis: Redis, app_settings: Any, 
         manual_approval_granted=approval,
     )
     return controls, account, settings_meta
+
+
+HISTORY_LIMIT = 500
+
+
+async def historical_excursion(session: AsyncSession, engine: str) -> tuple[Decimal | None, int]:
+    """(75th-percentile maximum favourable excursion, sample count) over the
+    engine's most recent closed LONG positions, paper and live. The
+    excursion is highest price reached / entry price - 1. Returns (None, n)
+    when there are fewer than MIN_HISTORY_SAMPLES closed trades."""
+    from yonixalpha_core.safety.planning import MIN_HISTORY_SAMPLES
+
+    rows = (await session.execute(
+        select(PaperPosition.entry_price, PaperPosition.highest_price)
+        .where(PaperPosition.engine == engine, PaperPosition.status == "closed", PaperPosition.side == "LONG",
+               PaperPosition.entry_price > 0, PaperPosition.highest_price.is_not(None))
+        .order_by(PaperPosition.exit_at.desc()).limit(HISTORY_LIMIT))).all()
+    mfe = sorted(max(Decimal(0), hi / entry - 1) for entry, hi in rows)
+    if len(mfe) < MIN_HISTORY_SAMPLES:
+        return None, len(mfe)
+    return mfe[min(len(mfe) - 1, (len(mfe) * 3) // 4)], len(mfe)
 
 
 def manual_overrides(config: dict[str, Any], price: Decimal | None, side: str = "LONG") -> ManualOverrides:

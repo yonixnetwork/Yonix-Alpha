@@ -279,6 +279,22 @@ class StrategyLevels:
 
 
 @dataclass
+class TargetContext:
+    """Evidence for automatic take-profits beyond R-multiples. Both inputs
+    are optional; absent means "not used", never guessed.
+    - resistance: the recent high above the current price (overhead supply
+      from earlier buyers), from the token's own trades;
+    - historical_mfe: the 75th-percentile maximum favourable excursion
+      (fraction, e.g. 0.8 = +80%) of this strategy's closed trades, only
+      with at least `samples` >= MIN_HISTORY_SAMPLES of them."""
+
+    resistance: Decimal | None = None
+    resistance_source: str = ""
+    historical_mfe: Decimal | None = None
+    samples: int = 0
+
+
+@dataclass
 class AssessmentInput:
     engine: str
     strategy_name: str
@@ -308,3 +324,4 @@ class AssessmentInput:
     # LONG for spot (Solana); futures strategies may request SHORT.
     side: str = "LONG"
     strategy_levels: StrategyLevels | None = None
+    targets: TargetContext | None = None

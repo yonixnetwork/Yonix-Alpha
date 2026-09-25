@@ -69,6 +69,17 @@ def trade_flow(
     )
 
 
+def recent_high_above(trades: list[Trade], now: datetime, window_seconds: int, decimals: int,
+                      price: Decimal) -> Decimal | None:
+    """Highest traded price in the window if it is above `price`: supply
+    that bought higher and may sell into a recovery. None otherwise."""
+    window = in_window(trades, now, window_seconds)
+    if not window or price <= 0:
+        return None
+    high = max(t.price(decimals) for t in window)
+    return high if high > price else None
+
+
 def realized_volatility(trades: list[Trade], now: datetime, window_seconds: int, decimals: int) -> Decimal | None:
     """Standard deviation of 1-minute log returns over the window, from the
     last traded price in each minute. None when there are too few minutes

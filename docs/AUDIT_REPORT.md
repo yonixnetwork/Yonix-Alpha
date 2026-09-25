@@ -17,7 +17,7 @@ No, not in the sense of "verified against real services". The answer is split be
 | Status | Items |
 |---|---|
 | **COMPLETED** (code path traced end to end, tested with byte-exact synthetic data or fakes at the provider boundary) | Pump.fun-only scope; fresh-token path; migration detection (Pump.fun migration event) and the canonical PumpSwap pool; AUTO never waits for approval (MANUAL is the only approval mode); tax gate 5%/5% with UNKNOWN → NO_TRADE in AUTO; mandatory sellability; size-relative liquidity (REDUCE_SIZE / NO_TRADE); word filters (scopes, BLOCK/ALLOW, 5 match types, 5 fields, dashboard CRUD, immutable system checks); creator/holder/funding indicators with neutral wording; fake-volume metrics; automatic risk plan plus a validated operator exit plan; exits TP1–3 / trailing / stop / REDUCE / EXIT, executed automatically; paper and live sharing the gate, `manage_step` and `close_position`; the order lifecycle (build → guard → sign → persist signature → simulate → send → confirm → fill from wallet balance deltas → realized PnL); reconciliation (wallet SOL, token balances, stuck orders, missing tokens, unknown holdings, duplicate prevention); provenance on every position; .env inventory; full E2E paper scenario; LIVE architecture tests with mocked provider boundaries |
-| **PARTIALLY COMPLETED** | Exit engine: no ML exit probability (there is no closed-trade history to train one honestly). Automatic TP: volatility/R-multiple based; no resistance or historical-behaviour input |
+| **PARTIALLY COMPLETED** | Exit engine: no ML exit probability (there is no closed-trade history to train one honestly). Automatic TP: R-multiples of the volatility stop, refined by recent resistance (TP2 placed just below it) and by the strategy's 75th-percentile favourable move once 30+ trades have closed (caps TP3); no momentum or ML input to targets |
 | **MISSING** | ML-driven exit model; any live execution for non-Pump.fun venues (intentionally out of scope) |
 | **BLOCKED** | Real PumpPortal trade-local responses, Solana mainnet RPC/WS, Helius: no network egress from the build sandbox, and no credentials |
 | **UNVERIFIED** | That PumpPortal's current transactions pass the transaction guard's allowlist (derived from the official Pump/PumpSwap IDLs). If PumpPortal adds an unknown instruction, the guard refuses the trade (fail closed) and the allowlist must be extended. Also unverified: real-world confirmation latency and slippage. PumpSwap addresses **are** verified against real mainnet data: pool authority, canonical pool and both vault ATAs match the pool documented in pump-public-docs. The account/event decoders are tested against encodings built from the current official IDL, not against live accounts |
@@ -173,7 +173,7 @@ VERIFIED = exercised by a test in this repository (fakes at the network boundary
 
     | Suite | Passed |
     |---|---|
-    | core | 326 |
+    | core | 332 |
     | API | 98 |
     | decision-engine | 47 |
     | paper-trading | 61 |
@@ -184,7 +184,7 @@ VERIFIED = exercised by a test in this repository (fakes at the network boundary
     | discovery | 8 |
     | migration | 11 |
     | momentum | 11 |
-    | **Total** | **657** |
+    | **Total** | **663** |
 
 38. **Tests failed**: none in the final run. During the audit, tests and the IDL cross-check found these real bugs, all fixed:
     - a DB check forbade the pre-fill LIVE row;

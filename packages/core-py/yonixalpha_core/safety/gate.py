@@ -576,6 +576,7 @@ def assess(inp: AssessmentInput, settings: SafetySettings, versions: dict[str, A
         side=inp.side,
         strategy_levels=inp.strategy_levels,
         leverage=settings.max_leverage,
+        targets=inp.targets,
     )
     findings.extend(plan.findings)
     _check_execution(inp, settings, plan, findings)

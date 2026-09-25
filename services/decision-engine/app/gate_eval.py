@@ -108,6 +108,9 @@ async def evaluate_with_gate(
     else:
         inp, evidence = await assemble_fresh(sources, mint, now, controls, engine=engine)
     inp.live_ready, inp.live_not_ready_reason = live_ready, live_reason
+    # Target evidence: resistance comes from the assembler; strategy history from closed trades.
+    if inp.targets is not None:
+        inp.targets.historical_mfe, inp.targets.samples = await pipeline.historical_excursion(session, engine)
     # Operator exit plan (dashboard strategy config); unset parts are automatic.
     inp.overrides = pipeline.manual_overrides(await store.load_strategy_config(session, engine),
                                               inp.market.price if inp.market else None, inp.side)

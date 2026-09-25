@@ -18,6 +18,7 @@ from redis.asyncio import Redis
 from yonixalpha_core.safety.models import (
     AccountState,
     AssessmentInput,
+    TargetContext,
     GlobalMode,
     HolderInfo,
     ManualOverrides,
@@ -33,6 +34,7 @@ from yonixalpha_core.solana.flow import (
     apply_demand_quality,
     early_buy_share,
     realized_volatility,
+    recent_high_above,
     round_trip_volume_share,
     synchronized_buy_cluster,
     trade_flow,
@@ -48,6 +50,7 @@ VOLATILITY_WINDOW_SECONDS = 900
 
 # Numeric features a custom rule may reference. Anything else is refused at
 # rule creation (see apps/api), so a rule can't silently never fire.
+RESISTANCE_WINDOW_SECONDS = 1800
 RULE_FIELDS = {
     "price", "liquidity_quote", "age_seconds", "volatility", "top1_share", "top10_share", "creator_share",
     "unique_buyers", "trade_count", "buy_sell_volume_ratio", "top3_wallet_volume_share", "transfer_fee_bps",
@@ -266,6 +269,9 @@ async def assemble_fresh(src: Sources, mint: str, now: datetime, c: Controls,
         inp.signal = momentum_signal(trades, now, FLOW_WINDOW_SECONDS, decimals)
     else:
         inp.signal = fresh_launch_signal(inp.flow, trades, now, decimals)
+    if inp.market is not None and inp.market.price and decimals is not None:
+        inp.targets = TargetContext(resistance=recent_high_above(trades, now, RESISTANCE_WINDOW_SECONDS, decimals, inp.market.price),
+                                    resistance_source="bonding-curve trades, last 30 min")
     _apply_controls(inp, c, meta.get("name"), meta.get("symbol"), meta.get("uri"), "FRESH")
     ev["source"], ev["lifecycle"] = "PUMPFUN", "FRESH"
     ev["features"] = {k: (str(v) if v is not None else None) for k, v in rule_features(inp).items()}
@@ -364,6 +370,9 @@ async def assemble_migrated(src: Sources, mint: str, now: datetime, c: Controls)
         if err:
             ev["errors"].append(err)
 
+    if pool_state is not None and decimals is not None:
+        inp.targets = TargetContext(resistance=recent_high_above(trades, now, RESISTANCE_WINDOW_SECONDS, decimals, pool_state.price),
+                                    resistance_source="PumpSwap pool trades, last 30 min")
     _apply_controls(inp, c, meta.get("name"), meta.get("symbol"), meta.get("uri"), "MIGRATED")
     ev["features"] = {k: (str(v) if v is not None else None) for k, v in rule_features(inp).items()}
     return inp, ev
