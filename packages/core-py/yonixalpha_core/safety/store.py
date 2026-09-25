@@ -213,17 +213,39 @@ async def get_paper_account(session: AsyncSession, name: str) -> PaperAccount:
     return (await session.execute(select(PaperAccount).where(PaperAccount.name == name))).scalar_one()
 
 
-def _marked_value(p: PaperPosition) -> Decimal:
+def venue_kind(p: PaperPosition) -> str:
+    return ((p.plan or {}).get("venue") or {}).get("kind", "spot")
+
+
+def marked_value(p: PaperPosition, price: Decimal | None = None) -> Decimal:
+    """Current value of the open remainder, before exit costs: tokens at
+    price for spot; remaining margin plus unrealized PnL for futures."""
     qty = p.remaining_quantity if p.remaining_quantity is not None else p.quantity
-    price = p.last_price if p.last_price is not None else p.entry_price
-    return qty * price
+    px = price if price is not None else (p.last_price if p.last_price is not None else p.entry_price)
+    if venue_kind(p) != "futures":
+        return qty * px
+    venue = (p.plan or {}).get("venue") or {}
+    margin = Decimal(venue.get("margin", "0"))
+    initial = p.initial_quantity or p.quantity
+    remaining_margin = margin * qty / initial if initial else Decimal(0)
+    sign = Decimal(-1) if p.side == "SHORT" else Decimal(1)
+    return remaining_margin + sign * (px - p.entry_price) * qty
+
+
+def notional_value(p: PaperPosition) -> Decimal:
+    """Exposure of the open remainder at the last price (same as the marked
+    value for spot; for futures the full notional, not the margin)."""
+    qty = p.remaining_quantity if p.remaining_quantity is not None else p.quantity
+    px = p.last_price if p.last_price is not None else p.entry_price
+    return qty * px
 
 
 async def account_state(
     session: AsyncSession, account: PaperAccount, asset_id: str | None, now: datetime, kill_switch_engaged: bool
 ) -> AccountState:
     """Equity is cash plus open positions marked at their last observed
-    price (entry price until the first mark). Daily PnL counts positions
+    price (entry price until the first mark; futures: margin + unrealized
+    PnL). Exposure is notional. Daily PnL counts positions
     fully closed since 00:00 UTC; unrealized losses are not in it, but they
     are in equity, which is what position sizing uses."""
     open_positions = (
@@ -235,8 +257,9 @@ async def account_state(
         .scalars()
         .all()
     )
-    exposure = sum((_marked_value(p) for p in open_positions), Decimal(0))
-    token_exposure = sum((_marked_value(p) for p in open_positions if asset_id and p.asset_id == asset_id), Decimal(0))
+    exposure = sum((notional_value(p) for p in open_positions), Decimal(0))
+    marked = sum((marked_value(p) for p in open_positions), Decimal(0))
+    token_exposure = sum((notional_value(p) for p in open_positions if asset_id and p.asset_id == asset_id), Decimal(0))
     day_start = now.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     daily = (
         await session.execute(
@@ -253,7 +276,7 @@ async def account_state(
         )
     ).scalar_one()
     return AccountState(
-        equity=account.cash_balance + exposure,
+        equity=account.cash_balance + marked,
         available_balance=account.cash_balance,
         open_positions=len(open_positions),
         current_exposure=exposure,

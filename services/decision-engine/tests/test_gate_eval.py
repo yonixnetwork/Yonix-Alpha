@@ -38,7 +38,9 @@ async def test_healthy_launch_opens_paper_position_from_gate_plan(db_session, re
     pos = (await db_session.execute(select(PaperPosition))).scalar_one()
     assert pos.assessment_id is not None and pos.engine == "solana_fresh"
     assert pos.entry_cost_quote == a.plan.position_size.value
-    assert pos.plan["venue"] == {"type": "pump_curve", "decimals": 6, "transfer_fee_bps": None}
+    venue = pos.plan["venue"]
+    assert venue["type"] == "pump_curve" and venue["decimals"] == 6 and venue["kind"] == "spot"
+    assert venue["simulator"] and venue["transfer_fee_bps"] is None
     assert (await db_session.execute(select(MLFeatureSnapshot))).scalar_one().label is None
     # Pacing: an immediate second call is skipped, not re-assessed.
     assert await evaluate_with_gate(db_session, redis_client, ENV, Sources(redis_client, FakeRpc(curve)), cand, NOW) is None

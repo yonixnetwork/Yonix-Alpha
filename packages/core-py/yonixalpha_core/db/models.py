@@ -469,6 +469,17 @@ class MLFeatureSnapshot(Base):
     ml_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 4), nullable=True)
     label: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     label_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Migration 0010: gate-era samples. `assessment_id` links a sample to the
+    # decision that produced it (futures positions have no candidate);
+    # `outcome` holds the explicit labels (TP hits, stop, MFE/MAE, return);
+    # `quality_status` is set by the pre-training data-quality check.
+    assessment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("risk_assessments.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    engine: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    feature_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    outcome: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    quality_status: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
 
 
@@ -549,6 +560,10 @@ class PaperPosition(Base):
     lowest_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
     last_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
     last_marked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Operator controls (migration 0010). A paused position still honours
+    # its stop; exit_requested is consumed by the next management tick.
+    management_paused: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    exit_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
 
 # ---------------------------------------------------------------------------

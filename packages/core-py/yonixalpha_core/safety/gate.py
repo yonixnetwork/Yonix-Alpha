@@ -3,7 +3,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from yonixalpha_core.safety.liquidity import ConstantProductModel
+from yonixalpha_core.safety.liquidity import BPS, close_fill, open_fill
 from yonixalpha_core.safety.models import (
     DECISION_PRECEDENCE,
     RISK_ENGINE_VERSION,
@@ -32,7 +32,13 @@ REQUIREMENTS: dict[str, set[str]] = {
     "solana_migration": {"market", "token", "holders", "flow", "execution"},
     "solana_momentum": {"market", "token", "holders", "flow", "execution"},
     "binance_futures": {"market", "execution"},
+    "bybit_futures": {"market", "execution"},
+    "hyperliquid_perps": {"market", "execution"},
 }
+
+# Engines that trade derivatives and may therefore open shorts. Spot engines
+# (Solana) can only buy what they later sell.
+SHORTABLE_ENGINES = {"binance_futures", "bybit_futures", "hyperliquid_perps"}
 
 # Token-2022 extensions whose mere presence gives an authority power over
 # holders' ability to sell. Presence alone is a REJECT: this codebase can't
@@ -211,7 +217,7 @@ def _check_liquidity(inp: AssessmentInput, s: SafetySettings, out: list[Finding]
 
 def _check_execution(inp: AssessmentInput, s: SafetySettings, plan: TradePlan, out: list[Finding]) -> None:
     q = inp.quote
-    model: ConstantProductModel | None = inp.liquidity_model
+    model = inp.liquidity_model
     size = plan.position_size.value if plan.position_size else None
     if q is not None:
         if q.buy_route_available is False:
@@ -226,8 +232,20 @@ def _check_execution(inp: AssessmentInput, s: SafetySettings, plan: TradePlan, o
         rt = q.round_trip_loss_bps
         entry_impact, exit_impact = q.entry_impact_bps, q.exit_impact_bps
     elif model is not None and size is not None:
-        buy, sell, rt = model.round_trip(size)
-        entry_impact, exit_impact = buy.impact_bps, sell.impact_bps
+        o = open_fill(model, size, inp.side)
+        c = close_fill(model, o.quantity, inp.side)
+        if not (o.complete and c.complete):
+            out.append(_finding(RiskCategory.LIQUIDITY, "BOOK_TOO_THIN", RiskLevel.CRITICAL,
+                                "visible order book cannot absorb the planned size in both directions",
+                                FinalDecision.NO_TRADE, True))
+        entry_impact, exit_impact = o.impact_bps, c.impact_bps
+        # Round trip including both fees, as a fraction of the notional.
+        if inp.side == "LONG":
+            spent, back = o.quote + o.fee, c.quote - c.fee
+            rt = (1 - back / spent) * BPS if spent > 0 else None
+        else:
+            got, paid = o.quote - o.fee, c.quote + c.fee
+            rt = (paid / got - 1) * BPS if got > 0 else None
     else:
         rt = entry_impact = exit_impact = None
     # A measured impact over the limit blocks at this size. It is never a
@@ -389,6 +407,9 @@ def assess(inp: AssessmentInput, settings: SafetySettings, versions: dict[str, A
     findings: list[Finding] = []
 
     _mode_findings(inp, findings)
+    if inp.side not in ("LONG", "SHORT") or (inp.side == "SHORT" and inp.engine not in SHORTABLE_ENGINES):
+        findings.append(_finding(RiskCategory.STRATEGY, "SHORT_NOT_SUPPORTED", RiskLevel.CRITICAL,
+                                 f"{inp.engine} cannot open a {inp.side} position", FinalDecision.NO_TRADE, True))
     data_status = _check_data(inp, settings, required, findings)
     _check_token(inp, settings, findings)
     _check_liquidity(inp, settings, findings)
@@ -410,6 +431,9 @@ def assess(inp: AssessmentInput, settings: SafetySettings, versions: dict[str, A
         quote=inp.quote,
         transfer_fee_bps=inp.token.transfer_fee_bps if inp.token else None,
         size_multiplier=SOFT_WARNING_SIZE_MULTIPLIER if soft_reduce else Decimal(1),
+        side=inp.side,
+        strategy_levels=inp.strategy_levels,
+        leverage=settings.max_leverage,
     )
     findings.extend(plan.findings)
     _check_execution(inp, settings, plan, findings)

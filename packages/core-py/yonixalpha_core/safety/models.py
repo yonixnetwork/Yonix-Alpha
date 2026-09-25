@@ -69,8 +69,9 @@ class DataStatus(StrEnum):
 
 
 class Provenance(StrEnum):
-    MANUAL = "MANUAL"
-    AUTO = "AUTO"
+    MANUAL = "MANUAL"  # operator-specified
+    AUTO = "AUTO"  # calculated by the risk engine
+    STRATEGY = "STRATEGY"  # supplied by the strategy's own rules (e.g. pivot stops)
 
 
 class GlobalMode(StrEnum):
@@ -250,6 +251,18 @@ class ManualOverrides:
 
 
 @dataclass
+class StrategyLevels:
+    """Stop/targets a strategy defines itself (e.g. Confluence Matrix: stop
+    beyond the opposite pivot, targets at wave extensions). Validated exactly
+    like operator values; an operator override still takes precedence."""
+
+    stop_loss: Decimal | None = None
+    take_profits: list[Decimal] | None = None
+    move_stop_to_breakeven_at_tp1: bool = False
+    source: str = ""
+
+
+@dataclass
 class AssessmentInput:
     engine: str
     strategy_name: str
@@ -272,3 +285,6 @@ class AssessmentInput:
     strategy_mode: StrategyMode = StrategyMode.PAPER
     live_trading_permitted: bool = False
     manual_approval_granted: bool = False
+    # LONG for spot (Solana); futures strategies may request SHORT.
+    side: str = "LONG"
+    strategy_levels: StrategyLevels | None = None

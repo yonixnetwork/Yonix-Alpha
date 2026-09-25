@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
-from yonixalpha_core.safety.liquidity import BPS, ConstantProductModel
+from yonixalpha_core.safety.liquidity import BPS, ConstantProductModel, max_size_within_side, side_costs
 from yonixalpha_core.safety.models import (
     AccountState,
     ExecutionQuote,
@@ -12,6 +12,7 @@ from yonixalpha_core.safety.models import (
     Provenance,
     RiskCategory,
     RiskLevel,
+    StrategyLevels,
 )
 from yonixalpha_core.safety.settings import SafetySettings
 
@@ -76,6 +77,10 @@ class TradePlan:
     entry_cost_bps: Decimal | None = None
     exit_cost_bps: Decimal | None = None
     binding_cap: str | None = None
+    side: str = "LONG"
+    breakeven_price: Decimal | None = None
+    move_stop_to_breakeven_at_tp1: bool = False
+    leverage: Decimal = Decimal(1)
     findings: list[Finding] = field(default_factory=list)
 
     @property
@@ -102,6 +107,10 @@ class TradePlan:
             "entry_cost_bps": str(self.entry_cost_bps) if self.entry_cost_bps is not None else None,
             "exit_cost_bps": str(self.exit_cost_bps) if self.exit_cost_bps is not None else None,
             "binding_cap": self.binding_cap,
+            "side": self.side,
+            "breakeven_price": str(self.breakeven_price) if self.breakeven_price is not None else None,
+            "move_stop_to_breakeven_at_tp1": self.move_stop_to_breakeven_at_tp1,
+            "leverage": str(self.leverage),
         }
 
 
@@ -109,13 +118,15 @@ def _block(code: str, message: str, category: RiskCategory = RiskCategory.ACCOUN
     return Finding(category, code, RiskLevel.CRITICAL, message, FinalDecision.NO_TRADE, hard_block=True)
 
 
-def ratchet_trailing_stop(current_stop: Decimal | None, price: Decimal, distance_pct: Decimal) -> Decimal:
-    """Long-side trailing stop update. Never moves the stop down: a trailing
-    stop that loosens as price falls is not a stop."""
+def ratchet_trailing_stop(current_stop: Decimal | None, price: Decimal, distance_pct: Decimal, side: str = "LONG") -> Decimal:
+    """Trailing stop update that only ever tightens: up for a long, down for
+    a short. A trailing stop that loosens as price moves against the
+    position is not a stop."""
+    if side == "SHORT":
+        candidate = price * (1 + distance_pct)
+        return candidate if current_stop is None else min(current_stop, candidate)
     candidate = price * (1 - distance_pct)
-    if current_stop is None:
-        return candidate
-    return max(current_stop, candidate)
+    return candidate if current_stop is None else max(current_stop, candidate)
 
 
 def _costs_at(
@@ -124,6 +135,7 @@ def _costs_at(
     quote: ExecutionQuote | None,
     slippage_bps: Decimal,
     transfer_fee_bps: Decimal,
+    side: str = "LONG",
 ) -> tuple[Decimal, Decimal] | None:
     """(entry_cost_bps, exit_cost_bps) at `size`, fees + impact, plus the
     configured slippage allowance and any Token-2022 transfer fee on the
@@ -132,10 +144,7 @@ def _costs_at(
         entry = quote.entry_impact_bps + quote.fee_bps_per_side
         exit_ = quote.exit_impact_bps + quote.fee_bps_per_side
     elif model is not None:
-        buy = model.simulate_buy(size)
-        sell = model.simulate_sell(buy.amount_out)
-        entry = buy.impact_bps + model.fee_bps
-        exit_ = sell.impact_bps + model.fee_bps
+        entry, exit_ = side_costs(model, size, side)
     elif quote is not None and quote.entry_impact_bps is not None and quote.exit_impact_bps is not None:
         # A quote for a different size: its impact at a larger size is an
         # upper bound for this smaller one, so reusing it is conservative.
@@ -148,11 +157,15 @@ def _costs_at(
     return entry, exit_ + slippage_bps + transfer_fee_bps
 
 
-def _loss_fraction(stop_pct: Decimal, entry_cost_bps: Decimal, exit_cost_bps: Decimal) -> Decimal:
-    """Fraction of notional lost if the stop is hit after paying entry costs
-    and exit costs: 1 - (1-c_in)(1-d)(1-c_out)."""
+def _loss_fraction(stop_pct: Decimal, entry_cost_bps: Decimal, exit_cost_bps: Decimal, side: str = "LONG") -> Decimal:
+    """Fraction of notional lost if the stop is hit after paying entry and
+    exit costs. Long: 1 - (1-c_in)(1-d)(1-c_out). Short: selling N nets
+    N(1-c_in); buying back at the stop costs N(1+d)(1+c_out), so the loss is
+    (1+d)(1+c_out) - (1-c_in) — slightly more than the long case."""
     c_in = entry_cost_bps / BPS
     c_out = exit_cost_bps / BPS
+    if side == "SHORT":
+        return (1 + stop_pct) * (1 + c_out) - (1 - c_in)
     return 1 - (1 - c_in) * (1 - stop_pct) * (1 - c_out)
 
 
@@ -168,12 +181,20 @@ def plan_trade(
     quote: ExecutionQuote | None,
     transfer_fee_bps: int | None,
     size_multiplier: Decimal = Decimal(1),
+    side: str = "LONG",
+    strategy_levels: StrategyLevels | None = None,
+    leverage: Decimal = Decimal(1),
 ) -> TradePlan:
     """Builds the full risk plan or explains exactly why it can't. Every
     missing input that the plan depends on is a NO_TRADE finding: per the
     spec, a trade with undefined risk, size or maximum loss never exists."""
-    plan = TradePlan()
+    plan = TradePlan(side=side, leverage=leverage)
     f = plan.findings
+    if side not in ("LONG", "SHORT"):
+        f.append(_block("SIDE_INVALID", f"unknown side {side}"))
+        return plan
+    sign = Decimal(1) if side == "LONG" else Decimal(-1)
+    levels = strategy_levels or StrategyLevels()
     tfee = Decimal(transfer_fee_bps or 0)
     slip = settings.max_slippage_bps
 
@@ -183,19 +204,28 @@ def plan_trade(
     plan.entry_price = entry_price
 
     # --- Stop loss ---------------------------------------------------------
+    # Precedence: operator value, then the strategy's own level, then AUTO.
+    given_sl, sl_prov, sl_method = None, None, None
     if overrides.stop_loss is not None:
-        sl = overrides.stop_loss
-        if sl <= 0 or sl >= entry_price:
-            f.append(_block("MANUAL_SL_INVALID", f"manual stop {sl} must be above 0 and below entry {entry_price}"))
+        given_sl, sl_prov, sl_method = overrides.stop_loss, Provenance.MANUAL, "operator-specified, validated"
+    elif levels.stop_loss is not None:
+        given_sl, sl_prov = levels.stop_loss, Provenance.STRATEGY
+        sl_method = f"strategy rule ({levels.source or 'strategy'}), validated"
+    if given_sl is not None:
+        sl = given_sl
+        wrong_side = sl >= entry_price if side == "LONG" else sl <= entry_price
+        if sl <= 0 or wrong_side:
+            where = "below" if side == "LONG" else "above"
+            f.append(_block("MANUAL_SL_INVALID", f"{sl_prov.value.lower()} stop {sl} must be above 0 and {where} entry {entry_price} for a {side}"))
             return plan
-        stop_pct = 1 - sl / entry_price
+        stop_pct = sign * (1 - sl / entry_price)
         if stop_pct < settings.min_stop_pct:
-            f.append(_block("MANUAL_SL_TOO_TIGHT", f"manual stop {stop_pct:.2%} is tighter than min_stop_pct {settings.min_stop_pct:.2%}"))
+            f.append(_block("MANUAL_SL_TOO_TIGHT", f"{sl_prov.value.lower()} stop {stop_pct:.2%} is tighter than min_stop_pct {settings.min_stop_pct:.2%}"))
             return plan
         if stop_pct > settings.max_stop_pct:
-            f.append(_block("MANUAL_SL_TOO_WIDE", f"manual stop {stop_pct:.2%} is wider than max_stop_pct {settings.max_stop_pct:.2%}"))
+            f.append(_block("MANUAL_SL_TOO_WIDE", f"{sl_prov.value.lower()} stop {stop_pct:.2%} is wider than max_stop_pct {settings.max_stop_pct:.2%}"))
             return plan
-        plan.stop_loss = PlannedValue(sl, Provenance.MANUAL, "operator-specified, validated", {"entry": entry_price})
+        plan.stop_loss = PlannedValue(sl, sl_prov, sl_method, {"entry": entry_price, "side": side})
     else:
         if volatility is None:
             f.append(_block("AUTO_SL_NO_VOLATILITY", "automatic stop requires volatility data, which is unavailable", RiskCategory.DATA))
@@ -215,7 +245,7 @@ def plan_trade(
             )
             return plan
         stop_pct = max(raw_pct, settings.min_stop_pct)
-        sl = entry_price * (1 - stop_pct)
+        sl = entry_price * (1 - sign * stop_pct)
         plan.stop_loss = PlannedValue(
             sl,
             Provenance.AUTO,
@@ -260,7 +290,8 @@ def plan_trade(
     if account.available_balance is None:
         f.append(_block("BALANCE_UNAVAILABLE", "available balance unavailable"))
         return plan
-    caps["available_balance"] = account.available_balance
+    # Futures margin: the balance supports notional up to balance * leverage.
+    caps["available_balance"] = account.available_balance * leverage
     if account.current_exposure is None:
         f.append(_block("EXPOSURE_UNAVAILABLE", "current exposure unavailable — exposure limit can't be enforced"))
         return plan
@@ -276,7 +307,9 @@ def plan_trade(
     if model is not None:
         upper = min(caps.values())
         if upper > 0:
-            caps["impact_limit"] = model.max_size_within(settings.max_entry_impact_bps, settings.max_exit_impact_bps, upper)
+            caps["impact_limit"] = max_size_within_side(
+                model, settings.max_entry_impact_bps, settings.max_exit_impact_bps, upper, side
+            )
 
     # --- Size: risk-based, iterated so costs are evaluated at the size used --
     size = min(caps.values())
@@ -285,7 +318,7 @@ def plan_trade(
     for _ in range(SIZE_ITERATIONS):
         if size <= 0:
             break
-        costs = _costs_at(size, model, quote, slip, tfee)
+        costs = _costs_at(size, model, quote, slip, tfee, side)
         if costs is None:
             f.append(
                 _block(
@@ -295,7 +328,7 @@ def plan_trade(
                 )
             )
             return plan
-        loss_frac = _loss_fraction(stop_pct, costs[0], costs[1])
+        loss_frac = _loss_fraction(stop_pct, costs[0], costs[1], side)
         if loss_frac <= 0:
             f.append(_block("LOSS_UNDEFINED", "loss fraction non-positive — invalid cost/stop inputs"))
             return plan
@@ -350,10 +383,10 @@ def plan_trade(
     for _ in range(SIZE_ITERATIONS * 2):
         if final_size <= 0:
             break
-        final_costs = _costs_at(final_size, model, quote, slip, tfee) or final_costs
+        final_costs = _costs_at(final_size, model, quote, slip, tfee, side) or final_costs
         if final_costs is None:
             break
-        allowed = max_loss / _loss_fraction(stop_pct, final_costs[0], final_costs[1])
+        allowed = max_loss / _loss_fraction(stop_pct, final_costs[0], final_costs[1], side)
         if final_size <= allowed:
             break
         final_size = allowed
@@ -372,36 +405,48 @@ def plan_trade(
     plan.position_size = PlannedValue(
         final_size, prov, method, {k: v for k, v in caps.items()} | {"risk_size": risk_size, "max_loss": max_loss}
     )
-    plan.quantity = final_size * (1 - plan.entry_cost_bps / BPS) / entry_price
+    if side == "LONG":
+        plan.quantity = final_size * (1 - plan.entry_cost_bps / BPS) / entry_price
+    else:
+        plan.quantity = final_size / entry_price
 
     # --- Take profits -------------------------------------------------------
     round_trip_frac = (plan.entry_cost_bps + plan.exit_cost_bps) / BPS
-    breakeven = entry_price * (1 + round_trip_frac)
+    breakeven = entry_price * (1 + sign * round_trip_frac)
+    plan.breakeven_price = breakeven
+    plan.move_stop_to_breakeven_at_tp1 = levels.move_stop_to_breakeven_at_tp1
+
+    def ordered(values: list[Decimal]) -> bool:
+        return values == (sorted(values) if side == "LONG" else sorted(values, reverse=True))
+
+    def clears(value: Decimal) -> bool:
+        return value > breakeven if side == "LONG" else value < breakeven
+
+    given_tps, tp_prov, tp_method = None, None, None
     if overrides.take_profits:
-        tps = list(overrides.take_profits)
-        if tps != sorted(tps) or tps[0] <= breakeven:
+        given_tps, tp_prov, tp_method = list(overrides.take_profits), Provenance.MANUAL, "operator-specified, validated"
+    elif levels.take_profits:
+        given_tps, tp_prov = list(levels.take_profits), Provenance.STRATEGY
+        tp_method = f"strategy rule ({levels.source or 'strategy'}), validated"
+    if given_tps:
+        if not ordered(given_tps) or not clears(given_tps[0]):
+            direction = "ascending and above" if side == "LONG" else "descending and below"
             f.append(
                 _block(
                     "MANUAL_TP_INVALID",
-                    f"manual take-profits must be ascending and above breakeven {breakeven} (entry plus round-trip costs)",
+                    f"{tp_prov.value.lower()} take-profits must be {direction} breakeven {breakeven} (entry plus round-trip costs)",
                 )
             )
             return plan
-        fractions = _fractions_for(len(tps), settings)
-        plan.take_profits = [
-            TakeProfit(PlannedValue(tp, Provenance.MANUAL, "operator-specified, validated"), fr) for tp, fr in zip(tps, fractions)
-        ]
+        fractions = _fractions_for(len(given_tps), settings)
+        plan.take_profits = [TakeProfit(PlannedValue(tp, tp_prov, tp_method), fr) for tp, fr in zip(given_tps, fractions)]
     else:
         tps = []
         for r, fr in zip(settings.tp_r_multiples, settings.tp_exit_fractions):
-            price = entry_price * (1 + r * stop_pct)
-            tps.append(
-                TakeProfit(
-                    PlannedValue(price, Provenance.AUTO, "entry * (1 + R * stop_distance)", {"R": r, "stop_distance": stop_pct}),
-                    fr,
-                )
-            )
-        if tps[0].price.value <= breakeven:
+            price = entry_price * (1 + sign * r * stop_pct)
+            method = "entry * (1 + R * stop_distance)" if side == "LONG" else "entry * (1 - R * stop_distance)"
+            tps.append(TakeProfit(PlannedValue(price, Provenance.AUTO, method, {"R": r, "stop_distance": stop_pct}), fr))
+        if not clears(tps[0].price.value):
             f.append(
                 _block(
                     "TP_BELOW_BREAKEVEN",

@@ -24,6 +24,9 @@ class SafetySettings:
     max_total_exposure_quote: Decimal = Decimal("3")
     max_token_exposure_quote: Decimal = Decimal("1")
     cooldown_after_loss_seconds: int = 300
+    # Futures only: notional allowed per unit of paper balance. 1 = no
+    # leverage. Hard-capped below.
+    max_leverage: Decimal = Decimal("1")
 
     # Liquidity / execution
     min_liquidity_quote: Decimal = Decimal("20")
@@ -84,6 +87,7 @@ HARD_LIMITS: dict[str, tuple[str, Any]] = {
     "max_stop_pct": ("max", Decimal("0.50")),
     "min_stop_pct": ("min", Decimal("0.005")),
     "max_open_positions": ("max", 50),
+    "max_leverage": ("max", Decimal("5")),
     "cooldown_after_loss_seconds": ("min", 0),
 }
 
@@ -163,6 +167,8 @@ def validate(settings: SafetySettings) -> list[str]:
         errors.append("tp_exit_fractions must not sum above 1")
     if list(settings.tp_r_multiples) != sorted(settings.tp_r_multiples) or any(r <= 0 for r in settings.tp_r_multiples):
         errors.append("tp_r_multiples must be positive and ascending")
+    if settings.max_leverage < 1:
+        errors.append("max_leverage must be at least 1")
     if settings.risk_per_trade_pct <= 0:
         errors.append("risk_per_trade_pct must be positive")
     if settings.min_position_size_quote > settings.max_position_size_quote:
