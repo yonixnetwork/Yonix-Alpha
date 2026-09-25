@@ -1,0 +1,273 @@
+from dataclasses import dataclass, field
+from datetime import datetime
+from decimal import Decimal
+from enum import StrEnum
+from typing import Any
+
+# Bumped whenever gate/planning logic changes in a way that could change a
+# decision for identical inputs, so a stored assessment stays reproducible.
+RISK_ENGINE_VERSION = "2.0.0"
+
+
+class RiskLevel(StrEnum):
+    LOW = "LOW"
+    MODERATE = "MODERATE"
+    HIGH = "HIGH"
+    CRITICAL = "CRITICAL"
+
+
+RISK_LEVEL_ORDER = [RiskLevel.LOW, RiskLevel.MODERATE, RiskLevel.HIGH, RiskLevel.CRITICAL]
+
+
+def max_level(levels: list[RiskLevel]) -> RiskLevel:
+    if not levels:
+        return RiskLevel.LOW
+    return max(levels, key=RISK_LEVEL_ORDER.index)
+
+
+class RiskCategory(StrEnum):
+    DATA = "DATA"
+    TOKEN = "TOKEN"
+    LIQUIDITY = "LIQUIDITY"
+    EXECUTION = "EXECUTION"
+    HOLDER = "HOLDER"
+    TRADING = "TRADING"
+    MARKET = "MARKET"
+    ACCOUNT = "ACCOUNT"
+    STRATEGY = "STRATEGY"
+    ML = "ML"
+
+
+class FinalDecision(StrEnum):
+    EXECUTE = "EXECUTE"
+    REDUCE_SIZE = "REDUCE_SIZE"
+    WAIT = "WAIT"
+    REQUIRE_MANUAL_APPROVAL = "REQUIRE_MANUAL_APPROVAL"
+    REJECT = "REJECT"
+    NO_TRADE = "NO_TRADE"
+
+
+# When several findings demand different outcomes, the most restrictive wins.
+# REJECT (the asset itself is unacceptable) outranks NO_TRADE (safety can't be
+# established right now) only in label, both block; WAIT means "re-evaluate
+# later", which is less restrictive than either.
+DECISION_PRECEDENCE = [
+    FinalDecision.REJECT,
+    FinalDecision.NO_TRADE,
+    FinalDecision.WAIT,
+    FinalDecision.REQUIRE_MANUAL_APPROVAL,
+    FinalDecision.REDUCE_SIZE,
+    FinalDecision.EXECUTE,
+]
+
+
+class DataStatus(StrEnum):
+    LIVE = "LIVE"
+    STALE = "STALE"
+    DEGRADED = "DEGRADED"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+class Provenance(StrEnum):
+    MANUAL = "MANUAL"
+    AUTO = "AUTO"
+
+
+class GlobalMode(StrEnum):
+    PAPER = "PAPER"
+    MANUAL = "MANUAL"
+    LIVE = "LIVE"
+
+
+class StrategyMode(StrEnum):
+    OFF = "OFF"
+    PAPER = "PAPER"
+    MANUAL = "MANUAL"
+    AUTO = "AUTO"
+
+
+class ExecutionTarget(StrEnum):
+    NONE = "NONE"
+    PAPER = "PAPER"
+    LIVE = "LIVE"
+
+
+class Venue(StrEnum):
+    PUMP_BONDING_CURVE = "PUMP_BONDING_CURVE"
+    PUMPSWAP = "PUMPSWAP"
+    JUPITER = "JUPITER"
+    BINANCE_FUTURES = "BINANCE_FUTURES"
+    UNKNOWN = "UNKNOWN"
+
+
+@dataclass(frozen=True)
+class Finding:
+    category: RiskCategory
+    code: str
+    level: RiskLevel
+    message: str
+    action: FinalDecision
+    hard_block: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "category": self.category.value,
+            "code": self.code,
+            "level": self.level.value,
+            "message": self.message,
+            "action": self.action.value,
+            "hard_block": self.hard_block,
+        }
+
+
+@dataclass
+class Observation:
+    """Freshness envelope for one input. A value the caller never obtained
+    must be passed as None, never as a zero or an empty default."""
+
+    source: str
+    observed_at: datetime | None
+
+
+@dataclass
+class TokenProgramInfo:
+    observation: Observation
+    token_program: str
+    mint_authority: str | None
+    freeze_authority: str | None
+    decimals: int
+    supply_raw: int
+    # Token-2022 extension tags exactly as jsonParsed reports them
+    # ("transferFeeConfig", "transferHook", ...).
+    extensions: list[str] = field(default_factory=list)
+    transfer_fee_bps: int | None = None
+    transfer_fee_authority: str | None = None
+    transfer_hook_program: str | None = None
+    permanent_delegate: str | None = None
+    default_account_state: str | None = None
+    paused: bool | None = None
+    unparseable_extension: bool = False
+
+
+@dataclass
+class HolderInfo:
+    observation: Observation
+    # Shares of total supply (0..1) held by the largest owners, with known
+    # pool/bonding-curve accounts already excluded by the caller.
+    top1_share: Decimal
+    top10_share: Decimal
+    creator_share: Decimal | None
+    holders_sampled: int
+    excluded_pool_accounts: int
+
+
+@dataclass
+class TradeFlow:
+    observation: Observation
+    window_seconds: int
+    trade_count: int
+    buy_count: int
+    sell_count: int
+    unique_buyers: int | None
+    unique_sellers: int | None
+    buy_volume_quote: Decimal
+    sell_volume_quote: Decimal
+    top3_wallet_volume_share: Decimal | None
+    creator_sold: bool | None
+    # True when counts come from an aggregator without wallet identities.
+    wallet_level: bool = True
+
+
+@dataclass
+class ExecutionQuote:
+    """Outcome of simulating the planned position against real liquidity,
+    in both directions. Impacts/fees are in basis points of notional."""
+
+    observation: Observation
+    venue: Venue
+    size_quote: Decimal
+    buy_route_available: bool | None
+    sell_route_available: bool | None
+    entry_impact_bps: Decimal | None
+    exit_impact_bps: Decimal | None
+    round_trip_loss_bps: Decimal | None
+    fee_bps_per_side: Decimal
+    expected_entry_price: Decimal | None
+    expected_exit_price: Decimal | None
+
+
+@dataclass
+class MarketInfo:
+    observation: Observation
+    price: Decimal | None
+    # Realized volatility of returns over the recent window, as a fraction
+    # (0.05 = 5%). Drives automatic stop distance.
+    volatility: Decimal | None
+    liquidity_quote: Decimal | None
+    age_seconds: float | None
+    curve_complete: bool | None = None
+    migrated: bool | None = None
+
+
+@dataclass
+class StrategySignal:
+    name: str
+    version: str
+    qualified: bool
+    strength: float
+    reasons: list[str] = field(default_factory=list)
+
+
+@dataclass
+class MLInput:
+    model_name: str
+    model_version: int
+    confidence: float
+
+
+@dataclass
+class AccountState:
+    equity: Decimal | None
+    available_balance: Decimal | None
+    open_positions: int
+    current_exposure: Decimal | None
+    daily_realized_pnl: Decimal | None
+    last_loss_at: datetime | None
+    token_exposure: Decimal | None
+    kill_switch_engaged: bool
+
+
+@dataclass
+class ManualOverrides:
+    """Operator-specified values. Each is validated, never trusted blindly."""
+
+    stop_loss: Decimal | None = None
+    position_size_quote: Decimal | None = None
+    take_profits: list[Decimal] | None = None
+    trailing_distance_pct: Decimal | None = None
+    max_risk_quote: Decimal | None = None
+
+
+@dataclass
+class AssessmentInput:
+    engine: str
+    strategy_name: str
+    asset_id: str
+    symbol: str
+    now: datetime
+    market: MarketInfo | None
+    token: TokenProgramInfo | None
+    holders: HolderInfo | None
+    flow: TradeFlow | None
+    account: AccountState
+    liquidity_model: Any | None = None
+    quote: ExecutionQuote | None = None
+    signal: StrategySignal | None = None
+    ml: MLInput | None = None
+    blacklisted_by: str | None = None
+    rule_actions: list[tuple[str, FinalDecision]] = field(default_factory=list)
+    overrides: ManualOverrides = field(default_factory=ManualOverrides)
+    global_mode: GlobalMode = GlobalMode.PAPER
+    strategy_mode: StrategyMode = StrategyMode.PAPER
+    live_trading_permitted: bool = False
+    manual_approval_granted: bool = False
