@@ -6,6 +6,16 @@ reference repositories this platform draws patterns from.
 
 ## Status
 
+**Control center (latest).** Every Solana decision now goes through one
+master safety gate: token, holder, liquidity, execution, trade-flow and
+account checks, plus automatic sizing and SL/TP/trailing stops with
+MANUAL/AUTO provenance. The gate is fed by a pump.fun-scoped event stream
+and drives the paper engine. Operators control runtime risk settings,
+modes, blacklist, custom rules and approvals from the dashboard. Live
+trading stays off. **See `docs/CONTROL_CENTER.md`** for deployment,
+the live-data verification step, and what is verified; see
+`docs/IMPLEMENTATION_MATRIX.md` for research and design decisions.
+
 **Phase 11 — Telegram alerting.** Phases 1-10 (foundation, data
 infrastructure, three Solana engines, the Binance Futures execution
 engine, the shared risk/decision system, the ML pipeline, paper trading,
