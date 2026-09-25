@@ -433,7 +433,7 @@ class ModelVersion(Base):
     id: Mapped[uuid.UUID] = _uuid_pk()
     name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
-    status: Mapped[str] = mapped_column(String(16), nullable=False, index=True, default="trained")  # trained|active|retired
+    status: Mapped[str] = mapped_column(String(16), nullable=False, index=True, default="trained")  # trained|challenger|active|superseded|retired
     feature_names: Mapped[list] = mapped_column(JSONB, nullable=False)
     training_sample_count: Mapped[int] = mapped_column(Integer, nullable=False)
     metrics: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)

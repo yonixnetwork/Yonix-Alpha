@@ -5,9 +5,11 @@ from yonixalpha_core.config import get_settings
 from yonixalpha_core.events import heartbeat_loop
 from yonixalpha_core.db.base import make_engine, make_session_factory
 from yonixalpha_core.db.models import SystemEvent
+from yonixalpha_core.db.redis import make_redis
 from yonixalpha_core.logging import configure_logging, get_logger
 from yonixalpha_core.notify import send_telegram_alert
 
+from app.gate_ml import run_cycle
 from app.train import train_and_maybe_register
 
 log = get_logger("ml.main")
@@ -31,7 +33,7 @@ async def _record_system_event(session_factory, event_type: str, severity: str, 
         )
 
 
-async def _training_loop(session_factory, stop_event: asyncio.Event) -> None:
+async def _training_loop(session_factory, redis, settings, stop_event: asyncio.Event) -> None:
     while not stop_event.is_set():
         try:
             async with session_factory() as session:
@@ -46,6 +48,15 @@ async def _training_loop(session_factory, stop_event: asyncio.Event) -> None:
         except Exception as exc:  # noqa: BLE001
             log.error("training_loop.failed", error=str(exc))
             await _record_system_event(session_factory, "training_loop_failed", "error", {"error": str(exc)})
+        # Safety-gate models: quality check, challenger training, drift.
+        # Challengers are only ever registered; promotion is an operator action.
+        try:
+            cycle = await run_cycle(session_factory, redis, settings)
+            log.info("gate_ml.completed", result=cycle)
+            await _record_system_event(session_factory, "gate_ml_cycle", "info", cycle)
+        except Exception as exc:  # noqa: BLE001
+            log.error("gate_ml.failed", error=str(exc))
+            await _record_system_event(session_factory, "gate_ml_cycle_failed", "error", {"error": str(exc)})
 
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=TRAIN_INTERVAL_SECONDS)
@@ -59,6 +70,7 @@ async def run() -> None:
 
     engine = make_engine(settings)
     session_factory = make_session_factory(engine)
+    redis = make_redis(settings)
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -69,9 +81,10 @@ async def run() -> None:
     log.info("ml.started")
 
     try:
-        await asyncio.gather(_training_loop(session_factory, stop_event), heartbeat_loop(settings, "ml", stop_event))
+        await asyncio.gather(_training_loop(session_factory, redis, settings, stop_event), heartbeat_loop(settings, "ml", stop_event))
     finally:
         await _record_system_event(session_factory, "service_stopped", "info")
+        await redis.aclose()
         await engine.dispose()
 
 

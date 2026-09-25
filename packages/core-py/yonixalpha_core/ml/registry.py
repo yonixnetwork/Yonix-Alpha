@@ -43,6 +43,7 @@ async def register_trained_model(
     feature_names: list[str],
     training_sample_count: int,
     metrics: dict,
+    status: str = "trained",
 ) -> ModelVersion:
     """Persists a newly trained estimator as a new, non-active ModelVersion
     row (status="trained") — registration and activation are deliberately
@@ -59,7 +60,7 @@ async def register_trained_model(
     model_version = ModelVersion(
         name=name,
         version=next_version,
-        status="trained",
+        status=status,
         feature_names=feature_names,
         training_sample_count=training_sample_count,
         metrics=metrics,
@@ -83,3 +84,36 @@ async def activate_model(session: AsyncSession, model_version: ModelVersion) -> 
     )
     model_version.status = "active"
     model_version.activated_at = datetime.now(timezone.utc)
+
+
+async def promote_challenger(session: AsyncSession, model_version: ModelVersion, user_id=None, note: str | None = None) -> None:
+    """Controlled, audited promotion (spec §45): only a registered challenger
+    whose evaluation marked it promotable, and only by an explicit call (the
+    dashboard's Promote button). Nothing promotes automatically. Caller
+    commits."""
+    from yonixalpha_core.db.models import AuditLog
+
+    if model_version.status != "challenger":
+        raise ValueError(f"model is {model_version.status}, not a challenger")
+    if not (model_version.metrics or {}).get("promotable"):
+        raise ValueError("challenger did not pass the promotion criteria")
+    previous = await get_active_model_row(session, model_version.name)
+    await activate_model(session, model_version)
+    session.add(AuditLog(user_id=user_id, event_type="ml.promoted", detail={
+        "name": model_version.name, "version": model_version.version,
+        "replaced_version": previous.version if previous else None, "note": note,
+    }))
+
+
+async def retire_champion(session: AsyncSession, name: str, user_id=None, reason: str | None = None) -> ModelVersion | None:
+    """Fallback: stop using the active model (decisions revert to rules only).
+    Audited. Caller commits."""
+    from yonixalpha_core.db.models import AuditLog
+
+    row = await get_active_model_row(session, name)
+    if row is None:
+        return None
+    row.status = "retired"
+    session.add(AuditLog(user_id=user_id, event_type="ml.champion_retired",
+                         detail={"name": name, "version": row.version, "reason": reason}))
+    return row

@@ -152,22 +152,29 @@ async def run_strategy(session_factory, redis: Redis, app_settings: Any, venues:
         features = {"price": mid, "volatility": inp.market.volatility, "liquidity_quote": book.liquidity_quote,
                     "spread_bps": book.spread_bps, "side": side, "signal_strength": strategy_signal.strength}
         inp.rule_actions = evaluate_custom_rules(controls.custom_rules, engine, features)
-        a = assess(inp, controls.settings, versions=await pipeline.versions(session, settings_meta, strategy_signal, f"{venue}_book"))
+        inp.ml, ml_info = await pipeline.champion_prediction(session, redis, engine, features)
+        vers = await pipeline.versions(session, settings_meta, strategy_signal, f"{venue}_book")
+        vers["ml_model"] = f"{ml_info['model']} v{ml_info['version']}" if inp.ml else None
+        a = assess(inp, controls.settings, versions=vers)
+        ml_info["influenced"] = pipeline.ml_influenced(a)
         a.inputs_snapshot = {"venue": venue, "interval": interval, "candle": last_closed.isoformat(),
-                             "features": {k: str(v) for k, v in features.items()}, "signal": strategy_signal.reasons}
+                             "features": {k: str(v) for k, v in features.items()}, "signal": strategy_signal.reasons,
+                             "ml": ml_info}
         row, created = await store.persist_assessment(session, a, None, store.assessment_key(engine, f"{strategy}:{symbol}",
                                                                                           str(int(last_closed.timestamp()))))
         if not created:
             await session.commit()
             return {"strategy": strategy, "status": "duplicate"}
         await pipeline.after_decision(session, redis, app_settings, a, row, f"{strategy}:{symbol}")
+        await pipeline.after_ml(redis, a, row, ml_info)
 
         result = {"strategy": strategy, "status": a.decision.value, "side": side}
         if a.executable and a.execution_target.value == "LIVE":
             await store.add_timeline_event(session, "live_refused", now, {"reason": "live futures execution is not implemented"},
                                            assessment_id=row.id)
         elif a.executable:
-            pipeline.record_ml_sample(session, a, row.id, None, {k: str(v) for k, v in features.items()})
+            pipeline.record_ml_sample(session, a, row.id, None, {k: str(v) for k, v in features.items()},
+                                      *pipeline.ml_sample_args(inp.ml, ml_info))
             try:
                 fill_book = await adapter.book(symbol)
                 position = await paper_engine.open_position(

@@ -15,14 +15,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yonixalpha_core import events, kill_switch
-from yonixalpha_core.db.models import BlacklistEntry, CustomRuleEntry, MLFeatureSnapshot, RiskAssessment
+from yonixalpha_core.db.models import BlacklistEntry, CustomRuleEntry, MLFeatureSnapshot, ModelVersion, RiskAssessment
+from yonixalpha_core.ml.gate_features import DRIFT_FLAG_PREFIX, FEATURE_VERSION, MODEL_FOR_ENGINE, explain, vector
 from yonixalpha_core.safety import store
 from yonixalpha_core.safety.gate import Assessment
-from yonixalpha_core.safety.models import FinalDecision, StrategyMode
+from yonixalpha_core.safety.models import FinalDecision, MLInput, StrategyMode
 from yonixalpha_core.solana.assembler import Controls
 
 APPROVAL_VALID_SECONDS = 10 * 60
-FEATURE_VERSION = "gate-features-v2"
 EXECUTION_ADAPTER_VERSIONS = {"pump_curve": "1", "jupiter": "1", "binance_book": "1", "bybit_book": "1", "hyperliquid_book": "1"}
 _MODE_RANK = {StrategyMode.OFF: 0, StrategyMode.MANUAL: 1, StrategyMode.PAPER: 2, StrategyMode.AUTO: 3}
 
@@ -84,6 +84,65 @@ async def versions(session: AsyncSession, settings_meta: dict, signal, adapter: 
         "paper_simulator": PAPER_SIMULATOR_VERSION,
         "execution_adapter": f"{adapter} v{EXECUTION_ADAPTER_VERSIONS.get(adapter or '', '?')}" if adapter else None,
     }
+
+
+_ESTIMATORS: dict[uuid.UUID, Any] = {}
+
+
+async def champion_prediction(session: AsyncSession, redis: Redis | None, engine: str,
+                              features: dict) -> tuple[MLInput | None, dict[str, Any]]:
+    """Score this decision with the operator-promoted champion for the
+    engine's model, if there is one. Returns (MLInput for the gate, record
+    for the decision's inputs snapshot). The model is skipped - decisions
+    fall back to rules only - when none is promoted, when drift was
+    detected (services/ml sets the flag), or when any feature is missing.
+    The gate only lets ML add caution (ML_BELOW_MIN -> WAIT); it can never
+    lift a risk block."""
+    name = MODEL_FOR_ENGINE.get(engine)
+    if name is None:
+        return None, {"status": "no model for this engine"}
+    row = (await session.execute(
+        select(ModelVersion.id, ModelVersion.version, ModelVersion.feature_names)
+        .where(ModelVersion.name == name, ModelVersion.status == "active")
+    )).first()
+    if row is None:
+        return None, {"model": name, "status": "no champion - rules only"}
+    info: dict[str, Any] = {"model": name, "version": row.version, "model_version_id": str(row.id)}
+    if redis is not None and await redis.exists(f"{DRIFT_FLAG_PREFIX}{name}"):
+        return None, {**info, "status": "ignored - drift detected"}
+    vec = vector(name, features)
+    if vec is None or any(n not in vec for n in row.feature_names):
+        return None, {**info, "status": "ignored - missing features"}
+    est = _ESTIMATORS.get(row.id)
+    if est is None:
+        import io
+
+        import joblib
+
+        artifact = (await session.execute(select(ModelVersion.artifact).where(ModelVersion.id == row.id))).scalar_one()
+        est = _ESTIMATORS[row.id] = joblib.load(io.BytesIO(artifact))
+    values = [vec[n] for n in row.feature_names]
+    score = float(est.predict_proba([values])[0][1])
+    info.update(status="scored", score=round(score, 4), explanation=explain(est, list(row.feature_names), vec))
+    return MLInput(name, row.version, score), info
+
+
+def ml_influenced(a: Assessment) -> bool:
+    return any(f.code == "ML_BELOW_MIN" and f.action == a.decision for f in a.findings)
+
+
+async def after_ml(redis: Redis | None, a: Assessment, row: RiskAssessment, info: dict[str, Any]) -> None:
+    if info.get("status") == "scored":
+        await events.publish(redis, "ml.prediction.updated", {
+            "assessment_id": str(row.id), "engine": a.engine, "symbol": a.symbol, "model": info["model"],
+            "version": info["version"], "score": info["score"], "influenced": info.get("influenced", False),
+        }, "decision-engine")
+
+
+def ml_sample_args(ml: MLInput | None, info: dict[str, Any]) -> tuple[float | None, uuid.UUID | None]:
+    if ml is None:
+        return None, None
+    return ml.confidence, uuid.UUID(info["model_version_id"])
 
 
 def record_ml_sample(session: AsyncSession, a: Assessment, assessment_id: uuid.UUID, candidate_id: uuid.UUID | None,

@@ -87,8 +87,12 @@ async def evaluate_with_gate(
     else:
         inp, evidence = await assemble_fresh(sources, mint, now, controls, engine=engine)
     adapter = "pump_curve" if inp.liquidity_model is not None else ("jupiter" if inp.quote is not None else None)
-    a = assess(inp, controls.settings, versions=await pipeline.versions(session, settings_meta, inp.signal, adapter))
-    a.inputs_snapshot = evidence
+    inp.ml, ml_info = await pipeline.champion_prediction(session, redis, engine, evidence.get("features") or {})
+    vers = await pipeline.versions(session, settings_meta, inp.signal, adapter)
+    vers["ml_model"] = f"{ml_info['model']} v{ml_info['version']}" if inp.ml else None
+    a = assess(inp, controls.settings, versions=vers)
+    ml_info["influenced"] = pipeline.ml_influenced(a)
+    a.inputs_snapshot = {**evidence, "ml": ml_info}
 
     key = store.assessment_key(engine, mint, str(int(now.timestamp()) // REEVALUATE_EVERY_SECONDS))
     row, created = await store.persist_assessment(session, a, candidate.id, key)
@@ -96,6 +100,7 @@ async def evaluate_with_gate(
         await session.commit()
         return a
     await pipeline.after_decision(session, redis, settings, a, row, str(candidate.id))
+    await pipeline.after_ml(redis, a, row, ml_info)
 
     codes = {f.code for f in a.findings if f.action == a.decision}
     if a.executable and a.execution_target.value == "LIVE":
@@ -104,7 +109,7 @@ async def evaluate_with_gate(
                                        candidate_id=candidate.id, assessment_id=row.id)
         apply_transition(candidate, CandidateState.REJECTED, reason="LIVE target but live Solana execution is not implemented")
     elif a.executable:
-        pipeline.record_ml_sample(session, a, row.id, candidate.id, evidence.get("features") or {})
+        pipeline.record_ml_sample(session, a, row.id, candidate.id, evidence.get("features") or {}, *pipeline.ml_sample_args(inp.ml, ml_info))
         await store.add_timeline_event(session, "risk_calculated", now,
                                        {"size": str(a.plan.position_size.value), "stop": str(a.plan.stop_loss.value),
                                         "max_loss": str(a.plan.max_loss.value)}, candidate_id=candidate.id, assessment_id=row.id)
