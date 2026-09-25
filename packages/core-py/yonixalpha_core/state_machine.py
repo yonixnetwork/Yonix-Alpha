@@ -13,6 +13,12 @@ class CandidateState(StrEnum):
 
     DISCOVERED = "discovered"
     OBSERVING = "observing"
+    # Gate-era lifecycle (spec §9). ANALYZING replaces OBSERVING for
+    # candidates evaluated by the safety gate; the two WAITING states make
+    # "why hasn't it traded yet" visible without reading the findings.
+    ANALYZING = "analyzing"
+    WAITING_FOR_LIQUIDITY = "waiting_for_liquidity"
+    WAITING_FOR_APPROVAL = "waiting_for_approval"
     QUALIFIED = "qualified"
     ENTRY_PENDING = "entry_pending"
     ENTERED = "entered"
@@ -26,7 +32,16 @@ class CandidateState(StrEnum):
 TERMINAL_STATES = {CandidateState.CLOSED, CandidateState.REJECTED}
 
 VALID_TRANSITIONS: dict[CandidateState, set[CandidateState]] = {
-    CandidateState.DISCOVERED: {CandidateState.OBSERVING, CandidateState.REJECTED},
+    CandidateState.DISCOVERED: {CandidateState.OBSERVING, CandidateState.ANALYZING, CandidateState.REJECTED},
+    CandidateState.ANALYZING: {
+        CandidateState.WAITING_FOR_LIQUIDITY, CandidateState.WAITING_FOR_APPROVAL, CandidateState.QUALIFIED, CandidateState.REJECTED,
+    },
+    CandidateState.WAITING_FOR_LIQUIDITY: {
+        CandidateState.ANALYZING, CandidateState.WAITING_FOR_APPROVAL, CandidateState.QUALIFIED, CandidateState.REJECTED,
+    },
+    CandidateState.WAITING_FOR_APPROVAL: {
+        CandidateState.ANALYZING, CandidateState.WAITING_FOR_LIQUIDITY, CandidateState.QUALIFIED, CandidateState.REJECTED,
+    },
     CandidateState.OBSERVING: {CandidateState.QUALIFIED, CandidateState.REJECTED},
     CandidateState.QUALIFIED: {CandidateState.ENTRY_PENDING, CandidateState.REJECTED},
     CandidateState.ENTRY_PENDING: {CandidateState.ENTERED, CandidateState.REJECTED},

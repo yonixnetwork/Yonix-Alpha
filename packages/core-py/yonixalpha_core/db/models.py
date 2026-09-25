@@ -217,7 +217,7 @@ class TradingCandidate(Base):
     id: Mapped[uuid.UUID] = _uuid_pk()
     token_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tokens.id", ondelete="CASCADE"), nullable=False, index=True)
     engine: Mapped[str] = mapped_column(String(32), nullable=False, index=True)  # discovery|migration|momentum
-    state: Mapped[str] = mapped_column(String(16), nullable=False, index=True, default="discovered")
+    state: Mapped[str] = mapped_column(String(32), nullable=False, index=True, default="discovered")
     state_history: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     state_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
@@ -661,7 +661,8 @@ class RiskAssessment(Base):
     __tablename__ = "risk_assessments"
     __table_args__ = (
         CheckConstraint(
-            "approval_state IN ('NONE','PENDING','APPROVED','DECLINED','EXPIRED')", name="ck_risk_assessments_approval_state"
+            "approval_state IN ('NONE','PENDING','APPROVED','DECLINED','EXPIRED','IGNORED')",
+            name="ck_risk_assessments_approval_state",
         ),
     )
 
@@ -728,3 +729,74 @@ class TradeTimelineEvent(Base):
     event_type: Mapped[str] = mapped_column(String(48), nullable=False)
     detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+
+
+class PaperOrder(Base):
+    """Resting and filled paper orders for strategies that work with limit
+    orders (the grid). Market-order strategies fill instantly and record
+    their fills on paper_positions/timeline instead."""
+
+    __tablename__ = "paper_orders"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("paper_accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+    strategy: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    venue: Mapped[str] = mapped_column(String(32), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)  # BUY|SELL
+    order_type: Mapped[str] = mapped_column(String(16), nullable=False)  # limit|market
+    price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, index=True)  # open|filled|cancelled
+    fill_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    fee: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    client_order_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+    filled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class StrategyState(Base):
+    """Durable per-strategy runtime state (spec: engine_states), e.g. a grid's
+    levels, position and breaker status, so a restart resumes rather than
+    rebuilding blindly."""
+
+    __tablename__ = "strategy_states"
+    __table_args__ = (UniqueConstraint("strategy", "key", name="uq_strategy_states_strategy_key"),)
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    strategy: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    key: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    state: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class Notification(Base):
+    """In-app notification feed (spec §93). Telegram delivery is separate and
+    optional; every notification is stored here regardless."""
+
+    __tablename__ = "notifications"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    kind: Mapped[str] = mapped_column(String(48), nullable=False, index=True)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False, default="info")
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    body: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    data: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+
+
+class DataQualityEvent(Base):
+    """Records quarantined from ML training and why (spec §41)."""
+
+    __tablename__ = "data_quality_events"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    source: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    record_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    record_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    issue: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
