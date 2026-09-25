@@ -88,6 +88,11 @@ class Settings(BaseSettings):
     # established from day one so nothing downstream has to invent them later.
     TRADING_ENABLED: bool = False
     LIVE_TRADING_ENABLED: bool = False
+    # A third, independent lock: while true, every executable decision is
+    # routed to the paper engine whatever the stored global/strategy modes
+    # say. Live execution needs TRADING_ENABLED and LIVE_TRADING_ENABLED true
+    # AND this false (yonixalpha_core.safety.store.live_trading_permitted).
+    PAPER_TRADING: bool = True
     MAX_DAILY_LOSS: Optional[float] = None
     MAX_POSITION_SIZE: Optional[float] = None
     MAX_SLIPPAGE: Optional[float] = None

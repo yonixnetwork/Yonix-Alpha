@@ -524,3 +524,192 @@ class PaperPosition(Base):
     entry_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     exit_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+
+    # Gate-driven positions (migration 0009). All nullable so rows opened by
+    # the original Phase 7 flow stay valid. Amounts are in the paper
+    # account's quote currency.
+    account_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("paper_accounts.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    assessment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("risk_assessments.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    engine: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    asset_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    initial_quantity: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    remaining_quantity: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    entry_cost_quote: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    proceeds_quote: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    fees_paid_quote: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    max_loss_quote: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    plan: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    tp_hits: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    trailing_stop: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    highest_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    lowest_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    last_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    last_marked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# ---------------------------------------------------------------------------
+# Control center: runtime risk configuration, operator rules, and the
+# persisted output of the master safety gate (yonixalpha_core.safety).
+# Secrets never live here — only tunable, non-secret configuration. The
+# environment flags (TRADING_ENABLED / LIVE_TRADING_ENABLED / PAPER_TRADING)
+# stay the outer bound: nothing stored in these tables can enable live
+# trading on its own.
+# ---------------------------------------------------------------------------
+
+
+class RiskSettingsVersion(Base):
+    """Append-only history of SafetySettings per scope ("GLOBAL" or an engine
+    name such as "solana_fresh"). The effective settings for a scope are its
+    highest version; editing inserts a new row, so every assessment's
+    settings snapshot can be traced to the version that produced it."""
+
+    __tablename__ = "risk_settings"
+    __table_args__ = (UniqueConstraint("scope", "version", name="uq_risk_settings_scope_version"),)
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    scope: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    settings: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    note: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class PlatformSetting(Base):
+    """Small key/value store for platform-wide runtime state, e.g.
+    "global_mode" -> {"mode": "PAPER"}."""
+
+    __tablename__ = "platform_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class StrategyConfig(Base):
+    """Per-strategy mode (OFF|PAPER|MANUAL|AUTO) and non-secret parameters."""
+
+    __tablename__ = "strategy_configs"
+    __table_args__ = (CheckConstraint("mode IN ('OFF','PAPER','MANUAL','AUTO')", name="ck_strategy_configs_mode"),)
+
+    strategy: Mapped[str] = mapped_column(String(64), primary_key=True)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False, default="PAPER")
+    config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class BlacklistEntry(Base):
+    __tablename__ = "blacklist_rules"
+    __table_args__ = (UniqueConstraint("scope", "field", "match_type", "value", name="uq_blacklist_rules_identity"),)
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    scope: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    field: Mapped[str] = mapped_column(String(16), nullable=False)  # name|symbol|mint
+    match_type: Mapped[str] = mapped_column(String(16), nullable=False)  # exact|pattern
+    value: Mapped[str] = mapped_column(String(128), nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class CustomRuleEntry(Base):
+    __tablename__ = "custom_rules"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    scope: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    field: Mapped[str] = mapped_column(String(64), nullable=False)
+    op: Mapped[str] = mapped_column(String(4), nullable=False)
+    threshold: Mapped[str] = mapped_column(String(64), nullable=False)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class RiskAssessment(Base):
+    """One row per safety-gate evaluation, including every rejected and
+    waiting opportunity, so rejections can be reviewed and their later
+    outcome compared with what the gate decided. `idempotency_key` makes a
+    retried evaluation of the same candidate at the same decision point a
+    no-op rather than a duplicate."""
+
+    __tablename__ = "risk_assessments"
+    __table_args__ = (
+        CheckConstraint(
+            "approval_state IN ('NONE','PENDING','APPROVED','DECLINED','EXPIRED')", name="ck_risk_assessments_approval_state"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    candidate_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("trading_candidates.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    engine: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    strategy: Mapped[str] = mapped_column(String(64), nullable=False)
+    asset_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    symbol: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    decision: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    status_label: Mapped[str] = mapped_column(String(64), nullable=False)
+    executable: Mapped[bool] = mapped_column(Boolean, nullable=False, index=True)
+    execution_target: Mapped[str] = mapped_column(String(8), nullable=False)
+    overall_risk: Mapped[str] = mapped_column(String(16), nullable=False)
+    risk_engine_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    assessment: Mapped[dict] = mapped_column(JSONB, nullable=False)  # Assessment.to_dict()
+    approval_state: Mapped[str] = mapped_column(String(16), nullable=False, default="NONE", index=True)
+    approved_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Filled later for REJECT/NO_TRADE/WAIT rows: what the price did after
+    # the decision (see safety follow-up job), never at decision time.
+    outcome: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class PaperAccount(Base):
+    """Simulated balance per quote currency book (e.g. "solana" in SOL,
+    "binance_futures" in USDT). Equity = cash + marked value of open
+    positions; cash moves only on simulated fills and fees."""
+
+    __tablename__ = "paper_accounts"
+    __table_args__ = (CheckConstraint("starting_balance > 0", name="ck_paper_accounts_starting_balance_positive"),)
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    name: Mapped[str] = mapped_column(String(32), nullable=False, unique=True)
+    quote_currency: Mapped[str] = mapped_column(String(16), nullable=False)
+    starting_balance: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    cash_balance: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    reset_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class TradeTimelineEvent(Base):
+    """Everything that happened to one opportunity, in order: assessed,
+    waiting, approved, entered, TP hit, stop moved, exited. Read by the
+    decision-detail page."""
+
+    __tablename__ = "trade_timeline_events"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    candidate_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("trading_candidates.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    assessment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("risk_assessments.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    position_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("paper_positions.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    event_type: Mapped[str] = mapped_column(String(48), nullable=False)
+    detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
