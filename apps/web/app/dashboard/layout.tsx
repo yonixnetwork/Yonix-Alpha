@@ -38,7 +38,8 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
       { href: "/dashboard/strategies/meta_muse", label: "Meta Muse", icon: Activity },
       { href: "/dashboard/strategies/confluence_matrix", label: "Confluence Matrix", icon: ListChecks },
       { href: "/dashboard/strategies/hyperliquid_grid", label: "Hyperliquid Grid", icon: Grid3x3 },
-      { href: "/dashboard/strategies/gold_vs_btc", label: "Gold vs BTC", icon: Scale },
+      { href: "/dashboard/strategies/gold_btc_trend", label: "Gold vs BTC Trend", icon: TrendingUp },
+      { href: "/dashboard/strategies/gold_vs_btc", label: "Gold vs BTC Ratio", icon: Scale },
     ],
   },
   {

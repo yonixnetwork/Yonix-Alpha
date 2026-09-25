@@ -198,6 +198,12 @@ calls `engine-binance-futures`'s order-placement function. See the phase
 list in the original spec for what comes next (the full dashboard,
 deployment, hardening).
 
+> **Current status and integrations:** the phase notes above are
+> historical. For what exists now — live paths per venue, what is verified,
+> and every configuration variable — see `docs/AUDIT_REPORT.md`,
+> `docs/repository-integration-matrix.md`, `docs/environment-variable-matrix.md`
+> and `docs/CONFIGURATION.md`.
+
 ## Repository layout
 
 ```
@@ -215,7 +221,11 @@ services/
   engine-binance-futures/    Authenticated account/order/position engine (Phase 4)
   decision-engine/           Feature/signal scoring + risk-gated Decision persistence (Phase 5)
   ml/                        Training job: labeled-dataset loading, model registry writes (Phase 6)
-  paper-trading/             Simulated entry/exit + ML label backfill (Phase 7)
+  paper-trading/             Simulated entry/exit + ML label backfill (Phase 7); Pump.fun live worker
+  execution-futures/         LIVE futures/FX: Binance, Bybit, Hyperliquid, MT5 bridge; live grid;
+                              reconciliation; external-bot polling (locks closed → does nothing)
+  mt5-bridge/                Runs on the Windows MT5 host, NOT in the Docker stack: authenticated
+                              HTTP bridge to a MetaTrader 5 terminal (see its README)
 packages/
   core-py/                   Shared config, logging, security, DB models/schemas,
                               Solana RPC/WS transport, SPL Token Program parsing,

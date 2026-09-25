@@ -1,28 +1,74 @@
-# Final implementation audit: Pump.fun sniper
+# Integration audit: every repository, every provider
 
 Date: 2026-09-25. Branch `claude/yonixalpha-platform-architecture-804nb5`.
 
-Every claim below comes from tracing code and from tests that ran in this
-repository. **No real transaction was built by PumpPortal, signed with a real
-key, or sent to Solana mainnet.** The sandbox cannot reach pumpportal.fun or any
-Solana RPC (proxy 403), and no credentials were provided. Everything live is
-therefore reported as **IMPLEMENTED — AWAITING CREDENTIAL VERIFICATION**. The
-locks remain `TRADING_ENABLED=false`, `LIVE_TRADING_ENABLED=false` and
-`PAPER_TRADING=true`.
+This report covers the full "audit every repository and complete all required
+integrations" task. The earlier Pump.fun audit is kept below as a sub-section.
 
-## Have I actually finished every task?
+**What was not done, stated first.** No real order was placed on any venue:
+not on Binance, Bybit, Hyperliquid, PumpPortal/Solana, or MT5. No real wallet,
+API key or MT5 account was used, and none was available. From this
+environment, egress to exchanges, Solana RPC, pumpportal.fun and dev.jup.ag is
+blocked. The locks stayed `TRADING_ENABLED=false`, `LIVE_TRADING_ENABLED=false`
+and `PAPER_TRADING=true` throughout.
 
-No, not in the sense of "verified against real services". The answer is split below.
+Every live path is therefore **IMPLEMENTED — AWAITING CREDENTIAL
+VERIFICATION**. It is tested against mocked venues that check request shapes
+and signatures, and against fake exchange accounts. Nothing here claims that
+everything works.
+
+Detailed inventories:
+- [integration-config-inventory.md](integration-config-inventory.md): every variable in every repository, mapped to YonixAlpha;
+- [repository-integration-matrix.md](repository-integration-matrix.md): per repository feature, and third-party ACCEPT / REJECT / PARTIALLY USE decisions;
+- [environment-variable-matrix.md](environment-variable-matrix.md): YonixAlpha's own variables;
+- [CONFIGURATION.md](CONFIGURATION.md): `.env` versus database settings, and start-up validation.
+
+## Final audit status
 
 | Status | Items |
 |---|---|
-| **COMPLETED** (code path traced end to end, tested with byte-exact synthetic data or fakes at the provider boundary) | Pump.fun-only scope; fresh-token path; migration detection (Pump.fun migration event) and the canonical PumpSwap pool; AUTO never waits for approval (MANUAL is the only approval mode); tax gate 5%/5% with UNKNOWN → NO_TRADE in AUTO; mandatory sellability; size-relative liquidity (REDUCE_SIZE / NO_TRADE); word filters (scopes, BLOCK/ALLOW, 5 match types, 5 fields, dashboard CRUD, immutable system checks); creator/holder/funding indicators with neutral wording; fake-volume metrics; automatic risk plan plus a validated operator exit plan; exits TP1–3 / trailing / stop / REDUCE / EXIT, executed automatically; paper and live sharing the gate, `manage_step` and `close_position`; the order lifecycle (build → guard → sign → persist signature → simulate → send → confirm → fill from wallet balance deltas → realized PnL); reconciliation (wallet SOL, token balances, stuck orders, missing tokens, unknown holdings, duplicate prevention); provenance on every position; .env inventory; full E2E paper scenario; LIVE architecture tests with mocked provider boundaries |
-| **PARTIALLY COMPLETED** | Exit engine: no ML exit probability (there is no closed-trade history to train one honestly). Automatic TP: R-multiples of the volatility stop, refined by recent resistance (TP2 placed just below it) and by the strategy's 75th-percentile favourable move once 30+ trades have closed (caps TP3); no momentum or ML input to targets |
-| **MISSING** | ML-driven exit model; any live execution for non-Pump.fun venues (intentionally out of scope) |
-| **BLOCKED** | Real PumpPortal trade-local responses, Solana mainnet RPC/WS, Helius: no network egress from the build sandbox, and no credentials |
-| **UNVERIFIED** | That PumpPortal's current transactions pass the transaction guard's allowlist (derived from the official Pump/PumpSwap IDLs). If PumpPortal adds an unknown instruction, the guard refuses the trade (fail closed) and the allowlist must be extended. Also unverified: real-world confirmation latency and slippage. PumpSwap addresses **are** verified against real mainnet data: pool authority, canonical pool and both vault ATAs match the pool documented in pump-public-docs. The account/event decoders are tested against encodings built from the current official IDL, not against live accounts |
+| **COMPLETED** (code path traced; automated tests with fakes at the network boundary) | Audit of all 10 repositories plus the reference bot, reading source and config (not only README/.env.example). Execution providers: `BinanceProvider` (Algo-service stops), `BybitProvider`, `HyperliquidProvider` (official SDK signing), `MT5BridgeProvider`; each has BUY, SELL, STATUS, BALANCE, order confirmation and reconciliation inputs. LIVE futures and FX for Meta Muse, Gold vs BTC and Confluence: entry, exchange-side stop, exits via the shared `manage_step`, gap-free stop tightening, reconciliation. Live Hyperliquid grid (post-only orders, confirmed fills, exchange stop, breakers, mismatch → needs review). Gold vs BTC dual-trend strategy ported. MT5 bridge service (Windows) plus MT5 market data. PumpPortal data WebSocket (coverage/migration cross-check; key only for metered trades of held mints). Per-module config validator (CONFIGURATION_ERROR blocks AUTO/LIVE for that module only). Provider health with CONNECTED / DEGRADED / STALE / UNAVAILABLE / NOT CONFIGURED (plus UNKNOWN when there is no evidence). External-bot control-API adapter behind login, with a LIVE conflict guard. Sectioned `.env.example` containing only consumed variables. The three matrices. `execution-futures` service in Compose and CI. Dashboard: Live Execution futures section, External Bots page, configuration panel, venue live status |
+| **PARTIALLY COMPLETED** | MT5 depth of market: many brokers publish none. Then `/book` is 404 and the gate returns NO_TRADE, so FX trading depends on the broker. Unknown-position detection on futures venues checks only symbols YonixAlpha has traded (the provider API is per symbol). Exchange balance sync uses the venue's *available* balance, so the live book shows free margin, not equity |
+| **MISSING** | ML exit model (no closed-trade history to train one honestly). Automatic migration of the user's standalone bots: they are monitored and controllable, not rewritten in place |
+| **BLOCKED** | Real calls to Binance, Bybit, Hyperliquid, PumpPortal, Solana RPC/WS, Helius, Jupiter, Telegram and an MT5 terminal: no egress from this environment, and no credentials. Official docs at pumpportal.fun, dev.jup.ag and developers.binance.com could not be fetched; the official SDK sources were used instead |
+| **UNVERIFIED** | That real venues accept the requests exactly as built (they match the official SDKs' paths, parameters and signing, and are checked in tests). Binance Algo-order response fields beyond `algoId` / `clientAlgoId`. Hyperliquid `userFillsByTime` carrying our cloid. Real fill latency, slippage and fees. The guard allowlist against PumpPortal's current transactions |
 
-## Paper / live parity matrix
+## Verification status per integration
+
+| Integration | Status | Evidence |
+|---|---|---|
+| Binance USDⓈ-M (orders, Algo stop, status, fills, balance, hedge-mode refusal) | IMPLEMENTED — AWAITING CREDENTIAL VERIFICATION | `test_execution_providers.py`: the signature is recomputed in the test; algoOrder params; -2013 → REJECTED |
+| Bybit V5 | IMPLEMENTED — AWAITING CREDENTIAL VERIFICATION | signature recomputed in the test (POST body / GET query); 110043 tolerated; position stop |
+| Hyperliquid (futures + grid) | IMPLEMENTED — AWAITING CREDENTIAL VERIFICATION | real EIP-712 signing with a throwaway key; IOC/ALO/trigger wire shapes; partial IOC; grid lifecycle test |
+| MT5 via bridge | IMPLEMENTED — AWAITING CREDENTIAL VERIFICATION | bridge tested end to end through the real provider over ASGI, against a fake MetaTrader5 module |
+| PumpPortal Local (Pump.fun trading) | IMPLEMENTED — AWAITING CREDENTIAL VERIFICATION | earlier audit (guard, sign, confirm, fills) |
+| PumpPortal data WebSocket | IMPLEMENTED — AWAITING CREDENTIAL VERIFICATION | scripted-socket tests: subscriptions, key only in URL, never logged |
+| Jupiter | IMPLEMENTED — AWAITING CREDENTIAL VERIFICATION | mocked quotes; health recorded |
+| Solana RPC / WS / Helius | IMPLEMENTED — AWAITING CREDENTIAL VERIFICATION | fake RPC, decoder tests |
+| External bot control APIs | IMPLEMENTED — AWAITING CREDENTIAL VERIFICATION | mocked bots: bearer token, no leakage, close confirmation |
+| Config validation | VERIFIED (in this repository) | unit tests; API refusal tests; start-up log observed with the API running locally |
+| Provider health states | VERIFIED (in this repository) | API tests; states observed in the browser |
+| execution-futures container | VERIFIED (locally) | image built, non-root, 58 MiB RSS; locks closed → `disabled`; clean stop and restart recorded |
+| Real exchange connectivity | BLOCKED | no egress, no credentials |
+| Any real-money trade | NOT VERIFIED | deliberately not attempted |
+
+## Parity matrix
+
+"same" means the paper and live paths run the same code. "venue" means the
+exchange does it for live, with the result read back.
+
+| Module | Discovery | Analysis | Risk | Paper | Live | Exit | Reconciliation |
+|---|---|---|---|---|---|---|---|
+| Pump.fun fresh | program-log stream (+ PumpPortal coverage check) | safety gate (token, holders, flow, tax, sellability, liquidity) | same gate, sizing, max loss | curve-simulated fills | PumpPortal Local → guard → sign → confirm | `manage_step` + exit intelligence → SELL orders | wallet vs DB, stuck orders, missing tokens, unknown holdings |
+| Pump.fun migrated | Pump.fun migration event (+ PumpPortal migrate) | same, PumpSwap pool from chain | same | pool-simulated fills | PumpPortal `pump-amm` | same | same |
+| Solana momentum | active-mint scan | same gate | same | same | same live worker | same | same |
+| Meta Muse | closed candles (Binance/Bybit/Hyperliquid) | dual-trend signal → gate (book liquidity, volatility) | same gate; strategy stop/target | book-simulated fills | `futures_live` → provider market order → fill read back → exchange stop | strategy exit rule + `manage_step` → reduce-only orders; stop tightened on venue | positions vs exchange, exchange-closed → booked from fills, missing stop re-placed, lost results via client id |
+| Gold vs BTC trend | closed candles (XAUUSDT + BTCUSDT) | per-asset thresholds → gate | same | same | same | three repo exit rules + `manage_step` | same |
+| Confluence Matrix | closed candles (Binance/Bybit/Hyperliquid or MT5 rates) | confluence score, pivots → gate (MT5 needs broker DOM) | same | same | same, venue `mt5` through the bridge | same | same (bridge-owned positions only) |
+| Hyperliquid grid | live mid | grid build + worst-case loss vs risk budget | breakers (drawdown, range break), capped leverage | maker fills simulated at level price | ALO orders; fills only from order status; exchange stop on net position | breakers → cancel all + reduce-only flatten | exchange position vs grid each tick → needs review |
+| External bots | – | – | LIVE conflict guard | – | status / close through their control APIs | close (confirmed, audited) | cached status |
+
+### Pump.fun detail (unchanged from the earlier audit)
 
 VERIFIED = exercised by a test in this repository (fakes at the network boundary).
 "credential" = awaiting a real wallet and endpoints.
@@ -57,176 +103,229 @@ VERIFIED = exercised by a test in this repository (fakes at the network boundary
 | Unknown holdings | n/a | recorded once per 24 h | yes | |
 | Provider errors | n/a | guard refusal / HTTP error / simulation failure → FAILED, no fill | yes | |
 
+## Final verification
+
+| Check | Result |
+|---|---|
+| Unit tests (all 13 projects) | VERIFIED: 716 passed, 0 failed |
+| Integration tests (DB + Redis, fakes at the network boundary) | VERIFIED: futures live lifecycle (10), live grid (4), execution-futures loop (5), MT5 bridge through the real provider (7), Pump.fun E2E/live worker (earlier) |
+| API tests | VERIFIED: 101 passed. Includes config validation, futures settings, external bots, health states |
+| WebSocket | VERIFIED as part of the API/E2E suites (event publication); the browser showed the realtime link connected |
+| Database | VERIFIED: `alembic check` reports no drift. Downgrade/upgrade round trip on 0011 ran. No schema change was needed (new statuses fit the existing constraints) |
+| Risk tests | VERIFIED: gate, planning and tax suites; live refusal when not ready, when a standalone bot conflicts, and when locks are closed |
+| Paper tests | VERIFIED: paper-trading suite (61); paper grid stays out of live mode |
+| Provider connectivity | BLOCKED (no egress, no credentials). Request shapes and signatures VERIFIED against mocks |
+| Config validation | VERIFIED: unit + API tests; start-up log observed |
+| Frontend | VERIFIED: ESLint clean, `tsc` clean, production build OK. Chromium at 1400 px and 390 px on Health, External Bots, Live Execution, venues (mt5, binance), Strategies, Gold vs BTC Trend: no console errors, no horizontal overflow. The missing favicon that caused a 404 was added |
+| E2E | VERIFIED (paper): signal → gate → live order → fake exchange fill → exchange stop → exit → realized PnL, and the Pump.fun paper E2E from the earlier audit |
+| Security | VERIFIED: no secret logged or returned (tests assert the absence of token/key values); control APIs behind login; bridge requires a ≥ 32-char token with constant-time compare; no committed keys found in the diff |
+| Docker build | VERIFIED locally for `execution-futures`. This environment needed its proxy CA injected through a scratch Dockerfile; the committed Dockerfile is unchanged |
+| Compose | VERIFIED: `docker compose config` with the base + prod files lists `execution-futures` |
+| Restart | VERIFIED: the container records `service_stopped` on SIGTERM and `service_started` again; reconcile runs first after a start |
+
 ## The 44 report items
 
-1. **Requirements completed**: see the COMPLETED row above.
-2. **Requirements partially completed**: see the PARTIALLY COMPLETED row.
-3. **Requirements missing**: an ML exit model. Live execution for non-Pump.fun venues is out of scope by design.
-4. **Existing architecture**: Solana engines (discovery, momentum, generic migration) → Redis stream store → decision-engine (safety gate) → paper-trading (entries, management, live worker) → API → Next.js dashboard. PostgreSQL holds state; Redis carries events, caches and readiness.
-5. **Features preserved**: futures strategies (paper), grid, Gold vs BTC analytics, ML champion/challenger, notifications, kill switch, every earlier gate check.
+1. **Requirements completed**: the COMPLETED row above.
+2. **Requirements partially completed**: the PARTIALLY COMPLETED row.
+3. **Requirements missing**:
+   - an ML exit model;
+   - in-place rewriting of the standalone bots. They are monitored and controlled through their control APIs, and conflicts block LIVE.
+4. **Existing architecture**:
+   - Solana engines → Redis stream store → decision-engine (safety gate, futures runner) → paper-trading (paper, Pump.fun live worker) and the new execution-futures (futures/FX/grid live);
+   - both feed the API and the Next.js dashboard. PostgreSQL holds state; Redis carries events, readiness and caches;
+   - services/mt5-bridge runs on the Windows MT5 host, outside the stack.
+5. **Features preserved**:
+   - all Pump.fun paths;
+   - paper futures and grid;
+   - Gold vs BTC ratio analytics;
+   - ML champion/challenger (no automatic promotion);
+   - notifications, kill switch, word filters, every gate check;
+   - `engine-binance-futures` (Phase 4 account sync), untouched.
 6. **Features upgraded**:
-   - migrated tokens are now read from the canonical PumpSwap pool on chain, with trader flow from pool events; they no longer fall into approval for missing wallet data;
-   - AUTO never waits for approval;
-   - the tax gate is split into buy and sell tax;
-   - word filters were rewritten;
-   - funding-link and demand-quality checks were added;
-   - Pump.fun strategies accept an operator exit plan.
-7. **Files changed**: `git diff --stat 71fb8f5` (about 55 files). Main ones:
-   - `safety/gate.py`, `safety/rules.py`, `safety/settings.py`, `safety/pipeline.py`;
-   - `solana/assembler.py`, `solana/flow.py`, `paper_engine.py`, `db/models.py`, `config.py`, `strategies/catalog.py`;
-   - `decision-engine/app/gate_eval.py`, `paper-trading/app/gate_manage.py`, `paper-trading/app/main.py`;
-   - API `control.py`, `paper.py`, `strategies.py`;
-   - web pages for rules, decisions, trades, settings and the strategy panel;
-   - `.env.example`, compose, web Dockerfile.
+   - futures strategies can trade LIVE;
+   - Confluence can use MT5 data and execution;
+   - the grid can run LIVE;
+   - health states now include UNAVAILABLE and NOT CONFIGURED plus more providers;
+   - the Solana live worker, reconcile and measured failure rates are scoped to PumpPortal orders only.
+7. **Files changed** (main):
+   - `config.py`, `safety/{gate,pipeline,settings,store}.py`, `strategies/{catalog,meta_muse,gold_btc}.py`;
+   - `venues/{common,registry}.py`, `solana/market_data.py`, `live_trading.py`, `paper_execution.py`;
+   - `decision-engine/app/futures_eval.py`, `paper-trading/app/{gate_manage,grid_engine,live_worker}.py`, `engine-solana-discovery/app/main.py`;
+   - API `health_state.py`, `routes/{control,live,system,strategies,venues}.py`, `main.py`;
+   - web health, live, venue pages, `layout.tsx`, `ui.tsx`, `cc.ts`;
+   - `.env.example`, the three compose files, `ci.yml`, `docs/CONFIGURATION.md`.
 8. **Files created**:
-   - `live_trading.py`;
-   - `solana/{wallet,pumpportal,txguard,live_exec,pumpswap,funding}.py`;
-   - `paper-trading/app/live_worker.py`;
-   - API `routes/live.py`;
-   - web `dashboard/live/page.tsx`;
-   - migration `0011`;
-   - `testing/pumpswap.py` (IDL-layout fixtures);
-   - tests `test_live_exec.py`, `test_live_worker.py`, `test_e2e_paper.py`, `test_live_api.py`, `test_funding_links.py`, `test_pumpswap.py`, `test_pumpswap_manage.py`;
-   - `docs/CONFIGURATION.md` and this report.
-9. **Database changes**: migration 0011. Upgrade, downgrade and upgrade were run, and `alembic check` is clean. It adds:
-   - `execution_orders` (unique idempotency key, check constraints);
-   - `reconciliation_events`;
-   - `blacklist_rules.action`;
-   - provenance columns on positions (`execution_mode`, source, lifecycle, provider, route, pool, strategy, model/feature version, pending order, exit failures);
-   - a quantity check that allows `pending_entry` / `failed` / `needs_review` rows at quantity 0.
+   - `execution/{base,binance,bybit,hyperliquid,mt5_bridge,registry}.py`;
+   - `futures_live.py`, `grid_live.py`, `external_bots.py`, `config_validation.py`;
+   - `solana/pumpportal_ws.py`, `strategies/gold_btc_trend.py`, `venues/mt5.py`;
+   - `services/execution-futures/`, `services/mt5-bridge/`;
+   - API `routes/bots.py`;
+   - web `dashboard/bots`, `components/FuturesLive.tsx`, `app/icon.svg`;
+   - tests for each; the three matrices.
+9. **Database changes**: none needed.
+   - Futures orders reuse `execution_orders`, with `provider` set to the venue provider, `amount_kind` `base`, and the client id stored in `signature`.
+   - Grid orders use provider `hyperliquid_grid`.
+   - Live books are `paper_accounts` rows named `live_<venue>`.
+   - The live grid state is `strategy_states` key `live:<coin>`.
+   - `alembic check` is clean.
 10. **API changes**:
-    - `/api/live/{status,settings,orders,orders/{id},reconciliation,positions}`;
-    - blacklist endpoints take `action`, new fields, match types and scopes;
-    - positions expose provenance, and trade details include orders;
-    - strategy config accepts the operator exit plan;
-    - decision detail carries the tax, sellability and liquidity reports.
-11. **WebSocket changes**: live position/trade/balance events use source `live`. No new event types were needed.
-12. **PumpPortal integration**: Local Transaction API only (`trade-local`); the custodial Lightning API is not used. Transactions are guarded and signed locally. IMPLEMENTED — AWAITING CREDENTIAL VERIFICATION.
-13. **Helius integration**: through standard Solana RPC/WS URLs (Helius URLs derived from `HELIUS_API_KEY`); no Helius-only API is required. Not exercised against the real service.
-14. **Solana execution integration**:
-    - `SolanaLiveExecutor` runs guard → sign → persist signature → simulate (sigVerify) → send (maxRetries 0, rebroadcast) → confirm or expire → `getTransaction` → fill;
-    - `wallet_balances` feeds reconciliation.
-15. **Pump.fun fresh-token implementation**: create/trade events decoded from program logs, curve state, gate, curve-simulated paper fills, and the `pump` route for live trades.
-16. **Pump.fun migration implementation**: Pump.fun's migration event → migration candidate → canonical PumpSwap pool PDA, verified (owner and mints) → reserves, fee from the pool's latest trade event, trader flow → gate. No pool means MIGRATION_PENDING.
-17. **PumpSwap execution implementation**: the `pump-amm` pool through PumpPortal. The guard knows the PumpSwap buy / buy_exact_quote_in / sell discriminators. Paper fills are simulated against the pool model.
+    - `GET /api/live/futures`, `PUT /api/live/futures/settings`, `GET /api/system/config-validation`;
+    - `/api/external-bots` (list, `/{name}/config`, `/{name}/close`);
+    - mode changes answer 409 CONFIGURATION_ERROR with variable names;
+    - venues list `mt5` and `live_orders` as a health entry;
+    - grid sessions carry `mode`.
+11. **WebSocket changes**: none in protocol. Live futures and grid events are published with source `live` / `grid`, as trade.created / updated / closed and strategy.updated.
+12. **PumpPortal integration**:
+    - trading uses the Local Transaction API (no key, signed locally);
+    - the data WebSocket (free new-token/migration feeds) is added as an independent coverage and migration check;
+    - `PUMPPORTAL_API_KEY` is only for the metered trade feed of held mints;
+    - the custodial Lightning API is rejected.
+
+    IMPLEMENTED — AWAITING CREDENTIAL VERIFICATION.
+13. **Helius integration**:
+    - standard RPC/WS (URLs derived from `HELIUS_API_KEY`, or the `HELIUS_*_URL` aliases);
+    - health now has a `helius` entry.
+
+    IMPLEMENTED — AWAITING CREDENTIAL VERIFICATION.
+14. **Solana execution integration**: unchanged from the earlier audit, and now isolated from futures orders by provider.
+15. **Pump.fun fresh-token implementation**: unchanged, plus the PumpPortal coverage metric (health degrades if the on-chain stream misses announced tokens).
+16. **Pump.fun migration implementation**: unchanged, plus the PumpPortal `migrate` cross-signal stored for comparison.
+17. **PumpSwap execution implementation**: unchanged (`pump-amm` via PumpPortal Local, guarded).
 18. **Buy implementation**:
-    - SOL-denominated; `max_sol_in` = size × (1 + entry slippage);
-    - bounded fee and priority fee;
-    - the position opens only on a confirmed fill that shows tokens in and SOL out.
+    - Solana: unchanged.
+    - Futures:
+      - market order by client id;
+      - quantity rounded to the venue step and checked against the minimum quantity and notional;
+      - leverage set first; hedge mode refused;
+      - the fill (quantity, average price, fee) is read back;
+      - a fill more than `max_fill_deviation_pct` from the plan is closed at once.
 19. **Sell implementation**:
-    - token-denominated;
-    - `min_sol_out` comes from the model's expected proceeds less exit slippage;
-    - the guard bounds tokens in;
-    - partial and full exits are supported, with dust closing the position.
+    - Solana: unchanged.
+    - Futures:
+      - reduce-only market orders;
+      - a full exit closes what the exchange actually holds;
+      - partial take-profits are booked at the actual fill.
+    - Grid: reduce-only flatten.
 20. **Automatic exit implementation**:
-    - `manage_step` covers stop, TPs, breakeven and trailing; exit intelligence adds REDUCE/EXIT;
-    - LIVE exits become SELL orders executed by the worker without human action;
-    - failures retry with more slippage and raise an alert.
-21. **Tax implementation**:
-    - Token-2022 `TransferFeeConfig` (max of the current/next epoch) sets both buy and sell tax;
-    - a transfer hook or an unparseable extension means UNKNOWN;
-    - limits are 5%/5% (hard maximum 25%), and protocol/venue fees are kept separate;
-    - the dashboard shows Buy Tax, Sell Tax, Tax Limit, Source, Confidence and Decision.
-22. **Sellability implementation**:
-    - SELLABLE only when a sell at the planned size was simulated or quoted and nothing restricts transfers;
-    - otherwise NOT SELLABLE or UNKNOWN (never executable in AUTO).
+    - the shared `manage_step` (stop, TPs, breakeven, trailing) plus the strategy exit rules;
+    - an exchange-side stop covers the whole position and is only ever tightened: the new stop is placed before the old one is cancelled;
+    - if a stop cannot be placed, the position is closed;
+    - no manual step is needed in AUTO.
+21. **Tax implementation**: unchanged — buy tax 5% / sell tax 5%; UNKNOWN → NO_TRADE in AUTO; kept separate from venue/protocol fees.
+22. **Sellability implementation**: unchanged.
 23. **Liquidity implementation**:
-    - usable liquidity, position/liquidity, entry and exit impact, and the binding size cap;
-    - the size is reduced to the caps, and NO_TRADE applies when even the minimum does not fit.
-24. **Token-risk implementation**: mint/freeze authority, Token-2022 extensions (hooks, permanent delegate, and so on), metadata, and the tax above.
-25. **Wallet-risk implementation**:
-    - holder concentration and creator share;
-    - serial creator;
-    - early-buyer funding links, reported as CREATOR-LINKED INDICATOR and RELATED-WALLET INDICATOR, with exchange-like funders ignored and an unavailable check reported as FUNDING_UNCHECKED;
-    - wording is always "indicator", never an accusation.
-26. **Word-filter implementation**:
-    - scopes GLOBAL/FRESH/MIGRATED (plus per-engine);
-    - fields name/symbol/metadata/any/mint;
-    - match types exact/word/substring/pattern/regex, all case-insensitive; regexes with catastrophic shapes are refused;
-    - ALLOW waives word blocks only;
-    - dashboard add/edit/delete/enable/disable, audited.
-27. **Blacklist implementation**: the same rule table, with BLOCK as the default action.
+    - unchanged for Solana;
+    - futures use the venue order book (MT5 needs the broker's depth of market, never invented).
+24. **Token-risk implementation**: unchanged.
+25. **Wallet-risk implementation**: unchanged.
+26. **Word-filter implementation**: unchanged.
+27. **Blacklist implementation**: unchanged.
 28. **Automatic risk implementation**:
-    - SL from volatility within the min/max stop;
-    - size from equity × risk per trade ÷ stop distance, capped by pool fraction, exposure, slippage and impact;
-    - TPs as R-multiples, and trailing with activation, distance and step;
-    - the stop is never widened;
-    - the operator exit plan is validated against the same limits.
-29. **Paper implementation**: the same gate, simulated curve/pool fills including fee and impact, partial exits, and the same `close_position`. It is not a PnL generator: fills come from reserves moved by real (or test) trades.
-30. **Live implementation**: complete, locked by three environment flags plus global mode LIVE and worker readiness. IMPLEMENTED — AWAITING CREDENTIAL VERIFICATION.
+    - unchanged gate;
+    - futures leverage is capped by both the gate's `max_leverage` and `futures_live_execution.max_leverage`;
+    - a free-balance reserve is enforced;
+    - grid worst-case loss must fit `max_daily_loss_quote`.
+29. **Paper implementation**:
+    - unchanged;
+    - Gold vs BTC trend added;
+    - Confluence can paper-trade on MT5 data.
+30. **Live implementation**:
+    - Pump.fun (unchanged);
+    - Meta Muse, Gold vs BTC and Confluence on Binance, Bybit, Hyperliquid or MT5;
+    - Hyperliquid grid.
+
+    All locked by the three environment flags, global LIVE, module AUTO/MANUAL, venue readiness from execution-futures, config validation and the external-bot conflict guard. IMPLEMENTED — AWAITING CREDENTIAL VERIFICATION.
 31. **ML implementation**:
-    - feature snapshot at decision time, labels from realized PnL (paper or live source kept distinct);
-    - champion/challenger with no automatic promotion;
-    - a high score cannot override any risk block.
-32. **Strategy implementation**: `fresh_launch_flow` (fresh), a migrated-pool flow signal, and momentum. Modes are OFF/MANUAL/PAPER/AUTO.
+    - unchanged;
+    - live futures samples are recorded like paper ones and labelled from realized PnL (source `live_execution_realized_pnl`);
+    - a high ML score still cannot override a risk block.
+32. **Strategy implementation**:
+    - `gold_btc_trend` added (ported: gold 0.005% / BTC 0.03% gaps, three exit rules);
+    - Meta Muse gained optional per-asset thresholds;
+    - Confluence gained venue `mt5`.
 33. **UI implementation**:
-    - a Live Execution page (preflight, settings, positions, orders, reconciliation);
-    - word filters with actions, scopes and match types;
-    - tax, sellability and liquidity panels on decisions;
-    - provenance and on-chain orders on trade details;
-    - operator exit-plan fields on strategy pages.
-    - Checked in Chromium at desktop and mobile widths: no console errors apart from one intentional 422 validation test, and no horizontal overflow.
-34. **.env variables**: see `docs/CONFIGURATION.md`. Added `WALLET_PUBLIC_KEY`, `WALLET_PRIVATE_KEY` and the `HELIUS_RPC_URL`/`HELIUS_WS_URL` aliases. Removed the unused `HELIUS_WEBHOOK_SECRET`, `NEXT_PUBLIC_WS_URL` and `PUMPPORTAL_API_KEY`. Documented `SOLANA_WATCHED_ADDRESSES`, the token TTLs and the legacy cost setting.
-35. **Dashboard settings**: risk settings, modes, word filters and rules, operator exit plans, live execution settings. See `docs/CONFIGURATION.md`.
-36. **Tests performed**: pytest for core, API and every service, ruff, `alembic check` plus a downgrade/upgrade round trip, the Next.js lint and build, and the browser check.
-37. **Tests passed** (final run):
+    - External Bots page;
+    - Live Execution → Futures & FX (per-venue readiness, settings);
+    - System Health → Configuration and the new provider entries;
+    - venue pages show live execution state;
+    - Gold vs BTC Trend in the navigation;
+    - favicon.
+34. **.env variables**: see [environment-variable-matrix.md](environment-variable-matrix.md).
+    - Added (all consumed): `PUMPPORTAL_API_KEY`, `HYPERLIQUID_API_WALLET_PRIVATE_KEY`, `MT5_BRIDGE_URL/TOKEN`, and four `*_CONTROL_URL/*_TOKEN` pairs.
+    - Removed: the unused `MAX_SLIPPAGE`.
+    - Not invented: a Jupiter secret, `EXCHANGE`, `DASHBOARD_TOKEN`.
+35. **Dashboard settings**:
+    - futures live settings (max leverage, free-balance reserve, balance max age, max fill deviation);
+    - venue per strategy (including `mt5`);
+    - Gold vs BTC trend parameters;
+    - everything earlier.
+36. **Tests performed**:
+    - pytest and ruff for 13 projects;
+    - `alembic check` and a round trip;
+    - ESLint, `tsc` and the Next.js build;
+    - a Chromium sweep at two widths;
+    - Docker build and a container run/restart;
+    - `docker compose config`.
+37. **Tests passed**:
 
     | Suite | Passed |
     |---|---|
-    | core | 332 |
-    | API | 98 |
-    | decision-engine | 47 |
+    | core | 354 |
+    | API | 101 |
+    | decision-engine | 59 |
     | paper-trading | 61 |
     | engine-binance-futures | 48 |
     | ml | 23 |
     | data-binance | 14 |
-    | data-solana | 10 |
-    | discovery | 8 |
-    | migration | 11 |
     | momentum | 11 |
-    | **Total** | **663** |
+    | migration | 11 |
+    | data-solana | 10 |
+    | execution-futures | 9 |
+    | discovery | 8 |
+    | mt5-bridge | 7 |
+    | **Total** | **716** |
 
-38. **Tests failed**: none in the final run. During the audit, tests and the IDL cross-check found these real bugs, all fixed:
-    - a DB check forbade the pre-fill LIVE row;
-    - the `reconcile_required` status overflowed its column, and was renamed `needs_review`;
-    - the PumpSwap fee ignored the buyback fee that the current program charges. The fee is now derived from the amounts each trader actually paid, with the declared bps as a floor;
-    - a failed funding check was silent, and is now reported as FUNDING_UNCHECKED;
-    - two catalog tests asserted the old "no config" behaviour.
-39. **Tests blocked**: anything needing pumpportal.fun, Solana mainnet or Helius (no egress, no credentials).
+38. **Tests failed**: none in the final run. Problems found and fixed while building:
+    - a mode-change refusal that was too broad: unrelated PAPER modules blocked switching to MANUAL;
+    - the grid order bookkeeping mutated a list while iterating it;
+    - an MT5 fee float artefact in a fixture;
+    - an IOC cancelled with a partial fill was mapped to a non-terminal state;
+    - four test expectations updated for the new states and catalog entries;
+    - two matrix claims about other repositories were checked against source, found wrong, and corrected before commit.
+39. **Tests blocked**: anything needing a real exchange, Solana RPC, PumpPortal, Jupiter, Telegram or an MT5 terminal.
 40. **Unverified integrations**:
-    - PumpPortal trade-local against the live service;
-    - the transaction guard allowlist against PumpPortal's current transactions;
-    - Solana RPC/WS against mainnet;
-    - Jupiter;
-    - Telegram.
-41. **Security findings**:
-    - In the reference bot (`solana_pumpswap_migration_bot`):
-      - a hidden `_ROUTE_KEY` / `platformFee` of 0.5% is added to Jupiter swaps and paid to a third-party referral account. It was not ported and is flagged as a security issue;
-      - it uses the custodial Lightning API with the API key in the URL;
-      - success is assumed from a returned signature;
-      - PnL comes from wallet balance deltas across unrelated activity;
-      - it uses bare `except` and `skipPreflight`.
+    - every external service in the verification table;
+    - the exact Binance Algo response fields;
+    - broker depth-of-market availability for FX.
+41. **Security findings**: see the list in [integration-config-inventory.md](integration-config-inventory.md#security-relevant-findings-in-the-source-repositories).
+    - In the user's and reference repositories:
+      - the reference bot has a hidden 0.5% referral fee;
+      - two bots use the custodial Lightning API;
+      - Meta Muse and goldvsbtc place stops through ccxt `stopLossPrice` against Binance's Algo migration (-4120). goldvsbtc then keeps the position open without protection;
+      - the grid bot books "assume filled".
     - In this code:
-      - the private key is a `SecretStr`, redacted in `repr`, never logged or returned;
-      - the guard refuses any transaction whose fee payer or sole signer is not our wallet, and any unknown program, unknown discriminator, token move, authority change, account close to another wallet, fee above the bound, or lookup-table use;
-      - the signature is persisted before sending.
+      - keys are `SecretStr` and never logged or returned;
+      - a Hyperliquid agent wallet (cannot withdraw), not the main key;
+      - control APIs sit behind the dashboard login;
+      - the bridge needs a ≥ 32-char token and is private-network only;
+      - the external-bot close needs typed confirmation and is audited.
 42. **Performance findings** (2 GB droplet):
-    - the funding check costs ≤ 2 RPC calls per checked wallet (default 6) + 1 per shared funder, cached 7 days;
-    - PumpSwap pool trades cost one `getTransaction` per new signature, cached 1 h;
-    - the live worker makes 3 RPC calls every 30 s and one row-locked order at a time;
-    - no new long-running processes (the live worker runs inside paper-trading).
+    - execution-futures idles at about 58 MiB RSS. The image is 1.03 GB on disk, mostly the Hyperliquid SDK's Ethereum dependencies;
+    - loops: orders every 2 s, manage every 5 s, reconcile every 30 s;
+    - the PumpPortal free feed adds one WebSocket to the discovery service.
 43. **Data-quality findings**:
-    - the PumpSwap fee is unknown until the pool's first trade event (the pool is not priced until then). It is the fee actually paid, which covers LP, protocol, creator, buyback and cashback without double counting holder rewards;
-    - "fresh wallet" means fewer than 25 signatures and "busy funder" means 1000 or more (heuristics, reported as indicators);
-    - a Token-2022 transfer hook makes the tax unknowable by design;
-    - evidence from the UI seed showed funding errors correctly surfacing as FUNDING_UNCHECKED instead of being silently read as clean.
+    - PumpPortal coverage below 80% of ≥ 20 announced tokens marks the on-chain stream DEGRADED;
+    - MT5 symbols whose profit currency differs from the account currency are refused, so PnL stays in one currency;
+    - futures balances are available margin, not equity.
 44. **Remaining work**:
-    1. Run the live path once with a dedicated low-balance wallet and real RPC:
-       - set the three locks;
-       - global mode LIVE;
-       - one strategy set to AUTO or MANUAL with a very small `manual_position_size_sol`;
-       - confirm the preflight on the Live Execution page;
-       - observe one buy and one sell and compare the fill with Solscan.
-    2. Extend the guard allowlist if PumpPortal's transactions contain an instruction it refuses; the refusal reason is stored on the order.
-    3. An ML exit model, once enough closed trades exist to train and validate one.
-    4. Set the paper failure rates from your first live results (or leave "use measured live rates" on: it switches automatically after 20 live orders per side).
+    1. With small, dedicated funds, verify one venue at a time:
+       - set the keys, open the three locks and set global LIVE;
+       - put one strategy on AUTO or MANUAL with a small size;
+       - watch the venue turn READY on Live Execution;
+       - compare one entry, its exchange stop and one exit with the exchange's own history.
+       - Recommended order: Binance testnet (`BINANCE_TESTNET=true`), Hyperliquid testnet, then mainnet.
+    2. Install services/mt5-bridge on the Windows MT5 host and connect it over a private tunnel. Check whether the broker publishes depth of market for the Confluence symbols.
+    3. Run the Pump.fun live check from the earlier audit.
+    4. Decide whether to keep the standalone bots running. If kept, set their control URLs/tokens so YonixAlpha can see them and avoid trading the same strategy twice.
+    5. Upgrade or retire the standalone Meta Muse and goldvsbtc bots: their Binance stop orders may be rejected (-4120).
+    6. An ML exit model once enough closed trades exist.

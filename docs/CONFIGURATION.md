@@ -2,87 +2,71 @@
 
 Two kinds of configuration, kept strictly apart:
 
-- **Secrets and deployment wiring** live in `.env` on the server (never in Git,
-  never in the database, never shown by the API). They are read once at start-up
-  by `yonixalpha_core.config.Settings` (plus four raw `os.getenv` reads noted below).
-- **Trading behaviour** (risk limits, modes, word filters, custom rules, strategy
-  parameters, operator exit plans, live-execution slippage/fees/reserve) lives in
-  the database, is edited on the dashboard, is validated by the same code the
-  engines use, and every change is written to the audit log.
+- **Secrets and infrastructure** live in `.env` on the server. They never go
+  in Git, never go in the database, and the API never shows them. They are
+  read once at start-up by `yonixalpha_core.config.Settings`, plus four raw
+  `os.getenv` reads listed in the matrix. Examples: API keys, private keys,
+  URLs, database/Redis wiring, and the three trading locks.
+- **Trading behaviour** lives in the database. It is edited on the dashboard,
+  validated by the same code the engines use, and every change goes to the
+  audit log. Examples: modes, risk limits, token-tax limits, slippage, word
+  filters, custom rules, strategy parameters, operator exit plans, and
+  live-execution settings.
 
-This inventory was produced by searching the code for every `Settings` field and
-every `os.getenv`/`os.environ` read (not from the README). "Tested" means an
-automated test exercises the variable's effect in this repository; no test here
-talks to a real external service.
+The per-variable inventory is in
+[environment-variable-matrix.md](environment-variable-matrix.md). What each of
+the user's repositories needs, and how it maps onto YonixAlpha, is in
+[integration-config-inventory.md](integration-config-inventory.md).
 
-## Environment variables
+## Start-up validation
 
-Req. column: **R** required, **O** optional, **L** required for live Pump.fun
-execution only. Dev/Paper/Live: whether the variable is needed in that mode.
+At start-up, the API validates each module's `.env` configuration
+(`yonixalpha_core.config_validation`). The results are cached in Redis and
+shown under System Health → Configuration and at
+`GET /api/system/config-validation`.
 
-| Variable | Purpose | Req. | Dev | Paper | Live | Where used | Tested |
-|---|---|---|---|---|---|---|---|
-| `APP_ENV` | `production` restricts CORS to PUBLIC_DOMAIN/API URL; reported on the System page | O | – | – | – | `config.py`, `apps/api/app/main.py` | yes (API tests) |
-| `APP_NAME` | service name in logs/OpenAPI | O | – | – | – | `config.py`, API | yes |
-| `APP_HOST`, `APP_PORT` | API bind address | O | – | – | – | `apps/api/Dockerfile` CMD | build only |
-| `JWT_SECRET` | signs dashboard sessions | R | yes | yes | yes | `yonixalpha_core/security.py` | yes |
-| `JWT_ALGORITHM`, `ACCESS_TOKEN_TTL_MINUTES`, `REFRESH_TOKEN_TTL_DAYS` | session token settings (defaults HS256 / 15 / 7) | O | – | – | – | API auth | yes |
-| `ADMIN_USERNAME`, `ADMIN_PASSWORD_HASH` | the single operator login (argon2 hash, never plaintext) | R | yes | yes | yes | API auth | yes |
-| `POSTGRES_HOST/PORT/DB/USER/PASSWORD` | database (or set `DATABASE_URL`) | R | yes | yes | yes | `config.py`, compose | yes |
-| `DATABASE_URL` | overrides the POSTGRES_* parts | O | – | – | – | `config.py` | yes |
-| `REDIS_HOST/PORT/PASSWORD`, `REDIS_URL` | Redis (streams, events, readiness, caches) | R | yes | yes | yes | `config.py` | yes |
-| `SOLANA_RPC_URL` (alias `HELIUS_RPC_URL`) | JSON-RPC: token/holder/authority checks, PumpSwap pool reads, funding links, live send/confirm, reconciliation | R for Solana | yes | yes | yes | discovery, decision-engine, paper-trading (pool pricing + live worker), data-solana | yes (fake RPC) |
-| `SOLANA_WS_URL` (alias `HELIUS_WS_URL`) | `logsSubscribe` to the Pump.fun program (token discovery, trades, migrations) | R for Solana | yes | yes | yes | engine-solana-discovery, data-solana | yes (decoder tests) |
-| `SOLANA_RPC_BACKUP_URL`, `SOLANA_WS_BACKUP_URL` | failover endpoints | O | – | – | recommended | `RpcManager`, `SolanaWsClient` | yes |
-| `HELIUS_API_KEY` | if the URLs above are empty, `https://mainnet.helius-rpc.com/?api-key=…` and the `wss://` equivalent are derived | O | – | – | – | `config.py` validator | yes |
-| `SOLANA_WATCHED_ADDRESSES` | extra addresses for data-solana's generic event table | O | – | – | – | `services/data-solana/app/main.py` | yes |
-| `JUPITER_API_KEY` | Jupiter quote API (cross-check for migrated tokens, fallback exit quote) | O | – | – | – | assembler, paper-trading | yes (fake) |
-| `WALLET_PRIVATE_KEY` (alias `SOLANA_WALLET_PRIVATE_KEY`) | signs live transactions locally; base58 64-byte or JSON array; `SecretStr`, never logged or returned | L | – | – | **yes** | `solana/wallet.py`, live worker | yes (repr/redaction, mismatch) |
-| `WALLET_PUBLIC_KEY` | optional cross-check: must match the private key | O | – | – | recommended | `solana/wallet.py` | yes |
-| `TRADING_ENABLED` | lock 1 | R | false | false | **true** | `safety/store.live_trading_permitted` + everywhere | yes |
-| `LIVE_TRADING_ENABLED` | lock 2 | R | false | false | **true** | same | yes |
-| `PAPER_TRADING` | lock 3 (true forces paper) | R | true | true | **false** | same | yes |
-| `MAX_DAILY_LOSS`, `MAX_POSITION_SIZE`, `MAX_SLIPPAGE`, `MAX_OPEN_POSITIONS` | legacy Phase 5 risk engine (pre-gate path). The gate uses DB risk settings instead | O | – | – | – | `services/decision-engine/app/evaluate.py` | yes |
-| `PAPER_TRADING_PER_LEG_COST_BPS` | legacy Phase 7 paper cost per leg | O | – | – | – | paper-trading legacy manage loop | yes |
-| `BINANCE_API_KEY/SECRET`, `BINANCE_TESTNET` | Binance futures account sync (live futures orders are not enabled) | O | – | – | – | engine-binance-futures | yes (signed-request tests) |
-| `BINANCE_SYMBOLS`, `BINANCE_STREAM_TYPES` | data-binance ingestion opt-in | O | – | – | – | `services/data-binance/app/main.py` | yes |
-| `BYBIT_API_KEY/SECRET`, `BYBIT_TESTNET` | read-only Bybit account views | O | – | – | – | venues | yes |
-| `HYPERLIQUID_ACCOUNT_ADDRESS`, `HYPERLIQUID_TESTNET` | read-only Hyperliquid account views (public address only) | O | – | – | – | venues | yes |
-| `MIGRATION_AMM_PROGRAM_IDS` | generic AMM detector (not part of the Pump.fun sniper; ships without parsers) | O | – | – | – | engine-solana-migration | yes |
-| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | alerts (both needed) | O | – | – | recommended | `notify.py` | yes |
-| `NEXT_PUBLIC_API_URL` | API base URL baked into the web build (realtime WS URL derived from it) | R | yes | yes | yes | `apps/web/lib/api.ts`, `events.tsx` | build |
-| `PUBLIC_DOMAIN` | CORS origin | R (prod) | – | – | – | `config.py` | yes |
-| `LOG_LEVEL` | log verbosity | O | – | – | – | all services | yes |
-| `LETSENCRYPT_EMAIL` | used only in the documented certbot command | O | – | – | – | `docs/DEPLOYMENT.md` | n/a |
+| Status | Meaning |
+|---|---|
+| DISABLED | module mode is OFF; it never blocks anything |
+| READY | what the module needs for its current mode is present and well-formed |
+| CONFIGURATION_ERROR | an enabled module lacks what it needs. This covers paper requirements (such as Solana RPC for the Pump.fun engines, or the bridge for an MT5 strategy), and live requirements when it is asked to trade live |
 
-Removed in this audit because nothing read them: `HELIUS_WEBHOOK_SECRET`,
-`NEXT_PUBLIC_WS_URL`, and `PUMPPORTAL_API_KEY`. PumpPortal's local-transaction
-API needs no key. Its data WebSocket is not used, because discovery decodes the
-Pump.fun program's own logs.
+A module in CONFIGURATION_ERROR cannot be switched to AUTO or MANUAL while
+the global mode is LIVE. The global mode cannot go LIVE while an AUTO or
+MANUAL module lacks its live configuration: the API answers 409 and lists
+the missing variable names. Messages name variables, never values.
+Switching a module to OFF or PAPER is never refused.
 
 ## External providers
 
-| Provider | Purpose | Key | Endpoint | WebSocket | Rate limits | Paper | Live |
-|---|---|---|---|---|---|---|---|
-| Solana RPC (Helius or any) | chain reads, simulate/send/confirm | in URL / `HELIUS_API_KEY` | `SOLANA_RPC_URL` | `SOLANA_WS_URL` | depends on the plan; the funding check is bounded to ≤ 2 calls per wallet + 1 per funder (cached 7 days), pool trades cached per signature (1 h) | required | required |
-| PumpPortal Local Transaction API | builds the unsigned buy/sell transaction (curve `pump`, PumpSwap `pump-amm`) | none | `POST https://pumpportal.fun/api/trade-local` | – | no numeric limit found in the docs consulted; the worker sends at most one request per order attempt | not used | required |
-| Jupiter | cross-check quote, fallback exit quote | `JUPITER_API_KEY` (optional) | Jupiter quote API | – | 20 req/min budget enforced client-side in paper-trading | optional | optional |
-| Telegram | alerts | bot token | Bot API | – | – | optional | recommended |
+| Provider | Purpose | Key | Endpoint | Paper | Live |
+|---|---|---|---|---|---|
+| Solana RPC/WS (Helius or any) | chain reads, program-log stream, simulate/send/confirm | in URL, or `HELIUS_API_KEY` | `SOLANA_RPC_URL` / `SOLANA_WS_URL` | required for Pump.fun | required for Pump.fun |
+| PumpPortal Local Transaction API | builds the unsigned buy/sell (curve `pump`, PumpSwap `pump-amm`); signed locally | none | `POST https://pumpportal.fun/api/trade-local` | not used | required |
+| PumpPortal data WebSocket | coverage and migration cross-check; trades of held mints only with a key (metered) | `PUMPPORTAL_API_KEY` (optional) | `wss://pumpportal.fun/api/data` | optional | optional |
+| Jupiter | cross-check and fallback exit quotes | `JUPITER_API_KEY` (optional; keyless lite-api is deprecated) | `api.jup.ag/swap/v1` or `lite-api.jup.ag/swap/v1` | optional | optional |
+| Binance USDⓈ-M | market data (public); orders, Algo-service stops, fills, balances | `BINANCE_API_KEY/SECRET` | `fapi.binance.com` / testnet | public data | required for venue `binance` |
+| Bybit V5 | market data; orders, position stop, executions, balance | `BYBIT_API_KEY/SECRET` | `api.bybit.com` / testnet | public data | required for venue `bybit` |
+| Hyperliquid | info API; signed orders via an API (agent) wallet | `HYPERLIQUID_ACCOUNT_ADDRESS` + `HYPERLIQUID_API_WALLET_PRIVATE_KEY` | `api.hyperliquid.xyz` / testnet | public data | required for venue `hyperliquid` and the live grid |
+| MT5 bridge | rates, depth of market, orders on a MetaTrader 5 account | `MT5_BRIDGE_URL` + `MT5_BRIDGE_TOKEN` (MT5 login stays on the bridge host) | private network only | required for venue `mt5` | required for venue `mt5` |
+| Standalone bots' control APIs | status / close / config; LIVE conflict guard | `*_CONTROL_URL` + `*_TOKEN` | private network only | optional | optional |
+| Telegram | alerts | `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | Bot API | optional | recommended |
 
-PumpPortal charges 0.5% per trade (per its docs). The transaction guard refuses
-any fee transfer above `max_platform_fee_bps` (default 100 bps).
+PumpPortal charges 0.5% per trade (per its docs). The transaction guard
+refuses any fee transfer above `max_platform_fee_bps` (default 100 bps).
 
 ## Runtime settings (database, dashboard)
 
 | Where on the dashboard | What | Validation |
 |---|---|---|
-| Risk Settings | per-engine risk limits (stop range, risk per trade, max position, slippage, tax limits 5%/5%, holder/flow thresholds, funding-check width, …) | `safety/settings.py` hard limits |
-| Settings → modes | global mode (OFF/PAPER/MANUAL/LIVE) and per-strategy mode (OFF/MANUAL/PAPER/AUTO); LIVE refused while locks are closed | `safety/store.py`, API |
-| Word Filters & Rules | BLOCK/ALLOW word filters, scope GLOBAL/FRESH/MIGRATED, fields name/symbol/metadata/any/mint, match exact/word/substring/pattern/regex; custom threshold rules | `safety/rules.py` (regex safety, min lengths) |
-| Fresh / Migrated / Momentum pages | optional operator exit plan: `manual_stop_loss_pct`, `manual_tp1..3_pct`, `manual_trailing_pct`, `manual_position_size_sol`, `manual_max_risk_sol` (empty = automatic) | `strategies/catalog.py`, then re-validated by the planner against risk settings |
-| Paper Trading → Simulated execution failures | entry and exit failure % (0–50, default 0), use measured live rates when 20+ live orders exist | `paper_execution.parse_settings` |
-| Live Execution | entry/exit slippage, per-failure exit slippage step, max exit slippage, priority fee and guard maximum, max provider fee, SOL reserve, wallet-sync max age | `live_trading.LIMITS` |
+| Risk Settings | per-engine risk limits: stop range, risk per trade, max position, slippage, token tax limits (buy 5% / sell 5%), holder/flow thresholds, funding-check width, max leverage, … | `safety/settings.py` hard limits |
+| Settings → modes | global mode (PAPER / MANUAL / LIVE) and per-strategy/venue mode (OFF / PAPER / MANUAL / AUTO). LIVE is refused while the locks are closed or a needed module is in CONFIGURATION_ERROR | `safety/store.py`, API, `config_validation.py` |
+| Word Filters & Rules | BLOCK/ALLOW filters, scopes, fields, match types; custom threshold rules | `safety/rules.py` |
+| Strategy pages | Meta Muse, Gold vs BTC, Confluence (including venue `binance`/`bybit`/`hyperliquid`/`mt5`), Hyperliquid grid parameters; Pump.fun operator exit plans | `strategies/catalog.py` |
+| Paper Trading → Simulated execution failures | entry/exit failure % | `paper_execution.parse_settings` |
+| Live Execution | Pump.fun: slippage, fees, SOL reserve, wallet-sync age. Futures (`futures_live_execution`): max leverage, free-balance reserve, balance max age, max fill deviation | `live_trading.LIMITS`, `futures_live.LIMITS` |
 
 The built-in safety checks cannot be configured away: authorities, tax limits
-(hard maximum 25%), sellability, liquidity, defined maximum loss, and the
-environment locks.
+(hard maximum 25%), sellability, liquidity, defined maximum loss, the
+exchange-side stop on every live futures position, and the environment
+locks.

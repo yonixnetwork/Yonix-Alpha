@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_username, get_db, get_redis, get_settings
 from app.api.util import audit, jsonable
-from yonixalpha_core import live_trading
+from yonixalpha_core import futures_live, live_trading
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import ExecutionOrder, PaperPosition, PlatformSetting, ReconciliationEvent
 from yonixalpha_core.safety import store
@@ -103,6 +103,38 @@ async def put_live_settings(body: dict, request: Request, db: AsyncSession = Dep
     await audit(db, username, request, "live_settings.updated", {"before": current, "after": s.to_dict()})
     await db.commit()
     return {"settings": s.to_dict(), "limits": {k: [str(lo), str(hi)] for k, (lo, hi) in live_trading.LIMITS.items()}}
+
+
+@router.get("/futures")
+async def futures_status(db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
+                         settings: Settings = Depends(get_settings), _: str = Depends(get_current_username)) -> dict:
+    """Live futures/FX execution: settings and each venue's readiness as
+    reported by services/execution-futures (never inferred here)."""
+    venues = {}
+    for venue in ("binance", "bybit", "hyperliquid", "mt5"):
+        ok, why = await futures_live.readiness(redis, settings, venue)
+        raw = await redis.get(futures_live.READY_KEY.format(venue=venue))
+        venues[venue] = {"ready": ok, "reason": why, "report": json.loads(raw) if raw else None}
+    s = await futures_live.load_settings(db)
+    return {"settings": s.to_dict(), "limits": {k: [str(lo), str(hi)] for k, (lo, hi) in futures_live.LIMITS.items()},
+            "venues": venues}
+
+
+@router.put("/futures/settings")
+async def put_futures_settings(body: dict, request: Request, db: AsyncSession = Depends(get_db),
+                               username: str = Depends(get_current_username)) -> dict:
+    current = (await futures_live.load_settings(db)).to_dict()
+    s, errors = futures_live.parse_settings({**current, **body})
+    if errors:
+        raise HTTPException(422, {"errors": errors})
+    row = await db.get(PlatformSetting, futures_live.SETTINGS_KEY)
+    if row is None:
+        db.add(PlatformSetting(key=futures_live.SETTINGS_KEY, value=s.to_dict()))
+    else:
+        row.value = s.to_dict()
+    await audit(db, username, request, "futures_live_settings.updated", {"before": current, "after": s.to_dict()})
+    await db.commit()
+    return {"settings": s.to_dict(), "limits": {k: [str(lo), str(hi)] for k, (lo, hi) in futures_live.LIMITS.items()}}
 
 
 @router.get("/orders")

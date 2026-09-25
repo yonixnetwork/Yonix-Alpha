@@ -9,6 +9,16 @@ import { formatDate } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
 
 const CATEGORY_ORDER = ["infrastructure", "service", "solana", "exchange", "execution", "control_api", "ml", "realtime"];
+const CATEGORY_LABEL: Record<string, string> = {
+  infrastructure: "Infrastructure",
+  service: "Services",
+  solana: "Solana",
+  exchange: "Exchanges & market data",
+  execution: "Live execution",
+  control_api: "External bot control APIs",
+  ml: "ML",
+  realtime: "Realtime",
+};
 const CONFIG_CLASS: Record<string, string> = { READY: "pill pill-ok", DISABLED: "pill pill-off", CONFIGURATION_ERROR: "pill pill-danger" };
 
 export default function HealthPage() {
@@ -35,7 +45,7 @@ export default function HealthPage() {
             const items = data.connections.filter((c) => c.category === cat);
             if (!items.length) return null;
             return (
-              <Section key={cat} title={cat[0].toUpperCase() + cat.slice(1)}>
+              <Section key={cat} title={CATEGORY_LABEL[cat] ?? cat}>
                 <div className="table-wrap">
                   <table className="data-table">
                     <thead>

@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { CheckCircle2, Send, XCircle } from "lucide-react";
+import FuturesLive from "@/components/FuturesLive";
 import { ErrorNotice, Loading, Money, PageHeader, Section, Stat } from "@/components/ui";
 import { apiPut, ApiError } from "@/lib/api";
 import type { ExecutionOrderRow } from "@/lib/cc";
@@ -126,7 +127,7 @@ export default function LiveExecutionPage() {
       <PageHeader
         title="Live Execution"
         icon={<Send size={20} aria-hidden />}
-        subtitle="Pump.fun only · PumpPortal local transactions, signed on this server"
+        subtitle="Pump.fun (PumpPortal local transactions, signed on this server) · Futures & FX (exchange APIs, MT5 bridge)"
       />
 
       <div className={s.ready ? "card" : "card warn-card"} role="status">
@@ -225,6 +226,8 @@ export default function LiveExecutionPage() {
           <Loading />
         )}
       </Section>
+
+      <FuturesLive />
 
       <Section title="Live positions">
         {!positions.data || positions.data.length === 0 ? (
