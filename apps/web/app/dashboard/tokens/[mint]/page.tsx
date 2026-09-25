@@ -1,0 +1,145 @@
+"use client";
+
+import Link from "next/link";
+import { useParams } from "next/navigation";
+import { Coins } from "lucide-react";
+import { Empty, ErrorNotice, Loading, Money, PageHeader, Section, Stat } from "@/components/ui";
+import { formatDate, formatDecimal, formatState, gateDecisionPillClass } from "@/lib/format";
+import { useApi } from "@/lib/useApi";
+
+export default function TokenDetailPage() {
+  const { mint } = useParams<{ mint: string }>();
+  const { data, error } = useApi<Record<string, any>>(`/api/tokens/${mint}`, undefined, {
+    reloadOn: ["risk.updated", "trade.created", "trade.closed"],
+    refreshMs: 30000,
+  });
+  if (error) return <ErrorNotice error={error} />;
+  if (!data) return <Loading />;
+  const t = data.token ?? {};
+  const meta = data.stream?.meta ?? {};
+  const curve = data.stream?.curve;
+  const trades: any[] = data.stream?.recent_trades ?? [];
+  return (
+    <div>
+      <PageHeader title={t.symbol || meta.symbol || "Token"} icon={<Coins size={20} aria-hidden />} subtitle={<span className="mono">{mint}</span>} />
+      <div className="stat-grid">
+        <Stat label="Name">{t.name || meta.name || "—"}</Stat>
+        <Stat label="Creator">
+          <span className="mono">{t.creator || meta.creator || "—"}</span>
+        </Stat>
+        <Stat label="First seen">{formatDate(t.first_seen_at ?? null)}</Stat>
+        <Stat label="Curve complete">{curve ? (curve.complete ? "yes (migrated)" : "no") : "—"}</Stat>
+        <Stat label="Real SOL in curve">{curve?.rsol !== undefined && curve?.rsol !== null ? formatDecimal(String(curve.rsol / 1e9), 4) : "—"}</Stat>
+        <Stat label="Stream trades held">{trades.length}</Stat>
+      </div>
+      <Section title="Safety-gate decisions">
+        {data.assessments.length === 0 ? (
+          <Empty>Not assessed.</Empty>
+        ) : (
+          <div className="table-wrap">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>When</th>
+                  <th>Engine</th>
+                  <th>Decision</th>
+                  <th>Risk</th>
+                  <th>Why</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.assessments.map((a: any) => (
+                  <tr key={a.id}>
+                    <td>
+                      <Link className="link" href={`/dashboard/decisions/${a.id}`}>
+                        {formatDate(a.evaluated_at)}
+                      </Link>
+                    </td>
+                    <td className="muted">{a.engine}</td>
+                    <td>
+                      <span className={gateDecisionPillClass(a.decision)}>{a.decision}</span>
+                    </td>
+                    <td className={`level-${a.overall_risk}`}>{a.overall_risk}</td>
+                    <td className="muted small">{(a.reasons ?? []).slice(0, 2).join("; ")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Section>
+      <Section title="Paper positions">
+        {data.positions.length === 0 ? (
+          <Empty>None.</Empty>
+        ) : (
+          <ul className="reason-list">
+            {data.positions.map((p: any) => (
+              <li key={p.id}>
+                <Link className="link" href={`/dashboard/trades/${p.id}`}>
+                  {p.side} {p.status}
+                </Link>{" "}
+                entry {formatDecimal(p.entry_price, 10)} · PnL <Money value={p.realized_pnl} currency="SOL" digits={6} /> · {p.exit_reason ?? ""}
+              </li>
+            ))}
+          </ul>
+        )}
+      </Section>
+      <Section title="Candidates">
+        {data.candidates.length === 0 ? (
+          <Empty>None.</Empty>
+        ) : (
+          <ul className="reason-list">
+            {data.candidates.map((c: any) => (
+              <li key={c.id}>
+                <Link className="link" href={`/dashboard/candidates/${c.id}`}>
+                  {c.engine}
+                </Link>{" "}
+                — {formatState(c.state)} ({formatDate(c.created_at)})
+              </li>
+            ))}
+          </ul>
+        )}
+      </Section>
+      <Section title="Recent stream trades">
+        {trades.length === 0 ? (
+          <Empty>No trades held in the live stream window.</Empty>
+        ) : (
+          <div className="table-wrap">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Side</th>
+                  <th>Wallet</th>
+                  <th>SOL</th>
+                </tr>
+              </thead>
+              <tbody>
+                {trades
+                  .slice(-30)
+                  .reverse()
+                  .map((tr: any, i: number) => (
+                    <tr key={i}>
+                      <td className="muted">{formatDate(tr.at)}</td>
+                      <td>
+                        <span className={tr.is_buy ? "pill pill-ok" : "pill pill-danger"}>{tr.is_buy ? "BUY" : "SELL"}</span>
+                      </td>
+                      <td className="mono">
+                        {String(tr.trader).slice(0, 4)}…{String(tr.trader).slice(-4)}
+                      </td>
+                      <td>{(tr.sol_lamports / 1e9).toFixed(4)}</td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Section>
+      {data.latest_evidence && (
+        <Section title="Latest evidence">
+          <pre className="json">{JSON.stringify(data.latest_evidence, null, 2)}</pre>
+        </Section>
+      )}
+    </div>
+  );
+}

@@ -3,6 +3,8 @@
 import { Fragment, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
+import ConfirmButton from "@/components/ConfirmDialog";
+import { TokenLink } from "@/components/ui";
 import { apiGet, apiPost, ApiError } from "@/lib/api";
 import { formatBps, formatDate, formatDecimal, formatPct, gateDecisionPillClass } from "@/lib/format";
 import type { AssessmentDetail, PlannedValue } from "@/lib/types";
@@ -12,7 +14,9 @@ function Provenance({ v }: { v: PlannedValue | null }) {
   return (
     <span>
       {formatDecimal(v.value, 10)}{" "}
-      <span className={v.provenance === "MANUAL" ? "pill pill-warn" : "pill pill-off"}>{v.provenance}</span>
+      <span className={v.provenance === "MANUAL" ? "pill pill-warn" : v.provenance === "STRATEGY" ? "pill pill-ok" : "pill pill-off"}>
+        {v.provenance}
+      </span>
       <div className="form-hint">{v.method}</div>
     </span>
   );
@@ -38,15 +42,17 @@ export default function DecisionDetailPage() {
     load();
   }, [load]);
 
-  async function act(action: "approve" | "decline") {
+  async function act(action: "approve" | "decline" | "ignore") {
     setNotice(null);
-    try {
-      await apiPost(`/api/control/assessments/${params.id}/${action}`);
-      setNotice(action === "approve" ? "Approved. Every check re-runs on the next evaluation." : "Declined.");
-      load();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Action failed.");
-    }
+    await apiPost(`/api/control/assessments/${params.id}/${action}`);
+    setNotice(
+      action === "approve"
+        ? "Approved. Every check re-runs on the next evaluation."
+        : action === "decline"
+          ? "Declined."
+          : "Ignored: nothing is rejected and a later evaluation can ask again.",
+    );
+    load();
   }
 
   if (error) return <div className="error">{error}</div>;
@@ -56,6 +62,7 @@ export default function DecisionDetailPage() {
   const plan = d.plan;
   const evidence = d.inputs_snapshot ?? {};
   const errors = (evidence.errors as string[] | undefined) ?? [];
+  const ml = evidence.ml as Record<string, unknown> | undefined;
   const findings = [...(d.findings ?? [])].sort((x, y) => Number(y.hard_block) - Number(x.hard_block));
 
   return (
@@ -75,12 +82,26 @@ export default function DecisionDetailPage() {
           Waiting for operator approval. Approving lets the next evaluation proceed <b>only if every safety check still
           passes on fresh data</b>.
           <div className="btn-row" style={{ marginTop: 8 }}>
-            <button className="btn btn-sm" onClick={() => act("approve")}>
-              Approve
-            </button>
-            <button className="btn btn-ghost btn-sm" onClick={() => act("decline")}>
-              Decline
-            </button>
+            <ConfirmButton
+              label="Approve"
+              className="btn btn-sm"
+              title={`Approve ${a.symbol ?? a.asset_id}?`}
+              body="Valid for 10 minutes. The next evaluation still runs every safety check on fresh data; approval never bypasses one."
+              onConfirm={() => act("approve")}
+            />
+            <ConfirmButton
+              label="Decline"
+              danger
+              title={`Decline ${a.symbol ?? a.asset_id}?`}
+              body="The candidate is rejected and will not be entered."
+              onConfirm={() => act("decline")}
+            />
+            <ConfirmButton
+              label="Ignore"
+              title="Ignore this request?"
+              body="Dismisses the request without a verdict. Nothing is rejected; a later evaluation can ask again."
+              onConfirm={() => act("ignore")}
+            />
           </div>
         </div>
       )}
@@ -103,8 +124,20 @@ export default function DecisionDetailPage() {
             <dd>{a.approval_state}</dd>
             <dt>Evaluated</dt>
             <dd>{formatDate(a.evaluated_at)}</dd>
-            <dt>Mint</dt>
-            <dd className="mono">{a.asset_id}</dd>
+            <dt>Asset</dt>
+            <dd className="mono">{a.engine.startsWith("solana") ? <TokenLink mint={a.asset_id} label={a.asset_id} /> : a.asset_id}</dd>
+            <dt>Strategy</dt>
+            <dd>{a.strategy}</dd>
+            {ml && (
+              <>
+                <dt>ML</dt>
+                <dd>
+                  {String(ml.status)}
+                  {ml.score !== undefined && ` · score ${Number(ml.score).toFixed(3)} (${String(ml.model)} v${String(ml.version)})`}
+                  {ml.influenced ? " · influenced this decision" : ""}
+                </dd>
+              </>
+            )}
           </dl>
         </div>
         <div className="card">
@@ -183,6 +216,13 @@ export default function DecisionDetailPage() {
         <div className="card-grid">
           <div className="card">
             <dl className="kv">
+              <dt>Side</dt>
+              <dd>
+                <span className={(plan as Record<string, any>).side === "SHORT" ? "pill pill-danger" : "pill pill-ok"}>
+                  {String((plan as Record<string, any>).side ?? "LONG")}
+                </span>
+                {(plan as Record<string, any>).leverage && <span className="muted"> · leverage {String((plan as Record<string, any>).leverage)}x</span>}
+              </dd>
               <dt>Entry (market)</dt>
               <dd>{formatDecimal(plan.entry_price, 12)}</dd>
               <dt>Stop loss</dt>
@@ -269,7 +309,7 @@ export default function DecisionDetailPage() {
       )}
 
       <div className="section-title">Evidence (raw inputs)</div>
-      <pre className="json">{JSON.stringify(evidence, null, 2)}</pre>
+      <pre className="json" tabIndex={0}>{JSON.stringify(evidence, null, 2)}</pre>
       <div className="section-title">Settings used</div>
       <pre className="json">{JSON.stringify({ versions: d.versions, settings: d.settings_snapshot }, null, 2)}</pre>
     </div>

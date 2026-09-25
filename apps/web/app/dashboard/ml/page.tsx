@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Pagination from "@/components/Pagination";
@@ -36,7 +37,10 @@ export default function MLPage() {
   return (
     <div>
       <div className="page-header">
-        <div className="page-title">ML</div>
+        <h1 className="page-title">ML Engine</h1>
+        <Link className="btn btn-ghost btn-sm" href="/dashboard/ml/review">
+          ML Review: champion / challenger, drift, data quality
+        </Link>
       </div>
 
       {stats && (

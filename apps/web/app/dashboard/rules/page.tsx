@@ -2,12 +2,15 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { apiDelete, apiGet, apiPatch, apiPost, ApiError } from "@/lib/api";
+import { Filter, Pencil, Trash2 } from "lucide-react";
+import ConfirmButton from "@/components/ConfirmDialog";
+import { PageHeader } from "@/components/ui";
+import { apiDelete, apiGet, apiPatch, apiPost, apiPut, ApiError } from "@/lib/api";
 import { formatDate } from "@/lib/format";
 import type { BlacklistOut, CustomRuleOut } from "@/lib/types";
 
-const SCOPES = ["GLOBAL", "solana_fresh", "solana_migration"];
-const RULE_SCOPES = ["GLOBAL", "solana_fresh", "solana_migration", "binance_futures"];
+const SCOPES = ["GLOBAL", "solana_fresh", "solana_migration", "solana_momentum"];
+const RULE_SCOPES = ["GLOBAL", "solana_fresh", "solana_migration", "solana_momentum", "binance_futures", "bybit_futures", "hyperliquid_perps"];
 const OPS = ["<", "<=", ">", ">=", "==", "!="];
 const ACTIONS = ["WAIT", "REQUIRE_MANUAL_APPROVAL", "NO_TRADE", "REJECT", "ALLOW"];
 
@@ -19,6 +22,8 @@ export default function RulesPage() {
   const [error, setError] = useState<string | null>(null);
   const [bl, setBl] = useState({ scope: "GLOBAL", field: "symbol", match_type: "exact", value: "", reason: "" });
   const [rule, setRule] = useState({ name: "", scope: "GLOBAL", field: "", op: ">", threshold: "", action: "WAIT" });
+  const [editingBl, setEditingBl] = useState<string | null>(null);
+  const [editingRule, setEditingRule] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -53,10 +58,12 @@ export default function RulesPage() {
 
   return (
     <div>
-      <div className="page-header">
-        <div className="page-title">Rules &amp; Blacklist</div>
-      </div>
-      {error && <div className="error">{error}</div>}
+      <PageHeader title="Blacklist & Filters" icon={<Filter size={20} aria-hidden />} />
+      {error && (
+        <div className="error" role="alert">
+          {error}
+        </div>
+      )}
 
       <div className="section-title">Blacklist</div>
       <p className="muted">
@@ -64,32 +71,40 @@ export default function RulesPage() {
         <span className="mono">?</span> one character), case-insensitive; a pattern of only wildcards is refused.
       </p>
       <div className="inline-form">
-        <select value={bl.scope} onChange={(e) => setBl({ ...bl, scope: e.target.value })}>
+        <select aria-label="Blacklist scope" value={bl.scope} onChange={(e) => setBl({ ...bl, scope: e.target.value })}>
           {SCOPES.map((s) => (
             <option key={s}>{s}</option>
           ))}
         </select>
-        <select value={bl.field} onChange={(e) => setBl({ ...bl, field: e.target.value })}>
+        <select aria-label="Field" value={bl.field} onChange={(e) => setBl({ ...bl, field: e.target.value })}>
           <option value="symbol">symbol</option>
           <option value="name">name</option>
           <option value="mint">mint</option>
         </select>
-        <select value={bl.match_type} onChange={(e) => setBl({ ...bl, match_type: e.target.value })}>
+        <select aria-label="Match type" value={bl.match_type} onChange={(e) => setBl({ ...bl, match_type: e.target.value })}>
           <option value="exact">exact</option>
           <option value="pattern">pattern</option>
         </select>
-        <input placeholder="value, e.g. *SCAM*" value={bl.value} onChange={(e) => setBl({ ...bl, value: e.target.value })} />
-        <input placeholder="reason (optional)" value={bl.reason} onChange={(e) => setBl({ ...bl, reason: e.target.value })} />
+        <input aria-label="Value" placeholder="value, e.g. *SCAM*" value={bl.value} onChange={(e) => setBl({ ...bl, value: e.target.value })} />
+        <input aria-label="Reason" placeholder="reason (optional)" value={bl.reason} onChange={(e) => setBl({ ...bl, reason: e.target.value })} />
         <button
           className="btn btn-sm"
           disabled={!bl.value.trim()}
           onClick={() => run(async () => {
-            await apiPost("/api/control/blacklist", { ...bl, reason: bl.reason || null });
+            const body = { ...bl, reason: bl.reason || null };
+            if (editingBl) await apiPut(`/api/control/blacklist/${editingBl}`, body);
+            else await apiPost("/api/control/blacklist", body);
+            setEditingBl(null);
             setBl({ ...bl, value: "", reason: "" });
           })}
         >
-          Add
+          {editingBl ? "Save changes" : "Add"}
         </button>
+        {editingBl && (
+          <button className="btn btn-ghost btn-sm" onClick={() => { setEditingBl(null); setBl({ ...bl, value: "", reason: "" }); }}>
+            Cancel edit
+          </button>
+        )}
       </div>
       {blacklist.length === 0 ? (
         <div className="muted">No blacklist entries.</div>
@@ -119,14 +134,32 @@ export default function RulesPage() {
                 <td>
                   <input
                     type="checkbox"
+                    aria-label={`Enable blacklist entry ${b.value}`}
                     checked={b.enabled}
                     onChange={(e) => run(() => apiPatch(`/api/control/blacklist/${b.id}`, { enabled: e.target.checked }))}
                   />
                 </td>
                 <td>
-                  <button className="btn btn-ghost btn-sm" onClick={() => run(() => apiDelete(`/api/control/blacklist/${b.id}`))}>
-                    Delete
-                  </button>
+                  <div className="btn-row">
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      aria-label={`Edit blacklist entry ${b.value}`}
+                      onClick={() => {
+                        setEditingBl(b.id);
+                        setBl({ scope: b.scope, field: b.field, match_type: b.match_type, value: b.value, reason: b.reason ?? "" });
+                      }}
+                    >
+                      <Pencil size={14} aria-hidden />
+                    </button>
+                    <ConfirmButton
+                      label={<Trash2 size={14} aria-hidden />}
+                      ariaLabel={`Delete blacklist entry ${b.value}`}
+                      title="Delete this blacklist entry?"
+                      body={`${b.scope} ${b.field} ${b.match_type} "${b.value}" stops blocking tokens. The deletion is audited.`}
+                      danger
+                      onConfirm={() => run(() => apiDelete(`/api/control/blacklist/${b.id}`))}
+                    />
+                  </div>
                 </td>
               </tr>
             ))}
@@ -140,24 +173,24 @@ export default function RulesPage() {
         A rule whose feature is unavailable for a token does not fire.
       </p>
       <div className="inline-form">
-        <input placeholder="rule name" value={rule.name} onChange={(e) => setRule({ ...rule, name: e.target.value })} />
-        <select value={rule.scope} onChange={(e) => setRule({ ...rule, scope: e.target.value })}>
+        <input aria-label="Rule name" placeholder="rule name" value={rule.name} onChange={(e) => setRule({ ...rule, name: e.target.value })} />
+        <select aria-label="Rule scope" value={rule.scope} onChange={(e) => setRule({ ...rule, scope: e.target.value })}>
           {RULE_SCOPES.map((s) => (
             <option key={s}>{s}</option>
           ))}
         </select>
-        <select value={rule.field} onChange={(e) => setRule({ ...rule, field: e.target.value })}>
+        <select aria-label="Feature" value={rule.field} onChange={(e) => setRule({ ...rule, field: e.target.value })}>
           {fields.map((f) => (
             <option key={f}>{f}</option>
           ))}
         </select>
-        <select value={rule.op} onChange={(e) => setRule({ ...rule, op: e.target.value })}>
+        <select aria-label="Operator" value={rule.op} onChange={(e) => setRule({ ...rule, op: e.target.value })}>
           {OPS.map((o) => (
             <option key={o}>{o}</option>
           ))}
         </select>
-        <input placeholder="threshold" value={rule.threshold} onChange={(e) => setRule({ ...rule, threshold: e.target.value })} />
-        <select value={rule.action} onChange={(e) => setRule({ ...rule, action: e.target.value })}>
+        <input aria-label="Threshold" placeholder="threshold" value={rule.threshold} onChange={(e) => setRule({ ...rule, threshold: e.target.value })} />
+        <select aria-label="Action" value={rule.action} onChange={(e) => setRule({ ...rule, action: e.target.value })}>
           {ACTIONS.map((a) => (
             <option key={a}>{a}</option>
           ))}
@@ -166,12 +199,19 @@ export default function RulesPage() {
           className="btn btn-sm"
           disabled={!rule.name.trim() || !rule.threshold.trim()}
           onClick={() => run(async () => {
-            await apiPost("/api/control/rules", rule);
+            if (editingRule) await apiPut(`/api/control/rules/${editingRule}`, rule);
+            else await apiPost("/api/control/rules", rule);
+            setEditingRule(null);
             setRule({ ...rule, name: "", threshold: "" });
           })}
         >
-          Add
+          {editingRule ? "Save changes" : "Add"}
         </button>
+        {editingRule && (
+          <button className="btn btn-ghost btn-sm" onClick={() => { setEditingRule(null); setRule({ ...rule, name: "", threshold: "" }); }}>
+            Cancel edit
+          </button>
+        )}
       </div>
       {rules.length === 0 ? (
         <div className="muted">No custom rules.</div>
@@ -199,14 +239,32 @@ export default function RulesPage() {
                 <td>
                   <input
                     type="checkbox"
+                    aria-label={`Enable rule ${r.name}`}
                     checked={r.enabled}
                     onChange={(e) => run(() => apiPatch(`/api/control/rules/${r.id}`, { enabled: e.target.checked }))}
                   />
                 </td>
                 <td>
-                  <button className="btn btn-ghost btn-sm" onClick={() => run(() => apiDelete(`/api/control/rules/${r.id}`))}>
-                    Delete
-                  </button>
+                  <div className="btn-row">
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      aria-label={`Edit rule ${r.name}`}
+                      onClick={() => {
+                        setEditingRule(r.id);
+                        setRule({ name: r.name, scope: r.scope, field: r.field, op: r.op, threshold: r.threshold, action: r.action });
+                      }}
+                    >
+                      <Pencil size={14} aria-hidden />
+                    </button>
+                    <ConfirmButton
+                      label={<Trash2 size={14} aria-hidden />}
+                      ariaLabel={`Delete rule ${r.name}`}
+                      title={`Delete rule "${r.name}"?`}
+                      body="The rule stops applying on the next evaluation. The deletion is audited."
+                      danger
+                      onConfirm={() => run(() => apiDelete(`/api/control/rules/${r.id}`))}
+                    />
+                  </div>
                 </td>
               </tr>
             ))}

@@ -1,156 +1,134 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
-import { apiGet, apiPost, ApiError } from "@/lib/api";
-import type { KillSwitchStatus, SystemStatusOut } from "@/lib/types";
+import Link from "next/link";
+import { useState } from "react";
+import { LayoutDashboard } from "lucide-react";
+import ConfirmButton from "@/components/ConfirmDialog";
+import DecisionsTable from "@/components/DecisionsTable";
+import PositionsTable from "@/components/PositionsTable";
+import { ErrorNotice, Loading, modeClass, Money, PageHeader, Section, Stat, StatePill } from "@/components/ui";
+import { apiPost } from "@/lib/api";
+import type { HealthOut, StrategyOut, SummaryOut } from "@/lib/cc";
+import type { KillSwitchStatus } from "@/lib/types";
+import { useApi } from "@/lib/useApi";
 
-const SERVICE_LABELS: Record<string, string> = {
-  "data-solana": "Data: Solana",
-  "data-binance": "Data: Binance",
-  "engine-solana-discovery": "Engine A: Discovery",
-  "engine-solana-migration": "Engine B: Migration",
-  "engine-solana-momentum": "Engine C: Momentum",
-  "engine-binance-futures": "Engine: Binance Futures",
-  "decision-engine": "Decision Engine",
-  ml: "ML Training",
-  "paper-trading": "Paper Trading",
-};
-
-function statusPillClass(status: string): string {
-  if (status === "running") return "pill pill-ok";
-  if (status === "stopped") return "pill pill-danger";
-  return "pill pill-off";
+function KillSwitch() {
+  const { data, reload } = useApi<KillSwitchStatus>("/api/risk/kill-switch", undefined, { refreshMs: 15000 });
+  const [reason, setReason] = useState("");
+  if (!data) return null;
+  return (
+    <div className="card kill-switch-panel">
+      <div className="status-label">Kill switch</div>
+      <div>
+        <span className={data.engaged ? "pill pill-danger" : "pill pill-ok"}>{data.engaged ? "ENGAGED" : "CLEAR"}</span>{" "}
+        {data.reason && <span className="muted">{data.reason}</span>}
+      </div>
+      {data.engaged ? (
+        <ConfirmButton
+          label="Disengage"
+          className="btn btn-sm"
+          title="Disengage the kill switch?"
+          body="Engines resume opening paper positions under their current modes."
+          onConfirm={async () => {
+            await apiPost("/api/risk/kill-switch/disengage");
+            reload();
+          }}
+        />
+      ) : (
+        <>
+          <label htmlFor="ks-reason" className="sr-only">
+            Reason
+          </label>
+          <textarea id="ks-reason" placeholder="Reason (required)" value={reason} onChange={(e) => setReason(e.target.value)} />
+          <ConfirmButton
+            label="Engage kill switch"
+            danger
+            disabled={!reason.trim()}
+            title="Engage the kill switch?"
+            body="Every engine stops opening positions immediately; the grid is flattened on its next tick."
+            onConfirm={async () => {
+              await apiPost("/api/risk/kill-switch/engage", { reason });
+              setReason("");
+              reload();
+            }}
+          />
+        </>
+      )}
+    </div>
+  );
 }
 
-export default function OverviewPage() {
-  const router = useRouter();
-  const [status, setStatus] = useState<SystemStatusOut | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [reason, setReason] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  const load = useCallback(async () => {
-    try {
-      const data = await apiGet<SystemStatusOut>("/api/system/status");
-      setStatus(data);
-      setError(null);
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401) {
-        router.replace("/login");
-        return;
-      }
-      setError("Failed to load system status.");
-    }
-  }, [router]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  async function handleEngage() {
-    if (!reason.trim()) return;
-    setBusy(true);
-    try {
-      const result = await apiPost<KillSwitchStatus>("/api/risk/kill-switch/engage", { reason });
-      setStatus((prev) => (prev ? { ...prev, kill_switch: result } : prev));
-      setReason("");
-    } catch {
-      setError("Failed to engage kill switch.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function handleDisengage() {
-    setBusy(true);
-    try {
-      const result = await apiPost<KillSwitchStatus>("/api/risk/kill-switch/disengage");
-      setStatus((prev) => (prev ? { ...prev, kill_switch: result } : prev));
-    } catch {
-      setError("Failed to disengage kill switch.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  if (error) return <div className="error">{error}</div>;
-  if (!status) return <div className="empty-state">Loading...</div>;
-
+export default function DashboardPage() {
+  const summary = useApi<SummaryOut>("/api/summary", undefined, {
+    refreshMs: 30000,
+    reloadOn: ["balance.updated", "trade.created", "trade.closed"],
+  });
+  const health = useApi<HealthOut>("/api/system/health", undefined, { refreshMs: 30000 });
+  const strategies = useApi<StrategyOut[]>("/api/strategies", undefined, { reloadOn: ["strategy.updated"], refreshMs: 60000 });
+  const s = summary.data;
   return (
     <div>
-      <div className="page-header">
-        <div className="page-title">Overview</div>
-      </div>
-
-      <div className="detail-grid">
-        <div className="card">
-          <div className="status-label">Environment</div>
-          <div className="status-value">{status.app_env}</div>
-        </div>
-        <div className="card">
-          <div className="status-label">Trading Enabled</div>
-          <div className="status-value">
-            <span className={`pill ${status.trading_enabled ? "pill-ok" : "pill-off"}`}>
-              {status.trading_enabled ? "ON" : "OFF"}
-            </span>
-          </div>
-        </div>
-        <div className="card">
-          <div className="status-label">Live Trading Enabled</div>
-          <div className="status-value">
-            <span className={`pill ${status.live_trading_enabled ? "pill-ok" : "pill-off"}`}>
-              {status.live_trading_enabled ? "ON" : "OFF"}
-            </span>
-          </div>
-        </div>
-        <div className="card kill-switch-panel">
-          <div className="status-label">Kill Switch</div>
-          <div className="status-value">
-            <span className={`pill ${status.kill_switch.engaged ? "pill-danger" : "pill-ok"}`}>
-              {status.kill_switch.engaged ? "ENGAGED" : "CLEAR"}
-            </span>
-          </div>
-          {status.kill_switch.reason && (
-            <div style={{ fontSize: 12, color: "var(--text-dim)" }}>{status.kill_switch.reason}</div>
-          )}
-          {status.kill_switch.engaged ? (
-            <button className="btn" onClick={handleDisengage} disabled={busy}>
-              Disengage
-            </button>
-          ) : (
-            <>
-              <textarea
-                placeholder="Reason for engaging the kill switch (required)"
-                value={reason}
-                onChange={(e) => setReason(e.target.value)}
-              />
-              <button className="btn btn-danger" onClick={handleEngage} disabled={busy || !reason.trim()}>
-                Engage kill switch
-              </button>
-            </>
-          )}
-        </div>
-      </div>
-
-      <div className="page-title" style={{ fontSize: 16, marginBottom: 12 }}>
-        Services
-      </div>
-      <div className="status-grid" style={{ padding: 0 }}>
-        {Object.entries(status.services).map(([name, s]) => (
-          <div className="card" key={name}>
-            <div className="status-label">{SERVICE_LABELS[name] ?? name}</div>
-            <div className="status-value">
-              <span className={statusPillClass(s.status)}>{s.status}</span>
-            </div>
-            {s.last_event_at && (
-              <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 6 }}>
-                {new Date(s.last_event_at).toLocaleString()}
+      <PageHeader title="Dashboard" icon={<LayoutDashboard size={20} aria-hidden />} subtitle="Paper trading only. No real funds, no live orders." />
+      <ErrorNotice error={summary.error} />
+      {!s && summary.loading && <Loading />}
+      {s && (
+        <div className="card-grid">
+          {s.accounts.map((a) => (
+            <div className="card" key={a.name}>
+              <div className="status-label">
+                {a.name} · {a.currency}
               </div>
-            )}
+              <div className="stat-value big">
+                {Number(a.equity ?? a.balance).toLocaleString(undefined, { maximumFractionDigits: 4 })} <span className="unit">{a.currency}</span>
+              </div>
+              <dl className="kv">
+                <dt>Available</dt>
+                <dd>{Number(a.available).toLocaleString(undefined, { maximumFractionDigits: 4 })}</dd>
+                <dt>Open positions</dt>
+                <dd>{a.open_positions}</dd>
+                <dt>PnL today</dt>
+                <dd>
+                  <Money value={a.realized_pnl_today} />
+                </dd>
+                <dt>PnL since reset</dt>
+                <dd>
+                  <Money value={a.realized_pnl_since_reset} />
+                </dd>
+              </dl>
+            </div>
+          ))}
+          <KillSwitch />
+        </div>
+      )}
+      <Section title="Connections" actions={<Link className="btn btn-ghost btn-sm" href="/dashboard/health">Details</Link>}>
+        {health.data && (
+          <div className="chip-row">
+            {health.data.connections.map((c) => (
+              <span key={c.name} title={c.detail} className="chip">
+                {c.name} <StatePill state={c.state} />
+              </span>
+            ))}
           </div>
-        ))}
-      </div>
+        )}
+      </Section>
+      <Section title="Strategies" actions={<Link className="btn btn-ghost btn-sm" href="/dashboard/strategies">All</Link>}>
+        <div className="stat-grid">
+          {strategies.data
+            ?.filter((x) => x.kind !== "venue")
+            .map((x) => (
+              <Stat key={x.name} label={x.label}>
+                {x.mode ? <span className={modeClass(x.effective_mode)}>{x.effective_mode}</span> : <span className="pill pill-off">analytics</span>}{" "}
+                {x.open_positions ? <span className="muted">{x.open_positions} open</span> : null}
+              </Stat>
+            ))}
+        </div>
+      </Section>
+      <Section title="Open positions">
+        <PositionsTable />
+      </Section>
+      <Section title="Latest decisions" actions={<Link className="btn btn-ghost btn-sm" href="/dashboard/decisions">All</Link>}>
+        <DecisionsTable limit={10} />
+      </Section>
     </div>
   );
 }

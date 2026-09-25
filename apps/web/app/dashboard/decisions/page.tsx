@@ -63,7 +63,10 @@ export default function DecisionsPage() {
           <option value="">All engines</option>
           <option value="solana_fresh">solana_fresh</option>
           <option value="solana_migration">solana_migration</option>
+          <option value="solana_momentum">solana_momentum</option>
           <option value="binance_futures">binance_futures</option>
+          <option value="bybit_futures">bybit_futures</option>
+          <option value="hyperliquid_perps">hyperliquid_perps</option>
         </select>
         <select value={approval} onChange={(e) => setApproval(e.target.value)}>
           <option value="">Any approval state</option>
@@ -71,6 +74,7 @@ export default function DecisionsPage() {
           <option value="APPROVED">Approved</option>
           <option value="DECLINED">Declined</option>
           <option value="EXPIRED">Expired</option>
+          <option value="IGNORED">Ignored</option>
         </select>
       </div>
 

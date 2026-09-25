@@ -22,6 +22,7 @@ async def list_positions(
     status_filter: str | None = Query(None, alias="status"),
     engine: str | None = None,
     account: str | None = None,
+    strategy: str | None = None,
     limit: int = Query(DEFAULT_PAGE_LIMIT, ge=1, le=MAX_PAGE_LIMIT),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
@@ -34,6 +35,8 @@ async def list_positions(
         filters.append(PaperPosition.engine == engine)
     if account is not None:
         filters.append(PaperPosition.account_id == select(PaperAccount.id).where(PaperAccount.name == account).scalar_subquery())
+    if strategy is not None:
+        filters.append(PaperPosition.assessment_id.in_(select(RiskAssessment.id).where(RiskAssessment.strategy == strategy)))
 
     total = (await db.execute(select(func.count()).select_from(PaperPosition).where(*filters))).scalar_one()
     result = await db.execute(select(PaperPosition).where(*filters).order_by(PaperPosition.created_at.desc()).limit(limit).offset(offset))

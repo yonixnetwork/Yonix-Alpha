@@ -49,10 +49,11 @@ def conn(name: str, category: str, state: str, detail: str, **extra) -> dict[str
 
 
 def worst(states: list[str]) -> str:
-    known = [s for s in states if s != "UNKNOWN"]
-    if not known:
+    """Worst state; an UNKNOWN dependency keeps the overall from reading
+    CONNECTED (nothing is claimed healthy without evidence)."""
+    if not states:
         return "UNKNOWN"
-    return max(known, key=lambda s: _RANK[s])
+    return max(states, key=lambda s: _RANK[s])
 
 
 async def _probe_db(db: AsyncSession) -> dict:

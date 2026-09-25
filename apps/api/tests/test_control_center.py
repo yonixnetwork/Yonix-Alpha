@@ -298,3 +298,12 @@ async def test_no_endpoint_leaks_secrets(app, client, auth_headers):
         assert key not in body
     async with app.state.db_session_factory() as s:
         assert (await s.execute(select(Notification))).first() is None
+
+
+async def test_positions_and_decisions_filter_by_strategy(app, client, auth_headers):
+    await seed_closed(app, "binance_futures", "binance_futures", ["1"], strategy="meta_muse")
+    await seed_closed(app, "binance_futures", "binance_futures", ["2", "3"], strategy="confluence_matrix")
+    r = await client.get("/api/paper/positions?strategy=confluence_matrix&status=closed", headers=auth_headers)
+    assert r.json()["total"] == 2
+    r = await client.get("/api/control/assessments?strategy=meta_muse", headers=auth_headers)
+    assert r.json()["total"] == 1

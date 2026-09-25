@@ -146,6 +146,11 @@ export interface PaperPositionOut {
   highest_price?: string | null;
   lowest_price?: string | null;
   last_price?: string | null;
+  last_marked_at?: string | null;
+  management_paused?: boolean;
+  exit_requested?: boolean;
+  account_id?: string | null;
+  plan?: Record<string, any> | null;
 }
 
 export interface ServiceStatus {
@@ -249,7 +254,7 @@ export interface Finding {
 
 export interface PlannedValue {
   value: string;
-  provenance: "MANUAL" | "AUTO";
+  provenance: "MANUAL" | "AUTO" | "STRATEGY";
   method: string;
   inputs: Record<string, unknown>;
 }

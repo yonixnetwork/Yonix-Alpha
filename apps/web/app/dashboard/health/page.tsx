@@ -1,0 +1,91 @@
+"use client";
+
+import Link from "next/link";
+import { Server } from "lucide-react";
+import { ErrorNotice, Loading, PageHeader, Section, Stat, StatePill } from "@/components/ui";
+import type { HealthOut } from "@/lib/cc";
+import { useLiveStatus } from "@/lib/events";
+import { formatDate } from "@/lib/format";
+import { useApi } from "@/lib/useApi";
+
+const CATEGORY_ORDER = ["infrastructure", "service", "solana", "exchange", "ml", "realtime"];
+
+export default function HealthPage() {
+  const { data, error, loading } = useApi<HealthOut>("/api/system/health", undefined, { refreshMs: 15000, reloadOn: ["system.health.updated"] });
+  const obs = useApi<Record<string, any>>("/api/system/observability", undefined, { refreshMs: 30000 });
+  const live = useLiveStatus();
+  return (
+    <div>
+      <PageHeader title="System Health" icon={<Server size={20} aria-hidden />} subtitle="Every state comes from a probe, a heartbeat or recorded calls; no evidence is UNKNOWN.">
+        <Link className="btn btn-ghost btn-sm" href="/dashboard/events">
+          System events
+        </Link>
+      </PageHeader>
+      <ErrorNotice error={error} />
+      {loading && !data && <Loading />}
+      {data && (
+        <>
+          <div className="notice">
+            Overall: <StatePill state={data.overall} /> · this browser&apos;s realtime link: <b>{live.status}</b>
+            {live.lastEventAt && <> (last event {formatDate(live.lastEventAt)})</>}
+          </div>
+          {CATEGORY_ORDER.map((cat) => {
+            const items = data.connections.filter((c) => c.category === cat);
+            if (!items.length) return null;
+            return (
+              <Section key={cat} title={cat[0].toUpperCase() + cat.slice(1)}>
+                <div className="table-wrap">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>Name</th>
+                        <th>State</th>
+                        <th>Detail</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {items.map((c) => (
+                        <tr key={c.name}>
+                          <td>{c.name}</td>
+                          <td>
+                            <StatePill state={c.state} />
+                          </td>
+                          <td className="muted small">
+                            {c.detail}
+                            {typeof c.latency_ms === "number" && ` · ${c.latency_ms} ms`}
+                            {typeof c.rss_mb === "number" && ` · ${c.rss_mb} MB RSS`}
+                            {typeof c.last_error === "string" && c.last_error && ` · last error: ${c.last_error}`}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </Section>
+            );
+          })}
+        </>
+      )}
+      {obs.data && (
+        <Section title="Observability (24 h)">
+          <div className="stat-grid">
+            <Stat label="Dashboard WebSocket clients">{obs.data.websocket_clients}</Stat>
+            <Stat label="Redis memory">
+              {obs.data.redis_memory.used} / {obs.data.redis_memory.max || "no limit"}
+            </Stat>
+            <Stat label="Errors (by service)">
+              {Object.entries(obs.data.errors_24h).map(([k, v]) => `${k}: ${v}`).join(", ") || "none"}
+            </Stat>
+            <Stat label="Decisions">{Object.entries(obs.data.decisions_24h).map(([k, v]) => `${k}: ${v}`).join(", ") || "none"}</Stat>
+            <Stat label="Notifications">{Object.entries(obs.data.notifications_24h).map(([k, v]) => `${k}: ${v}`).join(", ") || "none"}</Stat>
+            <Stat label="Quarantined ML samples">{Object.values(obs.data.data_quality_24h).reduce((a: number, b) => a + Number(b), 0)}</Stat>
+          </div>
+          <div className="muted small">
+            Realtime events published since Redis started:{" "}
+            {Object.entries(obs.data.events_published).map(([k, v]) => `${k} ${v}`).join(" · ") || "none"}
+          </div>
+        </Section>
+      )}
+    </div>
+  );
+}

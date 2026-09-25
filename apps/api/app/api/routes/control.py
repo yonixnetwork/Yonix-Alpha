@@ -327,6 +327,7 @@ async def list_assessments(
     engine: str | None = None,
     approval_state: str | None = None,
     asset_id: str | None = None,
+    strategy: str | None = None,
     limit: int = Query(DEFAULT_PAGE_LIMIT, ge=1, le=MAX_PAGE_LIMIT),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
@@ -341,6 +342,8 @@ async def list_assessments(
         filters.append(RiskAssessment.approval_state == approval_state)
     if asset_id:
         filters.append(RiskAssessment.asset_id == asset_id)
+    if strategy:
+        filters.append(RiskAssessment.strategy == strategy)
     total = (await db.execute(select(func.count()).select_from(RiskAssessment).where(*filters))).scalar_one()
     rows = (await db.execute(select(RiskAssessment).where(*filters).order_by(RiskAssessment.evaluated_at.desc())
                              .limit(limit).offset(offset))).scalars().all()

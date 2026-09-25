@@ -6,7 +6,7 @@ import { apiGet, apiPut, ApiError } from "@/lib/api";
 import { formatDate } from "@/lib/format";
 import type { SettingsOut, SettingsVersionOut } from "@/lib/types";
 
-const SCOPES = ["GLOBAL", "solana_fresh", "solana_migration", "binance_futures"];
+const SCOPES = ["GLOBAL", "solana_fresh", "solana_migration", "solana_momentum", "binance_futures", "bybit_futures", "hyperliquid_perps"];
 
 type Value = string | number | boolean | string[] | null;
 
