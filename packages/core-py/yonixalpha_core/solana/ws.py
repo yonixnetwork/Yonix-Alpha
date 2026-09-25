@@ -7,6 +7,7 @@ import websockets
 from websockets.exceptions import ConnectionClosed
 
 from yonixalpha_core.logging import get_logger
+from yonixalpha_core.redact import redact_text, redact_url
 
 log = get_logger("data-solana.ws")
 
@@ -39,7 +40,7 @@ class SolanaWsClient:
             url = self.url_provider()
             try:
                 async with websockets.connect(url) as ws:
-                    log.info("ws.connected", url=url)
+                    log.info("ws.connected", url=redact_url(url))
                     await self._resubscribe(ws)
                     backoff = self.initial_backoff_seconds  # reset after a clean connect
 
@@ -54,13 +55,13 @@ class SolanaWsClient:
             except ConnectionClosed as exc:
                 code = exc.rcvd.code if exc.rcvd else None
                 reason = exc.rcvd.reason if exc.rcvd else None
-                log.warning("ws.disconnected", url=url, code=code, reason=reason)
+                log.warning("ws.disconnected", url=redact_url(url), code=code, reason=reason)
             except OSError as exc:
-                log.warning("ws.connect_failed", url=url, error=str(exc))
+                log.warning("ws.connect_failed", url=redact_url(url), error=redact_text(str(exc), [url]))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - keep the reconnect loop alive on any unexpected error
-                log.error("ws.unexpected_error", url=url, error=str(exc))
+                log.error("ws.unexpected_error", url=redact_url(url), error=redact_text(str(exc), [url]))
 
             if stop_event.is_set():
                 break

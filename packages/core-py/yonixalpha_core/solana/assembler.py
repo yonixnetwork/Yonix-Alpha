@@ -165,6 +165,7 @@ async def assemble_fresh(src: Sources, mint: str, now: datetime, c: Controls) ->
     if err:
         ev["errors"].append(err)
     inp.token = token
+    ev["token_decimals"] = token.decimals if token else None
 
     curve: BondingCurveState | None = None
     curve_obs: datetime | None = None
@@ -240,6 +241,7 @@ async def assemble_migrated(src: Sources, mint: str, now: datetime, c: Controls)
     if err:
         ev["errors"].append(err)
     inp.token = token
+    ev["token_decimals"] = token.decimals if token else None
 
     pool = None
     if src.dexscreener is not None:

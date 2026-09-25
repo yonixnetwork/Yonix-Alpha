@@ -182,6 +182,7 @@ async def open_position(
     quote: ExecutionQuote | None,
     transfer_fee_bps: int | None,
     now: datetime,
+    venue: dict[str, Any] | None = None,
 ) -> PaperPosition:
     """Opens the paper position an executable assessment describes. Refuses
     anything the gate didn't clear for PAPER, and never spends more than the
@@ -216,7 +217,9 @@ async def open_position(
         proceeds_quote=Decimal(0),
         fees_paid_quote=fill.fee_quote,
         max_loss_quote=plan.max_loss.value,
-        plan=plan.to_dict(),
+        # The venue (curve vs quoted route, token decimals, transfer fee) is
+        # kept with the plan so exits are priced the same way entry was.
+        plan={**plan.to_dict(), "venue": {**(venue or {}), "transfer_fee_bps": transfer_fee_bps}},
         tp_hits=[],
         highest_price=plan.entry_price,
         lowest_price=plan.entry_price,
@@ -247,13 +250,21 @@ async def apply_step(
     model: ConstantProductModel | None,
     transfer_fee_bps: int | None,
     now: datetime,
+    exit_cost_bps: Decimal | None = None,
 ) -> StepResult:
     """Marks `position` at `price`, fills whatever manage_step triggers, and
     on full exit books realized PnL, labels the candidate's ML rows, and
-    closes the candidate. Caller commits."""
+    closes the candidate. Without a model, exits are charged
+    `exit_cost_bps` (default: the plan's estimate); pass 0 when `price` is
+    already an effective price from a real sell quote. Caller commits."""
     s = state_of(position)
     result = manage_step(s, price)
-    exit_cost = Decimal((position.plan or {}).get("exit_cost_bps") or 0) if model is None else None
+    if model is not None:
+        exit_cost = None
+    elif exit_cost_bps is not None:
+        exit_cost = exit_cost_bps
+    else:
+        exit_cost = Decimal((position.plan or {}).get("exit_cost_bps") or 0)
     for qty, reason in result.exits:
         # Each partial sale moves the reserves; later fills in the same tick
         # use the updated model so impact isn't under-counted.

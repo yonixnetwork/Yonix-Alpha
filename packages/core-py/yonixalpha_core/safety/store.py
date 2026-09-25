@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -303,6 +303,15 @@ async def persist_assessment(
     )
     new_id = (await session.execute(stmt)).scalar_one_or_none()
     row = (await session.execute(select(RiskAssessment).where(RiskAssessment.idempotency_key == idempotency_key))).scalar_one()
+    if new_id is not None and candidate_id is not None:
+        # Only the newest assessment of a candidate can be approved; older
+        # pending ones describe data that no longer holds.
+        await session.execute(
+            update(RiskAssessment)
+            .where(RiskAssessment.candidate_id == candidate_id, RiskAssessment.approval_state == "PENDING",
+                   RiskAssessment.id != new_id)
+            .values(approval_state="EXPIRED")
+        )
     if new_id is not None:
         session.add(
             TradeTimelineEvent(

@@ -4,7 +4,6 @@ assessment -> paper entry -> take-profit / trailing-stop management.
 
 Needs the local test Postgres and Redis (db 9)."""
 
-import base64
 import os
 import struct
 from datetime import datetime, timedelta, timezone
@@ -29,99 +28,30 @@ from yonixalpha_core.safety.rules import BlacklistRule, CustomRule  # noqa: E402
 from yonixalpha_core.safety.settings import default_settings_for  # noqa: E402
 from yonixalpha_core.solana import pump_stream  # noqa: E402
 from yonixalpha_core.solana.assembler import Controls, Sources, assemble_fresh  # noqa: E402
-from yonixalpha_core.solana.codec import DEFAULT_PUBKEY, b58encode  # noqa: E402
-from yonixalpha_core.solana.pumpfun import BONDING_CURVE_ACCOUNT, CREATE_EVENT, TRADE_EVENT  # noqa: E402
+from yonixalpha_core.solana.pumpfun import TRADE_EVENT  # noqa: E402
 from yonixalpha_core.state_machine import CandidateState  # noqa: E402
-
-from tests.test_solana_data import b, i64, pk, s, u64  # noqa: E402
+from yonixalpha_core.testing.pump import (  # noqa: E402
+    CREATOR,
+    CURVE,
+    MINT,
+    FakeRpc,
+    b,
+    empty_account,
+    i64,
+    logs_of,
+    pk,
+    s,
+    seed_healthy_launch,
+    u64,
+    wallet,
+)
 
 NOW = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
-MINT = b58encode(bytes([7]) * 32)
-CURVE = b58encode(bytes([8]) * 32)
-CREATOR = b58encode(bytes([9]) * 32)
-TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
-VIRTUAL_SOL0 = 30_000_000_000
-VIRTUAL_TOKEN0 = 1_073_000_000_000_000
-SUPPLY = 1_000_000_000_000_000
 FRESH = default_settings_for("solana_fresh")
 
 
-def wallet(i: int) -> str:
-    return b58encode(bytes([100 + i]) * 32)
-
-
-def create_log() -> bytes:
-    body = s("Pipeline Coin") + s("PIPE") + s("https://x/m.json") + pk(MINT) + pk(CURVE) + pk(CREATOR) + pk(CREATOR)
-    body += i64(int((NOW - timedelta(minutes=20)).timestamp()))
-    return CREATE_EVENT + body
-
-
-class Curve:
-    def __init__(self):
-        self.vsol, self.vtok = VIRTUAL_SOL0, VIRTUAL_TOKEN0
-
-    def trade(self, user: str, ts: datetime, sol: int, is_buy: bool) -> bytes:
-        if is_buy:
-            tokens = self.vtok * sol // (self.vsol + sol)
-            self.vsol += sol
-            self.vtok -= tokens
-        else:
-            tokens = self.vtok * sol // (self.vsol - sol)
-            self.vsol -= sol
-            self.vtok += tokens
-        body = pk(MINT) + u64(sol) + u64(tokens) + b(is_buy) + pk(user) + i64(int(ts.timestamp()))
-        body += u64(self.vsol) + u64(self.vtok) + u64(self.vsol - VIRTUAL_SOL0) + u64(self.vtok - 279_900_000_000_000)
-        body += pk(CREATOR) + u64(95) + u64(0) + pk(CREATOR) + u64(30) + u64(0)
-        body += b(False) + u64(0) + u64(0) + u64(0) + i64(0) + s("buy" if is_buy else "sell") + b(False)
-        body += u64(0) + u64(0) + u64(5) + u64(0) + struct.pack("<I", 0) + pk(DEFAULT_PUBKEY)
-        return TRADE_EVENT + body
-
-    def account(self, complete=False) -> bytes:
-        return (BONDING_CURVE_ACCOUNT + u64(self.vtok) + u64(self.vsol) + u64(self.vtok - 279_900_000_000_000)
-                + u64(self.vsol - VIRTUAL_SOL0) + u64(SUPPLY) + b(complete) + pk(CREATOR))
-
-
-def logs_of(*events: bytes) -> list[str]:
-    return ["Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P invoke [1]"] + [
-        "Program data: " + base64.b64encode(e).decode() for e in events
-    ]
-
-
-class FakeRpc:
-    def __init__(self, curve: Curve, mint_authority=None, fail=()):
-        self.curve, self.mint_authority, self.fail, self.calls = curve, mint_authority, set(fail), []
-
-    async def call(self, method, params=None):
-        self.calls.append(method)
-        if method in self.fail:
-            raise RuntimeError(f"{method} unavailable")
-        if method == "getAccountInfo" and params[1]["encoding"] == "jsonParsed":
-            info = {"mintAuthority": self.mint_authority, "freezeAuthority": None, "decimals": 6, "supply": str(SUPPLY)}
-            return {"value": {"owner": TOKEN_2022, "data": {"parsed": {"type": "mint", "info": info}}}}
-        if method == "getAccountInfo":
-            return {"value": {"data": [base64.b64encode(self.curve.account()).decode(), "base64"]}}
-        if method == "getTokenLargestAccounts":
-            accts = [{"address": "curveATA", "amount": str(SUPPLY * 70 // 100)}]
-            accts += [{"address": f"ta{i}", "amount": str(SUPPLY * 2 // 100)} for i in range(12)]
-            return {"value": accts}
-        if method == "getMultipleAccounts":
-            owners = [CURVE] + [wallet(i) for i in range(12)]
-            return {"value": [{"data": {"parsed": {"info": {"owner": o}}}} for o in owners]}
-        raise AssertionError(method)
-
-
-async def seed_stream(redis) -> Curve:
-    """25 wallets buying over 10 minutes, accelerating into the last 5."""
-    curve = Curve()
-    await pump_stream.ingest_logs(redis, logs_of(create_log()), "sigcreate", NOW - timedelta(minutes=20))
-    events = []
-    for i in range(12):  # 10..5 min ago
-        events.append(curve.trade(wallet(i), NOW - timedelta(seconds=590 - i * 25), 800_000_000, True))
-    for i in range(28):  # last 5 min
-        buy = i % 7 != 3
-        events.append(curve.trade(wallet(i % 25), NOW - timedelta(seconds=290 - i * 10), 700_000_000 if buy else 300_000_000, buy))
-    await pump_stream.ingest_logs(redis, logs_of(*events), "sigtrades", NOW - timedelta(seconds=2))
-    return curve
+async def seed_stream(redis):
+    return await seed_healthy_launch(redis, NOW)
 
 
 @pytest_asyncio.fixture
@@ -145,10 +75,7 @@ async def db():
 
 
 def controls(**kw) -> Controls:
-    from yonixalpha_core.safety.models import AccountState
-
-    account = AccountState(Decimal(10), Decimal(10), 0, Decimal(0), Decimal(0), None, Decimal(0), False)
-    return Controls(settings=kw.pop("settings", FRESH), account=account, **kw)
+    return Controls(settings=kw.pop("settings", FRESH), account=empty_account(), **kw)
 
 
 async def test_stream_ingest_decodes_and_counts(redis):

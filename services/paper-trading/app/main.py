@@ -3,22 +3,28 @@ import signal
 from datetime import datetime, timezone
 from decimal import Decimal
 
+import httpx
 from sqlalchemy import select
 
 from yonixalpha_core.config import get_settings
 from yonixalpha_core.db.base import make_engine, make_session_factory
 from yonixalpha_core.db.models import PaperPosition, SystemEvent, TradingCandidate
+from yonixalpha_core.db.redis import make_redis
 from yonixalpha_core.logging import configure_logging, get_logger
 from yonixalpha_core.notify import send_telegram_alert
+from yonixalpha_core.solana.market_data import JupiterClient, RateBudget
 from yonixalpha_core.state_machine import CandidateState
 
 from app.entry import try_open_position
+from app.gate_manage import manage_gate_positions, track_outcomes
 from app.manage import evaluate_open_position
 from app.pricing import latest_price
 
 log = get_logger("paper-trading.main")
 
 LOOP_INTERVAL_SECONDS = 15
+# Exit quotes for migrated positions only; conservative, see decision-engine.
+JUPITER_REQUESTS_PER_MINUTE = 20
 SERVICE_NAME = "paper-trading"
 
 
@@ -60,7 +66,10 @@ async def _open_qualified_candidates(session_factory, now: datetime) -> int:
 
 async def _manage_open_positions(session_factory, now: datetime, per_leg_cost_bps: Decimal = Decimal(0)) -> int:
     async with session_factory() as session:
-        result = await session.execute(select(PaperPosition.id).where(PaperPosition.status == "open"))
+        # Gate-opened positions (engine set) are managed by app/gate_manage.py.
+        result = await session.execute(
+            select(PaperPosition.id).where(PaperPosition.status == "open", PaperPosition.engine.is_(None))
+        )
         position_ids = result.scalars().all()
 
     closed = 0
@@ -90,7 +99,9 @@ async def _manage_open_positions(session_factory, now: datetime, per_leg_cost_bp
     return closed
 
 
-async def _paper_trading_loop(session_factory, stop_event: asyncio.Event, per_leg_cost_bps: Decimal = Decimal(0)) -> None:
+async def _paper_trading_loop(
+    session_factory, stop_event: asyncio.Event, per_leg_cost_bps: Decimal = Decimal(0), redis=None, jupiter=None
+) -> None:
     while not stop_event.is_set():
         now = datetime.now(timezone.utc)
         try:
@@ -101,6 +112,18 @@ async def _paper_trading_loop(session_factory, stop_event: asyncio.Event, per_le
         except Exception as exc:  # noqa: BLE001
             log.error("loop.failed", error=str(exc))
             await _record_system_event(session_factory, "paper_trading_loop_failed", "error", {"error": str(exc)})
+        if redis is not None:
+            try:
+                counts = await manage_gate_positions(session_factory, redis, jupiter, now)
+                if counts.get("failed"):
+                    await _record_system_event(session_factory, "gate_manage_failed", "error", counts)
+                elif counts["closed"]:
+                    log.info("gate_loop.completed", **counts)
+                async with session_factory() as session:
+                    await track_outcomes(session, redis, now)
+            except Exception as exc:  # noqa: BLE001
+                log.error("gate_loop.failed", error=str(exc))
+                await _record_system_event(session_factory, "gate_loop_failed", "error", {"error": str(exc)})
 
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=LOOP_INTERVAL_SECONDS)
@@ -123,10 +146,15 @@ async def run() -> None:
     await _record_system_event(session_factory, "service_started", "info")
     log.info("paper-trading.started")
 
+    redis = make_redis(settings)
+    http_client = httpx.AsyncClient()
+    jupiter = JupiterClient(http_client, settings.JUPITER_API_KEY, RateBudget(JUPITER_REQUESTS_PER_MINUTE))
     try:
-        await _paper_trading_loop(session_factory, stop_event, settings.PAPER_TRADING_PER_LEG_COST_BPS)
+        await _paper_trading_loop(session_factory, stop_event, settings.PAPER_TRADING_PER_LEG_COST_BPS, redis, jupiter)
     finally:
         await _record_system_event(session_factory, "service_stopped", "info")
+        await http_client.aclose()
+        await redis.aclose()
         await engine.dispose()
 
 

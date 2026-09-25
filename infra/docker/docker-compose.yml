@@ -40,7 +40,13 @@ services:
     # silently re-arms. AOF (fsync every second by default) reduces that
     # window from an hour to about a second. Measured during the audit:
     # appendonly was `no` and save was `3600 1 300 100 60 10000`.
-    entrypoint: ["sh", "-c", "redis-server --requirepass \"$$REDIS_PASSWORD\" --appendonly yes"]
+    #
+    # maxmemory + volatile-lru bounds the pump.fun stream buffers on a small
+    # server. volatile-lru only ever evicts keys that carry a TTL — every
+    # stream key does (yonixalpha_core/solana/pump_stream.py), the kill
+    # switch keys never do — so memory pressure can drop old trade history
+    # but can never silently disengage the kill switch.
+    entrypoint: ["sh", "-c", "redis-server --requirepass \"$$REDIS_PASSWORD\" --appendonly yes --maxmemory 256mb --maxmemory-policy volatile-lru"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -107,9 +113,15 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     networks: [yonixalpha]
 
   engine-solana-momentum:
+    # Superseded by the pump.fun stream funnel in engine-solana-discovery
+    # (both subscribed to the whole SPL Token program). Kept buildable;
+    # start with `--profile legacy` only if needed.
+    profiles: ["legacy"]
     build:
       context: ../..
       dockerfile: services/engine-solana-momentum/Dockerfile
@@ -121,6 +133,10 @@ services:
     networks: [yonixalpha]
 
   engine-solana-migration:
+    # Superseded by the pump.fun stream funnel in engine-solana-discovery
+    # (both subscribed to the whole SPL Token program). Kept buildable;
+    # start with `--profile legacy` only if needed.
+    profiles: ["legacy"]
     build:
       context: ../..
       dockerfile: services/engine-solana-migration/Dockerfile
@@ -163,6 +179,8 @@ services:
       - ../../.env
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     networks: [yonixalpha]
 

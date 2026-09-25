@@ -34,3 +34,14 @@ async def session_factory(_engine):
     exercise the real loop through the other.
     """
     return make_session_factory(_engine)
+
+
+@pytest_asyncio.fixture
+async def redis_client():
+    from redis.asyncio import from_url
+
+    client = from_url(os.environ.get("REDIS_URL", "redis://localhost:6379/9"), decode_responses=True)
+    await client.flushdb()
+    yield client
+    await client.flushdb()
+    await client.aclose()

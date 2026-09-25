@@ -2,6 +2,7 @@ import asyncio
 import signal
 from datetime import datetime, timezone
 
+import httpx
 from sqlalchemy import select
 
 from yonixalpha_core.config import get_settings
@@ -10,15 +11,24 @@ from yonixalpha_core.db.models import SystemEvent, TradingCandidate
 from yonixalpha_core.db.redis import make_redis
 from yonixalpha_core.logging import configure_logging, get_logger
 from yonixalpha_core.notify import send_telegram_alert
+from yonixalpha_core.solana.assembler import Sources
+from yonixalpha_core.solana.market_data import DexScreenerClient, JupiterClient, RateBudget
+from yonixalpha_core.solana.rpc import RpcManager
 from yonixalpha_core.state_machine import CandidateState
 
 from app.evaluate import evaluate_candidate
+from app.gate_eval import evaluate_with_gate, is_gate_candidate
 
 log = get_logger("decision-engine.main")
 
 EVAL_INTERVAL_SECONDS = 15
 SERVICE_NAME = "decision-engine"
 EVALUABLE_STATES = [CandidateState.DISCOVERED.value, CandidateState.OBSERVING.value]
+# Conservative client-side budgets. Neither provider's current free-tier
+# limit was verifiable from the build environment; these stay well under
+# the limits their public docs have historically stated.
+JUPITER_REQUESTS_PER_MINUTE = 30
+DEXSCREENER_REQUESTS_PER_MINUTE = 60
 
 
 async def _record_system_event(session_factory, event_type: str, severity: str, detail: dict | None = None) -> None:
@@ -31,7 +41,7 @@ async def _record_system_event(session_factory, event_type: str, severity: str, 
         )
 
 
-async def _evaluation_loop(session_factory, redis, settings, stop_event: asyncio.Event) -> None:
+async def _evaluation_loop(session_factory, redis, settings, stop_event: asyncio.Event, sources: Sources | None = None) -> None:
     while not stop_event.is_set():
         try:
             async with session_factory() as session:
@@ -48,7 +58,12 @@ async def _evaluation_loop(session_factory, redis, settings, stop_event: asyncio
                         candidate = await session.get(TradingCandidate, candidate_id)
                         if candidate is None or candidate.state not in EVALUABLE_STATES:
                             continue  # state changed since the query above
-                        await evaluate_candidate(session, redis, settings, candidate, datetime.now(timezone.utc))
+                        if is_gate_candidate(candidate):
+                            if sources is None:
+                                continue
+                            await evaluate_with_gate(session, redis, settings, sources, candidate, datetime.now(timezone.utc))
+                        else:
+                            await evaluate_candidate(session, redis, settings, candidate, datetime.now(timezone.utc))
                     evaluated += 1
                 except Exception as exc:  # noqa: BLE001
                     log.error("evaluate.candidate_failed", candidate_id=str(candidate_id), error=str(exc))
@@ -93,10 +108,23 @@ async def run() -> None:
         live_trading_enabled=settings.LIVE_TRADING_ENABLED,
     )
 
+    http_client = httpx.AsyncClient()
+    sources = None
+    if settings.SOLANA_RPC_URL:
+        sources = Sources(
+            redis=redis,
+            rpc=RpcManager.create(client=http_client, primary_url=settings.SOLANA_RPC_URL, backup_url=settings.SOLANA_RPC_BACKUP_URL),
+            jupiter=JupiterClient(http_client, settings.JUPITER_API_KEY, RateBudget(JUPITER_REQUESTS_PER_MINUTE)),
+            dexscreener=DexScreenerClient(http_client, RateBudget(DEXSCREENER_REQUESTS_PER_MINUTE)),
+        )
+    else:
+        log.warning("decision-engine.gate_disabled", reason="SOLANA_RPC_URL not set; pump.fun candidates are not evaluated")
+
     try:
-        await _evaluation_loop(session_factory, redis, settings, stop_event)
+        await _evaluation_loop(session_factory, redis, settings, stop_event, sources)
     finally:
         await _record_system_event(session_factory, "service_stopped", "info")
+        await http_client.aclose()
         await redis.aclose()
         await engine.dispose()
 

@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 import httpx
 
 from yonixalpha_core.logging import get_logger
+from yonixalpha_core.redact import redact_text, redact_url
 
 log = get_logger("data-solana.rpc")
 
@@ -87,7 +88,7 @@ class RpcManager:
                     endpoint=endpoint.label,
                     method=method,
                     consecutive_failures=endpoint.consecutive_failures,
-                    error=str(exc),
+                    error=redact_text(str(exc), [e.url for e in self.endpoints]),
                 )
                 if endpoint.consecutive_failures >= self.failure_threshold:
                     endpoint.disabled_until = time.monotonic() + self.cooldown_seconds
@@ -101,7 +102,7 @@ class RpcManager:
         return [
             {
                 "label": e.label,
-                "url": e.url,
+                "url": redact_url(e.url),
                 "consecutive_failures": e.consecutive_failures,
                 "disabled": e.disabled_until is not None and e.disabled_until > now,
             }

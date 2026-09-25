@@ -7,17 +7,22 @@ import httpx
 from yonixalpha_core.config import get_settings
 from yonixalpha_core.db.base import make_engine, make_session_factory
 from yonixalpha_core.db.models import SystemEvent
+from yonixalpha_core.db.redis import make_redis
 from yonixalpha_core.logging import configure_logging, get_logger
 from yonixalpha_core.notify import send_telegram_alert
+from yonixalpha_core.safety import store
+from yonixalpha_core.solana import pump_stream
+from yonixalpha_core.solana.pumpfun import PUMP_PROGRAM_ID
 from yonixalpha_core.solana.rpc import RpcManager
-from yonixalpha_core.solana.token_program import TOKEN_PROGRAM_ID, extract_mint_creations, logs_mention_mint_init
 from yonixalpha_core.solana.ws import SolanaWsClient
 
-from app.candidates import record_discovered_token
+from app.funnel import run_funnel
 
 log = get_logger("engine-solana-discovery.main")
 
 HEALTH_CHECK_INTERVAL_SECONDS = 30
+FUNNEL_INTERVAL_SECONDS = 10
+STATS_LOG_EVERY = 6  # funnel runs
 
 
 async def _record_system_event(session_factory, event_type: str, severity: str, detail: dict | None = None) -> None:
@@ -47,6 +52,27 @@ async def _health_check_loop(rpc: RpcManager, session_factory, stop_event: async
             pass
 
 
+async def _funnel_loop(redis, session_factory, stop_event: asyncio.Event) -> None:
+    runs = 0
+    while not stop_event.is_set():
+        try:
+            async with session_factory() as session:
+                settings, _ = await store.load_settings(session, "solana_fresh")
+            counts = await run_funnel(redis, session_factory, settings, datetime.now(timezone.utc))
+            runs += 1
+            if counts["promoted"] or counts["migrations"]:
+                log.info("funnel.run", **counts)
+            if runs % STATS_LOG_EVERY == 0:
+                log.info("stream.stats", heartbeat=str(await pump_stream.heartbeat(redis)), **await pump_stream.stats(redis))
+        except Exception as exc:  # noqa: BLE001
+            log.error("funnel.failed", error=str(exc))
+            await _record_system_event(session_factory, "funnel_failed", "error", {"error": str(exc)})
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=FUNNEL_INTERVAL_SECONDS)
+        except asyncio.TimeoutError:
+            pass
+
+
 async def run() -> None:
     settings = get_settings()
     configure_logging(settings.LOG_LEVEL)
@@ -61,6 +87,7 @@ async def run() -> None:
 
     engine = make_engine(settings)
     session_factory = make_session_factory(engine)
+    redis = make_redis(settings)
 
     async with httpx.AsyncClient() as http_client:
         rpc = RpcManager.create(
@@ -74,32 +101,11 @@ async def run() -> None:
                 return
             value = message.get("params", {}).get("result", {}).get("value", {})
             if value.get("err") is not None:
-                return  # failed transactions can't have created anything worth tracking
-            logs = value.get("logs", [])
-            if not logs_mention_mint_init(logs):
-                return
-
-            signature = value.get("signature")
-            if not signature:
-                return
-
-            try:
-                tx_result = await rpc.call(
-                    "getTransaction",
-                    [signature, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0, "commitment": "confirmed"}],
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.warning("main.get_transaction_failed", signature=signature, error=str(exc))
-                return
-
-            for mint_info in extract_mint_creations(tx_result or {}):
-                occurred_at = (
-                    datetime.fromtimestamp(mint_info["block_time"], tz=timezone.utc)
-                    if mint_info.get("block_time")
-                    else datetime.now(timezone.utc)
-                )
-                async with session_factory() as session:
-                    await record_discovered_token(session, mint_info, occurred_at)
+                return  # a failed transaction changed nothing on-chain
+            # pump.fun emits its Anchor events as "Program data:" log lines,
+            # so the notification alone carries every field we need — no
+            # getTransaction round-trip per event.
+            await pump_stream.ingest_logs(redis, value.get("logs", []), value.get("signature"), datetime.now(timezone.utc))
 
         ws_index = {"i": 0}
 
@@ -108,22 +114,17 @@ async def run() -> None:
             ws_index["i"] += 1
             return url
 
-        # NOTE: logsSubscribe's `mentions` filter against the Token Program
-        # (one of the highest-traffic programs on Solana) is known across
-        # the ecosystem to be rejected or rate-limited by some public RPC
-        # providers, since it forces the node to scan every transaction's
-        # logs. Not verified against any specific current provider's policy
-        # in this environment — if this connects but never delivers
-        # notifications, that is the likely cause; production use probably
-        # needs a dedicated indexer/webhook provider (e.g. Helius) instead
-        # of raw public-RPC logsSubscribe.
+        # Scoped to the pump.fun program only. The previous subscription to
+        # the whole SPL Token program delivered every token transaction on
+        # Solana and needed a getTransaction call per mint — far beyond a
+        # free RPC plan and a 2 GB server.
         ws_client = SolanaWsClient(
             url_provider=next_ws_url,
             subscriptions=[
                 {
                     "jsonrpc": "2.0",
                     "method": "logsSubscribe",
-                    "params": [{"mentions": [TOKEN_PROGRAM_ID]}, {"commitment": "confirmed"}],
+                    "params": [{"mentions": [PUMP_PROGRAM_ID]}, {"commitment": "confirmed"}],
                 }
             ],
             on_message=handle_message,
@@ -134,16 +135,18 @@ async def run() -> None:
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, stop_event.set)
 
-        await _record_system_event(session_factory, "service_started", "info")
-        log.info("engine-solana-discovery.started", token_program=TOKEN_PROGRAM_ID)
+        await _record_system_event(session_factory, "service_started", "info", {"program": PUMP_PROGRAM_ID})
+        log.info("engine-solana-discovery.started", program=PUMP_PROGRAM_ID)
 
         try:
             await asyncio.gather(
                 ws_client.run(stop_event),
                 _health_check_loop(rpc, session_factory, stop_event),
+                _funnel_loop(redis, session_factory, stop_event),
             )
         finally:
             await _record_system_event(session_factory, "service_stopped", "info")
+            await redis.aclose()
             await engine.dispose()
 
 
