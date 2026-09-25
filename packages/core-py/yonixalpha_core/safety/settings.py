@@ -170,3 +170,22 @@ def validate(settings: SafetySettings) -> list[str]:
     if settings.max_risk_level_for_auto not in ("LOW", "MODERATE", "HIGH"):
         errors.append("max_risk_level_for_auto must be LOW, MODERATE or HIGH")
     return errors
+
+
+# Per-engine starting points, used when no settings row exists for the
+# engine or GLOBAL. Only values forced by an engine's cost structure differ:
+# a pump.fun round trip pays ~1.25-1.3% fee per side (the fee bps pump.fun's
+# own TradeEvents report) plus impact plus the slippage allowance, ~6-7% in
+# total at small size, so a 5% stop would sit inside the costs and every
+# trade would be refused as STOP_INSIDE_COSTS. 10% keeps the stop outside
+# them; sizing then shrinks the position so the loss at that stop still
+# equals risk_per_trade_pct of equity.
+ENGINE_DEFAULTS: dict[str, dict[str, Any]] = {
+    "solana_fresh": {"min_stop_pct": "0.10"},
+    "solana_migration": {"min_stop_pct": "0.10"},
+    "solana_momentum": {"min_stop_pct": "0.10"},
+}
+
+
+def default_settings_for(engine: str) -> SafetySettings:
+    return settings_from_dict(ENGINE_DEFAULTS.get(engine, {}))

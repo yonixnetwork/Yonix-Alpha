@@ -174,7 +174,8 @@ class TradeFlow:
     sell_volume_quote: Decimal
     top3_wallet_volume_share: Decimal | None
     creator_sold: bool | None
-    # True when counts come from an aggregator without wallet identities.
+    # False when counts come from an aggregator without wallet identities
+    # (e.g. DexScreener txns), so per-wallet manipulation checks are impossible.
     wallet_level: bool = True
 
 

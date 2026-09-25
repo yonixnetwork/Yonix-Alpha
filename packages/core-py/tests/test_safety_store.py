@@ -19,7 +19,7 @@ from yonixalpha_core.db.models import AuditLog, PaperPosition, RiskSettingsVersi
 from yonixalpha_core.safety import store  # noqa: E402
 from yonixalpha_core.safety.gate import assess  # noqa: E402
 from yonixalpha_core.safety.models import GlobalMode, StrategyMode  # noqa: E402
-from yonixalpha_core.safety.settings import SafetySettings  # noqa: E402
+from yonixalpha_core.safety.settings import SafetySettings, default_settings_for  # noqa: E402
 
 from tests.test_safety_gate import NOW, healthy  # noqa: E402
 
@@ -45,7 +45,10 @@ def test_live_permission_needs_all_three_env_locks():
 
 async def test_settings_default_then_versioned_and_audited(db):
     settings, meta = await store.load_settings(db, "solana_fresh")
-    assert settings == SafetySettings() and meta["scope"] == "DEFAULT"
+    assert settings == default_settings_for("solana_fresh") and meta["scope"] == "DEFAULT"
+    assert settings.min_stop_pct == Decimal("0.10")  # pump.fun costs push the stop floor up
+    generic, _ = await store.load_settings(db, "binance_futures")
+    assert generic == SafetySettings()
 
     row, notes = await store.save_settings(db, "GLOBAL", {"max_position_size_quote": "0.5"}, None, "tighter")
     assert row.version == 1 and notes == []
@@ -84,7 +87,7 @@ async def test_stored_row_that_no_longer_validates_falls_back_to_defaults(db):
     db.add(RiskSettingsVersion(scope="GLOBAL", version=1, settings={"min_stop_pct": "0.5", "max_stop_pct": "0.1"}))
     await db.commit()
     settings, meta = await store.load_settings(db, "solana_fresh")
-    assert settings == SafetySettings() and meta["scope"] == "DEFAULT" and meta["errors"]
+    assert settings == default_settings_for("solana_fresh") and meta["scope"] == "DEFAULT" and meta["errors"]
 
 
 async def test_modes_default_to_paper_and_changes_are_audited(db):

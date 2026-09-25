@@ -32,7 +32,14 @@ from yonixalpha_core.db.models import (
 from yonixalpha_core.safety.gate import Assessment
 from yonixalpha_core.safety.models import AccountState, GlobalMode, StrategyMode
 from yonixalpha_core.safety.rules import BlacklistRule, CustomRule
-from yonixalpha_core.safety.settings import SafetySettings, clamp, settings_from_dict, settings_to_dict, validate
+from yonixalpha_core.safety.settings import (
+    SafetySettings,
+    clamp,
+    default_settings_for,
+    settings_from_dict,
+    settings_to_dict,
+    validate,
+)
 
 GLOBAL_SCOPE = "GLOBAL"
 GLOBAL_MODE_KEY = "global_mode"
@@ -75,17 +82,17 @@ async def _latest_settings_row(session: AsyncSession, scope: str) -> RiskSetting
 
 async def load_settings(session: AsyncSession, engine: str) -> tuple[SafetySettings, dict[str, Any]]:
     """Effective settings for `engine`: its own latest version if one exists,
-    else the GLOBAL latest, else code defaults. Always re-clamped, so a row
+    else the GLOBAL latest, else the engine's code defaults. Always re-clamped, so a row
     written before a hard limit was tightened can't bypass it."""
     row = await _latest_settings_row(session, engine) or await _latest_settings_row(session, GLOBAL_SCOPE)
     if row is None:
-        settings, notes = clamp(SafetySettings())
+        settings, notes = clamp(default_settings_for(engine))
         return settings, {"scope": "DEFAULT", "version": 0, "clamp_notes": notes}
     settings, notes = clamp(settings_from_dict(row.settings))
     errors = validate(settings)
     if errors:
         # A stored row that no longer validates is not silently used.
-        settings, _ = clamp(SafetySettings())
+        settings, _ = clamp(default_settings_for(engine))
         return settings, {"scope": "DEFAULT", "version": 0, "rejected_row": str(row.id), "errors": errors}
     return settings, {"scope": row.scope, "version": row.version, "id": str(row.id), "clamp_notes": notes}
 
