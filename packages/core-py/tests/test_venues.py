@@ -168,3 +168,26 @@ async def test_hyperliquid_account_needs_only_an_address():
         await HyperliquidInfo(client(hl_handler), RateBudget(100)).account()
     acct = await HyperliquidInfo(client(hl_handler), RateBudget(100), account_address="0xabc").account()
     assert acct["marginSummary"]["accountValue"] == "100"
+
+
+async def test_venue_health_records_failures_and_recovery():
+    from yonixalpha_core.venues import common
+
+    common.VENUE_HEALTH.pop("unit-venue", None)
+
+    async def fail():
+        raise common.VenueError("unit-venue: HTTP 503")
+
+    async def ok():
+        return 1
+
+    for _ in range(2):
+        try:
+            await common.tracked("unit-venue", fail())
+        except common.VenueError:
+            pass
+    h = common.venue_health_snapshot()["unit-venue"]
+    assert h["consecutive_failures"] == 2 and "503" in h["last_error"] and h["last_ok_at"] is None
+    assert await common.tracked("unit-venue", ok()) == 1
+    h = common.venue_health_snapshot()["unit-venue"]
+    assert h["consecutive_failures"] == 0 and h["last_ok_at"] and h["calls"] == 3

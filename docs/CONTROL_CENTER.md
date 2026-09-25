@@ -57,32 +57,50 @@ approval can never lift a WAIT, NO_TRADE or REJECT finding.
 
 ## 2. Deploying this to the server
 
-On the droplet (`/opt/yonixalpha`). Images are built one at a time because parallel builds
-ran out of memory on the 2 GB server earlier.
+On the droplet (`/opt/yonixalpha`). Build images **one at a time**: parallel builds ran
+out of memory on the 2 GB server earlier.
 
 ```bash
 cd /opt/yonixalpha
 git pull
 C="docker compose --env-file .env -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.prod.yml"
 
-# Optional but recommended: make the third lock explicit (defaults to true if absent).
+# The three locks. Keep them exactly like this.
 grep -q '^PAPER_TRADING=' .env || echo 'PAPER_TRADING=true' >> .env
+grep -E '^(TRADING_ENABLED|LIVE_TRADING_ENABLED|PAPER_TRADING)=' .env   # expect false / false / true
 
-for s in api decision-engine paper-trading engine-solana-discovery web; do $C build $s; done
+# Every Python service changed (heartbeats, venue tracking), plus web and nginx (/api/ws).
+for s in api web decision-engine paper-trading ml engine-solana-discovery data-solana \
+         data-binance engine-binance-futures reverse-proxy; do $C build $s || break; done
 
-# The superseded Solana engines are in the 'legacy' profile now; stop and remove them.
+# Superseded Solana engines stay in the 'legacy' profile (momentum now runs in discovery).
 $C --profile legacy rm -sf engine-solana-momentum engine-solana-migration
 
-# Redis picks up its new memory cap; api runs migration 0009 on start.
-$C up -d
-$C restart reverse-proxy     # nginx caches upstream IPs of recreated containers
+$C up -d                        # api applies migrations 0009 and 0010 on start
+$C restart reverse-proxy        # nginx caches upstream IPs of recreated containers
 $C ps
 $C logs --tail 50 api | grep -i alembic
 ```
 
-`SOLANA_RPC_URL` and `SOLANA_WS_URL` must be set for the pipeline to run. Without them,
-discovery and the gate stay idle and say so in their logs. `JUPITER_API_KEY` is optional:
-without it, the free `lite-api.jup.ag` host is used.
+Credentials, all optional except the Solana RPC pair. Put them in `.env` only, never in the
+dashboard:
+
+| Variable | Needed for | Without it |
+|---|---|---|
+| `SOLANA_RPC_URL`, `SOLANA_WS_URL` (+ `_BACKUP_`) | pump.fun stream, mint/holder reads | Solana engines idle and say so |
+| `JUPITER_API_KEY` | paid Jupiter host | free `lite-api.jup.ag` is used |
+| `BINANCE_API_KEY` / `_SECRET` | engine-binance-futures account sync (read side) | Binance account shows NOT CONNECTED; public data still works |
+| `BYBIT_API_KEY` / `_SECRET` (read-only key) | Bybit account read | Bybit account shows NOT CONNECTED |
+| `HYPERLIQUID_ACCOUNT_ADDRESS` | Hyperliquid account read (public info API) | NOT CONNECTED |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Telegram delivery | notifications stay in-app only |
+
+Outbound HTTPS from `api`, `decision-engine` and `paper-trading` to `fapi.binance.com`,
+`api.bybit.com` and `api.hyperliquid.xyz` is required for futures, grid and venue pages.
+Docker's default network allows it.
+
+Memory: nothing new runs as a container. The futures runner is a loop inside
+decision-engine, the grid a loop inside paper-trading, and champion/challenger training a
+loop inside ml.
 
 ## 3. Verifying against live data (do this first)
 
@@ -110,21 +128,38 @@ within seconds and growing trade counters.
 
 ## 4. Verification status
 
+States as the spec defines them. "Unit/integration" means local Postgres + Redis with
+synthetic or recorded inputs. Nothing marked VERIFIED has touched a live exchange or live
+Solana data, because the build environment blocks every external API (proxy 403).
+
 | Component | Status | Evidence |
 |---|---|---|
-| Safety gate, sizing, SL/TP/trailing with provenance | VERIFIED (unit) | 54 gate + rule/settings tests (spec §87 matrix) |
-| pump.fun event and bonding-curve decoding | PARTIALLY VERIFIED | Byte-exact tests against the official IDL layout; not yet run on live logs |
-| Mint authority / Token-2022 extensions / holders parsing | PARTIALLY VERIFIED | Tests on the documented jsonParsed shapes; not yet run on live RPC |
-| Jupiter quotes, DexScreener pool | IMPLEMENTED — AWAITING LIVE VERIFICATION | Mocked-HTTP tests only; sandbox got 403 |
-| Stream store → funnel → gate → paper entry → TP/trailing exit | VERIFIED (integration, synthetic data) | End-to-end tests on local Postgres + Redis |
-| Migration 0009 | VERIFIED | upgrade → downgrade → upgrade; `alembic check` clean |
-| Control API | VERIFIED (integration) | 10 API tests incl. auth, validation, audit, LIVE refusal |
-| Dashboard pages | VERIFIED (browser) | Chromium at 1440 px and 390 px against a DB seeded by the real pipeline |
-| Live pump.fun ingestion on the server | NOT VERIFIED | Run §3 |
-| Entry heuristics (`fresh_launch_flow`, `post_migration_flow`) | NOT VERIFIED (no edge shown) | Transparent rules, no backtest; they only narrow what the gate allows |
-| Live Solana execution | NOT IMPLEMENTED | LIVE targets are refused |
-| Bybit, Hyperliquid, Meta Muse, Gold vs BTC, champion/challenger | NOT STARTED | See `IMPLEMENTATION_MATRIX.md` §6 |
-| Confluence Matrix | BLOCKED | MetaTrader5 is Windows-only |
+| Safety gate, sizing, SL/TP/trailing with provenance (AUTO/MANUAL/STRATEGY), LONG + SHORT | VERIFIED (unit) | core tests incl. `test_short_and_book.py` |
+| Order-book fill model (walk the book, fees, max slippage, SHORT loss formula) | VERIFIED (unit) | same |
+| pump.fun event and bonding-curve decoding | PARTIALLY VERIFIED | Byte-exact tests against the official IDL; not run on live logs |
+| Mint authority / Token-2022 / holders parsing | PARTIALLY VERIFIED | Tests on documented jsonParsed shapes; not run on live RPC |
+| Wallet indicators (sniper share, sync clusters, round-trips, serial creator) | VERIFIED (unit) | synthetic trade sets |
+| Jupiter, DexScreener adapters | IMPLEMENTED — AWAITING LIVE VERIFICATION | mocked HTTP only |
+| Binance futures public, Bybit V5 public, Hyperliquid info adapters | IMPLEMENTED — AWAITING LIVE VERIFICATION | request shapes and parsing checked against the official SDK sources; mocked HTTP tests |
+| Bybit signed read-only account calls | IMPLEMENTED — AWAITING CREDENTIAL VERIFICATION | HMAC signature tested against the documented algorithm |
+| Hyperliquid account read (by address) | IMPLEMENTED — AWAITING CREDENTIAL VERIFICATION | mocked |
+| Binance account (from engine-binance-futures tables) | IMPLEMENTED — AWAITING CREDENTIAL VERIFICATION | engine's own tests; no key configured |
+| Meta Muse → gate → paper (LONG/SHORT, exit rule, closed-candle dedupe) | VERIFIED (integration, synthetic candles) | `services/decision-engine/tests/test_futures_eval.py` |
+| Confluence Matrix scoring on XAUUSDT | VERIFIED (unit + integration, synthetic) | strategy + runner tests; MT5/forex execution BLOCKED |
+| Hyperliquid grid (paper): build, maker fills, breakers, worst-case refusal, start/stop | VERIFIED (integration, synthetic mids) | `services/paper-trading/tests/test_engines.py` |
+| Gold vs BTC analytics | VERIFIED (unit); live data NOT VERIFIED | API returns 502 in the sandbox, as designed |
+| Solana momentum signal and scan | VERIFIED (unit/integration, synthetic) | discovery funnel tests |
+| Exit intelligence (HOLD/REDUCE/EXIT, two-evidence rule) | VERIFIED (unit) | |
+| Realtime bus, WebSocket auth/origin check, heartbeats, notifications | VERIFIED (integration) | `test_events.py`, `test_ws.py`; live in the browser check (indicator "Live") |
+| ML quality quarantine, challenger training, no auto-promotion, drift flag | VERIFIED (integration, synthetic) | `services/ml/tests/test_gate_ml.py` |
+| Champion inference: explained, advisory only, ignored on drift | VERIFIED (integration) | `services/decision-engine/tests/test_ml_champion.py` |
+| Control-center API (analytics, strategies, venues, health, ML review, notifications, controls) | VERIFIED (integration) | 91 API tests |
+| Migrations 0009 + 0010 | VERIFIED | upgrade → downgrade base → upgrade; `alembic check` clean |
+| Dashboard (23 routes) | VERIFIED (browser) | Chromium 1440 px + 390 px, DB seeded by the real pipeline; no page overflow |
+| Live data on the server | NOT VERIFIED | run §3 and `yonixalpha_core.tools.verify_live` |
+| Any strategy's profitability | NOT VERIFIED | no backtest; paper results will be the first evidence |
+| Live execution (any venue) | NOT IMPLEMENTED | LIVE targets are refused; environment locks closed |
+| Confluence on MT5 / forex | BLOCKED | MetaTrader5 is Windows-only |
 
 ## 5. Behaviour worth knowing before reading the results
 

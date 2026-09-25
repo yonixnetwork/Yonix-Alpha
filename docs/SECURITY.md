@@ -192,6 +192,16 @@ see the script's comments for the exact jail config chosen and why.
   stolen one cannot be cut off early. Verified during the audit. Standard
   tradeoff for a single-operator tool; a Redis `jti` denylist on logout
   would close it if that window ever becomes unacceptable.
+- **Tokens are kept in `localStorage`.** Any script injected into the
+  dashboard origin could read them. The CSP (`script-src 'self'`, no
+  third-party scripts), React's escaping of all rendered data, and the
+  ≤15 min access-token lifetime limit the exposure. HttpOnly cookies would
+  remove it but need CSRF protection on every write; not done for a
+  single-operator tool.
+- **Realtime WebSocket (`/api/ws`)** authenticates with the access token
+  as its first message (never in the URL, which nginx would log), refuses
+  refresh tokens and foreign `Origin`s, and only relays events — it
+  accepts no commands.
 - **The kill switch has no durable store.** It lives only in Redis. The
   audit measured `appendonly no` with `save 3600 1 ...`, meaning a single
   kill-switch write could sit unpersisted for up to an hour, and a crash

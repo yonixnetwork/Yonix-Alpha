@@ -106,3 +106,47 @@ whole extra phase of infrastructure work once it exists.
 `yonixalpha-core` (`packages/core-py/pyproject.toml`) rather than a base
 dependency — only `decision-engine` (inference) and `ml` (training) need
 them; every other service's image stays free of them.
+
+## Gate models: champion / challenger, data quality, drift (second pass)
+
+The original candidate-momentum model above still exists. Alongside it, `services/ml/app/gate_ml.py`
+trains one model per safety-gate engine family, from the samples the gate itself records
+(`safety.pipeline.record_ml_sample`) and labels when the paper position closes:
+
+| Model | Engines | Features (`gate-features-v2`) |
+|---|---|---|
+| `gate_solana_fresh`, `gate_solana_momentum` | solana_fresh / solana_momentum | liquidity, age, volatility, holder shares, buyers, trades, buy/sell ratio, top-3 wallet share, sync-buy cluster, round-trip share, window volume |
+| `gate_solana_migration` | solana_migration | liquidity, volatility, holder shares, trade count |
+| `gate_futures` | binance_futures, bybit_futures, hyperliquid_perps | volatility, book liquidity, spread, signal strength, side |
+
+Each hourly cycle, per model:
+
+1. **Data quality.** Every newly labeled sample is checked. It is quarantined (with a
+   `data_quality_events` row per issue, never silently dropped or trained on) when it is a
+   duplicate decision, has an invalid label, a label that disagrees with the recorded
+   outcome, an incomplete or corrupted trade record, a missing or impossible feature, a
+   missing timestamp, or a decision time after the row was written (future leakage).
+   Missing features are never defaulted to 0.
+2. **Challenger training.** Only after 50 clean samples (one per trade: repeated
+   evaluations of the same candidate count once). A logistic regression is trained on the
+   older 75% and evaluated on the newest 25%. The current champion is scored on **the same
+   holdout**. Recorded metrics: AUC with a 95% lower bound, Brier score, precision/recall,
+   false-positive/negative rates, stability across the two holdout halves, and the average
+   paper return of trades the model favoured versus all trades.
+3. **Promotion is an operator action.** A challenger is marked `promotable` only if AUC ≥ 0.55,
+   the lower bound is > 0.5, and it beats the champion on AUC and Brier. Even then, nothing
+   happens until someone presses *Promote* in ML Review. Promotion and retirement are audited.
+4. **Drift.** The champion's training distributions are stored. Recent decisions (7 days) are
+   compared by PSI per feature and on predictions, plus recent labeled accuracy. PSI > 0.25
+   or an accuracy drop > 0.15 records `MODEL_DRIFT_DETECTED` and sends a notification. It
+   also sets a Redis flag that makes the decision engine **ignore the model** until the
+   next check clears it.
+
+**What a champion can do:** decision-engine scores each decision and records the score,
+model version, top feature contributions (exact coef × value for the linear model) and
+whether it changed the outcome. The only effect on a decision: if the operator sets
+`min_ml_confidence` in Risk Settings, a score below it turns the decision into WAIT. A
+high score can never lift a block, change sizing, or bypass a check.
+
+**Today:** there are no labeled gate trades yet, so no challenger has been trained and every
+engine runs **RULES ONLY**. ML Review shows this state.

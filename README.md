@@ -14,7 +14,12 @@ and drives the paper engine. Operators control runtime risk settings,
 modes, blacklist, custom rules and approvals from the dashboard. Live
 trading stays off. **See `docs/CONTROL_CENTER.md`** for deployment,
 the live-data verification step, and what is verified; see
-`docs/IMPLEMENTATION_MATRIX.md` for research and design decisions.
+`docs/IMPLEMENTATION_MATRIX.md` for research and design decisions. The
+same gate now also runs Meta Muse, Confluence Matrix (on Binance XAUUSDT)
+and a Hyperliquid paper grid, with Bybit/Hyperliquid read-only venues, a
+realtime WebSocket, notifications, and ML champion/challenger review.
+**`docs/FINAL_REPORT.md`** is the complete report, including what is and
+is not verified.
 
 **Phase 11 — Telegram alerting.** Phases 1-10 (foundation, data
 infrastructure, three Solana engines, the Binance Futures execution

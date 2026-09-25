@@ -139,29 +139,19 @@ rather than being half-built:
    status, and the application shell (phase 4 subset).
 6. Droplet verification script for all live data sources.
 
-All six items above are implemented and tested in the build environment. None has run
-against live data yet; `docs/CONTROL_CENTER.md` has the per-component verification states
-and the server-side verification procedure.
+All six items above are implemented and tested in the build environment.
 
-Deferred (tracked, not started): realtime WebSocket bus (phase 5; the dashboard polls every
-15 s instead), Bybit (11), Meta Muse (12), Hyperliquid (14), Gold vs BTC analytics (15),
-champion/challenger + drift (16).
+**Second pass (this branch, after the first deploy):** everything that had been deferred is
+now built, each integration together with the tests that can be run without network access:
 
-Why these were not started, rather than built without verification:
+| Deferred item | Now | Verification state |
+|---|---|---|
+| Realtime WebSocket bus | `/api/ws` (first-message auth, Origin check, ping), Redis pub/sub, heartbeats | VERIFIED (integration + browser) |
+| Bybit | V5 public data + signed read-only account | IMPLEMENTED — AWAITING CREDENTIAL VERIFICATION |
+| Meta Muse | ported logic, closed candles, gate + paper, LONG/SHORT | VERIFIED on synthetic candles; no edge claimed |
+| Hyperliquid | info API adapter + paper grid engine | VERIFIED on synthetic mids; live data NOT VERIFIED |
+| Gold vs BTC | ratio / z-score / correlation analytics | analytics only; live data NOT VERIFIED |
+| Champion/challenger + drift | quality quarantine, temporal holdout, operator promotion, PSI drift | VERIFIED on synthetic samples; no real model yet (no labeled trades) |
+| Confluence Matrix | scoring ported, run on Binance XAUUSDT | MT5/forex BLOCKED |
 
-- **No exchange API was reachable from the build environment** (every request got a proxy 403).
-  An exchange adapter that has never answered a live request is exactly the "integration
-  claimed to work without testing" the specification forbids. Each should be built together
-  with a run on the server.
-- **Meta Muse** has no backtested edge (Phase 0 audit), so it could only ever be a PAPER-only
-  signal. It also needs a Binance-futures assembler for the gate (`requirements_for
-  ("binance_futures")` already exists) and a kline feed, and neither has been verified live.
-- **Confluence Matrix** stays **BLOCKED**: MetaTrader5 ships Windows wheels only.
-- **Gold vs BTC** needs only `BINANCE_SYMBOLS=XAUUSDT,PAXGUSDT,BTCUSDT` on the existing
-  `data-binance`. The ratio view is not built, and any trading signal waits on a backtest.
-- **Champion/challenger and drift** need labeled outcomes first. Paper positions opened by the
-  gate now write those labels (`ml_features.label`, source `paper_engine_realized_pnl`), so
-  this becomes possible once enough paper trades have closed.
-- **2 GB server**: every added always-on container competes with Postgres and Next.js for
-  memory. This pass *removed* two Solana containers (momentum and migration moved to the
-  `legacy` profile).
+`docs/FINAL_REPORT.md` has the complete §97 report.
