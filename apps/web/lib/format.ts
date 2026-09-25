@@ -34,3 +34,24 @@ export function formatState(state: string | null | undefined): string {
   if (typeof state !== "string" || state.length === 0) return "unknown";
   return state.replace(/_/g, " ");
 }
+
+export function gateDecisionPillClass(decision: string): string {
+  if (decision === "EXECUTE") return "pill pill-ok";
+  if (decision === "REDUCE_SIZE") return "pill pill-ok";
+  if (decision === "WAIT" || decision === "REQUIRE_MANUAL_APPROVAL") return "pill pill-warn";
+  if (decision === "REJECT" || decision === "NO_TRADE") return "pill pill-danger";
+  return "pill pill-off";
+}
+
+export function formatPct(value: string | number | null | undefined, digits = 2): string {
+  if (value === null || value === undefined || value === "") return "—";
+  const n = Number(value);
+  if (Number.isNaN(n)) return String(value);
+  return `${(n * 100).toFixed(digits)}%`;
+}
+
+export function formatBps(value: string | null | undefined): string {
+  if (value === null || value === undefined) return "—";
+  const n = Number(value);
+  return Number.isNaN(n) ? value : `${(n / 100).toFixed(2)}%`;
+}

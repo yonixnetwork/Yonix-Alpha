@@ -26,3 +26,20 @@ class PaperPositionOut(BaseModel):
     entry_at: datetime
     exit_at: datetime | None
     created_at: datetime
+    # Gate-driven positions (null on Phase 7 rows)
+    engine: str | None = None
+    asset_id: str | None = None
+    assessment_id: UUID | None = None
+    initial_quantity: Decimal | None = None
+    remaining_quantity: Decimal | None = None
+    entry_cost_quote: Decimal | None = None
+    proceeds_quote: Decimal | None = None
+    fees_paid_quote: Decimal | None = None
+    max_loss_quote: Decimal | None = None
+    plan: dict[str, Any] | None = None
+    tp_hits: list[Any] | None = None
+    trailing_stop: Decimal | None = None
+    highest_price: Decimal | None = None
+    lowest_price: Decimal | None = None
+    last_price: Decimal | None = None
+    last_marked_at: datetime | None = None

@@ -91,10 +91,38 @@ export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
   });
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({}));
-    throw new ApiError(res.status, errBody.detail ?? `Request failed (${res.status})`);
+    throw new ApiError(res.status, describeDetail(errBody.detail) ?? `Request failed (${res.status})`);
   }
   return res.json() as Promise<T>;
 }
+
+async function apiSend<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const res = await apiFetch(path, {
+    method,
+    headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw new ApiError(res.status, describeDetail(errBody.detail) ?? `Request failed (${res.status})`);
+  }
+  if (res.status === 204) return undefined as T;
+  return res.json() as Promise<T>;
+}
+
+/** FastAPI error details come as a string, {errors: [...]}, or a list of
+ * pydantic validation errors — flattened here into one readable line. */
+export function describeDetail(detail: unknown): string | undefined {
+  if (detail === undefined || detail === null) return undefined;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) return detail.map((d) => (typeof d === "object" && d && "msg" in d ? String(d.msg) : String(d))).join("; ");
+  if (typeof detail === "object" && detail && "errors" in detail) return (detail as { errors: string[] }).errors.join("; ");
+  return JSON.stringify(detail);
+}
+
+export const apiPut = <T>(path: string, body?: unknown) => apiSend<T>("PUT", path, body);
+export const apiPatch = <T>(path: string, body?: unknown) => apiSend<T>("PATCH", path, body);
+export const apiDelete = (path: string) => apiSend<void>("DELETE", path);
 
 /** Authenticated fetch — attaches the bearer token, and on a 401 attempts
  * exactly one refresh-and-retry before giving up (no infinite retry loop).
