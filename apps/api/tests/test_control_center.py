@@ -179,6 +179,18 @@ async def test_health_states_from_evidence(app, client, auth_headers):
     assert obs.status_code == 200 and "redis_memory" in obs.json()
 
 
+async def test_disabled_services_report_not_configured_and_legacy_services_are_hidden(app, client, auth_headers):
+    redis = app.state.redis
+    await events.heartbeat(redis, "data-solana", status="disabled", detail={"reason": "SOLANA_RPC_URL not set"})
+    c = {x["name"]: x for x in (await client.get("/api/system/health", headers=auth_headers)).json()["connections"]}
+    assert c["data-solana"]["state"] == "NOT CONFIGURED" and "SOLANA_RPC_URL not set" in c["data-solana"]["detail"]
+    # --profile legacy services: listed only while they actually run
+    assert "engine-solana-momentum" not in c and "engine-solana-migration" not in c
+    await events.heartbeat(redis, "engine-solana-momentum")
+    c = {x["name"]: x for x in (await client.get("/api/system/health", headers=auth_headers)).json()["connections"]}
+    assert c["engine-solana-momentum"]["state"] == "CONNECTED"
+
+
 async def test_summary_topbar(app, client, auth_headers):
     await seed_closed(app, "binance_futures", "binance_futures", ["10"])
     r = await client.get("/api/summary", headers=auth_headers)

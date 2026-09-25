@@ -32,6 +32,9 @@ from yonixalpha_core.solana import pump_stream, pumpportal_ws
 
 SERVICES = ["data-solana", "data-binance", "engine-solana-discovery", "engine-solana-migration", "engine-solana-momentum",
             "engine-binance-futures", "decision-engine", "ml", "paper-trading", "execution-futures"]
+# Started only with `docker compose --profile legacy` (superseded by the
+# discovery funnel in engine-solana-discovery).
+LEGACY_SERVICES = {"engine-solana-migration", "engine-solana-momentum"}
 VENUE_REPORTERS = ("decision-engine", "paper-trading", "execution-futures")
 PUMPPORTAL_STALE_SECONDS = 120
 PUMPPORTAL_OFFLINE_SECONDS = 600
@@ -120,6 +123,12 @@ async def connections(db: AsyncSession, redis: Redis, settings: Any) -> list[dic
 
     for s in SERVICES:
         hb = hbs.get(s)
+        if hb is None and s in LEGACY_SERVICES:
+            continue  # `--profile legacy` only: not part of the default stack, so not listed unless running
+        if hb is not None and hb.get("status") == "disabled":
+            out.append(conn(s, "service", NOT_CONFIGURED, ((hb.get("detail") or {}).get("reason") or "disabled")
+                            + " — idle until configured", rss_mb=hb.get("rss_mb"), last_seen_at=hb.get("at")))
+            continue
         if hb is None:
             state = "UNAVAILABLE" if s in seen else "UNKNOWN"
             out.append(conn(s, "service", state, "no heartbeat" + (" (service has run before)" if s in seen else "")))

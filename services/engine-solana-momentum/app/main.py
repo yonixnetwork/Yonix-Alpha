@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import httpx
 
 from yonixalpha_core.config import get_settings
-from yonixalpha_core.events import heartbeat_loop
+from yonixalpha_core.events import heartbeat_loop, idle_while_disabled
 from yonixalpha_core.db.base import make_engine, make_session_factory
 from yonixalpha_core.db.models import SystemEvent
 from yonixalpha_core.logging import configure_logging, get_logger
@@ -54,10 +54,12 @@ async def run() -> None:
 
     if not settings.SOLANA_RPC_URL:
         log.warning("engine-solana-momentum.disabled", reason="SOLANA_RPC_URL not set")
+        await idle_while_disabled(settings, "engine-solana-momentum", "SOLANA_RPC_URL not set")
         return
     ws_urls = [u for u in (settings.SOLANA_WS_URL, settings.SOLANA_WS_BACKUP_URL) if u]
     if not ws_urls:
         log.warning("engine-solana-momentum.disabled", reason="SOLANA_WS_URL not set")
+        await idle_while_disabled(settings, "engine-solana-momentum", "SOLANA_WS_URL not set")
         return
 
     engine = make_engine(settings)

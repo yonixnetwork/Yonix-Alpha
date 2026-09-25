@@ -79,7 +79,7 @@ for s in api web decision-engine paper-trading ml engine-solana-discovery data-s
 $C --profile legacy rm -sf engine-solana-momentum engine-solana-migration
 
 $C up -d                        # api applies migrations 0009 and 0010 on start
-$C restart reverse-proxy        # nginx caches upstream IPs of recreated containers
+$C restart reverse-proxy        # optional since nginx re-resolves api/web through Docker DNS; still reloads a renewed certificate
 $C ps
 $C logs --tail 50 api | grep -i alembic
 ```

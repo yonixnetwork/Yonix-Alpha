@@ -133,6 +133,34 @@ async def notify(
 HEARTBEAT_INTERVAL_SECONDS = 30
 
 
+async def idle_while_disabled(settings: Any, service: str, reason: str, stop_event=None) -> None:
+    """For a service whose required configuration is missing: stay up and
+    report heartbeat status "disabled" (with the reason) until SIGTERM/SIGINT,
+    instead of exiting. Under `restart: unless-stopped` an exit becomes an
+    endless restart loop, and the health page could only say "no heartbeat";
+    this way it shows NOT CONFIGURED with the missing setting."""
+    import asyncio
+    import signal
+
+    from yonixalpha_core.db.redis import make_redis
+
+    stop = stop_event or asyncio.Event()
+    if stop_event is None:
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, stop.set)
+    redis = make_redis(settings)
+    try:
+        while not stop.is_set():
+            await heartbeat(redis, service, status="disabled", detail={"reason": reason})
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=HEARTBEAT_INTERVAL_SECONDS)
+            except asyncio.TimeoutError:
+                pass
+    finally:
+        await redis.aclose()
+
+
 async def heartbeat_loop(settings: Any, service: str, stop_event, detail_fn=None) -> None:
     """Writes this service's heartbeat every 30 s until stop_event is set.
     Owns its own Redis client so services without Redis elsewhere can use

@@ -84,3 +84,21 @@ async def test_notifications_are_stored_and_telegram_follows_preferences(db, red
     assert sent == ["[INFO] Approve PIPE?\nrisk HIGH", "[INFO] TP1 again"]
     assert len((await db.execute(select(Notification))).scalars().all()) == 4
     await asyncio.sleep(0)
+
+
+async def test_disabled_service_idles_with_a_disabled_heartbeat_until_stopped(redis, monkeypatch):
+    import yonixalpha_core.db.redis as redis_mod
+
+    url = os.environ.get("REDIS_URL", "redis://localhost:6379/9")
+    monkeypatch.setattr(redis_mod, "make_redis", lambda settings: from_url(url, decode_responses=True))
+    stop = asyncio.Event()
+    task = asyncio.create_task(events.idle_while_disabled(SimpleNamespace(), "data-solana", "SOLANA_RPC_URL not set", stop))
+    for _ in range(50):
+        hb = (await events.read_heartbeats(redis, ["data-solana"]))["data-solana"]
+        if hb:
+            break
+        await asyncio.sleep(0.02)
+    assert hb["status"] == "disabled" and hb["detail"]["reason"] == "SOLANA_RPC_URL not set"
+    assert not task.done()  # stays up instead of exiting into a restart loop
+    stop.set()
+    await asyncio.wait_for(task, 2)

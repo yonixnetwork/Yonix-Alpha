@@ -119,9 +119,9 @@ VERIFIED = exercised by a test in this repository (fakes at the network boundary
 | Frontend | VERIFIED: ESLint clean, `tsc` clean, production build OK. Chromium at 1400 px and 390 px on Health, External Bots, Live Execution, venues (mt5, binance), Strategies, Gold vs BTC Trend: no console errors, no horizontal overflow. The missing favicon that caused a 404 was added |
 | E2E | VERIFIED (paper): signal → gate → live order → fake exchange fill → exchange stop → exit → realized PnL, and the Pump.fun paper E2E from the earlier audit |
 | Security | VERIFIED: no secret logged or returned (tests assert the absence of token/key values); control APIs behind login; bridge requires a ≥ 32-char token with constant-time compare; no committed keys found in the diff |
-| Docker build | VERIFIED locally for `execution-futures`. This environment needed its proxy CA injected through a scratch Dockerfile; the committed Dockerfile is unchanged |
-| Compose | VERIFIED: `docker compose config` with the base + prod files lists `execution-futures` |
-| Restart | VERIFIED: the container records `service_stopped` on SIGTERM and `service_started` again; reconcile runs first after a start |
+| Docker build | VERIFIED: all 13 images built with `--no-cache` from the committed tree. In this sandbox only: the proxy CA was injected, and the api/nginx images skipped `apt`/`apk` (their mirrors are blocked by the egress policy). The committed Dockerfiles are unchanged |
+| Compose | VERIFIED: the full production stack (base + prod files) ran behind nginx over HTTPS. Checked: redirect, security headers, login, 401 without a token, WebSocket auth (ready / 4401), Chromium sweep with no errors. About 550 MiB total. Found and fixed: services without config crash-looped under `restart: unless-stopped` (now idle with a `disabled` heartbeat → NOT CONFIGURED); legacy-profile services were listed as UNKNOWN (now hidden unless running); nginx pinned the api/web IPs at start-up and answered 502 after a recreate (now re-resolves through Docker DNS, verified by moving api to a new IP) |
+| Restart | VERIFIED: full `down`/`up` kept a database setting and an engaged kill switch (Redis AOF); every service came back; a service stops cleanly on SIGTERM |
 
 ## The 44 report items
 
