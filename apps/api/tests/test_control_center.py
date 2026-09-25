@@ -1,0 +1,300 @@
+import json
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+
+import pytest
+from sqlalchemy import select
+
+from yonixalpha_core import events
+from yonixalpha_core.db.models import (
+    AuditLog,
+    MLFeatureSnapshot,
+    ModelVersion,
+    Notification,
+    PaperPosition,
+    RiskAssessment,
+    SystemEvent,
+    Token,
+)
+from yonixalpha_core.ml.gate_features import DRIFT_FLAG_PREFIX, FEATURE_VERSION, FUTURES_FEATURES
+from yonixalpha_core.safety import store
+from yonixalpha_core.safety.liquidity import book_from_levels
+from yonixalpha_core.strategies import grid
+from yonixalpha_core.venues.common import Candle, Ticker, VenueError
+
+pytestmark = pytest.mark.asyncio
+NOW = datetime.now(timezone.utc).replace(microsecond=0)
+MINT = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+
+NEW_ENDPOINTS = ["/api/analytics/performance", "/api/analytics/gold-btc", "/api/strategies", "/api/venues", "/api/summary",
+                 "/api/notifications", "/api/notifications/prefs", "/api/system/health", "/api/system/observability",
+                 "/api/ml/review", "/api/ml/predictions", "/api/ml/data-quality", "/api/ml/samples", f"/api/tokens/{MINT}",
+                 "/api/paper/orders"]
+
+
+async def test_new_endpoints_require_auth(client):
+    for url in NEW_ENDPOINTS:
+        assert (await client.get(url)).status_code == 401, url
+
+
+async def seed_closed(app, account: str, engine: str, pnls: list[str], strategy: str | None = None) -> None:
+    async with app.state.db_session_factory() as s:
+        acct = await store.get_paper_account(s, account)
+        acct.reset_at = NOW - timedelta(days=1)  # trades before a reset are (correctly) excluded
+        for i, pnl in enumerate(pnls):
+            a = None
+            if strategy:
+                a = RiskAssessment(idempotency_key=f"k-{engine}-{strategy}-{i}", engine=engine, strategy=strategy, asset_id="ETHUSDT",
+                                   symbol="ETHUSDT", decision="EXECUTE", status_label="x", executable=True, execution_target="PAPER",
+                                   overall_risk="LOW", risk_engine_version="1", assessment={}, approval_state="NONE", evaluated_at=NOW)
+                s.add(a)
+                await s.flush()
+            s.add(PaperPosition(account_id=acct.id, assessment_id=a.id if a else None, engine=engine, symbol="ETHUSDT",
+                                asset_id="ETHUSDT", provider="paper", side="LONG", entry_price=Decimal(1), quantity=Decimal(1),
+                                take_profit=[], status="closed", realized_pnl=Decimal(pnl), fees_paid_quote=Decimal("0.1"),
+                                entry_at=NOW - timedelta(hours=2 + i), exit_at=NOW - timedelta(hours=1, minutes=i),
+                                plan={"venue": {"venue": "binance"}} if engine == "binance_futures" else {}))
+        s.add(PaperPosition(account_id=acct.id, engine=engine, symbol="OPEN", asset_id="OPEN", provider="paper", side="LONG",
+                            entry_price=Decimal(1), quantity=Decimal(1), take_profit=[], status="open", entry_at=NOW))
+        await s.commit()
+
+
+async def test_performance_analytics_per_currency_and_excludes_open(app, client, auth_headers):
+    await seed_closed(app, "binance_futures", "binance_futures", ["10", "-5", "0", "20"], strategy="meta_muse")
+    await seed_closed(app, "solana", "solana_fresh", ["0.5"])
+    r = await client.get("/api/analytics/performance", headers=auth_headers)
+    assert r.status_code == 200
+    accts = {a["account"]: a for a in r.json()["accounts"]}
+    fut = accts["binance_futures"]
+    o = fut["overall"]
+    assert fut["currency"] == "USDT" and fut["open_positions_not_counted"] == 1
+    assert (o["trades"], o["wins"], o["losses"], o["breakeven"]) == (4, 2, 1, 1)
+    assert o["win_rate"] == 0.5 and Decimal(o["profit_factor"]) == 6 and Decimal(o["expectancy"]) == Decimal("6.25")
+    assert Decimal(o["avg_win"]) == 15 and Decimal(o["avg_loss"]) == -5
+    assert "meta_muse" in fut["by_strategy"] and "binance" in fut["by_venue"]
+    assert accts["solana"]["currency"] == "SOL" and accts["solana"]["overall"]["trades"] == 1
+    only = await client.get("/api/analytics/performance?account=binance_futures&strategy=nothing", headers=auth_headers)
+    assert only.json()["accounts"][0]["overall"]["trades"] == 0
+
+
+class FakeBinance:
+    def __init__(self, fail=False):
+        self.fail = fail
+
+    async def klines(self, symbol, interval, limit=200, now=None):
+        if self.fail:
+            raise VenueError("binance: HTTP 451")
+        t0 = NOW - timedelta(hours=limit + 1)
+        base = 60000 if symbol == "BTCUSDT" else 2000
+        return [Candle(t0 + timedelta(hours=i), Decimal(base), Decimal(base), Decimal(base), Decimal(base + (i % 7)), Decimal(1), True)
+                for i in range(limit)]
+
+    async def ticker(self, symbol):
+        return Ticker(symbol, NOW, Decimal(100), Decimal(100), Decimal("0.0001"), None)
+
+    async def book(self, symbol, limit=100):
+        return book_from_levels([(Decimal("99.9"), Decimal(10))], [(Decimal("100.1"), Decimal(10))], Decimal(5))
+
+
+async def test_gold_btc_analytics_and_upstream_failure(app, client, auth_headers):
+    app.state.venues["binance"] = FakeBinance()
+    r = await client.get("/api/analytics/gold-btc", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ratio"] > 0 and len(body["points"]) == 500 and "no trading signal" in body["note"]
+    await app.state.redis.flushdb()
+    app.state.venues["binance"] = FakeBinance(fail=True)
+    r = await client.get("/api/analytics/gold-btc", headers=auth_headers)
+    assert r.status_code == 502 and "HTTP 451" in r.json()["detail"]
+
+
+async def test_strategies_catalog_config_validation_and_modes(client, auth_headers):
+    r = await client.get("/api/strategies", headers=auth_headers)
+    names = {s["name"]: s for s in r.json()}
+    assert {"solana_fresh", "solana_migration", "solana_momentum", "meta_muse", "confluence_matrix", "hyperliquid_grid",
+            "gold_vs_btc", "binance_futures", "bybit_futures", "hyperliquid_perps"} <= set(names)
+    assert names["gold_vs_btc"].get("mode") is None and "ANALYTICS ONLY" in names["gold_vs_btc"]["status"]
+    assert "BLOCKED" in names["confluence_matrix"]["status"]
+
+    bad = await client.put("/api/strategies/meta_muse/config", headers=auth_headers,
+                           json={"config": {"fast": 30, "slow": 21, "stop_pct": "5", "secret": "x"}})
+    errors = bad.json()["detail"]["errors"]
+    assert bad.status_code == 422 and any("unknown" in e for e in errors) and any("stop_pct" in e for e in errors)
+    ok = await client.put("/api/strategies/meta_muse/config", headers=auth_headers, json={"config": {"stop_pct": "0.015"}})
+    assert ok.status_code == 200 and ok.json()["config"]["stop_pct"] == "0.015"
+    assert (await client.put("/api/strategies/solana_fresh/config", headers=auth_headers, json={"config": {}})).status_code == 422
+
+    r = await client.put("/api/strategies/binance_futures/mode", headers=auth_headers, json={"mode": "OFF"})
+    assert r.status_code == 200
+    mm = (await client.get("/api/strategies/meta_muse", headers=auth_headers)).json()
+    assert mm["mode"] == "PAPER" and mm["effective_mode"] == "OFF"  # most restrictive of strategy and venue
+    assert (await client.put("/api/strategies/gold_vs_btc/mode", headers=auth_headers, json={"mode": "AUTO"})).status_code == 409
+
+
+async def test_grid_start_stop_requests(app, client, auth_headers):
+    r = await client.post("/api/strategies/hyperliquid_grid/start", headers=auth_headers)
+    assert r.status_code == 200 and await app.state.redis.get(grid.COMMAND_KEY) == "start"
+    await client.put("/api/strategies/hyperliquid_grid/mode", headers=auth_headers, json={"mode": "OFF"})
+    assert (await client.post("/api/strategies/hyperliquid_grid/start", headers=auth_headers)).status_code == 409
+    assert (await client.post("/api/strategies/hyperliquid_grid/stop", headers=auth_headers)).status_code == 200
+
+
+async def test_venues_status_never_claims_unverified_accounts(app, client, auth_headers):
+    r = await client.get("/api/venues", headers=auth_headers)
+    v = {x["venue"]: x for x in r.json()}
+    assert v["bybit"]["account"]["status"] == "NOT CONNECTED"
+    assert v["binance"]["market_data"]["state"] == "UNKNOWN"
+    assert "DISABLED" in v["binance"]["live_orders"]
+    assert (await client.get("/api/venues/bybit/account", headers=auth_headers)).status_code == 409
+    app.state.venues["binance"] = FakeBinance()
+    m = await client.get("/api/venues/binance/market?symbol=ETHUSDT", headers=auth_headers)
+    assert m.status_code == 200 and m.json()["book"]["mid"] == "100.0"
+    assert (await client.get("/api/venues/binance/market?symbol=eth;drop", headers=auth_headers)).status_code == 422
+    acct = await client.get("/api/venues/binance/account", headers=auth_headers)
+    assert acct.status_code == 200 and acct.json()["positions"] == []
+
+
+async def test_health_states_from_evidence(app, client, auth_headers):
+    redis = app.state.redis
+    await events.heartbeat(redis, "decision-engine", detail={"venues": {"binance": {
+        "last_ok_at": NOW.isoformat(), "consecutive_failures": 0, "last_error": None, "last_error_at": None, "calls": 3},
+        "bybit": {"last_ok_at": None, "consecutive_failures": 4, "last_error": "bybit: HTTP 403", "last_error_at": NOW.isoformat(),
+                  "calls": 4}}})
+    async with app.state.db_session_factory() as s:
+        s.add(SystemEvent(service="ml", event_type="service_started", severity="info"))
+        await s.commit()
+    r = await client.get("/api/system/health", headers=auth_headers)
+    c = {x["name"]: x for x in r.json()["connections"]}
+    assert c["postgres"]["state"] == "CONNECTED" and c["redis"]["state"] == "CONNECTED"
+    assert c["decision-engine"]["state"] == "CONNECTED"
+    assert c["ml"]["state"] == "OFFLINE"  # ran before, heartbeat gone
+    assert c["paper-trading"]["state"] == "UNKNOWN"  # never seen
+    assert c["binance"]["state"] == "CONNECTED" and c["bybit"]["state"] == "OFFLINE" and c["hyperliquid"]["state"] == "UNKNOWN"
+    assert r.json()["overall"] == "OFFLINE"
+    obs = await client.get("/api/system/observability", headers=auth_headers)
+    assert obs.status_code == 200 and "redis_memory" in obs.json()
+
+
+async def test_summary_topbar(app, client, auth_headers):
+    await seed_closed(app, "binance_futures", "binance_futures", ["10"])
+    r = await client.get("/api/summary", headers=auth_headers)
+    b = r.json()
+    fut = next(a for a in b["accounts"] if a["name"] == "binance_futures")
+    assert fut["currency"] == "USDT" and Decimal(fut["realized_pnl_today"]) in (Decimal(10), Decimal(0))
+    assert b["open_positions"] == 1 and b["env"]["live_permitted"] is False and b["global_mode"] == "PAPER"
+    assert b["system_status"] in ("CONNECTED", "DEGRADED", "STALE", "OFFLINE", "UNKNOWN")
+
+
+async def test_notifications_feed_and_prefs(app, client, auth_headers):
+    async with app.state.db_session_factory() as s:
+        n = await events.notify(s, None, None, "entry", "Paper entry: X LONG")
+        await s.commit()
+        nid = str(n.id)
+    r = await client.get("/api/notifications?unread=true", headers=auth_headers)
+    assert r.json()["unread"] == 1 and r.json()["items"][0]["kind"] == "entry"
+    assert (await client.post(f"/api/notifications/{nid}/read", headers=auth_headers)).json()["read_at"]
+    assert (await client.get("/api/notifications", headers=auth_headers)).json()["unread"] == 0
+    prefs = (await client.get("/api/notifications/prefs", headers=auth_headers)).json()
+    assert prefs["entry"]["telegram"] is True and prefs["tp1"]["telegram"] is False
+    r = await client.put("/api/notifications/prefs", headers=auth_headers, json={"entry": {"telegram": False}})
+    assert r.json()["entry"]["telegram"] is False
+    assert (await client.put("/api/notifications/prefs", headers=auth_headers, json={"nope": {"telegram": True}})).status_code == 422
+    async with app.state.db_session_factory() as s:
+        assert await events.telegram_enabled_for(s, "entry") is False
+
+
+async def test_position_controls_and_trade_details(app, client, auth_headers):
+    await seed_closed(app, "binance_futures", "binance_futures", [])
+    async with app.state.db_session_factory() as s:
+        pid = str((await s.execute(select(PaperPosition.id).where(PaperPosition.status == "open"))).scalar_one())
+    r = await client.post(f"/api/paper/positions/{pid}/pause", headers=auth_headers)
+    assert r.status_code == 200 and r.json()["position"]["management_paused"] is True and "stop loss is still enforced" in r.json()["note"]
+    assert (await client.post(f"/api/paper/positions/{pid}/resume", headers=auth_headers)).json()["position"]["management_paused"] is False
+    assert (await client.post(f"/api/paper/positions/{pid}/exit", headers=auth_headers)).json()["position"]["exit_requested"] is True
+    assert (await client.post(f"/api/paper/positions/{pid}/exit", headers=auth_headers)).status_code == 409
+    d = await client.get(f"/api/paper/positions/{pid}", headers=auth_headers)
+    assert [t["type"] for t in d.json()["timeline"]] == ["operator_pause", "operator_resume", "operator_exit"]
+    async with app.state.db_session_factory() as s:
+        kinds = [a.event_type for a in (await s.execute(select(AuditLog))).scalars()]
+    assert "paper_position.exit" in kinds
+
+
+async def test_ignore_and_rule_edits_and_reset_confirmation(app, client, auth_headers):
+    async with app.state.db_session_factory() as s:
+        a = RiskAssessment(idempotency_key="pending-1", engine="binance_futures", strategy="meta_muse", asset_id="ETHUSDT",
+                           symbol="ETHUSDT", decision="REQUIRE_MANUAL_APPROVAL", status_label="x", executable=False,
+                           execution_target="NONE", overall_risk="MODERATE", risk_engine_version="1", assessment={},
+                           approval_state="PENDING", evaluated_at=NOW)
+        s.add(a)
+        await s.commit()
+        aid = str(a.id)
+    r = await client.post(f"/api/control/assessments/{aid}/ignore", headers=auth_headers)
+    assert r.status_code == 200 and r.json()["approval_state"] == "IGNORED"
+    assert (await client.post(f"/api/control/assessments/{aid}/approve", headers=auth_headers)).status_code == 409
+
+    rid = (await client.post("/api/control/blacklist", headers=auth_headers,
+                             json={"field": "symbol", "match_type": "exact", "value": "SCAM"})).json()["id"]
+    r = await client.put(f"/api/control/blacklist/{rid}", headers=auth_headers,
+                         json={"field": "symbol", "match_type": "pattern", "value": "*RUG*", "reason": "edit"})
+    assert r.status_code == 200 and r.json()["value"] == "*RUG*"
+    assert (await client.put(f"/api/control/blacklist/{rid}", headers=auth_headers,
+                             json={"field": "symbol", "match_type": "pattern", "value": "**"})).status_code == 422
+    rule = (await client.post("/api/control/rules", headers=auth_headers, json={
+        "name": "min liq", "field": "liquidity_quote", "op": "<", "threshold": "5", "action": "REJECT"})).json()
+    r = await client.put(f"/api/control/rules/{rule['id']}", headers=auth_headers, json={
+        "name": "min liq", "field": "liquidity_quote", "op": "<", "threshold": "10", "action": "REJECT"})
+    assert r.status_code == 200 and r.json()["threshold"] == "10"
+
+    wrong = await client.post("/api/control/paper/accounts/solana/reset", headers=auth_headers,
+                              json={"starting_balance": "5", "confirm": "binance_futures"})
+    assert wrong.status_code == 422
+
+
+async def test_token_details(app, client, auth_headers):
+    assert (await client.get(f"/api/tokens/{MINT}", headers=auth_headers)).status_code == 404
+    assert (await client.get("/api/tokens/not-a-mint!", headers=auth_headers)).status_code in (404, 422)
+    async with app.state.db_session_factory() as s:
+        s.add(Token(mint_address=MINT, symbol="TEST", first_seen_source="pump_stream"))
+        await s.commit()
+    r = await client.get(f"/api/tokens/{MINT}", headers=auth_headers)
+    assert r.status_code == 200 and r.json()["token"]["symbol"] == "TEST"
+
+
+async def test_ml_review_promote_retire(app, client, auth_headers):
+    artifact = b"not loaded by the API"  # review/promote/retire work on rows, never unpickle
+    async with app.state.db_session_factory() as s:
+        good = ModelVersion(name="gate_futures", version=1, status="challenger", feature_names=FUTURES_FEATURES,
+                            training_sample_count=100, metrics={"promotable": True, "challenger": {"auc": 0.7}, "reference": {"x": 1}},
+                            artifact=artifact)
+        weak = ModelVersion(name="gate_futures", version=2, status="challenger", feature_names=FUTURES_FEATURES,
+                            training_sample_count=100, metrics={"promotable": False}, artifact=artifact)
+        s.add_all([good, weak])
+        s.add(MLFeatureSnapshot(symbol="ETHUSDT", engine="binance_futures", features={}, feature_version=FEATURE_VERSION,
+                                label=1, quality_status="ok"))
+        await s.commit()
+        good_id, weak_id = str(good.id), str(weak.id)
+    review = {m["model"]: m for m in (await client.get("/api/ml/review", headers=auth_headers)).json()}
+    gf = review["gate_futures"]
+    assert gf["mode"] == "RULES ONLY" and gf["champion"] is None and gf["samples"]["labeled"] == 1
+    assert "reference" not in gf["challenger"]["metrics"]
+    assert (await client.post(f"/api/ml/models/{weak_id}/promote", headers=auth_headers, json={})).status_code == 409
+    r = await client.post(f"/api/ml/models/{good_id}/promote", headers=auth_headers, json={"note": "reviewed"})
+    assert r.status_code == 200 and r.json()["status"] == "active"
+    await app.state.redis.set(f"{DRIFT_FLAG_PREFIX}gate_futures", "1")
+    review = {m["model"]: m for m in (await client.get("/api/ml/review", headers=auth_headers)).json()}
+    assert review["gate_futures"]["mode"] == "ML IGNORED (drift)"
+    assert (await client.post("/api/ml/gate_futures/retire", headers=auth_headers, json={"reason": "drift"})).status_code == 200
+    assert (await client.post("/api/ml/gate_futures/retire", headers=auth_headers, json={"reason": "again"})).status_code == 404
+    async with app.state.db_session_factory() as s:
+        kinds = [a.event_type for a in (await s.execute(select(AuditLog))).scalars()]
+    assert "ml.promoted" in kinds and "ml.champion_retired" in kinds
+    for url in ("/api/ml/predictions", "/api/ml/data-quality", "/api/ml/samples?labeled=true"):
+        assert (await client.get(url, headers=auth_headers)).status_code == 200, url
+
+
+async def test_no_endpoint_leaks_secrets(app, client, auth_headers):
+    body = json.dumps([(await client.get(u, headers=auth_headers)).text for u in ("/api/venues", "/api/summary", "/api/system/health")])
+    for key in ("API_SECRET", "api_secret", "JWT_SECRET", "password"):
+        assert key not in body
+    async with app.state.db_session_factory() as s:
+        assert (await s.execute(select(Notification))).first() is None

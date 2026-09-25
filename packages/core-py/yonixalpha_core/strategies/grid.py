@@ -44,6 +44,9 @@ DEFAULTS = {
     "taker_fee_bps": "4.5",
 }
 ZERO = Decimal(0)
+# Operator start/stop requests from the dashboard, consumed by the paper grid
+# loop on its next tick (it holds the live price the start/stop needs).
+COMMAND_KEY = "yx:grid:cmd"
 
 
 @dataclass
@@ -215,3 +218,18 @@ def step(s: GridState, mid: Decimal, params: dict) -> list[dict]:
         s.orders = []
     s.history = (s.history + [{"t": len(s.history), **e} for e in events])[-200:]
     return events
+
+
+def session_summary(status: str, data: dict) -> dict:
+    """Operator-facing summary of a stored grid session (strategy_states row)."""
+    out: dict = {"status": status, "reason": data.get("reason") or data.get("stopped_reason") or None,
+                 "reserved": data.get("reserved"), "worst_case_loss": data.get("worst_case_loss"),
+                 "started_at": data.get("started_at"), "updated": data.get("updated"), "last_mid": data.get("last_mid")}
+    if "grid" in data:
+        s = from_json(data["grid"])
+        equity = Decimal(data["final_equity"]) if data.get("final_equity") else s.equity
+        out.update(equity=str(equity), realized_pnl=str(s.realized_pnl), fees=str(s.fees), fills=s.fills,
+                   net_position=str(s.net_position), unrealized=str(s.unrealized), drawdown_pct=str(s.drawdown_pct),
+                   range_lower=str(s.range_lower), range_upper=str(s.range_upper), levels=len(s.levels),
+                   paused=s.paused, pnl=str(equity - s.starting_equity))
+    return out

@@ -1,11 +1,19 @@
-from fastapi import APIRouter, Depends, Query
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, Field
+from redis.asyncio import Redis
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_username, get_db
+from app.api.deps import get_current_username, get_db, get_redis
+from app.api.util import jsonable, user_id
 from app.schemas.common import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, Page
 from app.schemas.ml import MLStatsOut, ModelVersionOut
-from yonixalpha_core.db.models import MLFeatureSnapshot, ModelVersion
+from yonixalpha_core import events
+from yonixalpha_core.db.models import DataQualityEvent, MLFeatureSnapshot, ModelVersion
+from yonixalpha_core.ml import registry
+from yonixalpha_core.ml.gate_features import DRIFT_FLAG_PREFIX, ENGINES_FOR_MODEL, FEATURE_VERSION, FEATURES_FOR_MODEL
 
 router = APIRouter(prefix="/ml", tags=["ml"])
 
@@ -43,3 +51,118 @@ async def get_stats(
     total = (await db.execute(select(func.count()).select_from(MLFeatureSnapshot))).scalar_one()
     labeled = (await db.execute(select(func.count()).select_from(MLFeatureSnapshot).where(MLFeatureSnapshot.label.is_not(None)))).scalar_one()
     return MLStatsOut(total_features=total, labeled_features=labeled, unlabeled_features=total - labeled)
+
+
+# --- review (spec §43-46): champion/challenger, promotion, drift, data quality ---
+
+class PromoteIn(BaseModel):
+    note: str | None = Field(None, max_length=500)
+
+
+class RetireIn(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)
+
+
+def _model_summary(m: ModelVersion | None) -> dict | None:
+    if m is None:
+        return None
+    metrics = {k: v for k, v in (m.metrics or {}).items() if k != "reference"}
+    return jsonable({"id": m.id, "name": m.name, "version": m.version, "status": m.status, "feature_names": m.feature_names,
+                     "training_samples": m.training_sample_count, "trained_at": m.trained_at, "activated_at": m.activated_at,
+                     "metrics": metrics})
+
+
+@router.get("/review")
+async def review(db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
+                 _: str = Depends(get_current_username)) -> list[dict]:
+    out = []
+    for name, engines in ENGINES_FOR_MODEL.items():
+        champion = await registry.get_active_model_row(db, name)
+        challenger = (await db.execute(select(ModelVersion).where(ModelVersion.name == name, ModelVersion.status == "challenger")
+                                       .order_by(ModelVersion.version.desc()).limit(1))).scalar_one_or_none()
+        counts = (await db.execute(select(
+            func.count(),
+            func.count().filter(MLFeatureSnapshot.label.is_not(None)),
+            func.count().filter(MLFeatureSnapshot.quality_status == "ok"),
+            func.count().filter(MLFeatureSnapshot.quality_status == "quarantined"),
+            func.count().filter(MLFeatureSnapshot.ml_score.is_not(None)),
+        ).where(MLFeatureSnapshot.engine.in_(engines), MLFeatureSnapshot.feature_version == FEATURE_VERSION))).one()
+        out.append({
+            "model": name, "engines": engines, "feature_version": FEATURE_VERSION, "features": FEATURES_FOR_MODEL[name],
+            "champion": _model_summary(champion), "challenger": _model_summary(challenger),
+            "drift_flag": bool(await redis.exists(f"{DRIFT_FLAG_PREFIX}{name}")),
+            "drift": ((champion.metrics or {}).get("drift") if champion else None),
+            "samples": {"total": counts[0], "labeled": counts[1], "quality_ok": counts[2], "quarantined": counts[3],
+                        "scored": counts[4]},
+            "mode": "RULES ONLY" if champion is None else ("ML IGNORED (drift)" if await redis.exists(f"{DRIFT_FLAG_PREFIX}{name}")
+                                                          else "ML ADVISORY (can only add caution)"),
+        })
+    return out
+
+
+@router.post("/models/{model_id}/promote")
+async def promote(model_id: UUID, body: PromoteIn, request: Request, db: AsyncSession = Depends(get_db),
+                  redis: Redis = Depends(get_redis), username: str = Depends(get_current_username)) -> dict:
+    mv = await db.get(ModelVersion, model_id)
+    if mv is None:
+        raise HTTPException(404, "model not found")
+    try:
+        await registry.promote_challenger(db, mv, await user_id(db, username), body.note)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    await db.commit()
+    await redis.delete(f"{DRIFT_FLAG_PREFIX}{mv.name}")
+    await events.publish(redis, "ml.model.updated", {"model": mv.name, "version": mv.version, "status": "active"}, "api")
+    return _model_summary(mv)
+
+
+@router.post("/{name}/retire")
+async def retire(name: str, body: RetireIn, request: Request, db: AsyncSession = Depends(get_db),
+                 redis: Redis = Depends(get_redis), username: str = Depends(get_current_username)) -> dict:
+    row = await registry.retire_champion(db, name, await user_id(db, username), body.reason)
+    if row is None:
+        raise HTTPException(404, "no active model with that name")
+    await db.commit()
+    await events.publish(redis, "ml.model.updated", {"model": name, "version": row.version, "status": "retired"}, "api")
+    return {"retired": _model_summary(row), "note": "decisions now use rules only for this model's engines"}
+
+
+@router.get("/predictions")
+async def predictions(model: str | None = None, limit: int = Query(100, ge=1, le=MAX_PAGE_LIMIT),
+                      db: AsyncSession = Depends(get_db), _: str = Depends(get_current_username)) -> list[dict]:
+    """Scored decisions with their eventual outcome (null until the trade closes)."""
+    q = select(MLFeatureSnapshot, ModelVersion.name, ModelVersion.version).join(
+        ModelVersion, ModelVersion.id == MLFeatureSnapshot.model_version_id).order_by(MLFeatureSnapshot.created_at.desc()).limit(limit)
+    if model:
+        q = q.where(ModelVersion.name == model)
+    rows = (await db.execute(q)).all()
+    return jsonable([{"id": f.id, "model": n, "version": v, "engine": f.engine, "symbol": f.symbol, "score": f.ml_score,
+                      "label": f.label, "outcome": f.outcome, "assessment_id": f.assessment_id, "at": f.created_at}
+                     for f, n, v in rows])
+
+
+@router.get("/data-quality")
+async def data_quality(limit: int = Query(DEFAULT_PAGE_LIMIT, ge=1, le=MAX_PAGE_LIMIT), offset: int = Query(0, ge=0),
+                       db: AsyncSession = Depends(get_db), _: str = Depends(get_current_username)) -> dict:
+    total = (await db.execute(select(func.count()).select_from(DataQualityEvent))).scalar_one()
+    by_issue = (await db.execute(select(DataQualityEvent.issue, func.count()).group_by(DataQualityEvent.issue))).all()
+    rows = (await db.execute(select(DataQualityEvent).order_by(DataQualityEvent.created_at.desc()).limit(limit).offset(offset))).scalars().all()
+    return jsonable({"total": total, "by_issue": dict(by_issue),
+                     "items": [{"id": e.id, "source": e.source, "record_type": e.record_type, "record_id": e.record_id,
+                                "issue": e.issue, "detail": e.detail, "at": e.created_at} for e in rows]})
+
+
+@router.get("/samples")
+async def samples(engine: str | None = None, labeled: bool | None = None, limit: int = Query(DEFAULT_PAGE_LIMIT, ge=1, le=MAX_PAGE_LIMIT),
+                  offset: int = Query(0, ge=0), db: AsyncSession = Depends(get_db), _: str = Depends(get_current_username)) -> dict:
+    filters = [MLFeatureSnapshot.feature_version == FEATURE_VERSION]
+    if engine:
+        filters.append(MLFeatureSnapshot.engine == engine)
+    if labeled is not None:
+        filters.append(MLFeatureSnapshot.label.is_not(None) if labeled else MLFeatureSnapshot.label.is_(None))
+    total = (await db.execute(select(func.count()).select_from(MLFeatureSnapshot).where(*filters))).scalar_one()
+    rows = (await db.execute(select(MLFeatureSnapshot).where(*filters).order_by(MLFeatureSnapshot.created_at.desc())
+                             .limit(limit).offset(offset))).scalars().all()
+    return jsonable({"total": total, "items": [{"id": f.id, "engine": f.engine, "symbol": f.symbol, "features": f.features,
+                                                "label": f.label, "outcome": f.outcome, "quality": f.quality_status,
+                                                "score": f.ml_score, "at": f.created_at} for f in rows]})

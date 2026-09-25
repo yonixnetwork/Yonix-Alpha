@@ -2,13 +2,15 @@ import io
 from datetime import datetime, timezone
 from typing import Any
 
-import joblib
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yonixalpha_core.db.models import ModelVersion
 from yonixalpha_core.ml.model import MLModel, NullModel
-from yonixalpha_core.ml.sklearn_model import SklearnModel
+
+# joblib / scikit-learn are imported where a model is actually loaded or
+# saved, so services without the `ml` extra (the API) can still review,
+# promote and retire models by their database rows.
 
 
 async def get_active_model_row(session: AsyncSession, name: str) -> ModelVersion | None:
@@ -31,6 +33,10 @@ async def get_active_model(session: AsyncSession, name: str) -> MLModel:
     row = await get_active_model_row(session, name)
     if row is None:
         return NullModel()
+    import joblib
+
+    from yonixalpha_core.ml.sklearn_model import SklearnModel
+
     estimator = joblib.load(io.BytesIO(row.artifact))
     return SklearnModel(model_id=row.id, name=row.name, version=row.version, estimator=estimator, feature_names=row.feature_names)
 
@@ -55,6 +61,8 @@ async def register_trained_model(
     next_version = next_version_result.scalar_one() + 1
 
     buffer = io.BytesIO()
+    import joblib
+
     joblib.dump(estimator, buffer)
 
     model_version = ModelVersion(

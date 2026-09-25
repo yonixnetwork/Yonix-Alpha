@@ -122,9 +122,9 @@ async def test_paper_accounts_and_reset(client, auth_headers):
     r = await client.get("/api/control/paper/accounts", headers=auth_headers)
     names = {a["name"]: a for a in r.json()}
     assert names["solana"]["equity"] == "10.000000000000000000" and names["solana"]["closed_positions"] == 0
-    r = await client.post("/api/control/paper/accounts/solana/reset", json={"starting_balance": "5"}, headers=auth_headers)
+    r = await client.post("/api/control/paper/accounts/solana/reset", json={"starting_balance": "5", "confirm": "solana"}, headers=auth_headers)
     assert r.status_code == 200 and r.json()["cash_balance"] == "5"
-    assert (await client.post("/api/control/paper/accounts/solana/reset", json={"starting_balance": "-1"},
+    assert (await client.post("/api/control/paper/accounts/solana/reset", json={"starting_balance": "-1", "confirm": "solana"},
                               headers=auth_headers)).status_code == 422
 
 

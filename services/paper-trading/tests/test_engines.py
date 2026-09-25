@@ -152,3 +152,20 @@ async def test_grid_stops_when_strategy_turned_off(session_factory, redis_client
     assert (await run_grid(session_factory, redis_client, None, venues, NOW))["status"] == "stopped"
     async with session_factory() as s:
         assert (await store.get_paper_account(s, "hyperliquid")).cash_balance == Decimal(1000)
+
+
+async def test_manual_grid_waits_for_operator_start_and_stops_on_request(session_factory, redis_client):
+    from yonixalpha_core.strategies import grid as grid_math
+
+    venues = {"hyperliquid": Venue("100")}
+    async with session_factory() as s:
+        await store.save_strategy_config(s, "hyperliquid_grid", {"coin": "BTC", "capital": "50"}, None)
+        await store.set_strategy_mode(s, "hyperliquid_grid", StrategyMode.MANUAL, None)
+        await s.commit()
+    assert (await run_grid(session_factory, redis_client, None, venues, NOW))["status"] == "not started"
+    await redis_client.set(grid_math.COMMAND_KEY, "start")
+    assert (await run_grid(session_factory, redis_client, None, venues, NOW))["status"] == "running"
+    await redis_client.set(grid_math.COMMAND_KEY, "stop")
+    assert (await run_grid(session_factory, redis_client, None, venues, NOW))["status"] == "stopped"
+    async with session_factory() as s:
+        assert (await store.get_paper_account(s, "hyperliquid")).cash_balance == Decimal(1000)

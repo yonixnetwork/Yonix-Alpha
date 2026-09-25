@@ -100,17 +100,25 @@ async def run_grid(session_factory, redis: Redis, app_settings: Any, venues: dic
         coin = params["coin"]
         row = await load_state(session, coin)
         killed = await kill_switch.is_engaged(redis)
+        command = await redis.getdel(grid.COMMAND_KEY)
         try:
             mid = await venues["hyperliquid"].mid(coin)
         except VenueError as exc:
+            if command:
+                await redis.set(grid.COMMAND_KEY, command, ex=600)  # keep it for the next tick
             return {"status": f"no price: {exc}"}
 
-        if row is not None and row.status in ("running", "paused") and (mode == StrategyMode.OFF or killed):
-            await stop_grid(session, redis, row, mid, "kill switch" if killed else "strategy OFF")
+        if row is not None and row.status in ("running", "paused") and (mode == StrategyMode.OFF or killed or command == "stop"):
+            reason = "kill switch" if killed else ("strategy OFF" if mode == StrategyMode.OFF else "operator stop")
+            await stop_grid(session, redis, row, mid, reason)
             await session.commit()
             return {"status": "stopped"}
         if row is None or row.status in ("stopped", "refused"):
-            if mode in (StrategyMode.PAPER, StrategyMode.AUTO) and not killed and not (row and row.status == "refused"):
+            # PAPER/AUTO start on their own (unless a previous start was refused);
+            # MANUAL waits for an operator start; an operator start also retries
+            # a refused grid (it is re-checked against the risk budget).
+            auto = mode in (StrategyMode.PAPER, StrategyMode.AUTO) and not (row and row.status == "refused")
+            if mode != StrategyMode.OFF and not killed and (auto or command == "start"):
                 row = await start_grid(session, redis, app_settings, params, mid)
                 await session.commit()
                 return {"status": row.status}

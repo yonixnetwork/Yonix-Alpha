@@ -24,6 +24,7 @@ from yonixalpha_core.venues.common import (
     dec,
     ms_to_dt,
     raise_for,
+    tracked,
 )
 
 MAINNET = "https://api.bybit.com"
@@ -59,6 +60,9 @@ class BybitClient:
         return bool(self.api_key and self.api_secret)
 
     async def _get(self, path: str, params: dict[str, Any], auth: bool = False) -> Any:
+        return await tracked("bybit", self._get_raw(path, params, auth))
+
+    async def _get_raw(self, path: str, params: dict[str, Any], auth: bool = False) -> Any:
         await budgeted(self.budget, "bybit")
         qs = query_string(params)
         headers = {}

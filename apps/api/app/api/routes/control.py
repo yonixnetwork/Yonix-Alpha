@@ -57,12 +57,13 @@ from yonixalpha_core.safety.rules import validate_blacklist_rule, validate_custo
 from yonixalpha_core.safety.settings import HARD_LIMITS, default_settings_for, settings_to_dict
 from yonixalpha_core.solana import pump_stream
 from yonixalpha_core.solana.assembler import RULE_FIELDS
+from yonixalpha_core.strategies.catalog import MODE_KEYS
 from yonixalpha_core.state_machine import CandidateState, apply_transition
 
 router = APIRouter(prefix="/control", tags=["control"])
 
-SCOPES = ["GLOBAL", "solana_fresh", "solana_migration", "binance_futures"]
-STRATEGIES = ["solana_fresh", "solana_migration", "binance_futures"]
+SCOPES = ["GLOBAL", "solana_fresh", "solana_migration", "solana_momentum", "binance_futures", "bybit_futures", "hyperliquid_perps"]
+STRATEGIES = MODE_KEYS
 APPROVAL_WINDOW = timedelta(minutes=10)
 FUNNEL_KEY = f"{pump_stream.PREFIX}:funnel"
 
@@ -206,6 +207,24 @@ async def toggle_blacklist(rule_id: UUID, body: EnabledUpdate, request: Request,
     return BlacklistOut.model_validate(row)
 
 
+@router.put("/blacklist/{rule_id}", response_model=BlacklistOut)
+async def edit_blacklist(rule_id: UUID, body: BlacklistIn, request: Request, db: AsyncSession = Depends(get_db),
+                         username: str = Depends(get_current_username)):
+    row = await db.get(BlacklistEntry, rule_id)
+    if row is None:
+        raise HTTPException(404, "rule not found")
+    value = body.value.strip()
+    errors = validate_blacklist_rule(body.scope, body.field, value, body.match_type)
+    if errors:
+        raise HTTPException(422, {"errors": errors})
+    before = {"scope": row.scope, "field": row.field, "match_type": row.match_type, "value": row.value, "reason": row.reason}
+    row.scope, row.field, row.match_type, row.value, row.reason = body.scope, body.field, body.match_type, value, body.reason
+    row.updated_at = datetime.now(timezone.utc)
+    await _audit(db, username, request, "blacklist.edited", {"id": str(rule_id), "before": before, "after": body.model_dump()})
+    await db.commit()
+    return BlacklistOut.model_validate(row)
+
+
 @router.delete("/blacklist/{rule_id}", status_code=204)
 async def delete_blacklist(rule_id: UUID, request: Request, db: AsyncSession = Depends(get_db),
                            username: str = Depends(get_current_username)) -> None:
@@ -256,6 +275,26 @@ async def toggle_rule(rule_id: UUID, body: EnabledUpdate, request: Request, db: 
     row.enabled = body.enabled
     row.updated_at = datetime.now(timezone.utc)
     await _audit(db, username, request, "custom_rule.toggled", {"id": str(rule_id), "enabled": body.enabled})
+    await db.commit()
+    return CustomRuleOut.model_validate(row)
+
+
+@router.put("/rules/{rule_id}", response_model=CustomRuleOut)
+async def edit_rule(rule_id: UUID, body: CustomRuleIn, request: Request, db: AsyncSession = Depends(get_db),
+                    username: str = Depends(get_current_username)):
+    row = await db.get(CustomRuleEntry, rule_id)
+    if row is None:
+        raise HTTPException(404, "rule not found")
+    errors = validate_custom_rule(body.field, body.op, body.threshold, body.action, RULE_FIELDS)
+    if body.scope not in SCOPES:
+        errors.append(f"scope must be one of {SCOPES}")
+    if errors:
+        raise HTTPException(422, {"errors": errors})
+    before = {k: getattr(row, k) for k in body.model_dump()}
+    for k, v in body.model_dump().items():
+        setattr(row, k, v)
+    row.updated_at = datetime.now(timezone.utc)
+    await _audit(db, username, request, "custom_rule.edited", {"id": str(rule_id), "before": before, "after": body.model_dump()})
     await db.commit()
     return CustomRuleOut.model_validate(row)
 
@@ -321,7 +360,8 @@ async def get_assessment(assessment_id: UUID, db: AsyncSession = Depends(get_db)
                             timeline=[TimelineEventOut.model_validate(t) for t in timeline])
 
 
-async def _decide_approval(assessment_id: UUID, approve: bool, request: Request, db: AsyncSession, username: str):
+async def _decide_approval(assessment_id: UUID, approve: bool, request: Request, db: AsyncSession, username: str,
+                           ignore: bool = False):
     r = await db.get(RiskAssessment, assessment_id)
     if r is None:
         raise HTTPException(404, "assessment not found")
@@ -332,6 +372,14 @@ async def _decide_approval(assessment_id: UUID, approve: bool, request: Request,
         r.approval_state = "EXPIRED"
         await db.commit()
         raise HTTPException(409, "assessment is older than the approval window; wait for a fresh evaluation")
+    if ignore:
+        # Dismissed without a verdict: nothing is rejected, the candidate keeps
+        # being evaluated, and a later assessment can ask again.
+        r.approval_state = "IGNORED"
+        await store.add_timeline_event(db, "manual_ignore", now, {"by": username}, candidate_id=r.candidate_id, assessment_id=r.id)
+        await _audit(db, username, request, "assessment.ignored", {"assessment_id": str(r.id), "asset_id": r.asset_id, "engine": r.engine})
+        await db.commit()
+        return AssessmentSummary(**_summary(r))
     r.approval_state = "APPROVED" if approve else "DECLINED"
     r.approved_by = await _user_id(db, username)
     r.approved_at = now
@@ -359,6 +407,12 @@ async def approve_assessment(assessment_id: UUID, request: Request, db: AsyncSes
 async def decline_assessment(assessment_id: UUID, request: Request, db: AsyncSession = Depends(get_db),
                              username: str = Depends(get_current_username)):
     return await _decide_approval(assessment_id, False, request, db, username)
+
+
+@router.post("/assessments/{assessment_id}/ignore", response_model=AssessmentSummary)
+async def ignore_assessment(assessment_id: UUID, request: Request, db: AsyncSession = Depends(get_db),
+                            username: str = Depends(get_current_username)):
+    return await _decide_approval(assessment_id, False, request, db, username, ignore=True)
 
 
 # --- paper accounts -----------------------------------------------------------
@@ -393,6 +447,8 @@ async def reset_paper_account(name: str, body: PaperResetIn, request: Request, d
                               redis: Redis = Depends(get_redis), username: str = Depends(get_current_username)):
     if name not in store.DEFAULT_PAPER_ACCOUNTS:
         raise HTTPException(404, "unknown paper account")
+    if body.confirm != name:
+        raise HTTPException(422, f"type the account name ({name}) in 'confirm' to reset it")
     try:
         balance = Decimal(body.starting_balance)
     except InvalidOperation as exc:

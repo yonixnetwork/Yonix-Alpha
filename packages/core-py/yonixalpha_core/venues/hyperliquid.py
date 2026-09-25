@@ -22,6 +22,7 @@ from yonixalpha_core.venues.common import (
     dec,
     ms_to_dt,
     raise_for,
+    tracked,
 )
 
 MAINNET = "https://api.hyperliquid.xyz"
@@ -40,6 +41,9 @@ class HyperliquidInfo:
         self.taker_fee_bps = taker_fee_bps
 
     async def _info(self, body: dict[str, Any]) -> Any:
+        return await tracked("hyperliquid", self._info_raw(body))
+
+    async def _info_raw(self, body: dict[str, Any]) -> Any:
         await budgeted(self.budget, "hyperliquid")
         try:
             resp = await self.client.post(f"{self.base}/info", json=body, timeout=10.0)

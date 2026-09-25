@@ -17,6 +17,7 @@ from yonixalpha_core.venues.common import (
     dec,
     ms_to_dt,
     raise_for,
+    tracked,
 )
 
 BASE = "https://fapi.binance.com"
@@ -31,6 +32,9 @@ class BinanceFuturesPublic:
         self.client, self.budget, self.base, self.taker_fee_bps = client, budget, base, taker_fee_bps
 
     async def _get(self, path: str, params: dict) -> object:
+        return await tracked("binance", self._get_raw(path, params))
+
+    async def _get_raw(self, path: str, params: dict) -> object:
         await budgeted(self.budget, "binance")
         try:
             resp = await self.client.get(f"{self.base}{path}", params=params, timeout=10.0)

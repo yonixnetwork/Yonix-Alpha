@@ -145,6 +145,8 @@ class PaperAccountOut(BaseModel):
 
 class PaperResetIn(BaseModel):
     starting_balance: str
+    # The account name typed again: a reset erases the book's running record.
+    confirm: str
 
 
 class PipelineOut(BaseModel):

@@ -43,3 +43,6 @@ class PaperPositionOut(BaseModel):
     lowest_price: Decimal | None = None
     last_price: Decimal | None = None
     last_marked_at: datetime | None = None
+    management_paused: bool = False
+    exit_requested: bool = False
+    account_id: UUID | None = None

@@ -1,14 +1,17 @@
+from datetime import datetime, timedelta, timezone
+
 from fastapi import APIRouter, Depends, Query
 from redis.asyncio import Redis
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api import health_state
 from app.api.deps import get_current_username, get_db, get_redis, get_settings
 from app.schemas.common import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, Page
 from app.schemas.system import KillSwitchSummary, ServiceStatus, SystemEventOut, SystemStatusOut
-from yonixalpha_core import kill_switch
+from yonixalpha_core import events, kill_switch
 from yonixalpha_core.config import Settings
-from yonixalpha_core.db.models import SystemEvent
+from yonixalpha_core.db.models import DataQualityEvent, Notification, RiskAssessment, SystemEvent
 
 router = APIRouter(prefix="/system", tags=["system"])
 
@@ -91,3 +94,45 @@ async def list_events(
     result = await db.execute(select(SystemEvent).where(*filters).order_by(SystemEvent.created_at.desc()).limit(limit).offset(offset))
     events = result.scalars().all()
     return Page(items=[SystemEventOut.model_validate(e) for e in events], total=total, limit=limit, offset=offset)
+
+
+@router.get("/health")
+async def health(
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+    _: str = Depends(get_current_username),
+) -> dict:
+    items = await health_state.connections(db, redis, settings)
+    return {"overall": health_state.worst([c["state"] for c in items]), "states": health_state.STATES, "connections": items}
+
+
+@router.get("/observability")
+async def observability(
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+    _: str = Depends(get_current_username),
+) -> dict:
+    """Counters for the operator: realtime events published (since Redis
+    started), decisions / notifications / errors / quarantined ML samples in
+    the last 24 h, and Redis memory."""
+    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    decisions = (await db.execute(select(RiskAssessment.decision, func.count()).where(
+        RiskAssessment.evaluated_at >= since).group_by(RiskAssessment.decision))).all()
+    notes = (await db.execute(select(Notification.kind, func.count()).where(
+        Notification.created_at >= since).group_by(Notification.kind))).all()
+    errors = (await db.execute(select(SystemEvent.service, func.count()).where(
+        SystemEvent.created_at >= since, SystemEvent.severity.in_(["error", "critical"])).group_by(SystemEvent.service))).all()
+    quality = (await db.execute(select(DataQualityEvent.issue, func.count()).where(
+        DataQualityEvent.created_at >= since).group_by(DataQualityEvent.issue))).all()
+    memory = await redis.info("memory")
+    return {
+        "events_published": {k: int(v) for k, v in (await redis.hgetall(events.COUNTS)).items()},
+        "decisions_24h": dict(decisions),
+        "notifications_24h": dict(notes),
+        "errors_24h": dict(errors),
+        "data_quality_24h": dict(quality),
+        "websocket_clients": int(await redis.get("yx:ws:clients") or 0),
+        "redis_memory": {"used": memory.get("used_memory_human"), "max": memory.get("maxmemory_human"),
+                         "policy": memory.get("maxmemory_policy")},
+    }

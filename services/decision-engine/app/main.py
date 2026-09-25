@@ -10,6 +10,7 @@ from yonixalpha_core.events import heartbeat_loop
 from yonixalpha_core.db.base import make_engine, make_session_factory
 from yonixalpha_core.db.models import SystemEvent, TradingCandidate
 from yonixalpha_core.db.redis import make_redis
+from yonixalpha_core.venues.common import venue_health_snapshot
 from yonixalpha_core.logging import configure_logging, get_logger
 from yonixalpha_core.notify import send_telegram_alert
 from yonixalpha_core.solana.assembler import Sources
@@ -153,7 +154,7 @@ async def run() -> None:
         await asyncio.gather(
             _evaluation_loop(session_factory, redis, settings, stop_event, sources),
             _futures_loop(session_factory, redis, settings, venues, stop_event),
-            heartbeat_loop(settings, "decision-engine", stop_event),
+            heartbeat_loop(settings, "decision-engine", stop_event, lambda: {"venues": venue_health_snapshot()}),
         )
     finally:
         await _record_system_event(session_factory, "service_stopped", "info")

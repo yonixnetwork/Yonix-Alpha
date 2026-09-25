@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
@@ -10,6 +11,7 @@ from yonixalpha_core.logging import configure_logging, get_logger
 from yonixalpha_core.db.base import make_engine, make_session_factory
 from yonixalpha_core.db.models import User
 from yonixalpha_core.db.redis import make_redis
+from yonixalpha_core.venues.registry import build_venues
 
 log = get_logger("api.main")
 
@@ -47,12 +49,17 @@ async def lifespan(app: FastAPI):
     app.state.engine = engine
     app.state.db_session_factory = session_factory
     app.state.redis = redis
+    # Public market data / read-only account calls for the venue pages.
+    http = httpx.AsyncClient(headers={"User-Agent": "yonixalpha-api"})
+    app.state.http = http
+    app.state.venues = build_venues(http, settings)
 
     await _seed_admin_user(session_factory)
 
     log.info("api.startup", app_env=settings.APP_ENV, trading_enabled=settings.TRADING_ENABLED)
     yield
 
+    await http.aclose()
     await engine.dispose()
     await redis.aclose()
     log.info("api.shutdown")

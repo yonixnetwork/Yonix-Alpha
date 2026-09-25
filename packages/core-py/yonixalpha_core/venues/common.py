@@ -69,6 +69,39 @@ async def budgeted(budget: RateBudget, label: str) -> None:
         raise VenueError(f"{label}: client-side rate budget exhausted")
 
 
+# Per-process record of each venue's last successful and failed call, for
+# connection monitoring: services put it in their heartbeat, the API turns
+# it into CONNECTED / DEGRADED / OFFLINE. Error text never includes
+# credentials (requests are signed in headers, not echoed back).
+VENUE_HEALTH: dict[str, dict[str, Any]] = {}
+
+
+def _health(venue: str) -> dict[str, Any]:
+    return VENUE_HEALTH.setdefault(venue, {"last_ok_at": None, "last_error_at": None, "last_error": None,
+                                           "consecutive_failures": 0, "calls": 0})
+
+
+async def tracked(venue: str, coro) -> Any:
+    h = _health(venue)
+    h["calls"] += 1
+    try:
+        out = await coro
+    except NotConfigured:
+        raise
+    except VenueError as exc:
+        h["last_error_at"] = datetime.now(timezone.utc).isoformat()
+        h["last_error"] = str(exc)[:200]
+        h["consecutive_failures"] += 1
+        raise
+    h["last_ok_at"] = datetime.now(timezone.utc).isoformat()
+    h["consecutive_failures"] = 0
+    return out
+
+
+def venue_health_snapshot() -> dict[str, dict[str, Any]]:
+    return {k: dict(v) for k, v in VENUE_HEALTH.items()}
+
+
 def raise_for(resp: httpx.Response, label: str) -> Any:
     if resp.status_code != 200:
         raise VenueError(f"{label}: HTTP {resp.status_code} {resp.text[:160]}")
