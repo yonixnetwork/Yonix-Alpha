@@ -2,6 +2,7 @@ import asyncio
 import signal
 
 from yonixalpha_core.config import get_settings
+from yonixalpha_core.events import heartbeat_loop
 from yonixalpha_core.db.base import make_engine, make_session_factory
 from yonixalpha_core.db.models import SystemEvent
 from yonixalpha_core.logging import configure_logging, get_logger
@@ -68,7 +69,7 @@ async def run() -> None:
     log.info("ml.started")
 
     try:
-        await _training_loop(session_factory, stop_event)
+        await asyncio.gather(_training_loop(session_factory, stop_event), heartbeat_loop(settings, "ml", stop_event))
     finally:
         await _record_system_event(session_factory, "service_stopped", "info")
         await engine.dispose()

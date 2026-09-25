@@ -7,6 +7,7 @@ import httpx
 from sqlalchemy import select
 
 from yonixalpha_core.config import get_settings
+from yonixalpha_core.events import heartbeat_loop
 from yonixalpha_core.db.base import make_engine, make_session_factory
 from yonixalpha_core.db.models import PaperPosition, SystemEvent, TradingCandidate
 from yonixalpha_core.db.redis import make_redis
@@ -150,7 +151,10 @@ async def run() -> None:
     http_client = httpx.AsyncClient()
     jupiter = JupiterClient(http_client, settings.JUPITER_API_KEY, RateBudget(JUPITER_REQUESTS_PER_MINUTE))
     try:
-        await _paper_trading_loop(session_factory, stop_event, settings.PAPER_TRADING_PER_LEG_COST_BPS, redis, jupiter)
+        await asyncio.gather(
+            _paper_trading_loop(session_factory, stop_event, settings.PAPER_TRADING_PER_LEG_COST_BPS, redis, jupiter),
+            heartbeat_loop(settings, "paper-trading", stop_event),
+        )
     finally:
         await _record_system_event(session_factory, "service_stopped", "info")
         await http_client.aclose()

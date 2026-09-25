@@ -2,6 +2,7 @@ import httpx
 
 from yonixalpha_core.config import Settings
 from yonixalpha_core.logging import get_logger
+from yonixalpha_core.redact import redact_text
 
 log = get_logger("core.notify")
 
@@ -35,7 +36,8 @@ async def send_telegram_alert(settings: Settings, text: str, client: httpx.Async
             async with httpx.AsyncClient() as owned_client:
                 response = await owned_client.post(url, json=payload, timeout=TELEGRAM_TIMEOUT_SECONDS)
     except httpx.HTTPError as exc:
-        log.warning("telegram.alert.network_error", error=str(exc))
+        # The URL embeds the bot token; never let it reach a log line.
+        log.warning("telegram.alert.network_error", error=redact_text(str(exc), [url, settings.TELEGRAM_BOT_TOKEN]))
         return False
 
     if response.status_code != 200:

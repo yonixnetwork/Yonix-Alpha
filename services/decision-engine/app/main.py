@@ -6,6 +6,7 @@ import httpx
 from sqlalchemy import select
 
 from yonixalpha_core.config import get_settings
+from yonixalpha_core.events import heartbeat_loop
 from yonixalpha_core.db.base import make_engine, make_session_factory
 from yonixalpha_core.db.models import SystemEvent, TradingCandidate
 from yonixalpha_core.db.redis import make_redis
@@ -121,7 +122,10 @@ async def run() -> None:
         log.warning("decision-engine.gate_disabled", reason="SOLANA_RPC_URL not set; pump.fun candidates are not evaluated")
 
     try:
-        await _evaluation_loop(session_factory, redis, settings, stop_event, sources)
+        await asyncio.gather(
+            _evaluation_loop(session_factory, redis, settings, stop_event, sources),
+            heartbeat_loop(settings, "decision-engine", stop_event),
+        )
     finally:
         await _record_system_event(session_factory, "service_stopped", "info")
         await http_client.aclose()

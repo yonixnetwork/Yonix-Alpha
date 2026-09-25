@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import httpx
 
 from yonixalpha_core.config import get_settings
+from yonixalpha_core.events import heartbeat_loop
 from yonixalpha_core.db.base import make_engine, make_session_factory
 from yonixalpha_core.db.models import SystemEvent
 from yonixalpha_core.logging import configure_logging, get_logger
@@ -150,7 +151,7 @@ async def run() -> None:
         log.info("engine-solana-migration.started", configured_programs=program_ids)
 
         try:
-            await asyncio.gather(*tasks)
+            await asyncio.gather(*tasks, heartbeat_loop(settings, "engine-solana-migration", stop_event))
         finally:
             await _record_system_event(session_factory, "service_stopped", "info")
             await engine.dispose()

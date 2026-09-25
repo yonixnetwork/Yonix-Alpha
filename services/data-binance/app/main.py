@@ -5,6 +5,7 @@ import signal
 import httpx
 
 from yonixalpha_core.config import get_settings
+from yonixalpha_core.events import heartbeat_loop
 from yonixalpha_core.db.base import make_engine, make_session_factory
 from yonixalpha_core.db.models import SystemEvent
 from yonixalpha_core.db.writers import write_market_snapshot
@@ -91,6 +92,7 @@ async def run() -> None:
 
         try:
             await asyncio.gather(
+                heartbeat_loop(settings, "data-binance", stop_event, None),
                 ws_client.run(stop_event),
                 _rest_health_check_loop(rest_client, session_factory, stop_event),
             )

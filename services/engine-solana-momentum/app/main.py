@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import httpx
 
 from yonixalpha_core.config import get_settings
+from yonixalpha_core.events import heartbeat_loop
 from yonixalpha_core.db.base import make_engine, make_session_factory
 from yonixalpha_core.db.models import SystemEvent
 from yonixalpha_core.logging import configure_logging, get_logger
@@ -133,6 +134,7 @@ async def run() -> None:
 
         try:
             await asyncio.gather(
+                heartbeat_loop(settings, "engine-solana-momentum", stop_event, lambda: {"rpc": rpc.health_snapshot()}),
                 ws_client.run(stop_event),
                 _health_check_loop(rpc, session_factory, stop_event),
             )

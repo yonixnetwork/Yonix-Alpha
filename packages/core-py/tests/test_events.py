@@ -1,0 +1,86 @@
+import asyncio
+import json
+import os
+from types import SimpleNamespace
+
+os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://yonixalpha:yonixalpha_test_pw@localhost:5432/yonixalpha_test")
+
+import pytest_asyncio  # noqa: E402
+from redis.asyncio import from_url  # noqa: E402
+from sqlalchemy import select  # noqa: E402
+from sqlalchemy.ext.asyncio import create_async_engine  # noqa: E402
+
+from yonixalpha_core import events  # noqa: E402
+from yonixalpha_core.db import models  # noqa: F401,E402
+from yonixalpha_core.db.base import Base, make_session_factory  # noqa: E402
+from yonixalpha_core.db.models import Notification, PlatformSetting  # noqa: E402
+
+
+@pytest_asyncio.fixture
+async def redis():
+    r = from_url(os.environ.get("REDIS_URL", "redis://localhost:6379/9"), decode_responses=True)
+    await r.flushdb()
+    yield r
+    await r.flushdb()
+    await r.aclose()
+
+
+@pytest_asyncio.fixture
+async def db():
+    engine = create_async_engine(os.environ["DATABASE_URL"])
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+    async with make_session_factory(engine)() as session:
+        yield session
+    await engine.dispose()
+
+
+async def test_published_events_reach_subscribers_and_are_counted(redis):
+    pubsub = redis.pubsub()
+    await pubsub.subscribe(events.CHANNEL)
+    await pubsub.get_message(timeout=1)  # subscribe confirmation
+    await events.publish(redis, "trade.created", {"id": "x", "size": 1}, "test")
+    await events.publish(redis, "not.a.real.event", {}, "test")
+    msg = None
+    for _ in range(20):
+        msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.2)
+        if msg:
+            break
+    body = json.loads(msg["data"])
+    assert body["type"] == "trade.created" and body["data"] == {"id": "x", "size": 1} and body["source"] == "test"
+    assert await redis.hget(events.COUNTS, "trade.created") == "1"
+    assert await redis.hget(events.COUNTS, "not.a.real.event") is None
+    await pubsub.aclose()
+
+
+async def test_publish_never_raises_without_redis():
+    await events.publish(None, "trade.created", {})
+
+
+async def test_heartbeat_expires_and_reads_back(redis):
+    await events.heartbeat(redis, "svc-a", detail={"k": 1})
+    hb = await events.read_heartbeats(redis, ["svc-a", "svc-b"])
+    assert hb["svc-a"]["status"] == "ok" and hb["svc-a"]["detail"] == {"k": 1} and hb["svc-b"] is None
+    assert 0 < await redis.ttl(f"{events.HEARTBEAT_PREFIX}svc-a") <= events.HEARTBEAT_TTL_SECONDS
+
+
+async def test_notifications_are_stored_and_telegram_follows_preferences(db, redis, monkeypatch):
+    sent = []
+
+    async def fake_send(settings, text):
+        sent.append(text)
+        return True
+
+    monkeypatch.setattr(events, "send_telegram_alert", fake_send)
+    settings = SimpleNamespace()
+    await events.notify(db, redis, settings, "approval_required", "Approve PIPE?", "risk HIGH")
+    await events.notify(db, redis, settings, "tp1", "TP1 hit")  # not a Telegram default
+    db.add(PlatformSetting(key=events.PREFS_KEY, value={"tp1": {"telegram": True}, "approval_required": {"telegram": False}}))
+    await db.flush()
+    await events.notify(db, redis, settings, "tp1", "TP1 again")
+    await events.notify(db, redis, settings, "approval_required", "Approve again?")
+    await db.commit()
+    assert sent == ["[INFO] Approve PIPE?\nrisk HIGH", "[INFO] TP1 again"]
+    assert len((await db.execute(select(Notification))).scalars().all()) == 4
+    await asyncio.sleep(0)
