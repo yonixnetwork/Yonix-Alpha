@@ -18,6 +18,7 @@ can show where opportunities go.
 """
 
 import json
+from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -51,7 +52,7 @@ ACTIVE_STATES = [
     CandidateState.WAITING_FOR_LIQUIDITY.value, CandidateState.WAITING_FOR_APPROVAL.value,
 ]
 ENGINE_STRATEGY = {"discovery": "solana_fresh", "migration": "solana_migration", "momentum": "solana_momentum"}
-MOMENTUM_MIN_AGE_SECONDS = 30 * 60
+MOMENTUM_MIN_AGE_SECONDS = 30 * 60  # default of SafetySettings.momentum_min_age_seconds
 MOMENTUM_ACTIVE_WITHIN_SECONDS = 120
 MOMENTUM_MIN_TX_ACCELERATION = 1.5
 MOMENTUM_REPROMOTE_SECONDS = 3600
@@ -126,15 +127,18 @@ async def create_candidate(
     return candidate
 
 
-def momentum_prefilter(trades: list, now: datetime, created_ts: int | None, settings: SafetySettings) -> tuple[bool, dict[str, Any]]:
-    """Cheap stream-only screen for established tokens: old enough not to be
-    a launch, active now, and trading faster than in the previous window.
-    The full multi-factor momentum signal runs later inside the gate."""
+def momentum_prefilter(trades: list, now: datetime, created_ts: int | None, settings: SafetySettings,
+                       near_migration: bool = False) -> tuple[bool, dict[str, Any]]:
+    """Cheap stream-only screen: old enough not to be a launch (or
+    approaching migration), active now, and trading faster than in the
+    previous window. The full multi-factor momentum signal runs later
+    inside the gate."""
     age = now.timestamp() - created_ts if created_ts else None
     current, prior, ratio = acceleration(trades, now, PREFILTER_WINDOW_SECONDS)
     stats = {"age_seconds": int(age) if age else None, "trades": current, "prior_trades": prior,
-             "tx_acceleration": round(ratio, 2) if ratio else None}
-    ok = (age is not None and age >= MOMENTUM_MIN_AGE_SECONDS and current >= settings.min_trades_in_window
+             "tx_acceleration": round(ratio, 2) if ratio else None, "near_migration": near_migration}
+    old_enough = age is not None and (age >= settings.momentum_min_age_seconds or near_migration)
+    ok = (old_enough and current >= settings.min_trades_in_window
           and prior > 0 and ratio is not None and ratio >= MOMENTUM_MIN_TX_ACCELERATION)
     return ok, stats
 
@@ -280,13 +284,20 @@ async def run_funnel(redis: Redis, session_factory, settings: SafetySettings, no
         if not meta or not meta.get("bonding_curve"):
             continue  # launched before this stream started: curve address unknown
         created_ts = int(meta["created_at"]) if meta.get("created_at") else None
-        if created_ts and now.timestamp() - created_ts < MOMENTUM_MIN_AGE_SECONDS:
-            continue  # still a fresh launch; the discovery engine owns it
         curve = await pump_stream.load_curve(redis, mint)
         if curve is None or curve.complete:
             continue
+        progress = Decimal(observation.curve_context(curve, int(meta.get("initial_real_token_reserves") or 0) or None)
+                           .get("curve_progress") or 0)
+        near = progress >= settings.momentum_near_migration_progress
+        if created_ts and now.timestamp() - created_ts < settings.momentum_min_age_seconds:
+            # A young token belongs to the fresh engine, unless it is close to
+            # migration and the fresh engine did not take it.
+            if (not near or await redis.zscore(pump_stream.PROMOTED, mint) is not None
+                    or await redis.zscore(pump_stream.OBS_LIVE, mint) is not None):
+                continue
         counts["momentum_considered"] += 1
-        ok, stats = momentum_prefilter(await pump_stream.load_trades(redis, mint), now, created_ts, settings)
+        ok, stats = momentum_prefilter(await pump_stream.load_trades(redis, mint), now, created_ts, settings, near)
         if not ok:
             continue
         if active >= budget:
@@ -295,8 +306,9 @@ async def run_funnel(redis: Redis, session_factory, settings: SafetySettings, no
         if not await redis.set(f"{pump_stream.PREFIX}:mom_seen:{mint}", "1", nx=True, ex=MOMENTUM_REPROMOTE_SECONDS):
             continue
         async with session_factory() as session:
-            cand = await create_candidate(session, "momentum", mint, meta, now, "momentum prefilter: accelerating activity",
-                                          {"prefilter": stats})
+            reason = ("momentum prefilter: accelerating activity, approaching migration "
+                      f"({progress:.0%} of the curve sold)" if near else "momentum prefilter: accelerating activity")
+            cand = await create_candidate(session, "momentum", mint, meta, now, reason, {"prefilter": stats})
         if cand is not None:
             active += 1
             counts["momentum_promoted"] += 1

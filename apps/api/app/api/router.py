@@ -10,8 +10,10 @@ from app.api.routes import (
     live,
     ml,
     notifications,
+    observations,
     paper,
     risk,
+    settings_center,
     signals,
     strategies,
     summary,
@@ -39,4 +41,6 @@ api_router.include_router(summary.router)
 api_router.include_router(notifications.router)
 api_router.include_router(tokens.router)
 api_router.include_router(bots.router)
+api_router.include_router(observations.router)
+api_router.include_router(settings_center.router)
 api_router.include_router(ws.router)

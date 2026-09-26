@@ -168,3 +168,36 @@ async def test_momentum_promotes_established_accelerating_tokens_only(redis, ses
     [c] = await candidates(session_factory)
     assert c.engine == "momentum" and c.detail["mint"] == "HOT" and c.detail["strategy"] == "solana_momentum"
     assert (await run_funnel(redis, session_factory, SETTINGS, NOW))["momentum_promoted"] == 0
+
+
+async def test_momentum_takes_young_tokens_approaching_migration_the_fresh_engine_did_not_take(redis, session_factory):
+    async def add(mint, rtok):
+        created = int((NOW - timedelta(minutes=12)).timestamp())
+        await redis.hset(pump_stream.meta_key(mint), mapping={"symbol": mint, "created_at": created, "bonding_curve": "BC",
+                                                              "creator": "C"})
+        await redis.hset(pump_stream.curve_key(mint), mapping={"vsol": 1, "vtok": 1, "updated_at": 1, "rsol": 60 * SOL, "rtok": rtok})
+        await redis.zadd(pump_stream.OBS_FINAL, {mint: 1})  # its fresh observation is over
+        for i in range(10):
+            await trade(redis, mint, int((NOW - timedelta(seconds=590 - i * 10)).timestamp()), f"p{i}", True, 0.1, 30)
+        for i in range(30):
+            await trade(redis, mint, int((NOW - timedelta(seconds=290 - i * 5)).timestamp()), f"r{i}", True, 0.1, 30)
+        await redis.zadd(pump_stream.ACTIVE, {mint: int(NOW.timestamp()) - 10})
+
+    await add("NEAR", 150_000_000_000_000)  # ~81% of the curve sold
+    await add("EARLY", 700_000_000_000_000)  # ~12%
+    counts = await run_funnel(redis, session_factory, SETTINGS, NOW)
+    assert counts["momentum_promoted"] == 1
+    [c] = await candidates(session_factory)
+    assert c.detail["mint"] == "NEAR" and c.detail["prefilter"]["near_migration"] is True
+    assert "approaching migration" in c.state_history[0]["reason"]
+
+
+async def test_momentum_leaves_tokens_the_fresh_engine_is_still_watching(redis, session_factory):
+    created = int((NOW - timedelta(minutes=12)).timestamp())
+    await redis.hset(pump_stream.meta_key("WATCHED"), mapping={"symbol": "W", "created_at": created, "bonding_curve": "BC", "creator": "C"})
+    await redis.hset(pump_stream.curve_key("WATCHED"), mapping={"vsol": 1, "vtok": 1, "updated_at": 1, "rsol": 60 * SOL,
+                                                                "rtok": 150_000_000_000_000})
+    await redis.zadd(pump_stream.OBS_LIVE, {"WATCHED": created})
+    await redis.zadd(pump_stream.ACTIVE, {"WATCHED": int(NOW.timestamp()) - 10})
+    counts = await run_funnel(redis, session_factory, replace(SETTINGS, fresh_max_monitoring_seconds=60), NOW)
+    assert counts["momentum_considered"] == 0

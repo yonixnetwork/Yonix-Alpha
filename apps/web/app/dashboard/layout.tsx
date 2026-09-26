@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Activity, ArrowRightLeft, Bell, Bot, Brain, CandlestickChart, ClipboardCheck, Coins, Filter, Gauge, Grid3x3, Layers, LayoutDashboard, ListChecks, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Radio, Rocket, Scale, Send, Server, Settings, ShieldAlert, Sparkles, TrendingUp, Wallet, Waves, type LucideIcon } from "lucide-react";
+import { Activity, ArrowRightLeft, Bell, Bot, Brain, CandlestickChart, ClipboardCheck, Coins, Eye, Filter, Gauge, Grid3x3, Layers, LayoutDashboard, ListChecks, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Radio, Rocket, Scale, Send, Server, Settings, ShieldAlert, Sparkles, TrendingUp, Wallet, Waves, type LucideIcon } from "lucide-react";
 import NotificationsBell from "@/components/NotificationsBell";
 import { modeClass, stateClass } from "@/components/ui";
 import { getAccessToken, logout } from "@/lib/api";
@@ -19,6 +19,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     title: "Solana",
     items: [
       { href: "/dashboard/solana/fresh", label: "Fresh Tokens", icon: Sparkles },
+      { href: "/dashboard/solana/observing", label: "Fresh Observation", icon: Eye },
       { href: "/dashboard/solana/migrated", label: "Migrated Tokens", icon: ArrowRightLeft },
       { href: "/dashboard/solana/momentum", label: "Momentum", icon: Rocket },
     ],

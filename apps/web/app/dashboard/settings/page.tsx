@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { Settings } from "lucide-react";
 import ConfirmButton from "@/components/ConfirmDialog";
+import ProvidersPanel from "@/components/ProvidersPanel";
 import { ErrorNotice, modeClass, PageHeader, Section, Stat } from "@/components/ui";
 import { apiPut } from "@/lib/api";
 import type { ModesOut } from "@/lib/types";
@@ -31,8 +32,8 @@ export default function SettingsPage() {
             </div>
             <div className="notice">
               The environment flags live in the server&apos;s .env and cannot be changed from the dashboard. LIVE is refused while
-              they are closed. Live execution exists only for Pump.fun tokens (fresh and PumpSwap-migrated, see Live Execution);
-              futures venues remain paper-only. To stop everything, use the kill switch or set strategies to OFF.
+              they are closed. Live execution covers Pump.fun tokens (fresh and PumpSwap-migrated) and the futures/FX venues
+              (Binance, Bybit, Hyperliquid, MT5 bridge); see Live Execution. To stop everything, use the kill switch or set strategies to OFF.
             </div>
             <div className="btn-row" role="group" aria-label="Global mode">
               {GLOBAL_MODES.map((g) => (
@@ -68,9 +69,14 @@ export default function SettingsPage() {
               <li>
                 <Link className="link" href="/dashboard/paper">Paper trading</Link>: book balances and resets.
               </li>
+              <li>
+                <Link className="link" href="/dashboard/solana/observing">Fresh observation</Link>: every new token&apos;s observation
+                window and why it was or wasn&apos;t traded (window length and monitoring limits are in Risk settings → solana_fresh).
+              </li>
               <li>Secrets (API keys, RPC URLs, Telegram token) stay in the server&apos;s .env and are never shown here.</li>
             </ul>
           </Section>
+          <ProvidersPanel />
         </>
       )}
     </div>

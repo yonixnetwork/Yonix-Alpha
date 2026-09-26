@@ -100,6 +100,12 @@ class SafetySettings:
     fresh_max_sell_pressure: Decimal = Decimal("2")  # sell/buy volume in the latest half-window
     fresh_max_price_drawdown_pct: Decimal = Decimal("0.35")  # fall from the observed peak
     max_active_candidates: int = 25  # tokens under full (RPC-costly) gate analysis at once
+    # Momentum engine (read from the solana_fresh scope by the funnel):
+    # established tokens older than momentum_min_age_seconds, plus younger
+    # tokens approaching migration (curve progress at or above this share)
+    # that the fresh engine did not already take.
+    momentum_min_age_seconds: int = 1800
+    momentum_near_migration_progress: Decimal = Decimal("0.70")
 
     # Bonding-curve tokens (fresh, momentum) trade on the pump.fun curve, not
     # a DEX pool: min_liquidity_quote applies to pools only. The curve must
@@ -253,6 +259,8 @@ def validate(settings: SafetySettings) -> list[str]:
         errors.append("exit_liquidity_drop_warn must not exceed exit_liquidity_drop_exit")
     if settings.exit_liquidity_drop_exit > settings.exit_emergency_liquidity_drop:
         errors.append("exit_liquidity_drop_exit must not exceed exit_emergency_liquidity_drop")
+    if not (0 < settings.momentum_near_migration_progress <= 1):
+        errors.append("momentum_near_migration_progress must be in (0, 1]")
     if not (0 < settings.exit_volume_collapse_ratio < 1):
         errors.append("exit_volume_collapse_ratio must be between 0 and 1")
     return errors
