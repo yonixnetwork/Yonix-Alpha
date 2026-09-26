@@ -20,15 +20,17 @@ an extra finding in the same safety gate, controlled by a dashboard setting.
   count, because this wallet created it.
 - Module: `yonixalpha_core/solana/creator_history.py`.
 
-**Helius.** A plain `getProgramAccounts` on the Pump program is refused by Helius ("Too many accounts
-requested (10000001 pubkeys)", seen live on 2026-09-26). The query is therefore sent as Helius's paginated
-`getProgramAccountsV2`:
+**Helius: measured live on 2026-09-26.** The on-chain count does **not** work on Helius:
 
-- pages of up to 10,000 accounts, following `paginationKey` for at most 5 pages;
-- the format comes from the official helius-sdk types;
-- if the scan stops at the page limit, the count found so far (or Helius's `totalResults`, when it gives one) is a
-  **lower bound**: PASS as "at least N" when it meets the minimum, otherwise UNKNOWN;
-- RPCs without V2 get the plain call.
+- A plain `getProgramAccounts` on the Pump program is refused: "Too many accounts requested (10000001 pubkeys)".
+- The paginated `getProgramAccountsV2` pages through the program's whole account space, not the filtered matches. Five
+  pages (50,000 accounts, 8.5 s) found nothing, not even the creator's own new curve. A full scan would be about 1,000
+  pages per creator, so it is not used.
+- One refusal is remembered for 24 h, so evaluations make no further calls and add no latency.
+- On Helius the count therefore comes from this system's pump.fun stream only: PASS "at least N" when it meets the
+  minimum, otherwise **UNKNOWN**.
+- A second source for the full count, pump.fun's public API, is **NOT COMPLETE**. Its response format must first be
+  checked from the server, because it cannot be reached from the build environment.
 
 A refused request (JSON-RPC codes -32600/-32601/-32602) no longer counts against the RPC endpoint's health, so it can
 never put the primary RPC into cooldown for the other reads.

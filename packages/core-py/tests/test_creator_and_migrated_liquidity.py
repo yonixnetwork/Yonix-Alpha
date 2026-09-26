@@ -142,12 +142,12 @@ async def test_required_3_manual_approval_in_auto_mode_is_no_trade(redis):
 
 
 async def test_required_4_unavailable_history_is_unknown_never_invented(redis):
-    inp, ev, a = await fresh(redis, 10, fail={"getProgramAccounts", "getProgramAccountsV2"})
+    inp, ev, a = await fresh(redis, 10, fail={"getProgramAccounts"})
     h = inp.creator_history
     # The only evidence left is the stream, which saw this one launch: a
     # lower bound of 1, not a count.
     assert h["status"] == "LOWER_BOUND" and h["tokens_created"] == 1 and h["source"] == creator_history.SOURCE_STREAM
-    assert "creator curve query failed" in h["error"] and "getProgramAccountsV2" in h["error"]
+    assert "creator curve query failed" in h["error"]
     r = a.reports["creator_history"]
     assert r["result"] == "UNKNOWN" and r["tokens_created"] is None and r["reason"] == "CREATOR_HISTORY_UNKNOWN"
     f = finding(a, "CREATOR_HISTORY_UNKNOWN")
@@ -158,7 +158,7 @@ async def test_required_4_unavailable_history_is_unknown_never_invented(redis):
 
 async def test_unknown_history_action_is_configurable(redis):
     settings = replace(FRESH, creator_history_unknown_action="REJECT")
-    _, _, a = await fresh(redis, 10, settings, fail={"getProgramAccounts", "getProgramAccountsV2"})
+    _, _, a = await fresh(redis, 10, settings, fail={"getProgramAccounts"})
     assert a.decision == FinalDecision.REJECT and finding(a, "CREATOR_HISTORY_UNKNOWN").hard_block
 
 
@@ -168,7 +168,7 @@ async def test_stream_lower_bound_passes_only_when_it_already_meets_the_minimum(
         other = b58encode(bytes([30 + i]) * 32)
         await pump_stream.ingest_logs(redis, logs_of(create_event(NOW - timedelta(hours=2 + i), mint=other, symbol=f"P{i}")),
                                       f"c{i}", NOW - timedelta(hours=2 + i))
-    inp, _, a = await fresh(redis, 10, fail={"getProgramAccounts", "getProgramAccountsV2"})
+    inp, _, a = await fresh(redis, 10, fail={"getProgramAccounts"})
     assert inp.creator_history["status"] == "LOWER_BOUND" and inp.creator_history["tokens_created"] == 5
     r = a.reports["creator_history"]
     assert r["result"] == "PASS" and r["tokens_created_display"] == "at least 5"
@@ -179,7 +179,7 @@ async def test_creator_history_off_skips_the_query(redis):
     curve = await seed_healthy_launch(redis, NOW)
     rpc = FakeRpc(curve, creator_tokens=1)
     inp, _ = await assemble_fresh(Sources(redis, rpc), MINT, NOW, Controls(settings, empty_account()))
-    assert not {"getProgramAccounts", "getProgramAccountsV2"} & set(rpc.calls) and inp.creator_history is None
+    assert "getProgramAccounts" not in rpc.calls and inp.creator_history is None
     assert not {c for c in codes(assess(inp, settings)) if c.startswith("CREATOR_HISTORY")}
 
 
@@ -209,85 +209,57 @@ async def test_creator_history_does_not_replace_other_checks(redis):
 
 
 class RecordingRpc:
-    """A plain RPC (no getProgramAccountsV2): answers getProgramAccounts."""
+    """An RPC that serves the filtered getProgramAccounts."""
 
     def __init__(self, rows):
         self.rows, self.calls = rows, []
 
     async def call(self, method, params=None):
         self.calls.append((method, params))
-        if method == "getProgramAccountsV2":
-            raise RuntimeError("RPC error from primary: {'code': -32601, 'message': 'Method not found'}")
         return self.rows
 
 
 class HeliusRpc:
-    """Helius-like: plain getProgramAccounts refused on the Pump program,
-    getProgramAccountsV2 served in pages of `page` rows."""
+    """Helius: refuses getProgramAccounts on the Pump program."""
 
-    def __init__(self, rows, page: int, total: bool = False):
-        self.rows, self.page, self.total, self.calls = rows, page, total, []
+    def __init__(self):
+        self.calls = []
 
     async def call(self, method, params=None):
-        self.calls.append((method, params))
-        if method == "getProgramAccounts":
-            raise RuntimeError("RPC error from primary: {'code': -32600, 'message': 'Too many accounts requested'}")
-        start = int(params[1].get("paginationKey") or 0)
-        end = start + self.page
-        out = {"accounts": self.rows[start:end], "paginationKey": str(end) if end < len(self.rows) else None}
-        if self.total:
-            out["totalResults"] = len(self.rows)
-        return out
+        self.calls.append(method)
+        raise RuntimeError("All RPC endpoints failed") from RuntimeError(
+            "RPC error from primary: {'code': -32600, 'message': 'Too many accounts requested (10000001 pubkeys)'}")
 
 
 async def test_query_shape_counts_and_cache(redis):
-    rpc = HeliusRpc(program_accounts(7, current_curve=CURVE, migrated=2), page=10000)
+    rpc = RecordingRpc(program_accounts(7, current_curve=CURVE, migrated=2))
     h = await creator_history.creator_history(redis, rpc, CREATOR, MINT, CURVE, NOW)
     method, params = rpc.calls[0]
-    assert method == "getProgramAccountsV2" and params[0] == "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+    assert method == "getProgramAccounts" and params[0] == "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
     cfg = params[1]
-    assert cfg["dataSlice"] == {"offset": 48, "length": 1} and cfg["commitment"] == "confirmed" and cfg["limit"] == 10000
+    assert cfg["dataSlice"] == {"offset": 48, "length": 1} and cfg["commitment"] == "confirmed"
     assert {"memcmp": {"offset": 49, "bytes": CREATOR}} in cfg["filters"]
     assert h.status == "VERIFIED" and h.tokens_created == 7 and h.previous_launches == 6 and h.previous_migrated == 2
-    assert "getProgramAccountsV2" in h.source
     # Cached: a second read makes no RPC call.
     await creator_history.creator_history(redis, rpc, CREATOR, MINT, CURVE, NOW)
     assert len(rpc.calls) == 1
 
 
-async def test_v2_pages_are_followed_to_the_end(redis):
-    rpc = HeliusRpc(program_accounts(12, current_curve=CURVE), page=5)
+async def test_helius_refusal_is_remembered_and_costs_one_call(redis):
+    rpc = HeliusRpc()
     h = await creator_history.creator_history(redis, rpc, CREATOR, MINT, CURVE, NOW)
-    assert [c[0] for c in rpc.calls] == ["getProgramAccountsV2"] * 3
-    assert [c[1][1].get("paginationKey") for c in rpc.calls] == [None, "5", "10"]
-    assert h.status == "VERIFIED" and h.tokens_created == 12
+    assert h.status == "UNKNOWN" and h.tokens_created is None and "Too many accounts" in h.error
+    # Another creator: no RPC call at all, the refusal is remembered.
+    other = b58encode(bytes([77]) * 32)
+    h2 = await creator_history.creator_history(redis, rpc, other, MINT, CURVE, NOW)
+    assert rpc.calls == ["getProgramAccounts"] and "not served by this RPC" in h2.error and h2.tokens_created is None
 
 
-async def test_scan_stopped_at_the_page_limit_is_a_lower_bound(redis):
-    rows = program_accounts(20, current_curve=None)
-    rpc = HeliusRpc(rows, page=2)  # 10 pages needed, 5 allowed
-    h = await creator_history.creator_history(redis, rpc, CREATOR, MINT, CURVE, NOW)
-    assert len(rpc.calls) == creator_history.MAX_V2_PAGES
-    # 10 curves seen, plus this launch (not among them): at least 11 — never "11" as a count.
-    assert h.status == "LOWER_BOUND" and h.tokens_created == 11 and "stopped after 5 page(s)" in h.source
-    a = assess(replace(healthy(), creator_history=h.to_dict()), SafetySettings())
-    assert a.reports["creator_history"]["tokens_created_display"] == "at least 11"
-    # Below the minimum, a lower bound is UNKNOWN, not a low count.
-    a = assess(replace(healthy(), creator_history=h.to_dict()), SafetySettings(min_creator_tokens_created=30))
-    assert a.reports["creator_history"]["result"] == "UNKNOWN"
-
-
-async def test_rpc_total_results_raises_the_lower_bound(redis):
-    rpc = HeliusRpc(program_accounts(20, current_curve=None), page=2, total=True)
-    h = await creator_history.creator_history(redis, rpc, CREATOR, MINT, CURVE, NOW)
-    assert h.status == "LOWER_BOUND" and h.tokens_created == 20
-
-
-async def test_plain_rpc_without_v2_falls_back(redis):
-    rpc = RecordingRpc(program_accounts(4, current_curve=CURVE))
-    h = await creator_history.creator_history(redis, rpc, CREATOR, MINT, CURVE, NOW)
-    assert [c[0] for c in rpc.calls] == ["getProgramAccountsV2", "getProgramAccounts"]
-    assert h.status == "VERIFIED" and h.tokens_created == 4 and "via getProgramAccounts" in h.source
+async def test_transient_failure_is_not_remembered_as_refusal(redis):
+    curve = Curve()
+    rpc = FakeRpc(curve, fail={"getProgramAccounts"})  # "getProgramAccounts unavailable": transient
+    await creator_history.creator_history(redis, rpc, CREATOR, MINT, CURVE, NOW)
+    assert await redis.get(creator_history.ONCHAIN_UNSUPPORTED_KEY) is None
 
 
 async def test_request_errors_do_not_disable_the_primary_rpc():

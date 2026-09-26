@@ -9,16 +9,18 @@ right after the `complete` flag:
     real_sol u64 | total_supply u64 | complete bool (offset 48) |
     creator pubkey (offset 49) | ...
 
-A program-account query filtered on the discriminator and on the creator at
+A getProgramAccounts filtered on the discriminator and on the creator at
 offset 49, with a one-byte data slice (the `complete` flag), returns every
-curve this wallet created and whether each one migrated. Helius serves it
-as the paginated getProgramAccountsV2 (the Pump program has over 10 million
-accounts, too many for plain getProgramAccounts); other RPCs get the plain
-call. A scan stopped at the page limit is a lower bound, not a count. Curves are not
+curve this wallet created and whether each one migrated. Curves are not
 closed after migration, so migrated launches are counted too. Curves
 created before pump.fun added the creator field do not carry it and are
 not counted: the on-chain count can undercount a wallet that launched only
 before that, never overcount.
+
+Helius refuses this query on the Pump program (over 10 million accounts),
+and its paginated getProgramAccountsV2 scans the whole program rather than
+the matches (measured live: 5 pages, 8.5 s, no match). A refusal is
+remembered for a day, so evaluations don't keep paying for it.
 
 When the RPC refuses or fails the query, the only other evidence is this
 system's own stream: launches by the wallet that the pump.fun stream saw
@@ -48,8 +50,10 @@ COMPLETE_OFFSET = 48
 CACHE_TTL = 3600  # a creator's on-chain count, re-read hourly
 ERROR_TTL = 120  # a failed query is not retried for this long
 MAX_CACHED_CURVES = 2000
-V2_PAGE_LIMIT = 10000  # Helius getProgramAccountsV2 maximum page size
-MAX_V2_PAGES = 5  # beyond this the count is reported as a lower bound
+# Set when the RPC refuses the creator query outright (Helius does): no
+# further on-chain attempts for a day, so evaluations don't pay for it.
+ONCHAIN_UNSUPPORTED_KEY = "yx:creator_hist:onchain_unsupported"
+ONCHAIN_UNSUPPORTED_TTL = 86400
 MAX_PREVIOUS_CHECKED = 20  # previous stream-observed launches inspected for behaviour
 EARLY_SELL_SECONDS = 300
 
@@ -120,46 +124,32 @@ def _parse_rows(rows: list) -> list[tuple[str, bool]]:
 
 
 async def onchain_curves(rpc, creator: str) -> CurveScan:
-    """Every BondingCurve naming `creator`.
+    """Every BondingCurve naming `creator`, in one getProgramAccounts call.
 
-    Helius refuses plain getProgramAccounts on the Pump program (over 10
-    million accounts) and serves getProgramAccountsV2 instead: pages of at
-    most 10,000, a `paginationKey` until the last page, optionally
-    `totalResults` (helius-sdk types). At most MAX_V2_PAGES pages are read;
-    a scan cut short is reported as incomplete, so its count is a lower
-    bound. RPCs without V2 get the plain call."""
+    Measured on the live droplet (2026-09-26): Helius refuses this on the
+    Pump program ("Too many accounts requested", over 10 million accounts),
+    and its paginated getProgramAccountsV2 pages through the program's whole
+    account space, not the filtered matches — 5 pages (50,000 accounts, 8.5
+    s) found none, not even the creator's own new curve. A full scan would
+    take ~1,000 pages per creator, so V2 is not used. RPCs that serve a
+    filtered getProgramAccounts answer here; on the others the refusal is
+    remembered (ONCHAIN_UNSUPPORTED_KEY) and no further calls are made."""
     config = {
         "encoding": "base64", "commitment": "confirmed",
         "dataSlice": {"offset": COMPLETE_OFFSET, "length": 1},
         "filters": [{"memcmp": {"offset": 0, "bytes": b58encode(BONDING_CURVE_ACCOUNT)}},
                     {"memcmp": {"offset": CREATOR_OFFSET, "bytes": creator}}],
     }
-    curves: list[tuple[str, bool]] = []
-    key, total, pages = None, None, 0
-    try:
-        while True:
-            res = await rpc.call("getProgramAccountsV2", [PUMP_PROGRAM_ID, {**config, "limit": V2_PAGE_LIMIT,
-                                                                           **({"paginationKey": key} if key else {})}])
-            page = res.get("value", res) if isinstance(res, dict) else None
-            if not isinstance(page, dict) or not isinstance(page.get("accounts"), list):
-                raise ValueError("getProgramAccountsV2 returned an unexpected shape")
-            curves += _parse_rows(page["accounts"])
-            pages += 1
-            key = page.get("paginationKey")
-            if isinstance(page.get("totalResults"), int):
-                total = page["totalResults"]
-            if not key:
-                return CurveScan(curves, True, total, "getProgramAccountsV2", pages)
-            if pages >= MAX_V2_PAGES:
-                return CurveScan(curves, False, total, "getProgramAccountsV2", pages)
-    except Exception as v2_exc:  # noqa: BLE001 - V2 unavailable on this RPC: try the plain call
-        if pages:
-            raise
-        try:
-            res = await rpc.call("getProgramAccounts", [PUMP_PROGRAM_ID, config])
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"getProgramAccountsV2: {str(v2_exc)[:160]}; getProgramAccounts: {str(exc)[:160]}") from exc
-        return CurveScan(_parse_rows(_rows(res)), True, None, "getProgramAccounts", 1)
+    res = await rpc.call("getProgramAccounts", [PUMP_PROGRAM_ID, config])
+    return CurveScan(_parse_rows(_rows(res)), True, None, "getProgramAccounts", 1)
+
+
+def _refused(exc: BaseException) -> bool:
+    """The RPC answered that it won't serve this query (as opposed to a
+    transient failure)."""
+    text = f"{exc} {exc.__cause__ or ''}"
+    return any(m in text for m in ("Too many accounts", "-32600", "-32601", "excluded from account secondary indexes",
+                                   "getProgramAccounts is disabled"))
 
 
 async def _cached_curves(redis: Redis, rpc, creator: str) -> tuple[dict | None, str | None]:
@@ -172,10 +162,15 @@ async def _cached_curves(redis: Redis, rpc, creator: str) -> tuple[dict | None, 
             return None, c["error"]
         c["curves"] = [(p, bool(f)) for p, f in c["curves"]]
         return c, None
+    refused = await redis.get(ONCHAIN_UNSUPPORTED_KEY)
+    if refused:
+        return None, f"on-chain creator count not served by this RPC ({refused})"
     try:
         scan = await onchain_curves(rpc, creator)
     except Exception as exc:  # noqa: BLE001 - RPC refusal/failure is data unavailability
-        err = f"creator curve query failed: {type(exc).__name__}: {str(exc)[:300]}"
+        err = f"creator curve query failed: {type(exc).__name__}: {str(exc.__cause__ or exc)[:300]}"
+        if _refused(exc):
+            await redis.set(ONCHAIN_UNSUPPORTED_KEY, str(exc.__cause__ or exc)[:200], ex=ONCHAIN_UNSUPPORTED_TTL)
         await redis.set(cache_key(creator), json.dumps({"error": err}), ex=ERROR_TTL)
         return None, err
     c = {"count": len(scan.curves), "complete": scan.complete and len(scan.curves) <= MAX_CACHED_CURVES,
