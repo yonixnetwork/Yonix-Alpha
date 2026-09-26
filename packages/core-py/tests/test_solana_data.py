@@ -204,6 +204,43 @@ def test_holders_with_unknown_owner_raise():
         parse_holders([{"address": "x", "amount": "1"}], {}, 10, set(), None, NOW, "rpc")
 
 
+class _OwnersRpc:
+    def __init__(self, values):
+        self.values, self.calls = values, []
+
+    async def call(self, method, params):
+        self.calls.append((method, params))
+        return {"value": self.values}
+
+
+@pytest.mark.asyncio
+async def test_holder_owners_read_at_confirmed_and_closed_accounts_are_dropped():
+    from yonixalpha_core.solana.assembler import token_account_owners
+
+    largest = [{"address": "a1", "amount": "100"}, {"address": "gone", "amount": "90"}, {"address": "b1", "amount": "40"}]
+    rpc = _OwnersRpc([{"data": {"parsed": {"info": {"owner": "Alice"}}}}, None,
+                      {"data": {"parsed": {"info": {"owner": "Bob"}}}}])
+    kept, owners = await token_account_owners(rpc, largest)
+    # Same commitment as getTokenLargestAccounts: at "finalized" a recent
+    # buyer's account does not exist yet and the whole holder check failed.
+    assert rpc.calls[0][1][1]["commitment"] == "confirmed"
+    assert [a["address"] for a in kept] == ["a1", "b1"] and owners == {"a1": "Alice", "b1": "Bob"}
+    h = parse_holders(kept, owners, 1000, set(), None, NOW, "rpc")
+    assert h.top1_share == Decimal("0.1") and h.holders_sampled == 2
+
+
+@pytest.mark.asyncio
+async def test_holder_owner_that_exists_but_is_unparsed_still_raises():
+    from yonixalpha_core.solana.assembler import token_account_owners
+
+    kept, owners = await token_account_owners(_OwnersRpc([{"data": ["AAAA", "base64"]}]),
+                                              [{"address": "x", "amount": "1"}])
+    with pytest.raises(UnexpectedShape):
+        parse_holders(kept, owners, 10, set(), None, NOW, "rpc")
+    with pytest.raises(UnexpectedShape):
+        await token_account_owners(_OwnersRpc([]), [{"address": "x", "amount": "1"}])
+
+
 # --- flow -----------------------------------------------------------------------------
 
 def _t(sec, trader, buy, sol=1_000_000_000, vs=40_000_000_000, vt=800_000_000_000_000):

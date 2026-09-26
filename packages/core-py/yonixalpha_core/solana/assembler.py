@@ -104,18 +104,40 @@ async def fetch_curve(rpc, address: str) -> tuple[BondingCurveState | None, str 
         return None, f"curve rpc: {exc}"
 
 
+async def token_account_owners(rpc, largest: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, str | None]]:
+    """Owner wallet of each token account from getTokenLargestAccounts.
+
+    Read at the same "confirmed" commitment as the largest-accounts list: at
+    the RPC default ("finalized", ~13 s behind) an account opened by a recent
+    buyer does not exist yet, which on a fresh token is most of the top 20.
+    An account that no longer exists was closed after the list was read, so
+    it holds nothing and is dropped. One that exists without a parsed owner
+    stays in with owner None and parse_holders rejects it."""
+    addresses = [a["address"] for a in largest]
+    if not addresses:
+        return largest, {}
+    accts = ((await rpc.call("getMultipleAccounts", [addresses, {"encoding": "jsonParsed", "commitment": "confirmed"}]))
+             or {}).get("value") or []
+    if len(accts) != len(addresses):
+        raise UnexpectedShape("getMultipleAccounts returned a different number of accounts")
+    kept: list[dict[str, Any]] = []
+    owners: dict[str, str | None] = {}
+    for entry, acct in zip(largest, accts):
+        if acct is None:
+            continue
+        kept.append(entry)
+        data = acct.get("data")
+        info = ((data.get("parsed") or {}).get("info") or {}) if isinstance(data, dict) else {}
+        owners[entry["address"]] = info.get("owner")
+    return kept, owners
+
+
 async def fetch_holders(
     rpc, mint: str, supply_raw: int, excluded_owners: set[str], creator: str | None, now: datetime
 ) -> tuple[HolderInfo | None, str | None]:
     try:
         largest = ((await rpc.call("getTokenLargestAccounts", [mint, {"commitment": "confirmed"}])) or {}).get("value") or []
-        addresses = [a["address"] for a in largest]
-        owners: dict[str, str | None] = {}
-        if addresses:
-            accts = ((await rpc.call("getMultipleAccounts", [addresses, {"encoding": "jsonParsed"}])) or {}).get("value") or []
-            for addr, acct in zip(addresses, accts):
-                info = (((acct or {}).get("data") or {}).get("parsed") or {}).get("info") or {}
-                owners[addr] = info.get("owner")
+        largest, owners = await token_account_owners(rpc, largest)
         return parse_holders(largest, owners, supply_raw, excluded_owners, creator, now, "rpc:getTokenLargestAccounts"), None
     except (UnexpectedShape, ValueError, TypeError, KeyError) as exc:
         return None, f"holders: {exc}"

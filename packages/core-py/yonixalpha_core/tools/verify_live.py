@@ -27,6 +27,7 @@ import websockets
 
 from yonixalpha_core.config import get_settings
 from yonixalpha_core.redact import redact_text, redact_url
+from yonixalpha_core.solana.assembler import token_account_owners
 from yonixalpha_core.solana.market_data import DexScreenerClient, JupiterClient, RateBudget
 from yonixalpha_core.solana.pumpfun import PUMP_PROGRAM_ID, decode_bonding_curve, decode_log_events
 from yonixalpha_core.solana.rpc import RpcManager
@@ -143,10 +144,7 @@ async def main(seconds: int, as_json: bool) -> int:
                            f"{sample_mint}: program={t.token_program[:8]}.. decimals={t.decimals} mint_auth={t.mint_authority} "
                            f"freeze_auth={t.freeze_authority} extensions={t.extensions}")
                 largest = (await rpc.call("getTokenLargestAccounts", [sample_mint, {"commitment": "confirmed"}]))["value"]
-                addrs = [a["address"] for a in largest]
-                accts = (await rpc.call("getMultipleAccounts", [addrs, {"encoding": "jsonParsed"}]))["value"]
-                owners = {a: ((((x or {}).get("data") or {}).get("parsed") or {}).get("info") or {}).get("owner")
-                          for a, x in zip(addrs, accts)}
+                largest, owners = await token_account_owners(rpc, largest)
                 curve_addr = (samples.get("create") or {}).get("bonding_curve")
                 h = parse_holders(largest, owners, t.supply_raw, {curve_addr} if curve_addr else set(), None,
                                   datetime.now(timezone.utc), "rpc")
