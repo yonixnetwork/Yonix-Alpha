@@ -56,8 +56,8 @@ export default function ProvidersPanel() {
       <Section title="Providers & connections">
         <ErrorNotice error={overview.error ?? err} />
         <div className="notice">
-          Secrets are never shown or sent to the browser — only whether they are configured. They are changed on the server:{" "}
-          <code>{o?.secret_update ?? "scripts/set-keys.sh"}</code>. TEST CONNECTION makes one real read-only request (a balance or
+          Secrets are never shown or sent to the browser — only whether they are configured. Provider keys are changed in
+          “Change provider API keys” below; server-only secrets with <code>scripts/set-keys.sh</code>. TEST CONNECTION makes one real read-only request (a balance or
           account read, a quote, getSlot, a WebSocket subscription, Telegram getMe); it never places an order or sends a message.
         </div>
         {o?.groups.map((g) => (

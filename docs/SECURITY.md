@@ -98,6 +98,38 @@ surface this without needing direct DB access.
   server is compromised), and treat the droplet's `.env` file as the single
   highest-value target on the box.
 
+### Changing provider API keys from the dashboard
+
+Settings → **Change provider API keys** replaces provider keys and URLs without SSH:
+
+| | |
+|---|---|
+| Editable | Helius key, Solana RPC/WS URLs (and backups), Jupiter, PumpPortal, Binance key/secret, Bybit key/secret, Hyperliquid account address, MT5 bridge URL/token, Telegram token/chat id |
+| Server only (`scripts/set-keys.sh`) | wallet private keys (Solana, Hyperliquid API wallet), admin password, JWT/DB/Redis secrets, testnet flags, `TRADING_ENABLED` / `LIVE_TRADING_ENABLED` / `PAPER_TRADING` |
+
+How it is protected:
+
+- **Write-only.** Current secret values are never sent to the browser. URLs are shown as `scheme://host`.
+- **Admin password re-entered on every save.** Five wrong passwords lock the form for 15 minutes. Every attempt is
+  audited with key names only; values never reach logs, the database or the audit trail.
+- **The api never touches `.env`.** It validates the values and writes one request file (mode 600) into
+  `runtime/env-requests/`, the only host directory it can write. It never gets the Docker socket.
+- **A root helper on the host applies the change** (`scripts/apply-env-requests.py`, started by the systemd path unit
+  `yonixalpha-env-updater.path`). It:
+  - validates the request again with the same allowlist, so a forged request from a compromised container still
+    cannot touch wallet keys or trading locks;
+  - backs up `.env` to `/opt/yonixalpha-backups/env/` (mode 600, directory 700);
+  - merges the new values in and runs `docker compose up -d`, which recreates only the services whose environment
+    changed;
+  - writes a result file (status and key names) that the page polls.
+
+Install once, as root, in `/opt/yonixalpha`: `scripts/install-env-updater.sh`. Remove it with `--uninstall`. Until it
+is installed the page refuses changes. Applied changes are listed by `journalctl -u yonixalpha-env-updater.service`.
+
+**Trade-off.** Anyone holding a valid dashboard session *and* the admin password can replace provider keys. For
+example, they could point the RPC at a hostile endpoint. They still cannot move the wallet, open the live-trading
+locks or switch testnet to mainnet. Keep the admin password strong.
+
 ## 6. Transport security
 
 - TLS termination happens at the `reverse-proxy` (nginx) container —

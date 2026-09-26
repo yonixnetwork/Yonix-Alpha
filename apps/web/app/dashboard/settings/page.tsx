@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { Settings } from "lucide-react";
 import ConfirmButton from "@/components/ConfirmDialog";
+import KeysPanel from "@/components/KeysPanel";
 import ProvidersPanel from "@/components/ProvidersPanel";
 import SnipePanel from "@/components/SnipePanel";
 import { ErrorNotice, modeClass, PageHeader, Section, Stat } from "@/components/ui";
@@ -75,10 +76,12 @@ export default function SettingsPage() {
                 <Link className="link" href="/dashboard/solana/observing">Fresh observation</Link>: every new token&apos;s observation
                 window and why it was or wasn&apos;t traded (window length and monitoring limits are in Risk settings → solana_fresh).
               </li>
-              <li>Secrets (API keys, RPC URLs, Telegram token) stay in the server&apos;s .env and are never shown here.</li>
+              <li>Provider API keys and URLs: changed below (write-only, never shown). Wallet private keys, passwords and the
+                trading locks stay server-only: <code>scripts/set-keys.sh</code>.</li>
             </ul>
           </Section>
           <ProvidersPanel />
+          <KeysPanel />
         </>
       )}
     </div>

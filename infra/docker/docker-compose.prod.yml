@@ -13,6 +13,11 @@ services:
     restart: unless-stopped
     environment:
       - APP_ENV=production
+    # Dashboard key updates: the api writes one request file here; the host
+    # helper (scripts/install-env-updater.sh) applies it to .env. Until the
+    # helper is installed the directory is root-owned and updates are refused.
+    volumes:
+      - ../../runtime/env-requests:/app/runtime/env-requests
 
   web:
     restart: unless-stopped
