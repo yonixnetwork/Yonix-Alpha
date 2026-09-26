@@ -51,7 +51,8 @@ async def listen_pump(ws_url: str, seconds: int) -> dict[str, Any]:
     out: dict[str, Any] = {"notifications": 0, "events": {}, "samples": {}, "error": None, "subscribed": False}
     deadline = time.monotonic() + seconds
     try:
-        async with websockets.connect(ws_url, max_size=2**22) as ws:
+        ws = await websockets.connect(ws_url, max_size=2**22, close_timeout=2)
+        try:
             await ws.send(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "logsSubscribe",
                                       "params": [{"mentions": [PUMP_PROGRAM_ID]}, {"commitment": "confirmed"}]}))
             while time.monotonic() < deadline:
@@ -75,6 +76,11 @@ async def listen_pump(ws_url: str, seconds: int) -> dict[str, Any]:
                 for kind, fields in decode_log_events(value.get("logs", [])):
                     out["events"][kind] = out["events"].get(kind, 0) + 1
                     out["samples"].setdefault(kind, fields)
+        finally:
+            # Drop the connection instead of the closing handshake: on the
+            # pump.fun firehose the server's close frame queues behind
+            # unread notifications, and a graceful close can wait for it.
+            ws.transport.abort()
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"{type(exc).__name__}: {exc}"
     return out

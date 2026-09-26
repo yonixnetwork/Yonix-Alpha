@@ -181,6 +181,18 @@ fi
 if [ "$(status_of WALLET_PRIVATE_KEY)" = "set" ]; then
     warn "WALLET_PRIVATE_KEY is set: the Solana live wallet (real SOL) can be used once the locks are opened."
 fi
+# An explicit Solana URL wins over HELIUS_API_KEY, so a URL left over from
+# an older key silently keeps using that key.
+helius_key=$(grep -E '^HELIUS_API_KEY=' "${ENV_FILE}" | tail -1 | cut -d= -f2- || true)
+if [ -n "${helius_key}" ]; then
+    for url_var in SOLANA_RPC_URL SOLANA_WS_URL HELIUS_RPC_URL HELIUS_WS_URL; do
+        url=$(grep -E "^${url_var}=" "${ENV_FILE}" | tail -1 | cut -d= -f2- || true)
+        if [ -n "${url}" ] && [[ "${url}" == *helius-rpc.com* ]] && [[ "${url}" != *"${helius_key}"* ]]; then
+            warn "${url_var} points at Helius with a different key than HELIUS_API_KEY and overrides it - empty it: sed -i -E 's/^${url_var}=.*/${url_var}=/' .env"
+        fi
+    done
+fi
+unset helius_key url
 
 echo
 echo "Nothing has been restarted. To apply:"
