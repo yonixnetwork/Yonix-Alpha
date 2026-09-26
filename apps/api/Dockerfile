@@ -25,7 +25,10 @@ USER appuser
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
+# The long start period covers `alembic upgrade head` on a large database:
+# failures during it don't count, and the first passing check still marks
+# the container healthy at once. Workers wait for this (docker-compose.yml).
+HEALTHCHECK --interval=15s --timeout=5s --start-period=120s --retries=3 \
     CMD curl -f http://localhost:8000/api/health || exit 1
 
 CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host ${APP_HOST:-0.0.0.0} --port ${APP_PORT:-8000}"]

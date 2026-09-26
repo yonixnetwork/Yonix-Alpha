@@ -9,6 +9,10 @@
 # silently drops values like POSTGRES_PASSWORD. Where a value is needed
 # inside a command/healthcheck, it's read from the container's own shell
 # environment (populated by env_file) instead of compose-file substitution.
+#
+# Every worker that uses the database waits for `api` to be healthy. The api
+# container runs `alembic upgrade head` before it serves, so a worker started
+# earlier can query a table that a pending migration has not created yet.
 
 name: yonixalpha
 
@@ -90,6 +94,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      api:
+        condition: service_healthy
     networks: [yonixalpha]
 
   data-binance:
@@ -100,6 +106,8 @@ services:
       - ../../.env
     depends_on:
       postgres:
+        condition: service_healthy
+      api:
         condition: service_healthy
     networks: [yonixalpha]
 
@@ -113,6 +121,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      api:
         condition: service_healthy
     networks: [yonixalpha]
 
@@ -129,6 +139,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      api:
+        condition: service_healthy
     networks: [yonixalpha]
 
   engine-solana-migration:
@@ -144,6 +156,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      api:
+        condition: service_healthy
     networks: [yonixalpha]
 
   decision-engine:
@@ -157,6 +171,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      api:
+        condition: service_healthy
     networks: [yonixalpha]
 
   ml:
@@ -167,6 +183,8 @@ services:
       - ../../.env
     depends_on:
       postgres:
+        condition: service_healthy
+      api:
         condition: service_healthy
     networks: [yonixalpha]
 
@@ -181,6 +199,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      api:
+        condition: service_healthy
     networks: [yonixalpha]
 
   engine-binance-futures:
@@ -191,6 +211,8 @@ services:
       - ../../.env
     depends_on:
       postgres:
+        condition: service_healthy
+      api:
         condition: service_healthy
     networks: [yonixalpha]
 
@@ -207,6 +229,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      api:
         condition: service_healthy
     networks: [yonixalpha]
 
