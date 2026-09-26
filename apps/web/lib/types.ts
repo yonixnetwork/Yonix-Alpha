@@ -184,6 +184,7 @@ export interface SettingsOut {
   source: { scope: string; version: number; clamp_notes?: string[]; errors?: string[] };
   defaults: Record<string, string | number | boolean | string[] | null>;
   hard_limits: Record<string, { kind: "min" | "max"; bound: string }>;
+  enums?: Record<string, string[]>;
 }
 
 export interface SettingsVersionOut {
@@ -297,6 +298,8 @@ export interface AssessmentDetail extends AssessmentSummary {
       tax?: Record<string, string | null>;
       sellability?: Record<string, unknown>;
       liquidity?: Record<string, unknown>;
+      migrated_liquidity?: Record<string, unknown>;
+      creator_history?: Record<string, unknown>;
     };
   };
   approved_at: string | null;

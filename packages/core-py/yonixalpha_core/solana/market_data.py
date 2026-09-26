@@ -218,6 +218,7 @@ class PoolData:
     sells_h1: int | None
     volume_h1_usd: Decimal | None
     pair_created_at: datetime | None
+    price_usd: Decimal | None = None
 
 
 def _dec(value: Any) -> Decimal | None:
@@ -267,6 +268,7 @@ def parse_dexscreener_pairs(body: Any, mint: str, observed_at: datetime) -> Pool
         sells_h1=(txns.get("h1") or {}).get("sells"),
         volume_h1_usd=_dec((p.get("volume") or {}).get("h1")),
         pair_created_at=datetime.fromtimestamp(created_ms / 1000, tz=timezone.utc) if isinstance(created_ms, (int, float)) else None,
+        price_usd=_dec(p.get("priceUsd")),
     )
 
 

@@ -19,7 +19,7 @@ from yonixalpha_core.solana.codec import TruncatedData
 from yonixalpha_core.solana.assembler import Controls, Sources, assemble_migrated
 from yonixalpha_core.solana.txguard import TOKEN, TOKEN_2022, ata
 from yonixalpha_core.testing.pump import CREATOR, MINT, FakeRpc, empty_account, wallet
-from yonixalpha_core.testing.pumpswap import FakePoolRpc, pool_account, trade_event, trade_history
+from yonixalpha_core.testing.pumpswap import FakePoolRpc, pool_account, seed_sol_usd, trade_event, trade_history
 
 NOW = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
 MIGRATED = default_settings_for("solana_migration")
@@ -108,6 +108,7 @@ async def test_migrated_token_is_assessed_from_its_pool(redis):
     history = trade_history(pool, 30, 0, NOW - timedelta(minutes=30), every=40, tag="old")[5:]
     rpc = FakePoolRpc(MINT, 700_000_000_000_000, 95 * 10**9,
                       trade_history(pool, 25, 0, NOW - timedelta(seconds=25 * 20), every=20) + history, inner=FakeRpc(None))
+    await seed_sol_usd(redis, NOW)  # 95 SOL x $150 = $14,250 usable
     inp, ev = await assemble_migrated(Sources(redis, rpc), MINT, NOW, Controls(MIGRATED, empty_account()))
     a = assess(inp, MIGRATED)
     assert ev["source"] == "PUMPFUN" and ev["lifecycle"] == "MIGRATED" and ev["pool"]["verified"] is True
@@ -120,6 +121,9 @@ async def test_migrated_token_is_assessed_from_its_pool(redis):
     assert a.reports["tax"]["decision"] == "PASS"
     assert a.decision == FinalDecision.EXECUTE, a.reasons
     assert a.plan.complete and a.plan.max_loss.value > 0
+    liq = a.reports["migrated_liquidity"]
+    assert liq["applies"] and liq["decision"] == "PASS" and liq["usable_liquidity_usd"] == "14250.00"
+    assert liq["total_liquidity_usd"] == "28500.00" and Decimal(liq["executable_max_size_sol"]) > 0
 
 
 async def test_graduated_token_without_its_pool_waits_for_migration(redis):

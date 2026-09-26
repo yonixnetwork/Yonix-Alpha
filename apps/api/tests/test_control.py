@@ -132,3 +132,36 @@ async def test_pipeline_health_reports_absence_honestly(client, auth_headers):
     r = await client.get("/api/control/pipeline", headers=auth_headers)
     body = r.json()
     assert r.status_code == 200 and body["stream"]["heartbeat"] is None and body["last_assessment_at"] is None
+
+
+async def test_creator_and_migrated_liquidity_settings_are_dashboard_editable(client, auth_headers):
+    r = await client.get("/api/control/settings/solana_migration", headers=auth_headers)
+    body = r.json()
+    assert body["effective"]["min_creator_tokens_created"] == 5 and body["effective"]["creator_history_check"] is True
+    assert body["effective"]["creator_below_threshold_action"] == "WARN"
+    assert body["effective"]["min_migrated_liquidity_usd"] == "10000" and body["effective"]["migrated_liquidity_check"] is True
+    assert body["enums"]["creator_below_threshold_action"] == ["WARN", "REDUCE_SIZE", "REQUIRE_MANUAL_APPROVAL", "REJECT"]
+    r = await client.put("/api/control/settings/solana_migration", headers=auth_headers,
+                         json={"settings": {**body["effective"], "min_creator_tokens_created": 8,
+                                            "creator_below_threshold_action": "REJECT", "min_migrated_liquidity_usd": "15000"}})
+    assert r.status_code == 200, r.text
+    eff = (await client.get("/api/control/settings/solana_migration", headers=auth_headers)).json()["effective"]
+    assert eff["min_creator_tokens_created"] == 8 and eff["creator_below_threshold_action"] == "REJECT"
+    assert eff["min_migrated_liquidity_usd"] == "15000"
+    bad = await client.put("/api/control/settings/solana_migration", headers=auth_headers,
+                           json={"settings": {"creator_below_threshold_action": "NUKE"}})
+    assert bad.status_code == 422
+
+
+async def test_scam_name_preset_installs_editable_rules_once(app, client, auth_headers):
+    assert (await client.post("/api/control/blacklist/presets/scam-names")).status_code == 401
+    r = await client.post("/api/control/blacklist/presets/scam-names", headers=auth_headers)
+    assert r.status_code == 200 and r.json()["added"] == 19 + 11 * 2 and r.json()["skipped"] == 0
+    again = await client.post("/api/control/blacklist/presets/scam-names", headers=auth_headers)
+    assert again.json() == {"added": 0, "skipped": 41}
+    rules = (await client.get("/api/control/blacklist", headers=auth_headers)).json()
+    assert {"name", "symbol"} == {x["field"] for x in rules if x["match_type"] == "exact"}
+    assert any(x["value"] == "spacex" and x["match_type"] == "substring" for x in rules)
+    async with app.state.db_session_factory() as s:
+        kinds = [a.event_type for a in (await s.execute(select(AuditLog))).scalars()]
+    assert "blacklist.preset_added" in kinds

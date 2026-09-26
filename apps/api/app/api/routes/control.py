@@ -53,8 +53,8 @@ from yonixalpha_core.db.models import (
 )
 from yonixalpha_core.safety import store
 from yonixalpha_core.safety.models import GlobalMode, StrategyMode
-from yonixalpha_core.safety.rules import validate_blacklist_rule, validate_custom_rule
-from yonixalpha_core.safety.settings import HARD_LIMITS, default_settings_for, settings_to_dict
+from yonixalpha_core.safety.rules import scam_name_preset, validate_blacklist_rule, validate_custom_rule
+from yonixalpha_core.safety.settings import ENUM_FIELDS, HARD_LIMITS, default_settings_for, settings_to_dict
 from yonixalpha_core.solana import pump_stream
 from yonixalpha_core.solana.assembler import RULE_FIELDS
 from yonixalpha_core.strategies.catalog import MODE_KEYS
@@ -95,6 +95,7 @@ async def get_risk_settings(scope: str, db: AsyncSession = Depends(get_db), _: s
         source=source,
         defaults=settings_to_dict(default_settings_for(scope)),
         hard_limits={k: {"kind": kind, "bound": str(bound)} for k, (kind, bound) in HARD_LIMITS.items()},
+        enums={k: list(v) for k, v in ENUM_FIELDS.items()},
     )
 
 
@@ -214,6 +215,28 @@ async def add_blacklist(body: BlacklistIn, request: Request, db: AsyncSession = 
     await _audit(db, username, request, "blacklist.added", {"id": str(row.id), **body.model_dump()})
     await db.commit()
     return BlacklistOut.model_validate(row)
+
+
+@router.post("/blacklist/presets/scam-names")
+async def add_scam_name_preset(request: Request, db: AsyncSession = Depends(get_db),
+                               username: str = Depends(get_current_username)) -> dict[str, int]:
+    """Installs the scam/impersonation word lists as ordinary GLOBAL BLOCK
+    rules. Rules that already exist are skipped, so it is safe to repeat."""
+    added = skipped = 0
+    user_id = await _user_id(db, username)
+    for r in scam_name_preset():
+        dup = await db.execute(select(BlacklistEntry.id).where(
+            BlacklistEntry.scope == r["scope"], BlacklistEntry.field == r["field"], BlacklistEntry.action == r["action"],
+            BlacklistEntry.match_type == r["match_type"], func.lower(BlacklistEntry.value) == r["value"]))
+        if dup.first() is not None:
+            skipped += 1
+            continue
+        db.add(BlacklistEntry(created_by=user_id, **r))
+        added += 1
+    await db.flush()
+    await _audit(db, username, request, "blacklist.preset_added", {"preset": "scam-names", "added": added, "skipped": skipped})
+    await db.commit()
+    return {"added": added, "skipped": skipped}
 
 
 @router.patch("/blacklist/{rule_id}", response_model=BlacklistOut)

@@ -13,7 +13,7 @@ from yonixalpha_core.solana import pumpswap
 from yonixalpha_core.solana.assembler import Controls, Sources, assemble_migrated
 from yonixalpha_core.testing.pump import MINT, FakeRpc, empty_account
 from yonixalpha_core.safety.settings import default_settings_for
-from yonixalpha_core.testing.pumpswap import FakePoolRpc, trade_history
+from yonixalpha_core.testing.pumpswap import FakePoolRpc, seed_sol_usd, trade_history
 
 from app.gate_manage import manage_gate_positions
 
@@ -30,6 +30,7 @@ def pool_rpc(quote_reserve: int) -> FakePoolRpc:
 
 
 async def test_migrated_position_is_priced_from_the_pool_and_stopped_out(session_factory, redis_client):
+    await seed_sol_usd(redis_client, NOW)  # 95 SOL x $150: above the $10,000 usable minimum
     inp, ev = await assemble_migrated(Sources(redis_client, pool_rpc(QUOTE)), MINT, NOW, Controls(MIGRATED, empty_account()))
     a = assess(inp, MIGRATED)
     assert a.executable, a.reasons
@@ -63,6 +64,7 @@ async def test_migrated_position_is_priced_from_the_pool_and_stopped_out(session
 
 
 async def test_pumpswap_position_without_rpc_is_unpriced_not_guessed(session_factory, redis_client):
+    await seed_sol_usd(redis_client, NOW)
     inp, _ = await assemble_migrated(Sources(redis_client, pool_rpc(QUOTE)), MINT, NOW, Controls(MIGRATED, empty_account()))
     a = assess(inp, MIGRATED)
     async with session_factory() as s:

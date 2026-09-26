@@ -57,6 +57,22 @@ class CustomRule:
     enabled: bool = True
 
 
+# Operator-supplied word lists (from the sniper configuration the operator
+# brought over): impersonation of big brands/people and LP/exchange tokens as
+# name substrings, generic or asset tickers as exact names/symbols. Installed
+# on request (Rules page), never implicitly, and editable like any rule.
+SCAM_NAME_SUBSTRINGS = ("spacex", "tesla", "apple inc", "google", "microsoft", "amazon", "nvidia", "openai", "chatgpt",
+                        "claude ai", "biden", "obama", "putin", "meteora lp", "lp token", "raydium", "binance", "coinbase",
+                        "robinhood")
+SCAM_NAME_EXACT = ("sol", "btc", "eth", "bnb", "xrp", "usdt", "usdc", "lp", "test", "token", "airdrop")
+
+
+def scam_name_preset() -> list[dict[str, str]]:
+    rules = [{"field": "name", "match_type": "substring", "value": w} for w in SCAM_NAME_SUBSTRINGS]
+    rules += [{"field": f, "match_type": "exact", "value": w} for w in SCAM_NAME_EXACT for f in ("name", "symbol")]
+    return [{**r, "scope": "GLOBAL", "action": "BLOCK", "reason": "preset: scam / impersonation names"} for r in rules]
+
+
 def validate_blacklist_rule(scope: str, field: str, value: str, match_type: str, action: str = "BLOCK") -> list[str]:
     errors = []
     if scope not in BLACKLIST_SCOPES:

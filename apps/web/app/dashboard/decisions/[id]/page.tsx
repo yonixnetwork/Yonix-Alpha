@@ -26,6 +26,12 @@ function Reports({ reports }: { reports: NonNullable<AssessmentDetail["assessmen
   const tax = reports.tax;
   const sell = reports.sellability as Record<string, unknown> | undefined;
   const liq = reports.liquidity as Record<string, unknown> | undefined;
+  const mig = reports.migrated_liquidity;
+  const creator = reports.creator_history;
+  const usd = (v: unknown) => (v === null || v === undefined ? "UNKNOWN" : `$${Number(v).toLocaleString("en-US", { maximumFractionDigits: 0 })}`);
+  const txt = (v: unknown) => (v === null || v === undefined || v === "" ? "—" : String(v));
+  const resultPill = (r: unknown) =>
+    r === "PASS" ? "pill pill-ok" : r === "WARNING" || r === "UNKNOWN" ? "pill pill-warn" : r === "OFF" ? "pill pill-off" : "pill pill-danger";
   const pctOrUnknown = (v: string | null | undefined) => (v === null || v === undefined ? "UNKNOWN" : `${v}%`);
   const list = (v: unknown) => (Array.isArray(v) && v.length ? v.join(", ") : "none");
   return (
@@ -77,6 +83,68 @@ function Reports({ reports }: { reports: NonNullable<AssessmentDetail["assessmen
             <dt>Blocking</dt>
             <dd>{list(sell.blocking)}</dd>
           </dl>
+        </div>
+      )}
+      {creator && (
+        <div className="card">
+          <div className="status-label">Creator history</div>
+          <dl className="kv">
+            <dt>CREATOR TOKENS CREATED</dt>
+            <dd>{creator.tokens_created === null || creator.tokens_created === undefined ? "UNKNOWN" : txt(creator.tokens_created_display ?? creator.tokens_created)}</dd>
+            <dt>CREATOR HISTORY</dt>
+            <dd><span className={resultPill(creator.result)}>{txt(creator.result)}</span></dd>
+            <dt>Minimum</dt>
+            <dd>{txt(creator.minimum)}</dd>
+            <dt>Action</dt>
+            <dd>{txt(creator.action)}</dd>
+            <dt>Reason</dt>
+            <dd><code>{txt(creator.reason)}</code>{creator.detail ? ` — ${String(creator.detail)}` : ""}</dd>
+            <dt>Previous launches</dt>
+            <dd>{txt(creator.previous_launches)}{creator.previous_migrated !== null && creator.previous_migrated !== undefined ? ` (${String(creator.previous_migrated)} migrated)` : ""}</dd>
+            <dt>Creator wallet</dt>
+            <dd>{txt(creator.creator)}</dd>
+            <dt>Creator sold (this token)</dt>
+            <dd>{creator.creator_sold_now === null || creator.creator_sold_now === undefined ? "—" : creator.creator_sold_now ? "yes" : "no"}</dd>
+            <dt>Creator-linked early buyers</dt>
+            <dd>{txt(creator.creator_linked_buyers)}</dd>
+            <dt>Early sells on previous launches</dt>
+            <dd>{creator.previous_creator_sold_early === null || creator.previous_creator_sold_early === undefined ? "—"
+              : `${String(creator.previous_creator_sold_early)} of ${String(creator.previous_checked_for_sells)} observed`}</dd>
+            <dt>Previous launches rejected by observation</dt>
+            <dd>{txt(creator.previous_observation_rejected)}</dd>
+            <dt>Source</dt>
+            <dd>{txt(creator.source)}</dd>
+          </dl>
+          <div className="form-hint">Few launches is not proof of anything; the action is the configured policy. UNKNOWN is never replaced by a guess.</div>
+        </div>
+      )}
+      {mig && (
+        <div className="card">
+          <div className="status-label">Migrated liquidity (USD)</div>
+          {mig.applies ? (
+            <dl className="kv">
+              <dt>Usable liquidity</dt>
+              <dd>{usd(mig.usable_liquidity_usd)} ({txt(mig.usable_liquidity_sol)} SOL)</dd>
+              <dt>Total liquidity</dt>
+              <dd>{usd(mig.total_liquidity_usd)}</dd>
+              <dt>Minimum</dt>
+              <dd>{usd(mig.minimum_usd)}</dd>
+              <dt>Decision</dt>
+              <dd><span className={mig.decision === "PASS" ? "pill pill-ok" : "pill pill-danger"}>{txt(mig.decision)}</span></dd>
+              <dt>Reason</dt>
+              <dd><code>{txt(mig.reason)}</code></dd>
+              <dt>SOL/USD</dt>
+              <dd>{mig.sol_usd ? `$${Number(mig.sol_usd).toFixed(2)}` : "UNKNOWN"} · {txt(mig.sol_usd_source)}</dd>
+              <dt>Executable size (depth)</dt>
+              <dd>{mig.executable_max_size_sol ? `${String(mig.executable_max_size_sol)} SOL (${usd(mig.executable_max_size_usd)})` : "—"}</dd>
+              <dt>Entry impact / slippage</dt>
+              <dd>{formatBps((mig.entry_impact_bps as string | null) ?? null)} / {formatBps((mig.entry_slippage_bps as string | null) ?? null)}</dd>
+              <dt>Exit impact / slippage</dt>
+              <dd>{formatBps((mig.exit_impact_bps as string | null) ?? null)} / {formatBps((mig.exit_slippage_bps as string | null) ?? null)}</dd>
+            </dl>
+          ) : (
+            <div className="muted">{txt(mig.reason)}</div>
+          )}
         </div>
       )}
       {liq && (
@@ -262,7 +330,7 @@ export default function DecisionDetailPage() {
 
       {d.reports && (
         <>
-          <div className="section-title">Tax, sellability and liquidity</div>
+          <div className="section-title">Tax, sellability, liquidity and creator history</div>
           <Reports reports={d.reports} />
         </>
       )}

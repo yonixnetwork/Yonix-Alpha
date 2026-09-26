@@ -39,7 +39,7 @@ from yonixalpha_core.solana.flow import (
     synchronized_buy_cluster,
     trade_flow,
 )
-from yonixalpha_core.solana import funding
+from yonixalpha_core.solana import creator_history, funding, sol_price
 from yonixalpha_core.solana.market_data import DexScreenerClient, JupiterClient
 from yonixalpha_core.solana.pumpfun import BondingCurveState, decode_bonding_curve
 from yonixalpha_core.solana.token_safety import UnexpectedShape, parse_holders, parse_mint_account
@@ -205,6 +205,24 @@ async def _wallet_analysis(src: Sources, inp: AssessmentInput, trades, creator: 
     ev["funding"] = {k: v for k, v in res.items() if k != "groups"} | {"groups": {f[:8] + "…": len(w) for f, w in res["groups"].items()}}
 
 
+async def _creator_and_name(src: Sources, inp: AssessmentInput, c: Controls, meta: dict[str, str], mint: str,
+                            curve_addr: str | None, now: datetime, ev: dict) -> None:
+    """Creator history (on-chain launch count, stream behaviour) and the
+    name filters' inputs. A failure leaves the history UNKNOWN, with why."""
+    if c.settings.creator_history_check:
+        try:
+            h = await creator_history.creator_history(src.redis, src.rpc, inp.creator, mint, curve_addr, now)
+        except Exception as exc:  # noqa: BLE001 - unavailable data, stated as UNKNOWN
+            h = creator_history.CreatorHistory(inp.creator, creator_history.UNKNOWN, None, None, None, None, now.isoformat(),
+                                               error=f"creator history: {type(exc).__name__}")
+        inp.creator_history = h.to_dict()
+        ev["creator_history"] = inp.creator_history
+    if meta.get("name") is not None:
+        inp.token_name = meta.get("name")
+        if c.settings.skip_duplicate_names:
+            inp.duplicate_of = await pump_stream.duplicate_of(src.redis, mint, inp.token_name)
+
+
 def _base_input(engine: str, strategy: str, mint: str, symbol: str, now: datetime, c: Controls) -> AssessmentInput:
     return AssessmentInput(
         engine=engine, strategy_name=strategy, asset_id=mint, symbol=symbol, now=now,
@@ -304,6 +322,7 @@ async def assemble_fresh(src: Sources, mint: str, now: datetime, c: Controls,
     inp.flow.round_trip_share = round_trip_volume_share(trades, now, FLOW_WINDOW_SECONDS)
     inp.flow.creator_launches_24h = await pump_stream.creator_launches(src.redis, creator, now)
     await _wallet_analysis(src, inp, trades, creator, now, decimals, c, ev)
+    await _creator_and_name(src, inp, c, meta, mint, curve_addr, now, ev)
 
     if token is not None and curve_addr:
         inp.holders, err = await fetch_holders(src.rpc, mint, token.supply_raw, {curve_addr}, creator, now)
@@ -412,6 +431,12 @@ async def assemble_migrated(src: Sources, mint: str, now: datetime, c: Controls)
         # Curve completed but no verified pool: the gate reports MIGRATION_PENDING.
         inp.market = MarketInfo(observation=Observation("pump_stream", now), price=None, volatility=None,
                                 liquidity_quote=None, age_seconds=None, curve_complete=True, migrated=False)
+
+    await _creator_and_name(src, inp, c, meta, mint, meta.get("bonding_curve") or None, now, ev)
+    if pool_state is not None and c.settings.migrated_liquidity_check:
+        inp.sol_usd, inp.sol_usd_source, errs = await sol_price.sol_usd(src.redis, src.jupiter, src.dexscreener, mint, now)
+        ev["sol_usd"] = {"price": str(inp.sol_usd) if inp.sol_usd is not None else None, "source": inp.sol_usd_source}
+        ev["errors"].extend(errs)
 
     if src.jupiter is not None and token is not None and pool_state is not None:
         quote, qev = await src.jupiter.execution_quote(

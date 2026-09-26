@@ -199,9 +199,16 @@ def test_insufficient_liquidity_on_established_token_is_no_trade():
 
 
 def test_insufficient_liquidity_on_young_token_waits():
-    a = decide(_pool(liquidity_quote=Decimal("5"), age_seconds=60))
+    # With the migrated USD minimum switched off, a young pool below the SOL
+    # minimum still waits for liquidity, as before.
+    off = replace(SafetySettings(), migrated_liquidity_check=False)
+    a = decide(_pool(liquidity_quote=Decimal("5"), age_seconds=60), off)
     assert a.decision == FinalDecision.WAIT
     assert a.status_label == "WAITING_FOR_LIQUIDITY"
+    # With it on (the default), $750 of usable liquidity is below $10,000: NO_TRADE.
+    a = decide(replace(_pool(liquidity_quote=Decimal("5"), age_seconds=60), sol_usd=Decimal("150")))
+    assert a.decision == FinalDecision.NO_TRADE and "INSUFFICIENT_MIGRATED_LIQUIDITY" in codes(a)
+    assert "WAITING_FOR_LIQUIDITY" in codes(a)
 
 
 def test_curve_token_is_not_blocked_by_the_dex_pool_liquidity_minimum():

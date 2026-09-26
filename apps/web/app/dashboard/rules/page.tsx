@@ -32,6 +32,7 @@ export default function RulesPage() {
   const [rule, setRule] = useState({ name: "", scope: "GLOBAL", field: "", op: ">", threshold: "", action: "WAIT" });
   const [editingBl, setEditingBl] = useState<string | null>(null);
   const [editingRule, setEditingRule] = useState<string | null>(null);
+  const [presetNote, setPresetNote] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -126,6 +127,25 @@ export default function RulesPage() {
           </button>
         )}
       </div>
+      <div className="btn-row">
+        <button
+          className="btn btn-sm"
+          onClick={() =>
+            run(async () => {
+              const r = await apiPost<{ added: number; skipped: number }>("/api/control/blacklist/presets/scam-names");
+              setPresetNote(`Scam / impersonation word preset: ${r.added} rule(s) added, ${r.skipped} already present.`);
+            })
+          }
+        >
+          Add scam-name preset
+        </button>{" "}
+        <span className="muted">
+          Name substrings (spacex, tesla, apple inc, google, microsoft, amazon, nvidia, openai, chatgpt, claude ai, biden,
+          obama, putin, meteora lp, lp token, raydium, binance, coinbase, robinhood) and exact names/symbols (sol, btc, eth,
+          bnb, xrp, usdt, usdc, lp, test, token, airdrop). Each becomes an ordinary rule you can disable or delete.
+        </span>
+      </div>
+      {presetNote && <div className="success">{presetNote}</div>}
       {blacklist.length === 0 ? (
         <div className="muted">No word filters.</div>
       ) : (

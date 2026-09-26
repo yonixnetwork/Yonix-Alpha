@@ -28,6 +28,9 @@ RECENT = f"{PREFIX}:recent"  # zset mint -> create timestamp
 PROMOTED = f"{PREFIX}:promoted"  # zset mint -> promotion timestamp
 MIGRATED = f"{PREFIX}:migrated"  # zset mint -> migration timestamp
 ACTIVE = f"{PREFIX}:active"  # zset mint -> last trade timestamp (momentum scan)
+STREAM_STARTED = f"{PREFIX}:stream_started"  # first ingest: start of the creator-launch coverage
+NAMES = f"{PREFIX}:name"  # + ":" + normalized name -> first mint that used it
+NAME_TTL = 24 * 3600
 CREATOR_TTL = 7 * 86400
 
 META_TTL = 6 * 3600
@@ -54,6 +57,26 @@ def creator_key(creator: str) -> str:
     return f"{PREFIX}:creator:{creator}"
 
 
+def normalize_name(value: str | None) -> str:
+    """Case-, space- and punctuation-insensitive form used for duplicates."""
+    return "".join(ch for ch in (value or "").casefold() if ch.isalnum())
+
+
+def name_key(name: str | None) -> str | None:
+    n = normalize_name(name)
+    return f"{NAMES}:{n}" if n else None
+
+
+async def duplicate_of(redis: Redis, mint: str, name: str | None) -> str | None:
+    """The earlier mint (last 24 h) that launched with the same name, or
+    None. Symbols are not compared: popular tickers are reused all the time."""
+    key = name_key(name)
+    if key is None:
+        return None
+    first = await redis.get(key)
+    return first if first and first != mint else None
+
+
 def _ts(fields: dict[str, Any]) -> int | None:
     ts = fields.get("timestamp")
     return int(ts) if isinstance(ts, int) and ts > 0 else None
@@ -67,6 +90,7 @@ async def ingest_logs(redis: Redis, logs: list[str], signature: str | None, rece
     counts: dict[str, int] = {}
     pipe = redis.pipeline(transaction=False)
     pipe.set(HEARTBEAT, received_at.isoformat())
+    pipe.set(STREAM_STARTED, int(received_at.timestamp()), nx=True)
     pipe.hincrby(STATS, "notifications", 1)
     for kind, f in decode_log_events(logs):
         mint = f.get("mint")
@@ -96,6 +120,9 @@ async def ingest_logs(redis: Redis, logs: list[str], signature: str | None, rece
             if meta["creator"]:
                 pipe.zadd(creator_key(meta["creator"]), {mint: meta["created_at"]})
                 pipe.expire(creator_key(meta["creator"]), CREATOR_TTL)
+            if name_key(meta["name"]):
+                # The first launch to use a name keeps it for 24 h.
+                pipe.set(name_key(meta["name"]), mint, nx=True, ex=NAME_TTL)
         elif kind == "trade":
             if ts is None or "virtual_sol_reserves" not in f:
                 continue

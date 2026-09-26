@@ -10,10 +10,27 @@ const SCOPES = ["GLOBAL", "solana_fresh", "solana_migration", "solana_momentum",
 
 type Value = string | number | boolean | string[] | null;
 
-const SECTIONS: { title: string; match: (k: string) => boolean }[] = [
+// First match wins; `also` shows a key that belongs to another section here
+// too (same value, edited in either place).
+const SECTIONS: { title: string; match: (k: string) => boolean; also?: string[]; note?: string }[] = [
   { title: "Account & sizing", match: (k) => /risk_per_trade|position_size|open_positions|daily_loss|exposure|cooldown/.test(k) },
+  {
+    title: "Creator risk",
+    match: (k) => /creator/.test(k),
+    note: "Creator history counts the pump.fun tokens the launch creator's wallet has created, on chain. Fewer than the minimum is not proof of anything — choose the action. If the count cannot be established it is UNKNOWN, never guessed.",
+  },
+  {
+    title: "Migrated liquidity (PumpSwap)",
+    match: (k) => /^migrated_|min_migrated/.test(k),
+    also: ["max_entry_impact_bps", "max_exit_impact_bps"],
+    note: "Migrated tokens only. Usable liquidity is the pool's SOL side (what a seller can withdraw) in USD. Below the minimum: NO_TRADE. Bonding-curve tokens are never judged by this rule. The price-impact limits apply to every venue.",
+  },
+  { title: "Token name filters", match: (k) => /name_length|duplicate_names|ascii_names/.test(k),
+    note: "Word blacklists (substring / exact / regex) are on the Rules page." },
+  { title: "Fresh-token observation", match: (k) => /^fresh_|max_active_candidates|^momentum_/.test(k) },
+  { title: "Exit intelligence", match: (k) => /^exit_/.test(k) },
   { title: "Liquidity & execution", match: (k) => /liquidity|pool_fraction|impact|round_trip|slippage|data_age/.test(k) },
-  { title: "Token & holders", match: (k) => /authority|transfer_fee|top1|top10|creator|holder/.test(k) },
+  { title: "Token & holders", match: (k) => /authority|transfer_fee|top1|top10|holder|tax|agent|program/.test(k) },
   { title: "Trading activity", match: (k) => /buyers|top3|trades_in_window/.test(k) },
   { title: "Stops, targets & trailing", match: (k) => /stop|tp_|trailing/.test(k) },
   { title: "Decision policy", match: () => true },
@@ -26,6 +43,23 @@ const HELP: Record<string, string> = {
   min_stop_pct: "Floor on the automatic stop distance. Must exceed round-trip costs.",
   max_risk_level_for_auto: "Findings above this level need operator approval.",
   wait_for_liquidity_max_age_seconds: "Young pools below min liquidity WAIT instead of NO_TRADE for this long.",
+  creator_history_check: "Creator History Check ON/OFF.",
+  min_creator_tokens_created: "Minimum pump.fun tokens created by the creator wallet (this one included).",
+  creator_below_threshold_action: "What happens below the minimum: WARN, REDUCE_SIZE, REQUIRE_MANUAL_APPROVAL or REJECT.",
+  creator_history_unknown_action: "What happens when the count cannot be established.",
+  max_creator_tokens_created: "Serial-launcher ceiling: at or above this, approval is needed. 0 = off.",
+  max_creator_launches_24h: "Launches by this creator seen by the stream in 24 h; above: approval.",
+  max_creator_share: "Creator wallet's own holding, share of supply; above: approval.",
+  max_creator_linked_buyers: "Early buyers funded by the creator; above: approval.",
+  migrated_liquidity_check: "Liquidity Check ON/OFF (migrated tokens).",
+  min_migrated_liquidity_usd: "Minimum usable liquidity in USD; below: NO_TRADE.",
+  migrated_max_entry_slippage_bps: "Entry price impact + pool fee at the planned size (bps).",
+  migrated_max_exit_slippage_bps: "Exit price impact + pool fee at the planned size (bps).",
+  max_entry_impact_bps: "Maximum entry price impact (bps), every venue.",
+  max_exit_impact_bps: "Maximum exit price impact (bps), every venue.",
+  min_name_length: "Reject names shorter than this. 0 = off.",
+  skip_duplicate_names: "Reject a launch reusing a name launched in the last 24 h.",
+  ascii_names_only: "Reject names/symbols with non-ASCII characters.",
 };
 
 function toInput(v: Value): string {
@@ -86,7 +120,8 @@ export default function RiskSettingsPage() {
     return SECTIONS.map((sec) => {
       const ks = keys.filter((k) => !used.has(k) && sec.match(k));
       ks.forEach((k) => used.add(k));
-      return { title: sec.title, keys: ks };
+      const also = (sec.also ?? []).filter((k) => keys.includes(k) && !ks.includes(k));
+      return { title: sec.title, note: sec.note, keys: [...ks, ...also] };
     }).filter((g) => g.keys.length);
   }, [data]);
 
@@ -154,21 +189,30 @@ export default function RiskSettingsPage() {
         grouped.map((g) => (
           <div key={g.title}>
             <div className="section-title">{g.title}</div>
+            {g.note && <p className="muted">{g.note}</p>}
             <div className="form-grid">
               {g.keys.map((k) => {
                 const original = data.effective[k];
                 const limit = data.hard_limits[k];
+                const choices = data.enums?.[k];
+                const id = `${g.title}-${k}`.replace(/[^a-zA-Z0-9_-]/g, "_");
                 return (
                   <div className="form-row" key={k}>
-                    <label htmlFor={k}>{k}</label>
+                    <label htmlFor={id}>{k}</label>
                     {typeof original === "boolean" ? (
-                      <select id={k} value={draft[k]} onChange={(e) => setDraft({ ...draft, [k]: e.target.value })}>
-                        <option value="true">true</option>
-                        <option value="false">false</option>
+                      <select id={id} className={changed.has(k) ? "changed" : ""} value={draft[k]}
+                        onChange={(e) => setDraft({ ...draft, [k]: e.target.value })}>
+                        <option value="true">ON (true)</option>
+                        <option value="false">OFF (false)</option>
+                      </select>
+                    ) : choices ? (
+                      <select id={id} className={changed.has(k) ? "changed" : ""} value={draft[k]}
+                        onChange={(e) => setDraft({ ...draft, [k]: e.target.value })}>
+                        {choices.map((c) => <option key={c} value={c}>{c}</option>)}
                       </select>
                     ) : (
                       <input
-                        id={k}
+                        id={id}
                         className={changed.has(k) ? "changed" : ""}
                         value={draft[k] ?? ""}
                         onChange={(e) => setDraft({ ...draft, [k]: e.target.value })}

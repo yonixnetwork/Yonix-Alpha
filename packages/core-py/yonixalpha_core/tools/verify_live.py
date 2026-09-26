@@ -31,6 +31,7 @@ from yonixalpha_core.solana.assembler import token_account_owners
 from yonixalpha_core.solana.market_data import DexScreenerClient, JupiterClient, RateBudget
 from yonixalpha_core.solana.pumpfun import PUMP_PROGRAM_ID, decode_bonding_curve, decode_log_events
 from yonixalpha_core.solana.rpc import RpcManager
+from yonixalpha_core.solana import creator_history
 from yonixalpha_core.solana.token_safety import parse_holders, parse_mint_account
 
 USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
@@ -166,6 +167,20 @@ async def main(seconds: int, as_json: bool) -> int:
                     report.add("bonding_curve_decode", "FAILED", f"{type(exc).__name__}: {exc}")
             else:
                 report.add("bonding_curve_decode", "NOT VERIFIED", "no CreateEvent in window to learn a curve address from")
+            creator = (samples.get("create") or {}).get("creator") or (samples.get("create") or {}).get("user")
+            if creator:
+                try:
+                    t0 = time.monotonic()
+                    curves = await creator_history.onchain_curves(rpc, creator)
+                    report.add("creator_history", "VERIFIED",
+                               f"creator {creator[:6]}…: {len(curves)} pump.fun curve(s) on chain "
+                               f"({sum(1 for _, done in curves if done)} migrated) in {(time.monotonic() - t0) * 1000:.0f} ms")
+                except Exception as exc:  # noqa: BLE001
+                    report.add("creator_history", "FAILED",
+                               f"getProgramAccounts refused or failed ({type(exc).__name__}: {str(exc)[:160]}); the gate will "
+                               "report CREATOR HISTORY: UNKNOWN unless the stream itself saw enough launches")
+            else:
+                report.add("creator_history", "NOT VERIFIED", "no CreateEvent in window to learn a creator from")
         elif not sample_mint:
             report.add("mint_parse", "NOT VERIFIED", "no pump.fun mint sampled from the stream")
 
@@ -182,6 +197,10 @@ async def main(seconds: int, as_json: bool) -> int:
                        f"round_trip={quote.round_trip_loss_bps} bps")
         else:
             report.add("jupiter_quote", "FAILED", f"{q.status}: {q.error}")
+        q1 = await jup.quote("So11111111111111111111111111111111111111112", USDC, 1_000_000_000, 50)
+        report.add("sol_usd", "VERIFIED" if q1.out_amount else "FAILED",
+                   f"1 SOL = {Decimal(q1.out_amount) / Decimal(10**6)} USDC (migrated-liquidity USD rule)" if q1.out_amount
+                   else f"{q1.status}: {q1.error} — migrated tokens would be NO_TRADE (USD liquidity unknown)")
 
         dex = DexScreenerClient(http, RateBudget(60))
         pool, err = await dex.pool(BONK)

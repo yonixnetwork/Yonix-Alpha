@@ -6,6 +6,7 @@ canonical pool, its vaults and its recent trades."""
 import base64
 import struct
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 from yonixalpha_core.solana import pumpswap
 from yonixalpha_core.testing.pump import SUPPLY, b, i64, pk, s, u64, wallet
@@ -97,3 +98,14 @@ def trade_history(pool: str, n_buys: int, n_sells: int, start: datetime, every: 
         base, quote = (base - tok, quote + sol) if buy else (base + tok, quote - sol)
         out.append((f"{tag}{i}", trade_event(pool, wallet(20 + i % 30), start + timedelta(seconds=every * i), buy, tok, sol, base, quote)))
     return list(reversed(out))  # newest first, like getSignaturesForAddress
+
+
+SOL_USD = Decimal("150")
+
+
+async def seed_sol_usd(redis, now: datetime, price: Decimal = SOL_USD) -> None:
+    """Puts a SOL/USD price in the cache the migrated-liquidity rule reads,
+    so tests never call Jupiter or DexScreener."""
+    from yonixalpha_core.solana import sol_price
+
+    await sol_price.store(redis, price, "test fixture", now, ttl=3600)

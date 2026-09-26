@@ -343,3 +343,13 @@ class AssessmentInput:
     # Fresh-token observation (T0 / T+half / T+window comparison) from
     # solana.observation; the gate adds its trend as a finding.
     observation: dict | None = None
+    # Creator history (solana.creator_history.CreatorHistory.to_dict());
+    # None when not evaluated (non-Solana engines).
+    creator_history: dict | None = None
+    # Token name as launched, and the earlier mint (24 h) that used the same
+    # name; the name filters apply only when token_name is set.
+    token_name: str | None = None
+    duplicate_of: str | None = None
+    # SOL/USD for the migrated-liquidity USD rule; None = no source answered.
+    sol_usd: Decimal | None = None
+    sol_usd_source: str | None = None

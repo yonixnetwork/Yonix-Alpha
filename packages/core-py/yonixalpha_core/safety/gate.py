@@ -456,6 +456,192 @@ def _check_observation(inp: AssessmentInput, out: list[Finding]) -> None:
                             + ("; ".join(obs.get("positive") or []) or "no change"), FinalDecision.EXECUTE))
 
 
+_CREATOR_ACTION = {
+    "WARN": (FinalDecision.EXECUTE, RiskLevel.MODERATE, "WARNING"),
+    "REDUCE_SIZE": (FinalDecision.REDUCE_SIZE, RiskLevel.MODERATE, "WARNING"),
+    "REQUIRE_MANUAL_APPROVAL": (FinalDecision.REQUIRE_MANUAL_APPROVAL, RiskLevel.HIGH, "WARNING"),
+    "REJECT": (FinalDecision.REJECT, RiskLevel.CRITICAL, "REJECT"),
+}
+
+
+def creator_history_report(inp: AssessmentInput, s: SafetySettings) -> dict[str, Any] | None:
+    """What the creator-history check decided, with the exact reason. None
+    when no history was evaluated (non-Solana engines) or the check is off."""
+    h = inp.creator_history
+    if h is None:
+        return None
+    base = {"creator": h.get("creator"), "tokens_created": h.get("tokens_created"),
+            "previous_launches": h.get("previous_launches"), "previous_migrated": h.get("previous_migrated"),
+            "count_status": h.get("status"), "source": h.get("source"), "minimum": s.min_creator_tokens_created,
+            "maximum": s.max_creator_tokens_created or None, "enabled": s.creator_history_check,
+            "stream_observed_launches": h.get("stream_observed_launches"), "stream_since": h.get("stream_since"),
+            "previous_creator_sold_early": h.get("previous_creator_sold_early"),
+            "previous_checked_for_sells": h.get("previous_checked_for_sells"),
+            "previous_observation_rejected": h.get("previous_observation_rejected"),
+            "previous_rejection_reasons": h.get("previous_rejection_reasons") or [],
+            "creator_sold_now": inp.flow.creator_sold if inp.flow else None,
+            "creator_linked_buyers": inp.flow.creator_linked_buyers if inp.flow else None,
+            "error": h.get("error")}
+    if not s.creator_history_check:
+        return {**base, "result": "OFF", "action": None, "reason": "creator history check disabled"}
+    n, status = h.get("tokens_created"), h.get("status")
+    known = n is not None and (status == "VERIFIED" or (status == "LOWER_BOUND" and n >= s.min_creator_tokens_created))
+    if not known:
+        action = s.creator_history_unknown_action
+        return {**base, "tokens_created": None, "result": "UNKNOWN", "action": action,
+                "reason": "CREATOR_HISTORY_UNKNOWN", "detail": h.get("error") or
+                (f"only a lower bound is available (at least {n}), below the minimum" if n is not None else "count unavailable")}
+    shown = f"at least {n}" if status == "LOWER_BOUND" else str(n)
+    if s.max_creator_tokens_created and n >= s.max_creator_tokens_created and status == "VERIFIED":
+        return {**base, "tokens_created_display": shown, "result": "WARNING", "action": "REQUIRE_MANUAL_APPROVAL",
+                "reason": "CREATOR_SERIAL_LAUNCHER"}
+    if n >= s.min_creator_tokens_created:
+        return {**base, "tokens_created_display": shown, "result": "PASS", "action": None, "reason": "CREATOR_HISTORY_OK"}
+    action = s.creator_below_threshold_action
+    return {**base, "tokens_created_display": shown, "result": _CREATOR_ACTION[action][2], "action": action,
+            "reason": "CREATOR_HISTORY_BELOW_THRESHOLD"}
+
+
+def _check_creator_history(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) -> None:
+    r = creator_history_report(inp, s)
+    if r is None or r["result"] == "OFF":
+        return
+    if r["result"] == "UNKNOWN":
+        decision, level, _ = _CREATOR_ACTION[r["action"]]
+        out.append(_finding(RiskCategory.HOLDER, "CREATOR_HISTORY_UNKNOWN", level,
+                            f"CREATOR TOKENS CREATED: UNKNOWN · Minimum: {s.min_creator_tokens_created} · Action: {r['action']} · "
+                            f"Reason: CREATOR_HISTORY_UNKNOWN — CREATOR HISTORY: UNKNOWN ({r['detail']}); the count is never estimated",
+                            decision, decision == FinalDecision.REJECT))
+        return
+    shown = r["tokens_created_display"]
+    prev = f"; previous launches {r['previous_launches']}" if r.get("previous_launches") is not None else ""
+    if r.get("previous_migrated") is not None:
+        prev += f", {r['previous_migrated']} migrated"
+    if r["reason"] == "CREATOR_HISTORY_OK":
+        out.append(_finding(RiskCategory.HOLDER, "CREATOR_HISTORY_OK", RiskLevel.LOW,
+                            f"CREATOR TOKENS CREATED: {shown} · Minimum: {s.min_creator_tokens_created} — CREATOR HISTORY: PASS"
+                            f"{prev} ({r['source']})", FinalDecision.EXECUTE))
+    elif r["reason"] == "CREATOR_SERIAL_LAUNCHER":
+        out.append(_finding(RiskCategory.HOLDER, "CREATOR_SERIAL_LAUNCHER", RiskLevel.HIGH,
+                            f"CREATOR TOKENS CREATED: {shown} · Maximum: {s.max_creator_tokens_created} · "
+                            "Action: REQUIRE_MANUAL_APPROVAL · Reason: CREATOR_SERIAL_LAUNCHER — CREATOR HISTORY: WARNING "
+                            f"(serial-launcher indicator, not proof){prev}", FinalDecision.REQUIRE_MANUAL_APPROVAL))
+    else:
+        decision, level, label = _CREATOR_ACTION[r["action"]]
+        out.append(_finding(RiskCategory.HOLDER, "CREATOR_HISTORY_BELOW_THRESHOLD", level,
+                            f"Creator Tokens Created: {shown} · Minimum: {s.min_creator_tokens_created} · Action: {r['action']} · "
+                            f"Reason: CREATOR_HISTORY_BELOW_THRESHOLD — CREATOR HISTORY: {label}{prev}. Few launches is not "
+                            "evidence of malice; this is the configured policy", decision, decision == FinalDecision.REJECT))
+    sold, checked = r.get("previous_creator_sold_early"), r.get("previous_checked_for_sells")
+    if sold:
+        out.append(_finding(RiskCategory.HOLDER, "CREATOR_PRIOR_EARLY_SELLS", RiskLevel.MODERATE,
+                            f"creator sold within 5 min of launch on {sold} of {checked} previous launches this system "
+                            "observed — historical selling indicator", FinalDecision.EXECUTE))
+
+
+def _check_names(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) -> None:
+    name = inp.token_name
+    if name is None:
+        return
+    shown = name.strip()
+    if s.min_name_length and len(shown) < s.min_name_length:
+        out.append(_finding(RiskCategory.TOKEN, "NAME_TOO_SHORT", RiskLevel.CRITICAL,
+                            f"token name '{shown}' is shorter than min_name_length {s.min_name_length}", FinalDecision.REJECT, True))
+    if s.ascii_names_only and not (shown + (inp.symbol or "")).isascii():
+        out.append(_finding(RiskCategory.TOKEN, "NON_ASCII_NAME", RiskLevel.CRITICAL,
+                            f"token name/symbol '{shown}' / '{inp.symbol}' contains non-ASCII characters (ascii_names_only)",
+                            FinalDecision.REJECT, True))
+    if s.skip_duplicate_names and inp.duplicate_of:
+        out.append(_finding(RiskCategory.TOKEN, "DUPLICATE_NAME", RiskLevel.CRITICAL,
+                            f"name '{shown}' was already launched as {_short(inp.duplicate_of)} in the last 24 h "
+                            "(skip_duplicate_names — copycat launch)", FinalDecision.REJECT, True))
+
+
+def _migrated_applies(inp: AssessmentInput) -> bool:
+    m = inp.market
+    return inp.engine.startswith("solana") and m is not None and m.migrated is True
+
+
+def migrated_liquidity_report(inp: AssessmentInput, s: SafetySettings, plan: TradePlan) -> dict[str, Any]:
+    """Usable liquidity of a migrated (PumpSwap) pool in USD, and what the
+    planned size can actually execute. Usable = the pool's SOL side — what a
+    seller can withdraw — valued at SOL/USD. Total = both sides at the pool
+    price (2x usable), the cosmetic figure aggregators show."""
+    m = inp.market
+    if not _migrated_applies(inp):
+        return {"applies": False, "minimum_usd": str(s.min_migrated_liquidity_usd),
+                "reason": "bonding-curve token: judged on curve state and executability; the migrated USD minimum "
+                          "applies after migration"}
+    out: dict[str, Any] = {"applies": True, "enabled": s.migrated_liquidity_check,
+                           "minimum_usd": str(s.min_migrated_liquidity_usd),
+                           "sol_usd": str(inp.sol_usd) if inp.sol_usd is not None else None,
+                           "sol_usd_source": inp.sol_usd_source,
+                           "usable_liquidity_sol": str(m.liquidity_quote) if m.liquidity_quote is not None else None,
+                           "usable_liquidity_usd": None, "total_liquidity_usd": None,
+                           "max_entry_impact_bps": str(s.max_entry_impact_bps), "max_exit_impact_bps": str(s.max_exit_impact_bps),
+                           "max_entry_slippage_bps": str(s.migrated_max_entry_slippage_bps),
+                           "max_exit_slippage_bps": str(s.migrated_max_exit_slippage_bps)}
+    if m.liquidity_quote is not None and inp.sol_usd is not None:
+        usable = (m.liquidity_quote * inp.sol_usd).quantize(Decimal("0.01"))
+        out["usable_liquidity_usd"], out["total_liquidity_usd"] = str(usable), str(usable * 2)
+    model = inp.liquidity_model
+    size = plan.position_size.value if plan.position_size else None
+    if model is not None and hasattr(model, "max_size_within") and m.liquidity_quote:
+        depth = model.max_size_within(s.max_entry_impact_bps, s.max_exit_impact_bps, m.liquidity_quote)
+        out["executable_max_size_sol"] = str(depth.quantize(Decimal("0.0001")))
+        out["executable_max_size_usd"] = str((depth * inp.sol_usd).quantize(Decimal("0.01"))) if inp.sol_usd else None
+    if model is not None and hasattr(model, "marginal_price") and size:
+        o = open_fill(model, size, inp.side)
+        c = close_fill(model, o.quantity, inp.side)
+        mp = model.marginal_price
+        out["planned_size_sol"] = str(size)
+        out["entry_impact_bps"], out["exit_impact_bps"] = str(o.impact_bps.quantize(Decimal("0.01"))), \
+            str(c.impact_bps.quantize(Decimal("0.01")))
+        if o.quantity > 0 and c.complete:
+            out["entry_slippage_bps"] = str((((o.quote + o.fee) / o.quantity / mp - 1) * BPS).quantize(Decimal("0.01")))
+            out["exit_slippage_bps"] = str(((1 - (c.quote - c.fee) / o.quantity / mp) * BPS).quantize(Decimal("0.01")))
+    if not s.migrated_liquidity_check:
+        out.update(decision="PASS", reason="migrated liquidity check disabled")
+    elif out["usable_liquidity_usd"] is None:
+        out.update(decision="NO_TRADE", reason="MIGRATED_LIQUIDITY_USD_UNKNOWN")
+    elif Decimal(out["usable_liquidity_usd"]) < s.min_migrated_liquidity_usd:
+        out.update(decision="NO_TRADE", reason="INSUFFICIENT_MIGRATED_LIQUIDITY")
+    else:
+        out.update(decision="PASS", reason="MIGRATED_LIQUIDITY_OK")
+    return out
+
+
+def _usd(v: Any) -> str:
+    return f"${Decimal(v):,.0f}"
+
+
+def _check_migrated_liquidity(r: dict[str, Any], s: SafetySettings, out: list[Finding]) -> None:
+    if not r.get("applies") or not s.migrated_liquidity_check:
+        return
+    minimum = _usd(s.min_migrated_liquidity_usd)
+    if r["reason"] == "MIGRATED_LIQUIDITY_USD_UNKNOWN":
+        why = "SOL/USD unavailable" if r["sol_usd"] is None else "pool liquidity unknown"
+        out.append(_finding(RiskCategory.LIQUIDITY, "MIGRATED_LIQUIDITY_USD_UNKNOWN", RiskLevel.CRITICAL,
+                            f"Usable Liquidity: UNKNOWN ({why}) · Minimum: {minimum} · Decision: NO_TRADE · "
+                            "Reason: MIGRATED_LIQUIDITY_USD_UNKNOWN", FinalDecision.NO_TRADE, True))
+        return
+    depth = f"; executable within impact limits up to {r['executable_max_size_sol']} SOL" if r.get("executable_max_size_sol") else ""
+    base = (f"Usable Liquidity: {_usd(r['usable_liquidity_usd'])} ({r['usable_liquidity_sol']} SOL at "
+            f"${Decimal(r['sol_usd']):,.2f}) · Total: {_usd(r['total_liquidity_usd'])} · Minimum: {minimum}")
+    if r["reason"] == "INSUFFICIENT_MIGRATED_LIQUIDITY":
+        out.append(_finding(RiskCategory.LIQUIDITY, "INSUFFICIENT_MIGRATED_LIQUIDITY", RiskLevel.CRITICAL,
+                            f"{base} · Decision: NO_TRADE · Reason: INSUFFICIENT_MIGRATED_LIQUIDITY", FinalDecision.NO_TRADE, True))
+        return
+    out.append(_finding(RiskCategory.LIQUIDITY, "MIGRATED_LIQUIDITY_OK", RiskLevel.LOW,
+                        f"{base} · Decision: PASS{depth}", FinalDecision.EXECUTE))
+    for side, limit in (("entry", s.migrated_max_entry_slippage_bps), ("exit", s.migrated_max_exit_slippage_bps)):
+        v = r.get(f"{side}_slippage_bps")
+        if v is not None and Decimal(v) > limit:
+            out.append(_finding(RiskCategory.EXECUTION, f"MIGRATED_{side.upper()}_SLIPPAGE", RiskLevel.HIGH,
+                                f"{side} slippage {Decimal(v) / 100:.2f}% (price impact + pool fee at the planned size) exceeds "
+                                f"{limit / 100:.2f}% · Decision: NO_TRADE", FinalDecision.NO_TRADE, True))
+
+
 def _check_account(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) -> None:
     a = inp.account
     if a.kill_switch_engaged:
@@ -618,9 +804,11 @@ def assess(inp: AssessmentInput, settings: SafetySettings, versions: dict[str, A
                                  f"{inp.engine} cannot open a {inp.side} position", FinalDecision.NO_TRADE, True))
     data_status = _check_data(inp, settings, required, findings)
     _check_token(inp, settings, findings)
+    _check_names(inp, settings, findings)
     _check_liquidity(inp, settings, findings)
     _check_holders(inp, settings, findings)
     _check_flow(inp, settings, findings)
+    _check_creator_history(inp, settings, findings)
     _check_observation(inp, findings)
     _check_market(inp, findings)
     _check_account(inp, settings, findings)
@@ -645,6 +833,9 @@ def assess(inp: AssessmentInput, settings: SafetySettings, versions: dict[str, A
     )
     findings.extend(plan.findings)
     _check_execution(inp, settings, plan, findings)
+    migrated_liq = migrated_liquidity_report(inp, settings, plan) if _migrated_applies(inp) or inp.engine in CURVE_ENGINES else None
+    if migrated_liq is not None:
+        _check_migrated_liquidity(migrated_liq, settings, findings)
     _check_strategy_and_ml(inp, settings, findings)
 
     category_levels: dict[str, list[RiskLevel]] = {c.value: [] for c in RiskCategory}
@@ -732,7 +923,9 @@ def assess(inp: AssessmentInput, settings: SafetySettings, versions: dict[str, A
         versions={"risk_engine": RISK_ENGINE_VERSION, **(versions or {})},
         settings_snapshot=settings_to_dict(settings),
         reports={"tax": {**tax_report(inp.token, settings), "decision": _tax_decision(inp, findings)},
-                 "sellability": _sellability(inp, plan, findings), "liquidity": _liquidity(inp, plan)},
+                 "sellability": _sellability(inp, plan, findings), "liquidity": _liquidity(inp, plan),
+                 **({"migrated_liquidity": migrated_liq} if migrated_liq is not None else {}),
+                 **({"creator_history": creator_report} if (creator_report := creator_history_report(inp, settings)) else {})},
     )
 
 

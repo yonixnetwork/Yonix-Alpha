@@ -128,6 +128,36 @@ class SafetySettings:
     exit_emergency_liquidity_drop: Decimal = Decimal("0.60")
     exit_emergency_price_drop: Decimal = Decimal("0.35")  # from the highest price since entry
 
+    # Creator / developer history (pump.fun). The number of pump.fun tokens
+    # the launch creator's wallet has created, counted on chain (see
+    # solana.creator_history). Below the minimum is not proof of anything:
+    # the action is the operator's choice, WARN by default. When the count
+    # cannot be established it is UNKNOWN, never guessed.
+    creator_history_check: bool = True
+    min_creator_tokens_created: int = 5
+    creator_below_threshold_action: str = "WARN"  # WARN | REDUCE_SIZE | REQUIRE_MANUAL_APPROVAL | REJECT
+    creator_history_unknown_action: str = "WARN"  # same choices, when the count is unavailable
+    # Serial-launcher ("scam farm") ceiling: at or above this many tokens
+    # created, operator approval is needed. 0 disables.
+    max_creator_tokens_created: int = 0
+
+    # Migrated (PumpSwap) tokens only: minimum USABLE liquidity in USD — the
+    # SOL side of the pool (what a seller can actually withdraw) at the
+    # current SOL/USD price, not the cosmetic two-sided figure. Below it:
+    # NO_TRADE. Never applied to bonding-curve tokens.
+    migrated_liquidity_check: bool = True
+    min_migrated_liquidity_usd: Decimal = Decimal("10000")
+    # Price impact plus pool fee at the planned size, migrated pools only.
+    # The pure price-impact limits are max_entry_impact_bps / max_exit_impact_bps.
+    migrated_max_entry_slippage_bps: Decimal = Decimal("400")
+    migrated_max_exit_slippage_bps: Decimal = Decimal("600")
+
+    # Token name filters (pump.fun names/symbols). Word blacklists are the
+    # Rules page; these are structural checks.
+    min_name_length: int = 2  # 0 disables
+    skip_duplicate_names: bool = True  # a later launch reusing an earlier launch's name/symbol (24 h)
+    ascii_names_only: bool = False
+
     # ML
     min_ml_confidence: float | None = None
 
@@ -159,6 +189,20 @@ HARD_LIMITS: dict[str, tuple[str, Any]] = {
     "exit_reduce_fraction": ("max", Decimal("1")),
     "exit_emergency_price_drop": ("min", Decimal("0.05")),
     "exit_emergency_liquidity_drop": ("min", Decimal("0.10")),
+    "min_migrated_liquidity_usd": ("min", Decimal("0")),
+    "migrated_max_entry_slippage_bps": ("max", Decimal("1500")),
+    "migrated_max_exit_slippage_bps": ("max", Decimal("2000")),
+    "min_creator_tokens_created": ("min", 0),
+    "max_creator_tokens_created": ("min", 0),
+    "min_name_length": ("max", 32),
+}
+
+CREATOR_ACTIONS = ("WARN", "REDUCE_SIZE", "REQUIRE_MANUAL_APPROVAL", "REJECT")
+# Fields with a fixed set of values (the dashboard renders a select).
+ENUM_FIELDS: dict[str, tuple[str, ...]] = {
+    "creator_below_threshold_action": CREATOR_ACTIONS,
+    "creator_history_unknown_action": CREATOR_ACTIONS,
+    "max_risk_level_for_auto": ("LOW", "MODERATE", "HIGH"),
 }
 
 _TUPLE_FIELDS = {"tp_r_multiples", "tp_exit_fractions"}
@@ -263,6 +307,15 @@ def validate(settings: SafetySettings) -> list[str]:
         errors.append("momentum_near_migration_progress must be in (0, 1]")
     if not (0 < settings.exit_volume_collapse_ratio < 1):
         errors.append("exit_volume_collapse_ratio must be between 0 and 1")
+    for name in ("creator_below_threshold_action", "creator_history_unknown_action"):
+        if getattr(settings, name) not in CREATOR_ACTIONS:
+            errors.append(f"{name} must be one of {', '.join(CREATOR_ACTIONS)}")
+    if settings.max_creator_tokens_created and settings.max_creator_tokens_created <= settings.min_creator_tokens_created:
+        errors.append("max_creator_tokens_created must be 0 (off) or above min_creator_tokens_created")
+    if settings.migrated_max_entry_slippage_bps <= 0 or settings.migrated_max_exit_slippage_bps <= 0:
+        errors.append("migrated_max_entry_slippage_bps and migrated_max_exit_slippage_bps must be positive")
+    if settings.min_name_length < 0:
+        errors.append("min_name_length must not be negative")
     return errors
 
 

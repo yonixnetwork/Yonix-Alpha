@@ -23,7 +23,7 @@ from yonixalpha_core.solana import pump_stream, pumpswap
 from yonixalpha_core.solana.assembler import Sources
 from yonixalpha_core.state_machine import CandidateState
 from yonixalpha_core.testing.pump import CREATOR, MINT, SUPPLY, Curve, FakeRpc, create_event, logs_of, wallet
-from yonixalpha_core.testing.pumpswap import FakePoolRpc, trade_event
+from yonixalpha_core.testing.pumpswap import FakePoolRpc, seed_sol_usd, trade_event
 
 from app.gate_manage import manage_gate_positions
 
@@ -229,12 +229,15 @@ async def test_migrated_token_is_detected_entered_and_exited_when_volume_collaps
     assert counts["migrations"] == 1
     cand = await one(session_factory, TradingCandidate, TradingCandidate.engine == "migration")
 
-    # PumpSwap pool verified, liquidity (95 SOL) and volume verified, buyers
-    # increasing, risk acceptable -> automatic (paper) entry.
+    # PumpSwap pool verified, liquidity (95 SOL = $14,250 usable at $150,
+    # above the $10,000 minimum) and volume verified, buyers increasing, risk
+    # acceptable -> automatic (paper) entry.
+    await seed_sol_usd(redis_client, NOW)
     async with session_factory() as s:
         c = await s.get(TradingCandidate, cand.id)
         a = await gate_eval.evaluate_with_gate(s, redis_client, PAPER_ENV, Sources(redis_client, busy_pool(20, 5, NOW)), c, NOW)
     assert a.decision.value == "EXECUTE", a.reasons
+    assert a.reports["migrated_liquidity"]["decision"] == "PASS"
     assert a.inputs_snapshot["pool"]["verified"] is True
     assert a.inputs_snapshot["pool_age_source"] == "migration event timestamp"
     assert a.inputs_snapshot["features"]["age_seconds"].startswith("600")

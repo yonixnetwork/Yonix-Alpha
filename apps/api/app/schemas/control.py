@@ -11,6 +11,8 @@ class SettingsOut(BaseModel):
     source: dict[str, Any]
     defaults: dict[str, Any]
     hard_limits: dict[str, Any]
+    # Fields with a fixed set of values (rendered as a select).
+    enums: dict[str, list[str]] = {}
 
 
 class SettingsUpdate(BaseModel):

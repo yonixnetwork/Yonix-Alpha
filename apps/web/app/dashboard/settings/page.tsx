@@ -4,6 +4,7 @@ import Link from "next/link";
 import { Settings } from "lucide-react";
 import ConfirmButton from "@/components/ConfirmDialog";
 import ProvidersPanel from "@/components/ProvidersPanel";
+import SnipePanel from "@/components/SnipePanel";
 import { ErrorNotice, modeClass, PageHeader, Section, Stat } from "@/components/ui";
 import { apiPut } from "@/lib/api";
 import type { ModesOut } from "@/lib/types";
@@ -52,6 +53,7 @@ export default function SettingsPage() {
               ))}
             </div>
           </Section>
+          <SnipePanel modes={m} onModes={(x) => modes.setData(x)} />
           <Section title="Where everything else lives">
             <ul className="reason-list">
               <li>

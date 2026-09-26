@@ -88,15 +88,33 @@ def logs_of(*events: bytes) -> list[str]:
     ]
 
 
+def program_accounts(creator_tokens: int, current_curve: str | None = CURVE, migrated: int = 0) -> list[dict]:
+    """getProgramAccounts answer for a creator with `creator_tokens` curves
+    (the current one included when `current_curve` is set), the first
+    `migrated` of the previous ones complete. Data is the 1-byte slice."""
+    rows = []
+    previous = creator_tokens - (1 if current_curve else 0)
+    for i in range(max(previous, 0)):
+        flag = b"\x01" if i < migrated else b"\x00"
+        rows.append({"pubkey": b58encode(bytes([60 + i % 150]) * 31 + bytes([i // 150])),
+                     "account": {"data": [base64.b64encode(flag).decode(), "base64"]}})
+    if current_curve:
+        rows.append({"pubkey": current_curve, "account": {"data": [base64.b64encode(b"\x00").decode(), "base64"]}})
+    return rows
+
+
 class FakeRpc:
     def __init__(self, curve: Curve, mint_authority: str | None = None, fail: set[str] | frozenset = frozenset(),
-                 funders: dict[str, str] | None = None, busy: set[str] | frozenset = frozenset()):
+                 funders: dict[str, str] | None = None, busy: set[str] | frozenset = frozenset(),
+                 creator_tokens: int = 12):
         """`funders` maps a buyer wallet to the wallet that funded it (the
         buyer then looks fresh); funders have a short history unless listed
         in `busy` (an exchange-like wallet); every other wallet has a long
         history."""
         self.curve, self.mint_authority, self.fail, self.calls = curve, mint_authority, set(fail), []
         self.funders, self.busy = funders or {}, set(busy)
+        # Pump.fun tokens created by the creator wallet (getProgramAccounts).
+        self.creator_tokens = creator_tokens
 
     async def call(self, method, params=None):
         self.calls.append(method)
@@ -107,6 +125,8 @@ class FakeRpc:
             return {"value": {"owner": TOKEN_2022, "data": {"parsed": {"type": "mint", "info": info}}}}
         if method == "getAccountInfo":
             return {"value": {"data": [base64.b64encode(self.curve.account()).decode(), "base64"]}}
+        if method == "getProgramAccounts":
+            return program_accounts(self.creator_tokens)
         if method == "getTokenLargestAccounts":
             accts = [{"address": "curveATA", "amount": str(SUPPLY * 70 // 100)}]
             accts += [{"address": f"ta{i}", "amount": str(SUPPLY * 2 // 100)} for i in range(12)]
