@@ -37,7 +37,7 @@ from app.schemas.control import (
     SettingsVersionOut,
     TimelineEventOut,
 )
-from yonixalpha_core import config_validation, kill_switch
+from yonixalpha_core import config_validation, execution_funnel, kill_switch
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import (
     AuditLog,
@@ -536,3 +536,22 @@ async def pipeline(db: AsyncSession = Depends(get_db), redis: Redis = Depends(ge
     last = (await db.execute(select(func.max(RiskAssessment.evaluated_at)))).scalar_one()
     return PipelineOut(stream=stream, funnel=funnel, candidates={s: n for s, n in rows},
                        decisions_24h={d: n for d, n in decisions}, last_assessment_at=last)
+
+
+# --- execution funnel ---------------------------------------------------------
+
+@router.get("/execution-funnel")
+async def get_execution_funnel(hours: float = Query(24, gt=0, le=24 * 14), db: AsyncSession = Depends(get_db),
+                               redis: Redis = Depends(get_redis), settings: Settings = Depends(get_settings),
+                               _: str = Depends(get_current_username)) -> dict:
+    """Where every Pump.fun token stopped: observed -> candidate -> assessed
+    -> BUY signal -> executable -> position -> live order, with the exact
+    blocking codes. Counted from the database; nothing is estimated."""
+    return await execution_funnel.funnel(db, execution_funnel.since_hours(hours), redis, settings)
+
+
+@router.get("/execution-funnel/token/{mint}")
+async def get_token_trace(mint: str, db: AsyncSession = Depends(get_db), _: str = Depends(get_current_username)) -> dict:
+    if not 32 <= len(mint) <= 64 or not mint.isalnum():
+        raise HTTPException(422, "not a mint address")
+    return await execution_funnel.token_trace(db, mint)

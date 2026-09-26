@@ -201,6 +201,27 @@ async def _manage_live(session, redis: Redis, app_settings, p: PaperPosition, pr
                                                      "exit_requested": out["requested"]}, "live")
 
 
+async def _note_migration(session, p: PaperPosition, source: str, now: datetime) -> None:
+    """A position bought on the bonding curve whose token has migrated: the
+    same position, now in its POST_MIGRATION market state. Its price
+    already comes from the PumpSwap pool (price_position); a live sell must
+    go there too — a bonding-curve sell of a completed curve cannot fill."""
+    venue = (p.plan or {}).get("venue") or {}
+    if venue.get("type") != "pump_curve" or source != "rpc:pumpswap_pool" or p.lifecycle == "MIGRATED":
+        return
+    before = p.execution_route
+    p.lifecycle = "MIGRATED"
+    p.pool = pumpswap.canonical_pool(p.asset_id)
+    if p.execution_mode == "LIVE":
+        p.execution_route = "pump-amm"
+    await add_timeline_event(session, "position_migrated", now,
+                             {"market_state": "POST_MIGRATION", "previous_market_state": "PRE_MIGRATION",
+                              "pool": p.pool, "route_before": before, "route_after": p.execution_route,
+                              "price_source": source},
+                             candidate_id=p.candidate_id, assessment_id=p.assessment_id, position_id=p.id)
+    log.info("gate_manage.position_migrated", position_id=str(p.id), mint=p.asset_id, route=p.execution_route)
+
+
 async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterClient | None, now: datetime,
                                 venues: dict | None = None, app_settings=None, rpc=None) -> dict[str, int]:
     counts = {"managed": 0, "closed": 0, "unpriced": 0}
@@ -229,6 +250,7 @@ async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterC
                     counts["unpriced"] += 1
                     log.warning("gate_manage.unpriced", position_id=str(pid), asset=p.asset_id, reason=source)
                     continue
+                await _note_migration(session, p, source, now)
                 extra = None if p.exit_requested or p.management_paused else await _exit_intelligence(
                     redis, p, model, now, session, ctx.get("pool_trades"), rpc, price)
                 if p.execution_mode == "LIVE":  # a paused position still honours its stop (manage_step)

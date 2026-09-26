@@ -2,6 +2,7 @@
 
 import { Fragment, useState } from "react";
 import { Eye } from "lucide-react";
+import ExecutionFunnel, { TokenPipeline } from "@/components/ExecutionFunnel";
 import { Empty, ErrorNotice, PageHeader, Section, Stat, TokenLink } from "@/components/ui";
 import { formatDate } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
@@ -41,8 +42,9 @@ function Explain({ mint }: { mint: string }) {
     positive?: string[]; negative?: string[]; reasons?: string[]; metrics?: Metrics; trend?: string };
   return (
     <div className="card" aria-live="polite">
+      <TokenPipeline mint={mint} />
       <div className="status-label">
-        Why: <span className={outcomeClass(data.observation.outcome)}>{data.observation.outcome ?? "—"}</span>{" "}
+        Observation: <span className={outcomeClass(data.observation.outcome)}>{data.observation.outcome ?? "—"}</span>{" "}
         {r.trend && <>trend <b>{r.trend}</b></>}
       </div>
       <ul className="reason-list">{(r.reasons ?? []).map((x, i) => <li key={i}>{x}</li>)}</ul>
@@ -106,7 +108,7 @@ export default function ObservingPage() {
   return (
     <div>
       <PageHeader title="Fresh Token Observation" icon={<Eye size={20} aria-hidden />}
-        subtitle="Every new pump.fun token is observed before any decision — and every outcome is kept with its reasons." />
+        subtitle="Every new pump.fun token is observed before any decision. Activity (what the stream saw) is not a signal: a buy needs a BUY signal, risk approval and execution — each shown separately below." />
       {stats.data && (
         <div className="stat-grid">
           <Stat label="observing now">{stats.data.live}</Stat>
@@ -116,6 +118,7 @@ export default function ObservingPage() {
           ))}
         </div>
       )}
+      <ExecutionFunnel />
       <Section title="Under observation">
         <ErrorNotice error={live.error} />
         {live.data && live.data.length === 0 && <Empty>No token is inside its observation window right now.</Empty>}

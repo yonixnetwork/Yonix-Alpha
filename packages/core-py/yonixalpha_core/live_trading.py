@@ -28,11 +28,13 @@ from decimal import ROUND_DOWN, Decimal
 from typing import Any
 
 from redis.asyncio import Redis
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yonixalpha_core import events, paper_engine
-from yonixalpha_core.db.models import ExecutionOrder, PaperAccount, PaperPosition, PlatformSetting, ReconciliationEvent, TradingCandidate
+from yonixalpha_core.db.models import (
+    ExecutionOrder, PaperAccount, PaperPosition, PlatformSetting, ReconciliationEvent, TradeTimelineEvent, TradingCandidate,
+)
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.safety.store import add_timeline_event, live_trading_permitted
 from yonixalpha_core.solana.live_exec import ExecOutcome, SolanaLiveExecutor, wallet_balances
@@ -48,6 +50,9 @@ LIVE_PROVIDER = "pumpportal_local"
 PAPER_PROVIDER = "paper_simulator"
 SETTINGS_KEY = "live_execution"
 WALLET_KEY = "yx:live:wallet"
+# A buy that failed without filling may be tried once more, after a full
+# fresh re-evaluation by the gate.
+MAX_ENTRY_ATTEMPTS = 2
 READY_KEY = "yx:live:executor"
 DUST_RAW = 1
 SIGNED_RECHECK_SECONDS = 20
@@ -361,23 +366,61 @@ async def apply_outcome(session: AsyncSession, redis: Redis | None, app_settings
         position.status = "failed"
         position.exit_reason = "entry_failed"
         position.exit_at = now
+        attempt = 1
         if position.candidate_id:
+            attempt += (await session.execute(select(func.count()).select_from(TradeTimelineEvent).where(
+                TradeTimelineEvent.candidate_id == position.candidate_id,
+                TradeTimelineEvent.event_type == "live_entry_failed"))).scalar_one()
             cand = await session.get(TradingCandidate, position.candidate_id)
             if cand is not None and cand.state == CandidateState.ENTRY_PENDING.value:
-                apply_transition(cand, CandidateState.REJECTED, reason=f"live entry failed: {order.error[:120]}")
-        await add_timeline_event(session, "live_entry_failed", now, {"error": order.error, "signature": order.signature},
+                if attempt < MAX_ENTRY_ATTEMPTS:
+                    # Nothing filled (no tokens arrived): the token goes back to
+                    # the gate, which re-checks everything with fresh data
+                    # before any new buy. Never a blind resend.
+                    apply_transition(cand, CandidateState.ANALYZING,
+                                     reason=f"BUY_FAILED (attempt {attempt}/{MAX_ENTRY_ATTEMPTS}): {order.error[:120]} — "
+                                            "re-evaluated with fresh data before any retry")
+                else:
+                    apply_transition(cand, CandidateState.REJECTED,
+                                     reason=f"BUY_FAILED (attempt {attempt}/{MAX_ENTRY_ATTEMPTS}, no retries left): "
+                                            f"{order.error[:120]}")
+        await add_timeline_event(session, "live_entry_failed", now, {"error": order.error, "signature": order.signature,
+                                                                     "status": order.status, "attempt": attempt,
+                                                                     "code": _failure_code(order)},
                                  candidate_id=position.candidate_id, assessment_id=position.assessment_id, position_id=position.id)
         await events.notify(session, redis, app_settings, "provider_failure", f"LIVE entry failed: {position.symbol}",
                             order.error, "warning", {"position_id": str(position.id)})
     else:
         position.exit_failures += 1
         await add_timeline_event(session, "live_exit_failed", now, {"reason": order.reason, "error": order.error,
-                                                                    "attempt": position.exit_failures},
+                                                                    "attempt": position.exit_failures,
+                                                                    "code": _failure_code(order)},
                                  candidate_id=position.candidate_id, assessment_id=position.assessment_id, position_id=position.id)
         if position.exit_failures >= 2:
             await events.notify(session, redis, app_settings, "provider_failure",
                                 f"LIVE exit failing: {position.symbol} ({order.reason})",
                                 f"attempt {position.exit_failures}: {order.error}", "critical", {"position_id": str(position.id)})
+
+
+def _failure_code(order: ExecutionOrder) -> str:
+    """BUY_/SELL_ + the stage that failed, from what the executor recorded
+    (solana.live_exec): build -> guard -> simulate -> submit -> confirm."""
+    side = order.side
+    err = (order.error or "").lower()
+    sent = bool((order.result or {}).get("sent"))
+    if order.status == "EXPIRED":
+        return f"{side}_CONFIRMATION_TIMEOUT"
+    if "guard refused" in err:
+        return f"{side}_REFUSED_BY_TRANSACTION_GUARD"
+    if "simulation" in err:
+        return f"{side}_SIMULATION_FAILED"
+    if "failed on chain" in err:
+        return f"{side}_FAILED_ON_CHAIN"
+    if "could not decode" in err or not order.signature:
+        return f"{side}_TRANSACTION_BUILD_FAILED"
+    if not sent:
+        return f"{side}_SUBMISSION_FAILED"
+    return f"{side}_CONFIRMATION_FAILED"
 
 
 async def _reconcile_event(session, kind: str, severity: str, order: ExecutionOrder | None, position: PaperPosition | None,

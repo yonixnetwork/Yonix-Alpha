@@ -182,8 +182,39 @@ async def test_unfilled_buy_never_opens_a_position(session_factory, redis_client
         cand = await s.get(TradingCandidate, cid)
         acct = await live_trading.get_live_account(s)
     assert p.status == "failed" and p.quantity == 0 and p.exit_reason == "entry_failed"
-    assert cand.state == CandidateState.REJECTED.value
+    # Scenario D: first failure -> back to the gate for a fresh full re-evaluation (one retry allowed).
+    assert cand.state == CandidateState.ANALYZING.value
+    assert cand.state_history[-1]["reason"].startswith("BUY_FAILED (attempt 1/2)")
     assert acct.cash_balance == Decimal(5)  # nothing debited without a fill
+
+
+async def test_second_buy_failure_rejects_and_never_duplicates(session_factory, redis_client):
+    from yonixalpha_core.db.models import TradeTimelineEvent
+
+    curve, a, pid, oid, cid = await enter(session_factory, redis_client)
+    ex = FakeExecutor()
+    ex.outcomes.append(ExecOutcome("FAILED", None, error="transaction guard refused to sign: unexpected program"))
+    await live_trading.process_order(session_factory, redis_client, LIVE_ON, ex, oid)
+    # The gate re-evaluates (new assessment) and tries once more; it fails again.
+    async with session_factory() as s:
+        acct = await live_trading.get_live_account(s)
+        cand = await s.get(TradingCandidate, cid)
+        row, _ = await store.persist_assessment(s, a, cid, "k-retry")
+        await s.flush()
+        p2 = await live_trading.enter_live(s, redis_client, acct, a, row.id, cand, NOW, "FRESH", 6, {"venue": {}})
+        await s.commit()
+        oid2 = p2.pending_order_id
+    ex.outcomes.append(ExecOutcome("EXPIRED", "sig-x", error="not found; blockhash expired"))
+    assert await live_trading.process_order(session_factory, redis_client, LIVE_ON, ex, oid2) == "EXPIRED"
+    async with session_factory() as s:
+        cand = await s.get(TradingCandidate, cid)
+        live = (await s.execute(select(PaperPosition).where(PaperPosition.execution_mode == "LIVE",
+                                                            PaperPosition.status.in_(("open", "pending_entry"))))).scalars().all()
+        codes = [e.detail["code"] for e in (await s.execute(select(TradeTimelineEvent).where(
+            TradeTimelineEvent.event_type == "live_entry_failed").order_by(TradeTimelineEvent.occurred_at))).scalars()]
+    assert cand.state == CandidateState.REJECTED.value and "no retries left" in cand.state_history[-1]["reason"]
+    assert live == []  # no position, no duplicate
+    assert codes == ["BUY_REFUSED_BY_TRANSACTION_GUARD", "BUY_CONFIRMATION_TIMEOUT"]
 
 
 async def test_confirmed_buy_without_tokens_needs_review_not_an_invented_position(session_factory, redis_client):
@@ -381,3 +412,43 @@ async def test_migrated_live_entry_routes_to_pumpswap(session_factory, redis_cli
     assert (p.lifecycle, p.execution_route, p.pool, p.plan["venue"]["type"]) == ("MIGRATED", "pump-amm", "Pool1111", "pumpswap_pool")
     req, exp = live_trading._trade_request(order, WALLET)
     assert req.pool == "pump-amm" and req.action == "buy" and exp.side == "buy"
+
+
+async def test_curve_position_keeps_managing_through_migration_and_sells_on_pumpswap(session_factory, redis_client):
+    """Scenario B: bought on the bonding curve, the token migrates while the
+    position is open. The same position continues (PRE_MIGRATION ->
+    POST_MIGRATION), is priced from the PumpSwap pool, and its exit is a
+    PumpSwap sell — a bonding-curve sell of a completed curve cannot fill."""
+    from yonixalpha_core.db.models import TradeTimelineEvent
+    from yonixalpha_core.solana import pumpswap
+    from yonixalpha_core.testing.pumpswap import FakePoolRpc, trade_history
+
+    _, _, pid, _, ex, _ = await open_live(session_factory, redis_client)
+    async with session_factory() as s:
+        p = await s.get(PaperPosition, pid)
+        assert (p.lifecycle, p.execution_route) == ("FRESH", "pump")
+    later = NOW + timedelta(seconds=30)
+    pool = pumpswap.canonical_pool(MINT)
+    await redis_client.hset(pump_stream.curve_key(MINT), mapping={"complete": 1, "pool": pool,
+                                                                  "migrated_at": int(later.timestamp())})
+    await redis_client.set(pump_stream.HEARTBEAT, later.isoformat())
+    # The pool trades well below the position's stop.
+    rpc = FakePoolRpc(MINT, 700_000_000_000_000, 30 * 10**9, trade_history(pool, 10, 0, later - timedelta(seconds=200)),
+                      inner=FakeRpc(None))
+    counts = await manage_gate_positions(session_factory, redis_client, None, later, None, LIVE_ON, rpc)
+    assert counts["managed"] == 1 and counts["unpriced"] == 0
+    async with session_factory() as s:
+        p = await s.get(PaperPosition, pid)
+        sell = await s.get(ExecutionOrder, p.pending_order_id)
+        moved = (await s.execute(select(TradeTimelineEvent).where(TradeTimelineEvent.event_type == "position_migrated"))).scalar_one()
+    assert (p.status, p.lifecycle, p.execution_route, p.pool) == ("open", "MIGRATED", "pump-amm", pool)
+    assert moved.detail["market_state"] == "POST_MIGRATION" and moved.detail["route_before"] == "pump"
+    assert (sell.side, sell.route) == ("SELL", "pump-amm")
+    req, _ = live_trading._trade_request(sell, WALLET)
+    assert req.pool == "pump-amm"
+
+    ex.outcomes.append(confirmed("sig-sell-amm", 20_000_000, -3_000_000_000_000))
+    assert await live_trading.process_order(session_factory, redis_client, LIVE_ON, ex, sell.id) == "CONFIRMED"
+    async with session_factory() as s:
+        p = await s.get(PaperPosition, pid)
+    assert p.status == "closed" and p.realized_pnl < 0

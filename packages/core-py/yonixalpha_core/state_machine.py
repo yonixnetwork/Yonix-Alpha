@@ -52,7 +52,9 @@ VALID_TRANSITIONS: dict[CandidateState, set[CandidateState]] = {
     },
     CandidateState.OBSERVING: {CandidateState.QUALIFIED, CandidateState.REJECTED, CandidateState.MIGRATED},
     CandidateState.QUALIFIED: {CandidateState.ENTRY_PENDING, CandidateState.REJECTED},
-    CandidateState.ENTRY_PENDING: {CandidateState.ENTERED, CandidateState.REJECTED},
+    # ANALYZING: a buy that failed without filling goes back for a full,
+    # fresh re-evaluation (bounded; see live_trading.MAX_ENTRY_ATTEMPTS).
+    CandidateState.ENTRY_PENDING: {CandidateState.ENTERED, CandidateState.REJECTED, CandidateState.ANALYZING},
     CandidateState.ENTERED: {CandidateState.MANAGING},
     CandidateState.MANAGING: {CandidateState.EXIT_SIGNAL},
     CandidateState.EXIT_SIGNAL: {CandidateState.EXITING},

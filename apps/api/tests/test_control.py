@@ -165,3 +165,17 @@ async def test_scam_name_preset_installs_editable_rules_once(app, client, auth_h
     async with app.state.db_session_factory() as s:
         kinds = [a.event_type for a in (await s.execute(select(AuditLog))).scalars()]
     assert "blacklist.preset_added" in kinds
+
+
+async def test_execution_funnel_endpoints(client, auth_headers):
+    assert (await client.get("/api/control/execution-funnel")).status_code == 401
+    r = await client.get("/api/control/execution-funnel?hours=6", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["modes"]["global"] == "PAPER" and "diagnosis" in body and "blocked_with_buy_signal" in body
+    assert any("Global mode is PAPER" in n for n in body["diagnosis"])
+    assert (await client.get("/api/control/execution-funnel?hours=0", headers=auth_headers)).status_code == 422
+    mint = "7LSsEoJGhLeZzGvDofTdNg7M3JttxQqGWNLo6vWMpump"
+    t = await client.get(f"/api/control/execution-funnel/token/{mint}", headers=auth_headers)
+    assert t.status_code == 200 and t.json()["mint"] == mint and t.json()["assessments"] == []
+    assert (await client.get("/api/control/execution-funnel/token/bad!mint", headers=auth_headers)).status_code == 422

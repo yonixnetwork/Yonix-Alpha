@@ -5,6 +5,7 @@ Keeping them in one place is what makes paper and every engine go through
 the same safety pipeline."""
 
 import hashlib
+from dataclasses import replace
 import json
 import uuid
 from datetime import datetime, timedelta
@@ -78,9 +79,18 @@ async def load_controls(session: AsyncSession, redis: Redis, app_settings: Any, 
         account = await get_live_account(session)
     else:
         account = await store.get_paper_account(session, store.ENGINE_ACCOUNT[engine])
+    state = await store.account_state(session, account, asset_id, now, await kill_switch.is_engaged(redis))
+    if live and not live_venue and state.available_balance is not None:
+        # The live wallet keeps min_sol_reserve for fees and exits; enter_live
+        # refuses any size above wallet - reserve, so size against that
+        # instead of planning a trade the execution step must refuse.
+        from yonixalpha_core.live_trading import load_live_settings
+
+        reserve = (await load_live_settings(session)).min_sol_reserve
+        state = replace(state, available_balance=max(Decimal(0), state.available_balance - reserve))
     controls = Controls(
         settings=safety,
-        account=await store.account_state(session, account, asset_id, now, await kill_switch.is_engaged(redis)),
+        account=state,
         blacklist=await store.load_blacklist(session),
         custom_rules=await store.load_custom_rules(session),
         global_mode=await store.load_global_mode(session),
