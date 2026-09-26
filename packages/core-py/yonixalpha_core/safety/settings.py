@@ -83,6 +83,45 @@ class SafetySettings:
     min_trailing_pct: Decimal = Decimal("0.05")
     max_risk_level_for_auto: str = "MODERATE"
 
+    # Fresh pump.fun observation (discovery funnel; read from the
+    # solana_fresh scope). Every new token is watched for
+    # fresh_observation_seconds and compared at T0 / T+half / T+window before
+    # anything is decided; a token still interesting but not yet qualified
+    # stays under observation up to fresh_max_monitoring_seconds.
+    fresh_observation_seconds: int = 10
+    fresh_continue_monitoring: bool = True
+    fresh_max_monitoring_seconds: int = 900
+    fresh_max_monitored_tokens: int = 300
+    fresh_min_trades_to_continue: int = 3  # trades in the latest window to keep watching
+    fresh_inactivity_timeout_seconds: int = 120  # no trade for this long: expire
+    fresh_promote_min_trades: int = 8  # since launch, to hand the token to the safety gate
+    fresh_promote_min_unique_buyers: int = 6
+    fresh_promote_min_volume_quote: Decimal = Decimal("0.5")  # SOL traded since launch
+    fresh_max_sell_pressure: Decimal = Decimal("2")  # sell/buy volume in the latest half-window
+    fresh_max_price_drawdown_pct: Decimal = Decimal("0.35")  # fall from the observed peak
+    max_active_candidates: int = 25  # tokens under full (RPC-costly) gate analysis at once
+
+    # Bonding-curve tokens (fresh, momentum) trade on the pump.fun curve, not
+    # a DEX pool: min_liquidity_quote applies to pools only. The curve must
+    # be executable (fee known, exact fill simulated both ways within the
+    # impact / round-trip limits); 0 means no extra minimum on its reserve.
+    min_curve_liquidity_quote: Decimal = Decimal("0")
+
+    # Holder concentration: accounts owned by programs rather than wallets
+    # (PDAs) are reported separately from wallets. Pump.fun Mayhem-mode
+    # tokens hold part of the supply in the Mayhem agent's vault.
+    max_protocol_agent_share: Decimal = Decimal("0.60")  # above: reduce size
+    max_program_controlled_share: Decimal = Decimal("0.15")  # unknown program accounts: approval above
+
+    # Exit intelligence (open Solana positions). Two independent signals for
+    # REDUCE/EXIT; one emergency signal is enough for EXIT_NOW.
+    exit_liquidity_drop_exit: Decimal = Decimal("0.40")
+    exit_liquidity_drop_warn: Decimal = Decimal("0.20")
+    exit_reduce_fraction: Decimal = Decimal("0.5")
+    exit_volume_collapse_ratio: Decimal = Decimal("0.25")  # latest window volume vs previous
+    exit_emergency_liquidity_drop: Decimal = Decimal("0.60")
+    exit_emergency_price_drop: Decimal = Decimal("0.35")  # from the highest price since entry
+
     # ML
     min_ml_confidence: float | None = None
 
@@ -108,6 +147,12 @@ HARD_LIMITS: dict[str, tuple[str, Any]] = {
     "max_open_positions": ("max", 50),
     "max_leverage": ("max", Decimal("5")),
     "cooldown_after_loss_seconds": ("min", 0),
+    "fresh_observation_seconds": ("min", 2),
+    "fresh_max_monitored_tokens": ("max", 2000),
+    "max_active_candidates": ("max", 100),
+    "exit_reduce_fraction": ("max", Decimal("1")),
+    "exit_emergency_price_drop": ("min", Decimal("0.05")),
+    "exit_emergency_liquidity_drop": ("min", Decimal("0.10")),
 }
 
 _TUPLE_FIELDS = {"tp_r_multiples", "tp_exit_fractions"}
@@ -194,6 +239,22 @@ def validate(settings: SafetySettings) -> list[str]:
         errors.append("min_position_size_quote must not exceed max_position_size_quote")
     if settings.max_risk_level_for_auto not in ("LOW", "MODERATE", "HIGH"):
         errors.append("max_risk_level_for_auto must be LOW, MODERATE or HIGH")
+    if settings.fresh_max_monitoring_seconds < settings.fresh_observation_seconds:
+        errors.append("fresh_max_monitoring_seconds must be at least fresh_observation_seconds")
+    if settings.fresh_inactivity_timeout_seconds < settings.fresh_observation_seconds:
+        errors.append("fresh_inactivity_timeout_seconds must be at least fresh_observation_seconds")
+    if settings.fresh_max_sell_pressure <= 0 or settings.fresh_max_price_drawdown_pct <= 0:
+        errors.append("fresh_max_sell_pressure and fresh_max_price_drawdown_pct must be positive")
+    if settings.max_active_candidates < 1 or settings.fresh_max_monitored_tokens < 1:
+        errors.append("max_active_candidates and fresh_max_monitored_tokens must be at least 1")
+    if not (0 < settings.exit_reduce_fraction <= 1):
+        errors.append("exit_reduce_fraction must be in (0, 1]")
+    if settings.exit_liquidity_drop_warn > settings.exit_liquidity_drop_exit:
+        errors.append("exit_liquidity_drop_warn must not exceed exit_liquidity_drop_exit")
+    if settings.exit_liquidity_drop_exit > settings.exit_emergency_liquidity_drop:
+        errors.append("exit_liquidity_drop_exit must not exceed exit_emergency_liquidity_drop")
+    if not (0 < settings.exit_volume_collapse_ratio < 1):
+        errors.append("exit_volume_collapse_ratio must be between 0 and 1")
     return errors
 
 

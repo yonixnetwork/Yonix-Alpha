@@ -160,6 +160,15 @@ class HolderInfo:
     creator_share: Decimal | None
     holders_sampled: int
     excluded_pool_accounts: int
+    # top1/top10 count wallets only (owners on the ed25519 curve). Accounts
+    # owned by a program-derived address are not anyone's personal wallet
+    # and are reported here instead: the Pump.fun Mayhem agent's vault
+    # separately from any other program-controlled account.
+    top1_owner: str | None = None
+    protocol_agent_share: Decimal = Decimal(0)
+    program_controlled_share: Decimal = Decimal(0)
+    largest_program_owner: str | None = None
+    largest_program_share: Decimal = Decimal(0)
 
 
 @dataclass
@@ -225,6 +234,9 @@ class MarketInfo:
     age_seconds: float | None
     curve_complete: bool | None = None
     migrated: bool | None = None
+    # Share of the bonding curve's sellable tokens already bought (0..1);
+    # None off the curve or when the launch reserve is unknown.
+    curve_progress: Decimal | None = None
 
 
 @dataclass
@@ -325,3 +337,9 @@ class AssessmentInput:
     side: str = "LONG"
     strategy_levels: StrategyLevels | None = None
     targets: TargetContext | None = None
+    # Launch creator wallet (Solana), so holder findings can say whether the
+    # largest wallet is the creator's own.
+    creator: str | None = None
+    # Fresh-token observation (T0 / T+half / T+window comparison) from
+    # solana.observation; the gate adds its trend as a finding.
+    observation: dict | None = None

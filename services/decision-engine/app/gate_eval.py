@@ -13,6 +13,7 @@ including rejections and waits), and act on it:
   WAIT (liquidity)        -> WAITING_FOR_LIQUIDITY
   WAIT / NO_TRADE         -> ANALYZING until the engine's time limit
   REJECT                  -> REJECTED now
+  token migrated (curve engines) -> MIGRATED: handed to the migration engine
 
 A LIVE target (global mode LIVE, strategy AUTO/MANUAL, all three
 environment locks open, live readiness confirmed) creates a pending LIVE
@@ -31,7 +32,7 @@ from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import TradingCandidate
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.safety import pipeline, store
-from yonixalpha_core.safety.gate import Assessment, assess
+from yonixalpha_core.safety.gate import CURVE_ENGINES, Assessment, assess
 from yonixalpha_core.safety.models import FinalDecision, GlobalMode, StrategyMode
 from yonixalpha_core.solana import pump_stream, pumpswap
 from yonixalpha_core.solana.assembler import Sources, assemble_fresh, assemble_migrated
@@ -86,6 +87,20 @@ async def evaluate_with_gate(
     # Per-candidate pacing: each evaluation costs several RPC/HTTP calls.
     if not await redis.set(f"yx:gate:pace:{candidate.id}", "1", nx=True, ex=REEVALUATE_EVERY_SECONDS):
         return None
+
+    if engine in CURVE_ENGINES:
+        stream_curve = await pump_stream.load_curve(redis, mint)
+        if stream_curve is not None and stream_curve.pool:
+            # Pre-migration rules stop applying the moment a pool exists: the
+            # migration engine re-evaluates the token (its funnel picks up the
+            # same migration event) with pool liquidity, routes and flow.
+            apply_transition(candidate, CandidateState.MIGRATED,
+                             reason=f"MIGRATION_DETECTED: PumpSwap pool {stream_curve.pool} — handed to solana_migration "
+                                    "(MIGRATED_ANALYSIS with pool rules)")
+            await store.add_timeline_event(session, "migration_detected", now, {"pool": stream_curve.pool, "from_engine": engine},
+                                           candidate_id=candidate.id)
+            await session.commit()
+            return None
 
     if candidate.state == CandidateState.DISCOVERED.value:
         apply_transition(candidate, CandidateState.ANALYZING, reason=f"safety gate analysis started ({engine})")

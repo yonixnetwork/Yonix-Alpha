@@ -37,6 +37,9 @@ REQUIREMENTS: dict[str, set[str]] = {
     "mt5_fx": {"market", "execution"},
 }
 
+# Engines whose pre-migration venue is the pump.fun bonding curve.
+CURVE_ENGINES = {"solana_fresh", "solana_momentum"}
+
 # Engines that trade derivatives and may therefore open shorts. Spot engines
 # (Solana) can only buy what they later sell.
 SHORTABLE_ENGINES = {"binance_futures", "bybit_futures", "hyperliquid_perps", "mt5_fx"}
@@ -240,6 +243,23 @@ def _check_liquidity(inp: AssessmentInput, s: SafetySettings, out: list[Finding]
         out.append(_finding(RiskCategory.LIQUIDITY, "LIQUIDITY_UNKNOWN", RiskLevel.CRITICAL,
                             "pool liquidity unknown", FinalDecision.NO_TRADE, True))
         return
+    if inp.engine in CURVE_ENGINES and not m.migrated:
+        # No DEX pool yet is not "no market": the pump.fun curve is the venue.
+        # Whether it can take this trade is decided by the exact fill
+        # simulation in _check_execution (impact, round trip, both ways);
+        # without a curve model the execution data check already blocks.
+        progress = f", {m.curve_progress:.0%} of the curve sold" if m.curve_progress is not None else ""
+        executable = "execution simulated on the curve" if inp.liquidity_model is not None else "curve NOT executable (fee unknown)"
+        out.append(_finding(RiskCategory.LIQUIDITY, "BONDING_CURVE_MARKET", RiskLevel.LOW,
+                            f"NO DEX POOL YET — trading on the pump.fun bonding curve: real reserve {m.liquidity_quote:.4f} SOL"
+                            f"{progress}; {executable}", FinalDecision.EXECUTE))
+        if s.min_curve_liquidity_quote > 0 and m.liquidity_quote < s.min_curve_liquidity_quote:
+            young = m.age_seconds is not None and m.age_seconds < s.wait_for_liquidity_max_age_seconds
+            out.append(_finding(RiskCategory.LIQUIDITY, "WAITING_FOR_LIQUIDITY" if young else "INSUFFICIENT_LIQUIDITY",
+                                RiskLevel.HIGH if young else RiskLevel.CRITICAL,
+                                f"curve reserve {m.liquidity_quote:.4f} SOL below min_curve_liquidity_quote "
+                                f"{s.min_curve_liquidity_quote}", FinalDecision.WAIT if young else FinalDecision.NO_TRADE, not young))
+        return
     if m.liquidity_quote < s.min_liquidity_quote:
         young = m.age_seconds is not None and m.age_seconds < s.wait_for_liquidity_max_age_seconds
         out.append(_finding(RiskCategory.LIQUIDITY, "WAITING_FOR_LIQUIDITY" if young else "INSUFFICIENT_LIQUIDITY",
@@ -307,21 +327,44 @@ def _check_holders(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) 
     h = inp.holders
     if h is None:
         return
+    who = f" ({_short(h.top1_owner)})" if h.top1_owner else ""
+    is_creator = bool(h.top1_owner) and h.top1_owner == inp.creator
+    label = "TOP HOLDER (creator wallet)" if is_creator else "TOP HOLDER (wallet)"
+    scope = "of supply; bonding curve/pool and program-owned accounts excluded"
     if h.top1_share >= s.reject_top1_share:
         out.append(_finding(RiskCategory.HOLDER, "TOP1_CRITICAL", RiskLevel.CRITICAL,
-                            f"one wallet holds {h.top1_share:.1%} of supply (reject at {s.reject_top1_share:.0%})", FinalDecision.REJECT, True))
+                            f"{label}{who}: {h.top1_share:.1%} {scope} (reject at {s.reject_top1_share:.0%})",
+                            FinalDecision.REJECT, True))
     elif h.top1_share > s.max_top1_share:
         out.append(_finding(RiskCategory.HOLDER, "TOP1_HIGH", RiskLevel.HIGH,
-                            f"largest holder has {h.top1_share:.1%} of supply", FinalDecision.REDUCE_SIZE))
+                            f"{label}{who}: {h.top1_share:.1%} {scope}", FinalDecision.REDUCE_SIZE))
     if h.top10_share >= s.reject_top10_share:
         out.append(_finding(RiskCategory.HOLDER, "TOP10_CRITICAL", RiskLevel.CRITICAL,
-                            f"top 10 wallets hold {h.top10_share:.1%} (reject at {s.reject_top10_share:.0%})", FinalDecision.REJECT, True))
+                            f"TOP 10 WALLETS: {h.top10_share:.1%} {scope} (reject at {s.reject_top10_share:.0%})",
+                            FinalDecision.REJECT, True))
     elif h.top10_share > s.max_top10_share:
         out.append(_finding(RiskCategory.HOLDER, "TOP10_HIGH", RiskLevel.HIGH,
-                            f"top 10 wallets hold {h.top10_share:.1%}", FinalDecision.REDUCE_SIZE))
+                            f"TOP 10 WALLETS: {h.top10_share:.1%} {scope}", FinalDecision.REDUCE_SIZE))
     if h.creator_share is not None and h.creator_share > s.max_creator_share:
         out.append(_finding(RiskCategory.HOLDER, "CREATOR_CONCENTRATION", RiskLevel.HIGH,
-                            f"creator holds {h.creator_share:.1%}", FinalDecision.REQUIRE_MANUAL_APPROVAL))
+                            f"CREATOR WALLET holding: {h.creator_share:.1%} of supply (the launch creator's own wallet)",
+                            FinalDecision.REQUIRE_MANUAL_APPROVAL))
+    if h.protocol_agent_share > 0:
+        over = h.protocol_agent_share > s.max_protocol_agent_share
+        out.append(_finding(RiskCategory.HOLDER, "PROTOCOL_AGENT_HOLDING", RiskLevel.MODERATE if not over else RiskLevel.HIGH,
+                            f"PUMP.FUN MAYHEM AGENT VAULT: {h.protocol_agent_share:.1%} of supply — a protocol trading agent, "
+                            "not the developer; it can sell into the market"
+                            + (f" (above {s.max_protocol_agent_share:.0%}: size reduced)" if over else ""),
+                            FinalDecision.REDUCE_SIZE if over else FinalDecision.EXECUTE))
+    if h.largest_program_share > s.max_program_controlled_share:
+        out.append(_finding(RiskCategory.HOLDER, "PROGRAM_CONTROLLED_HOLDING", RiskLevel.HIGH,
+                            f"PROGRAM-CONTROLLED ACCOUNT ({_short(h.largest_program_owner)}): {h.largest_program_share:.1%} "
+                            "of supply — owned by a program (e.g. locker, vault or other pool), not a wallet; who controls "
+                            "it is unknown", FinalDecision.REQUIRE_MANUAL_APPROVAL))
+
+
+def _short(addr: str | None) -> str:
+    return f"{addr[:4]}…{addr[-4:]}" if addr and len(addr) > 10 else (addr or "?")
 
 
 def _check_flow(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) -> None:
@@ -391,6 +434,26 @@ def _check_flow(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) -> 
     if fl.creator_launches_24h is not None and fl.creator_launches_24h > s.max_creator_launches_24h:
         out.append(_finding(RiskCategory.HOLDER, "SERIAL_CREATOR", RiskLevel.HIGH,
                             f"creator launched {fl.creator_launches_24h} tokens in the last 24 h", FinalDecision.REQUIRE_MANUAL_APPROVAL))
+
+
+def _check_observation(inp: AssessmentInput, out: list[Finding]) -> None:
+    """Fresh tokens: the activity trend over the latest window (see
+    solana.observation). DETERIORATING waits; the reasons are listed."""
+    obs = inp.observation
+    if not obs:
+        return
+    trend = obs.get("trend")
+    if trend == "DETERIORATING":
+        out.append(_finding(RiskCategory.TRADING, "ACTIVITY_DETERIORATING", RiskLevel.MODERATE,
+                            f"activity deteriorating over the latest {obs.get('window_seconds')}s: "
+                            + "; ".join(obs.get("negative") or []), FinalDecision.WAIT))
+    elif trend == "NO_ACTIVITY":
+        out.append(_finding(RiskCategory.TRADING, "NO_RECENT_ACTIVITY", RiskLevel.MODERATE,
+                            f"no trades in the latest {obs.get('window_seconds')}s", FinalDecision.WAIT))
+    else:
+        out.append(_finding(RiskCategory.TRADING, f"ACTIVITY_{trend}", RiskLevel.LOW,
+                            f"activity {str(trend).lower()} over the latest {obs.get('window_seconds')}s: "
+                            + ("; ".join(obs.get("positive") or []) or "no change"), FinalDecision.EXECUTE))
 
 
 def _check_account(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) -> None:
@@ -558,6 +621,7 @@ def assess(inp: AssessmentInput, settings: SafetySettings, versions: dict[str, A
     _check_liquidity(inp, settings, findings)
     _check_holders(inp, settings, findings)
     _check_flow(inp, settings, findings)
+    _check_observation(inp, findings)
     _check_market(inp, findings)
     _check_account(inp, settings, findings)
 

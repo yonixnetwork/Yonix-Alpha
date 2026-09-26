@@ -80,17 +80,19 @@ def recent_high_above(trades: list[Trade], now: datetime, window_seconds: int, d
     return high if high > price else None
 
 
-def realized_volatility(trades: list[Trade], now: datetime, window_seconds: int, decimals: int) -> Decimal | None:
-    """Standard deviation of 1-minute log returns over the window, from the
-    last traded price in each minute. None when there are too few minutes
-    with trades to estimate it — volatility is never invented."""
+def realized_volatility(trades: list[Trade], now: datetime, window_seconds: int, decimals: int,
+                        bucket_seconds: int = VOLATILITY_BUCKET_SECONDS) -> Decimal | None:
+    """Standard deviation of per-bucket log returns over the window (1-minute
+    buckets by default), from the last traded price in each bucket. None when
+    there are too few buckets with trades to estimate it — volatility is
+    never invented."""
     window = in_window(trades, now, window_seconds)
     if not window:
         return None
     start = now - timedelta(seconds=window_seconds)
     last_price_per_bucket: dict[int, Decimal] = {}
     for t in window:
-        bucket = int((t.at - start).total_seconds() // VOLATILITY_BUCKET_SECONDS)
+        bucket = int((t.at - start).total_seconds() // bucket_seconds)
         last_price_per_bucket[bucket] = t.price(decimals)
     prices = [last_price_per_bucket[b] for b in sorted(last_price_per_bucket)]
     returns = [math.log(float(b / a)) for a, b in zip(prices, prices[1:]) if a > 0 and b > 0]
@@ -99,6 +101,26 @@ def realized_volatility(trades: list[Trade], now: datetime, window_seconds: int,
     mean = sum(returns) / len(returns)
     var = sum((r - mean) ** 2 for r in returns) / (len(returns) - 1)
     return Decimal(str(round(math.sqrt(var), 8)))
+
+
+FAST_VOLATILITY_BUCKET_SECONDS = 10
+FAST_VOLATILITY_WINDOW_SECONDS = 300
+
+
+def measured_volatility(trades: list[Trade], now: datetime, window_seconds: int, decimals: int) -> tuple[Decimal | None, str]:
+    """1-minute volatility for stop sizing, and where it came from. A young
+    token (or a busy pool whose recent-trade sample spans under a minute)
+    has too few 1-minute returns; then 10-second returns over the last 5
+    minutes are used, scaled to a 1-minute equivalent (x sqrt(6)). Both are
+    measured from real trades; with neither, None."""
+    vol = realized_volatility(trades, now, window_seconds, decimals)
+    if vol is not None:
+        return vol, "1-minute returns"
+    fast = realized_volatility(trades, now, FAST_VOLATILITY_WINDOW_SECONDS, decimals, FAST_VOLATILITY_BUCKET_SECONDS)
+    if fast is None:
+        return None, "unavailable: fewer than 3 returns even at 10-second resolution"
+    scale = Decimal(str(math.sqrt(VOLATILITY_BUCKET_SECONDS / FAST_VOLATILITY_BUCKET_SECONDS)))
+    return (fast * scale).quantize(Decimal("0.00000001")), "10-second returns, scaled to 1 minute (young token / short sample)"
 
 
 def acceleration(trades: list[Trade], now: datetime, window_seconds: int) -> tuple[int, int, float | None]:

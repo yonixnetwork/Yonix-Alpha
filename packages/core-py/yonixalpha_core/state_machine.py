@@ -27,22 +27,30 @@ class CandidateState(StrEnum):
     EXITING = "exiting"
     CLOSED = "closed"
     REJECTED = "rejected"
+    # A fresh/momentum (bonding-curve) candidate whose token migrated before
+    # entry: handed to the migration engine, which re-evaluates it with pool
+    # rules (MIGRATION_DETECTED -> MIGRATED_ANALYSIS). Not a rejection.
+    MIGRATED = "migrated"
 
 
-TERMINAL_STATES = {CandidateState.CLOSED, CandidateState.REJECTED}
+TERMINAL_STATES = {CandidateState.CLOSED, CandidateState.REJECTED, CandidateState.MIGRATED}
 
 VALID_TRANSITIONS: dict[CandidateState, set[CandidateState]] = {
-    CandidateState.DISCOVERED: {CandidateState.OBSERVING, CandidateState.ANALYZING, CandidateState.REJECTED},
+    CandidateState.DISCOVERED: {CandidateState.OBSERVING, CandidateState.ANALYZING, CandidateState.REJECTED,
+                                CandidateState.MIGRATED},
     CandidateState.ANALYZING: {
         CandidateState.WAITING_FOR_LIQUIDITY, CandidateState.WAITING_FOR_APPROVAL, CandidateState.QUALIFIED, CandidateState.REJECTED,
+        CandidateState.MIGRATED,
     },
     CandidateState.WAITING_FOR_LIQUIDITY: {
         CandidateState.ANALYZING, CandidateState.WAITING_FOR_APPROVAL, CandidateState.QUALIFIED, CandidateState.REJECTED,
+        CandidateState.MIGRATED,
     },
     CandidateState.WAITING_FOR_APPROVAL: {
         CandidateState.ANALYZING, CandidateState.WAITING_FOR_LIQUIDITY, CandidateState.QUALIFIED, CandidateState.REJECTED,
+        CandidateState.MIGRATED,
     },
-    CandidateState.OBSERVING: {CandidateState.QUALIFIED, CandidateState.REJECTED},
+    CandidateState.OBSERVING: {CandidateState.QUALIFIED, CandidateState.REJECTED, CandidateState.MIGRATED},
     CandidateState.QUALIFIED: {CandidateState.ENTRY_PENDING, CandidateState.REJECTED},
     CandidateState.ENTRY_PENDING: {CandidateState.ENTERED, CandidateState.REJECTED},
     CandidateState.ENTERED: {CandidateState.MANAGING},
@@ -51,6 +59,7 @@ VALID_TRANSITIONS: dict[CandidateState, set[CandidateState]] = {
     CandidateState.EXITING: {CandidateState.CLOSED},
     CandidateState.CLOSED: set(),
     CandidateState.REJECTED: set(),
+    CandidateState.MIGRATED: set(),
 }
 
 

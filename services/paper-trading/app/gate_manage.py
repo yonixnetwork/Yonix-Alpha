@@ -34,8 +34,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from yonixalpha_core import events, live_trading, paper_engine, paper_execution
 from yonixalpha_core.db.models import PaperAccount, PaperPosition, RiskAssessment
 from yonixalpha_core.execution.registry import FUTURES_PROVIDERS
-from yonixalpha_core.exit_intel import solana_exit_decision
-from yonixalpha_core.safety.store import add_timeline_event
+from yonixalpha_core.exit_intel import ExitConfig, solana_exit_decision
+from yonixalpha_core.safety.store import add_timeline_event, load_settings
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.safety.liquidity import ConstantProductModel
 from yonixalpha_core.solana import pump_stream, pumpswap
@@ -161,7 +161,7 @@ REDUCE_COOLDOWN_SECONDS = 300
 
 
 async def _exit_intelligence(redis: Redis, p: PaperPosition, model, now: datetime, session,
-                             pool_trades: list | None = None, rpc=None) -> tuple | None:
+                             pool_trades: list | None = None, rpc=None, price: Decimal | None = None) -> tuple | None:
     """For curve and PumpSwap positions: HOLD / REDUCE / EXIT from flow,
     liquidity and creator behaviour. Returns an `extra_exit`, or None."""
     venue = (p.plan or {}).get("venue") or {}
@@ -170,8 +170,11 @@ async def _exit_intelligence(redis: Redis, p: PaperPosition, model, now: datetim
     trades = pool_trades if pool_trades is not None else await pump_stream.load_trades(redis, p.asset_id)
     entry_liq = Decimal(venue["real_liquidity_at_entry"]) if venue.get("real_liquidity_at_entry") else None
     holders = await holders_now(rpc, redis, p, now)
+    settings, _ = await load_settings(session, p.engine) if p.engine else (None, None)
     d = solana_exit_decision(trades, now, venue.get("creator"), entry_liq, model.liquidity_quote,
-                             venue.get("holders_at_entry"), holders)
+                             venue.get("holders_at_entry"), holders,
+                             cfg=ExitConfig.from_settings(settings) if settings is not None else None,
+                             highest_price=max(p.highest_price or Decimal(0), price or Decimal(0)) or None, current_price=price)
     if d.action == "HOLD":
         return None
     remaining = p.remaining_quantity if p.remaining_quantity is not None else p.quantity
@@ -227,7 +230,7 @@ async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterC
                     log.warning("gate_manage.unpriced", position_id=str(pid), asset=p.asset_id, reason=source)
                     continue
                 extra = None if p.exit_requested or p.management_paused else await _exit_intelligence(
-                    redis, p, model, now, session, ctx.get("pool_trades"), rpc)
+                    redis, p, model, now, session, ctx.get("pool_trades"), rpc, price)
                 if p.execution_mode == "LIVE":  # a paused position still honours its stop (manage_step)
                     await _manage_live(session, redis, app_settings, p, price, model, extra, now, source)
                     counts["managed"] += 1

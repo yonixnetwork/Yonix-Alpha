@@ -99,7 +99,10 @@ def test_exit_intelligence_needs_two_pieces_of_evidence():
     assert solana_exit_decision(one, NOW, None, Decimal(30), Decimal(15)).action == "EXIT"
     assert solana_exit_decision(one, NOW, "whale", None, None).action == "EXIT"
     quiet = [tr(60, "b0", True, 10**8)]
-    assert solana_exit_decision(quiet, NOW, None, Decimal(30), Decimal(10)).action == "HOLD"
+    # A 50% liquidity drop without sell pressure is one signal: hold.
+    assert solana_exit_decision(quiet, NOW, None, Decimal(30), Decimal(15)).action == "HOLD"
+    # A collapse past exit_emergency_liquidity_drop (60%) is an emergency on its own.
+    assert solana_exit_decision(quiet, NOW, None, Decimal(30), Decimal(10)).action == "EXIT_NOW"
 
 
 async def test_grid_starts_fills_and_stops_returning_capital(session_factory, redis_client):

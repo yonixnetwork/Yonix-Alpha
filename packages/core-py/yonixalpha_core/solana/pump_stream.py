@@ -87,6 +87,8 @@ async def ingest_logs(redis: Redis, logs: list[str], signature: str | None, rece
                 "token_program": f.get("token_program", ""),
                 "created_at": ts or int(received_at.timestamp()),
                 "signature": signature or "",
+                "is_mayhem_mode": 1 if f.get("is_mayhem_mode") else 0,
+                "initial_real_token_reserves": int(f.get("real_token_reserves") or 0),
             }
             pipe.hset(meta_key(mint), mapping=meta)
             pipe.expire(meta_key(mint), META_TTL)
@@ -156,6 +158,7 @@ class StreamCurve:
     updated_at: datetime
     complete: bool
     pool: str | None
+    migrated_at: datetime | None = None
 
     def as_state(self) -> BondingCurveState | None:
         if self.rsol is None or self.rtok is None:
@@ -176,6 +179,7 @@ async def load_curve(redis: Redis, mint: str) -> StreamCurve | None:
         updated_at=datetime.fromtimestamp(int(h["updated_at"]), tz=timezone.utc),
         complete=h.get("complete") == "1",
         pool=h.get("pool") or None,
+        migrated_at=datetime.fromtimestamp(int(h["migrated_at"]), tz=timezone.utc) if h.get("migrated_at") not in (None, "", "0") else None,
     )
 
 
@@ -201,6 +205,32 @@ async def recent_unpromoted(redis: Redis, now: datetime, max_age_seconds: int, l
         pipe.zscore(PROMOTED, mint)
     promoted = await pipe.execute()
     return [(mint, int(score)) for (mint, score), p in zip(rows, promoted) if p is None]
+
+
+OBS_FINAL = f"{PREFIX}:obs_final"  # zset mint -> time the observation outcome became final
+OBS_SINCE = f"{PREFIX}:obs_since"  # hash mint -> end of the first window (continued monitoring)
+OBS_LIVE = f"{PREFIX}:obs_live"  # zset mint -> created ts, tokens currently observed / monitored
+
+
+def obs_report_key(mint: str) -> str:
+    return f"{PREFIX}:obs:{mint}"
+
+
+async def open_for_observation(redis: Redis, now: datetime, max_age_seconds: int, limit: int = 2000) -> list[tuple[str, int]]:
+    """(mint, created_ts) launched within `max_age_seconds`, newest first,
+    whose observation has no final outcome yet and that were not promoted.
+    Newest first: when the stream is busier than one run can process, the
+    launches still inside their observation window come first."""
+    lo = int(now.timestamp()) - max_age_seconds
+    rows = await redis.zrevrangebyscore(RECENT, "+inf", lo, start=0, num=limit, withscores=True)
+    if not rows:
+        return []
+    pipe = redis.pipeline(transaction=False)
+    for mint, _ in rows:
+        pipe.zscore(PROMOTED, mint)
+        pipe.zscore(OBS_FINAL, mint)
+    flags = await pipe.execute()
+    return [(mint, int(score)) for i, (mint, score) in enumerate(rows) if flags[2 * i] is None and flags[2 * i + 1] is None]
 
 
 async def mark_promoted(redis: Redis, mint: str, now: datetime) -> bool:
@@ -234,4 +264,6 @@ async def prune(redis: Redis, now: datetime) -> None:
     pipe.zremrangebyscore(RECENT, "-inf", t - RECENT_RETENTION)
     pipe.zremrangebyscore(PROMOTED, "-inf", t - PROMOTED_RETENTION)
     pipe.zremrangebyscore(MIGRATED, "-inf", t - PROMOTED_RETENTION)
+    pipe.zremrangebyscore(OBS_FINAL, "-inf", t - PROMOTED_RETENTION)
+    pipe.zremrangebyscore(OBS_LIVE, "-inf", t - RECENT_RETENTION)
     await pipe.execute()

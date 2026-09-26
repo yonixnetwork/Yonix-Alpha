@@ -188,17 +188,40 @@ def test_unverified_route_is_no_trade():
     assert a.decision == FinalDecision.NO_TRADE and "ROUTE_UNVERIFIED" in codes(a)
 
 
+def _pool(**market):
+    """A migrated token trading on its DEX pool: the pool liquidity minimum applies."""
+    return healthy(engine="solana_migration", market=replace(healthy().market, curve_complete=True, migrated=True, **market))
+
+
 def test_insufficient_liquidity_on_established_token_is_no_trade():
-    m = replace(healthy().market, liquidity_quote=Decimal("5"), age_seconds=86400)
-    a = decide(healthy(market=m))
+    a = decide(_pool(liquidity_quote=Decimal("5"), age_seconds=86400))
     assert a.decision == FinalDecision.NO_TRADE and "INSUFFICIENT_LIQUIDITY" in codes(a)
 
 
 def test_insufficient_liquidity_on_young_token_waits():
-    m = replace(healthy().market, liquidity_quote=Decimal("5"), age_seconds=60)
-    a = decide(healthy(market=m))
+    a = decide(_pool(liquidity_quote=Decimal("5"), age_seconds=60))
     assert a.decision == FinalDecision.WAIT
     assert a.status_label == "WAITING_FOR_LIQUIDITY"
+
+
+def test_curve_token_is_not_blocked_by_the_dex_pool_liquidity_minimum():
+    # A fresh pump.fun token: 5 SOL real reserve on the curve, no DEX pool.
+    # The 20 SOL pool minimum does not apply; the curve is the market and the
+    # exact fill simulation decides executability.
+    for engine in ("solana_fresh", "solana_momentum"):
+        a = decide(healthy(engine=engine, market=replace(healthy().market, liquidity_quote=Decimal("5"), curve_progress=Decimal("0.07"))))
+        assert "INSUFFICIENT_LIQUIDITY" not in codes(a) and "WAITING_FOR_LIQUIDITY" not in codes(a), (engine, a.reasons)
+        bc = next(f for f in a.findings if f.code == "BONDING_CURVE_MARKET")
+        assert "NO DEX POOL YET" in bc.message and "7% of the curve sold" in bc.message and "simulated on the curve" in bc.message
+    # An operator minimum for curve reserves is honoured when set.
+    a = decide(healthy(market=replace(healthy().market, liquidity_quote=Decimal("5"), age_seconds=60)),
+               SafetySettings(min_curve_liquidity_quote=Decimal("8")))
+    assert a.status_label == "WAITING_FOR_LIQUIDITY"
+
+
+def test_curve_token_without_a_curve_model_is_not_executable():
+    a = decide(healthy(liquidity_model=None))
+    assert not a.executable and "EXECUTION_UNAVAILABLE" in codes(a)
 
 
 def test_excessive_price_impact_blocks_at_that_size():

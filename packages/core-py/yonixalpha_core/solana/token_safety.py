@@ -78,6 +78,41 @@ def parse_mint_account(account_info: dict[str, Any] | None, observed_at: datetim
     return result
 
 
+# Pump.fun Mayhem mode (create_v2 with is_mayhem_mode): part of the supply
+# sits in a vault of the Mayhem program (address from the official pump IDL,
+# create_v2.mayhem_program_id), which trades it as an automated agent. Its
+# SOL vault PDA (seed "sol-vault") is the vault authority.
+MAYHEM_PROGRAM = "MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e"
+
+
+def _mayhem_authorities() -> frozenset[str]:
+    try:
+        from solders.pubkey import Pubkey
+
+        pda = Pubkey.find_program_address([b"sol-vault"], Pubkey.from_string(MAYHEM_PROGRAM))[0]
+        return frozenset({str(pda), MAYHEM_PROGRAM})
+    except Exception:  # noqa: BLE001 - labelling only; classification below still works
+        return frozenset({MAYHEM_PROGRAM})
+
+
+MAYHEM_AUTHORITIES = _mayhem_authorities()
+
+
+def owner_kind(owner: str) -> str:
+    """"wallet" for an address on the ed25519 curve (a keypair someone
+    holds), "protocol_agent" for the Mayhem agent's vault authority,
+    "program" for any other program-derived address (pools, vaults,
+    lockers: controlled by a program, not directly by a person)."""
+    if owner in MAYHEM_AUTHORITIES:
+        return "protocol_agent"
+    try:
+        from solders.pubkey import Pubkey
+
+        return "wallet" if Pubkey.from_string(owner).is_on_curve() else "program"
+    except Exception:  # noqa: BLE001 - an unparseable owner is treated as a wallet (the stricter reading)
+        return "wallet"
+
+
 def parse_holders(
     largest_accounts: list[dict[str, Any]],
     account_owners: dict[str, str | None],
@@ -92,7 +127,12 @@ def parse_holders(
     wallet (from getMultipleAccounts jsonParsed). Token accounts owned by
     `excluded_owners` — the bonding curve or pool — are dropped: they hold
     liquidity, not a holder's position. Balances are aggregated per owner,
-    since one wallet can hold several token accounts."""
+    since one wallet can hold several token accounts.
+
+    top1/top10 are shares of total supply held by wallets. Program-owned
+    accounts are summed separately (program_controlled_share, and the
+    Mayhem agent vault in protocol_agent_share) rather than reported as
+    "one wallet holds X%"."""
     if supply_raw <= 0:
         raise UnexpectedShape("supply must be positive")
     per_owner: dict[str, int] = {}
@@ -107,10 +147,14 @@ def parse_holders(
             excluded += 1
             continue
         per_owner[owner] = per_owner.get(owner, 0) + amount
-    ranked = sorted(per_owner.values(), reverse=True)
     supply = Decimal(supply_raw)
-    top1 = Decimal(ranked[0]) / supply if ranked else Decimal(0)
-    top10 = Decimal(sum(ranked[:10])) / supply
+    wallets = {o: a for o, a in per_owner.items() if owner_kind(o) == "wallet"}
+    programs = {o: a for o, a in per_owner.items() if owner_kind(o) == "program"}
+    agent = sum(a for o, a in per_owner.items() if owner_kind(o) == "protocol_agent")
+    ranked = sorted(wallets.items(), key=lambda kv: kv[1], reverse=True)
+    top1 = Decimal(ranked[0][1]) / supply if ranked else Decimal(0)
+    top10 = Decimal(sum(a for _, a in ranked[:10])) / supply
+    biggest_program = max(programs.items(), key=lambda kv: kv[1]) if programs else None
     # getTokenLargestAccounts returns at most 20 accounts, so a creator
     # absent from it holds less than the 20th-largest balance; 0 here is a
     # lower bound for that case, not a measured zero.
@@ -122,4 +166,9 @@ def parse_holders(
         creator_share=creator_share,
         holders_sampled=len(per_owner),
         excluded_pool_accounts=excluded,
+        top1_owner=ranked[0][0] if ranked else None,
+        protocol_agent_share=Decimal(agent) / supply,
+        program_controlled_share=Decimal(sum(programs.values())) / supply,
+        largest_program_owner=biggest_program[0] if biggest_program else None,
+        largest_program_share=Decimal(biggest_program[1]) / supply if biggest_program else Decimal(0),
     )

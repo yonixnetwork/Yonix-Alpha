@@ -8,7 +8,7 @@ WAIT finding. The assembler never decides anything itself.
 """
 
 import base64
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -29,11 +29,11 @@ from yonixalpha_core.safety.models import (
 )
 from yonixalpha_core.safety.rules import BlacklistRule, CustomRule, evaluate_custom_rules, match_blacklist
 from yonixalpha_core.safety.settings import SafetySettings
-from yonixalpha_core.solana import pump_stream
+from yonixalpha_core.solana import observation, pump_stream
 from yonixalpha_core.solana.flow import (
     apply_demand_quality,
     early_buy_share,
-    realized_volatility,
+    measured_volatility,
     recent_high_above,
     round_trip_volume_share,
     synchronized_buy_cluster,
@@ -145,6 +145,16 @@ async def fetch_holders(
         return None, f"holders rpc: {exc}"
 
 
+GATE_TREND_MIN_WINDOW_SECONDS = 30
+
+
+def _curve_progress(real_token_reserves: int | None, meta: dict[str, str]) -> Decimal | None:
+    if real_token_reserves is None:
+        return None
+    initial = int(meta.get("initial_real_token_reserves") or 0) or observation.DEFAULT_INITIAL_REAL_TOKEN_RESERVES
+    return max(Decimal(0), 1 - Decimal(real_token_reserves) / Decimal(initial))
+
+
 def rule_features(inp: AssessmentInput) -> dict[str, Any]:
     m, h, fl, t = inp.market, inp.holders, inp.flow, inp.token
     ratio = None
@@ -253,14 +263,16 @@ async def assemble_fresh(src: Sources, mint: str, now: datetime, c: Controls,
     age = (now - datetime.fromtimestamp(created_at, tz=timezone.utc)).total_seconds() if created_at else None
 
     if curve is not None and decimals is not None:
+        volatility, ev["volatility_source"] = measured_volatility(trades, now, VOLATILITY_WINDOW_SECONDS, decimals)
         inp.market = MarketInfo(
             observation=Observation("rpc:bonding_curve" if curve_obs == now else "pump_stream:curve", curve_obs),
             price=curve.price_sol(decimals),
-            volatility=realized_volatility(trades, now, VOLATILITY_WINDOW_SECONDS, decimals),
+            volatility=volatility,
             liquidity_quote=curve.real_liquidity_sol(),
             age_seconds=age,
             curve_complete=curve.complete,
             migrated=bool(stream_curve and stream_curve.pool),
+            curve_progress=_curve_progress(curve.real_token_reserves, meta),
         )
         if fee_bps is not None and not curve.complete:
             inp.liquidity_model = curve.model(decimals, fee_bps)
@@ -272,7 +284,20 @@ async def assemble_fresh(src: Sources, mint: str, now: datetime, c: Controls,
             "complete": curve.complete, "fee_bps": fee_bps,
         }
 
+    inp.creator = creator
     inp.flow = trade_flow(trades, now, FLOW_WINDOW_SECONDS, creator, "pump_stream", hb)
+    if engine == "solana_fresh":
+        # Activity trend over the latest window (T0 / T+half / T+window), the
+        # same comparison the funnel's observation window made before
+        # promotion; the gate turns DETERIORATING into a WAIT.
+        window = max(c.settings.fresh_observation_seconds, GATE_TREND_MIN_WINDOW_SECONDS)
+        obs = observation.evaluate(mint, trades, created_at, now, replace(c.settings, fresh_observation_seconds=window),
+                                   creator=creator, curve=stream_curve,
+                                   initial_real_token_reserves=int(meta.get("initial_real_token_reserves") or 0) or None,
+                                   monitoring_since=now)
+        inp.observation = {"trend": obs.trend, "window_seconds": window, "positive": obs.positive, "negative": obs.negative,
+                           "checkpoints": obs.checkpoints, "halves": obs.halves, "metrics": obs.metrics}
+        ev["observation"] = inp.observation
     created_dt = datetime.fromtimestamp(created_at, tz=timezone.utc) if created_at else None
     inp.flow.early_buy_share = early_buy_share(trades, created_dt, token.supply_raw if token else None) if engine == "solana_fresh" else None
     inp.flow.sync_buy_cluster = synchronized_buy_cluster(trades, now, FLOW_WINDOW_SECONDS)
@@ -347,11 +372,21 @@ async def assemble_migrated(src: Sources, mint: str, now: datetime, c: Controls)
             ev["errors"].append(f"pumpswap rpc: {type(exc).__name__}: {exc}")
             ev["pool"]["verified"] = False
 
+    inp.creator = creator
     if pool_state is not None:
+        # Pool age is time since the migration event. The oldest of the last
+        # 25 pool trades is NOT the pool's age: on a busy pool 25 trades span
+        # seconds, which kept post_migration_signal waiting forever.
+        stream_curve = await pump_stream.load_curve(src.redis, mint)
         pool_trades_at = [t.at for t in trades]
-        age = (now - min(pool_trades_at)).total_seconds() if pool_trades_at else None
-        vol = realized_volatility(trades or curve_trades, now, VOLATILITY_WINDOW_SECONDS, decimals)
-        ev["volatility_source"] = "pumpswap pool trades" if trades else "pre-migration bonding-curve trades"
+        if stream_curve is not None and stream_curve.migrated_at is not None:
+            age = (now - stream_curve.migrated_at).total_seconds()
+            ev["pool_age_source"] = "migration event timestamp"
+        else:
+            age = (now - min(pool_trades_at)).total_seconds() if pool_trades_at else None
+            ev["pool_age_source"] = "oldest recent pool trade (lower bound: migration time unknown)"
+        vol, how = measured_volatility(trades or curve_trades, now, VOLATILITY_WINDOW_SECONDS, decimals)
+        ev["volatility_source"] = ("pumpswap pool trades" if trades else "pre-migration bonding-curve trades") + f", {how}"
         inp.market = MarketInfo(
             observation=Observation("rpc:pumpswap_pool", now),
             price=pool_state.price,
