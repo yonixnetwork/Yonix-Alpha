@@ -171,13 +171,16 @@ async def main(seconds: int, as_json: bool) -> int:
             if creator:
                 try:
                     t0 = time.monotonic()
-                    curves = await creator_history.onchain_curves(rpc, creator)
-                    report.add("creator_history", "VERIFIED",
-                               f"creator {creator[:6]}…: {len(curves)} pump.fun curve(s) on chain "
-                               f"({sum(1 for _, done in curves if done)} migrated) in {(time.monotonic() - t0) * 1000:.0f} ms")
+                    scan = await creator_history.onchain_curves(rpc, creator)
+                    report.add("creator_history", "VERIFIED" if scan.complete else "PARTIAL",
+                               f"creator {creator[:6]}…: {len(scan.curves)} pump.fun curve(s) on chain "
+                               f"({sum(1 for _, done in scan.curves if done)} migrated) via {scan.method}, "
+                               f"{scan.pages} page(s), complete={scan.complete}, totalResults={scan.total_results}, "
+                               f"{(time.monotonic() - t0) * 1000:.0f} ms"
+                               + ("" if scan.complete else " — scan stopped at the page limit: counts are lower bounds"))
                 except Exception as exc:  # noqa: BLE001
                     report.add("creator_history", "FAILED",
-                               f"getProgramAccounts refused or failed ({type(exc).__name__}: {str(exc)[:160]}); the gate will "
+                               f"creator curve query refused or failed ({type(exc).__name__}: {str(exc.__cause__ or exc)[:300]}); the gate will "
                                "report CREATOR HISTORY: UNKNOWN unless the stream itself saw enough launches")
             else:
                 report.add("creator_history", "NOT VERIFIED", "no CreateEvent in window to learn a creator from")

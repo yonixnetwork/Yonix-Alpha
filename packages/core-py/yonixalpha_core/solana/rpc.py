@@ -13,6 +13,18 @@ class RpcAllEndpointsFailedError(Exception):
     pass
 
 
+# JSON-RPC codes meaning "this request is invalid / unsupported here"
+# (invalid request, method not found, invalid params). The endpoint answered,
+# so they don't count against its health — e.g. Helius refusing an
+# unpaginated getProgramAccounts on a huge program must not put the primary
+# RPC, which every other read depends on, into cooldown.
+REQUEST_ERROR_CODES = {-32600, -32601, -32602}
+
+
+class RpcRequestError(RuntimeError):
+    pass
+
+
 @dataclass
 class _Endpoint:
     url: str
@@ -76,10 +88,19 @@ class RpcManager:
                 response.raise_for_status()
                 body = response.json()
                 if "error" in body:
-                    raise RuntimeError(f"RPC error from {endpoint.label}: {body['error']}")
+                    err = body["error"]
+                    code = err.get("code") if isinstance(err, dict) else None
+                    cls = RpcRequestError if code in REQUEST_ERROR_CODES else RuntimeError
+                    raise cls(f"RPC error from {endpoint.label}: {err}")
                 endpoint.consecutive_failures = 0
                 endpoint.disabled_until = None
                 return body["result"]
+            except RpcRequestError as exc:
+                # The endpoint is healthy; another endpoint may still support the request.
+                last_error = exc
+                log.info("rpc.call.rejected", endpoint=endpoint.label, method=method,
+                         error=redact_text(str(exc), [e.url for e in self.endpoints]))
+                continue
             except Exception as exc:  # noqa: BLE001 - any transport/parse/RPC failure triggers failover
                 last_error = exc
                 endpoint.consecutive_failures += 1

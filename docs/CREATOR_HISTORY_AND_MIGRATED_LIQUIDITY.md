@@ -20,6 +20,19 @@ an extra finding in the same safety gate, controlled by a dashboard setting.
   count, because this wallet created it.
 - Module: `yonixalpha_core/solana/creator_history.py`.
 
+**Helius.** A plain `getProgramAccounts` on the Pump program is refused by Helius ("Too many accounts
+requested (10000001 pubkeys)", seen live on 2026-09-26). The query is therefore sent as Helius's paginated
+`getProgramAccountsV2`:
+
+- pages of up to 10,000 accounts, following `paginationKey` for at most 5 pages;
+- the format comes from the official helius-sdk types;
+- if the scan stops at the page limit, the count found so far (or Helius's `totalResults`, when it gives one) is a
+  **lower bound**: PASS as "at least N" when it meets the minimum, otherwise UNKNOWN;
+- RPCs without V2 get the plain call.
+
+A refused request (JSON-RPC codes -32600/-32601/-32602) no longer counts against the RPC endpoint's health, so it can
+never put the primary RPC into cooldown for the other reads.
+
 **What it cannot count.**
 - Curves created before pump.fun added the creator field do not carry it, so they are not counted. The count can
   undercount such a wallet. It never overcounts.

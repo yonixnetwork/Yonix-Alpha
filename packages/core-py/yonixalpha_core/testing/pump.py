@@ -125,6 +125,8 @@ class FakeRpc:
             return {"value": {"owner": TOKEN_2022, "data": {"parsed": {"type": "mint", "info": info}}}}
         if method == "getAccountInfo":
             return {"value": {"data": [base64.b64encode(self.curve.account()).decode(), "base64"]}}
+        if method == "getProgramAccountsV2":  # Helius: one page here
+            return {"accounts": program_accounts(self.creator_tokens), "paginationKey": None}
         if method == "getProgramAccounts":
             return program_accounts(self.creator_tokens)
         if method == "getTokenLargestAccounts":
