@@ -17,6 +17,8 @@ distinct funder, all cached for a week.
 import json
 from typing import Any
 
+from yonixalpha_core.solana.rpc import RpcAllEndpointsFailedError, call_optional
+
 FRESH_SIGNATURES = 25
 BUSY_FUNDER_SIGNATURES = 1000
 CACHE_TTL = 7 * 86400
@@ -53,20 +55,20 @@ def funder_from_transaction(tx: dict | None, wallet: str) -> str | None:
 
 async def wallet_funder(rpc, redis, wallet: str) -> dict[str, Any]:
     async def fetch():
-        sigs = await rpc.call("getSignaturesForAddress", [wallet, {"limit": FRESH_SIGNATURES}]) or []
+        sigs = await call_optional(rpc, "getSignaturesForAddress", [wallet, {"limit": FRESH_SIGNATURES}]) or []
         if len(sigs) >= FRESH_SIGNATURES:
             return {"fresh": False, "funder": None}
         if not sigs:
             return {"fresh": True, "funder": None}
         oldest = sigs[-1]["signature"]
-        tx = await rpc.call("getTransaction", [oldest, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}])
+        tx = await call_optional(rpc, "getTransaction", [oldest, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}])
         return {"fresh": True, "funder": funder_from_transaction(tx, wallet)}
     return await _cached(redis, f"yx:funder:{wallet}", fetch)
 
 
 async def funder_is_busy(rpc, redis, funder: str) -> bool:
     async def fetch():
-        sigs = await rpc.call("getSignaturesForAddress", [funder, {"limit": BUSY_FUNDER_SIGNATURES}]) or []
+        sigs = await call_optional(rpc, "getSignaturesForAddress", [funder, {"limit": BUSY_FUNDER_SIGNATURES}]) or []
         return {"busy": len(sigs) >= BUSY_FUNDER_SIGNATURES}
     return (await _cached(redis, f"yx:funder_busy:{funder}", fetch))["busy"]
 
@@ -82,6 +84,11 @@ async def funding_links(rpc, redis, early_buyers: list[str], creator: str | None
             continue
         try:
             info = await wallet_funder(rpc, redis, wallet)
+        except RpcAllEndpointsFailedError as exc:
+            # No endpoint can answer now (usually HTTP 429): asking for the
+            # remaining wallets would only extend the rate limit.
+            out["errors"].append(f"stopped after {out['checked']} wallets: {type(exc).__name__}")
+            break
         except Exception as exc:  # noqa: BLE001 - partial evidence is reported, never filled in
             out["errors"].append(f"{wallet[:6]}…: {type(exc).__name__}")
             continue
@@ -98,6 +105,9 @@ async def funding_links(rpc, redis, early_buyers: list[str], creator: str | None
         try:
             if await funder_is_busy(rpc, redis, f):
                 continue
+        except RpcAllEndpointsFailedError as exc:
+            out["errors"].append(f"funder check stopped: {type(exc).__name__}")
+            break
         except Exception as exc:  # noqa: BLE001
             out["errors"].append(f"funder {f[:6]}…: {type(exc).__name__}")
             continue

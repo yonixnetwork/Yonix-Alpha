@@ -400,6 +400,29 @@ async def test_worker_reconciles_before_processing_and_then_reports_ready(sessio
     assert n == 0
 
 
+async def test_kill_switch_cancels_a_queued_live_buy_and_never_sends_it(session_factory, redis_client):
+    from yonixalpha_core import kill_switch
+
+    _, a, pid, oid, _ = await enter(session_factory, redis_client)
+    await kill_switch.engage(redis_client, "test")
+    ex = FakeExecutor(lamports=5_000_000_000)
+    ex.outcomes.append(confirmed("sig-must-not-send", -100_000_000, 2_000_000))
+    stop = asyncio.Event()
+    task = asyncio.create_task(live_worker_loop(session_factory, redis_client, LIVE_ON, None, None, stop, executor=ex))
+    for _ in range(50):
+        await asyncio.sleep(0.1)
+        async with session_factory() as s:
+            if (await s.get(ExecutionOrder, oid)).status != "PENDING":
+                break
+    stop.set()
+    await task
+    async with session_factory() as s:
+        assert (await s.get(ExecutionOrder, oid)).status == "CANCELLED"
+        assert (await s.get(PaperPosition, pid)).status == "failed"
+    assert len(ex.outcomes) == 1  # the prepared fill was never consumed: nothing was sent
+    await kill_switch.disengage(redis_client)
+
+
 async def test_migrated_live_entry_routes_to_pumpswap(session_factory, redis_client):
     _, a, aid, cid = await live_assessment(session_factory, redis_client)
     async with session_factory() as s:

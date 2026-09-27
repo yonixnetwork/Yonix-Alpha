@@ -16,6 +16,18 @@ class RpcAllEndpointsFailedError(Exception):
     pass
 
 
+class RpcRateLimitedError(RpcAllEndpointsFailedError):
+    """An optional lookup was not sent: every endpoint is cooling down after
+    HTTP 429 (see call_optional)."""
+
+
+# A provider that answers 401/403 for a method (wrong key, or a plan that
+# doesn't include the method) is not asked for that method again for this
+# long; its other methods keep working.
+FORBIDDEN_METHOD_SECONDS = 600.0
+MAX_RATE_LIMIT_BACKOFF = 300.0
+
+
 # JSON-RPC codes meaning "this request is invalid / unsupported here"
 # (invalid request, method not found, invalid params). The endpoint answered,
 # so they don't count against its health — e.g. Helius refusing an
@@ -63,6 +75,8 @@ class _Endpoint:
     last_error: str | None = None
     latency_ms: float | None = None  # moving average of successful calls
     _sent: list = field(default_factory=list)  # monotonic send times in the last second
+    forbidden: dict = field(default_factory=dict)  # method -> monotonic time until which 401/403 is remembered
+    rate_limit_streak: int = 0  # consecutive 429s: each doubles the cooldown (reset by a success)
 
     def over_budget(self, now: float) -> bool:
         if not self.rps:
@@ -127,14 +141,24 @@ class RpcManager:
             endpoints.append(_Endpoint(url=emergency_url, label="emergency"))
         return cls(endpoints=endpoints, client=client, **kwargs)
 
-    def _candidates(self) -> list[_Endpoint]:
+    def _candidates(self, method: str | None = None) -> list[_Endpoint]:
         now = time.monotonic()
-        healthy = [e for e in self.endpoints if (e.disabled_until is None or e.disabled_until <= now)
+        allowed = [e for e in self.endpoints if method is None or e.forbidden.get(method, 0) <= now]
+        healthy = [e for e in allowed if (e.disabled_until is None or e.disabled_until <= now)
                    and (e.rate_limited_until is None or e.rate_limited_until <= now)]
         if not healthy:
-            return list(self.endpoints)
+            return allowed or list(self.endpoints)
         # An endpoint at its own request budget is tried last, not skipped.
         return [e for e in healthy if not e.over_budget(now)] + [e for e in healthy if e.over_budget(now)]
+
+    def cooling_down(self, method: str | None = None) -> float | None:
+        """Seconds until the first endpoint that may serve `method` leaves its
+        429 cooldown, when every such endpoint is rate-limited; else None."""
+        now = time.monotonic()
+        usable = [e for e in self.endpoints if method is None or e.forbidden.get(method, 0) <= now]
+        if not usable or any(e.rate_limited_until is None or e.rate_limited_until <= now for e in usable):
+            return None
+        return min(e.rate_limited_until for e in usable) - now
 
     def replace_endpoints(self, specs: list[dict[str, Any]]) -> None:
         """Swaps the endpoint list at runtime (dashboard change), keeping the
@@ -163,14 +187,22 @@ class RpcManager:
         last_error: Exception | None = None
         reasons: list[str] = []
         urls = [e.url for e in self.endpoints]
-        for endpoint in self._candidates():
+        for endpoint in self._candidates(method):
             started = time.monotonic()
             endpoint._sent.append(started)
             try:
                 response = await self.client.post(endpoint.url, json=payload, timeout=endpoint.timeout or self.timeout_seconds)
                 if response.status_code == 429:
                     endpoint.rate_limited_count += 1
-                    endpoint.rate_limited_until = time.monotonic() + self.cooldown_seconds
+                    endpoint.rate_limit_streak += 1
+                    # A provider still limiting after its cooldown gets a longer
+                    # rest instead of being hit again every 30 s.
+                    backoff = min(self.cooldown_seconds * 2 ** (endpoint.rate_limit_streak - 1), MAX_RATE_LIMIT_BACKOFF)
+                    endpoint.rate_limited_until = time.monotonic() + backoff
+                elif response.status_code in (401, 403):
+                    endpoint.forbidden[method] = time.monotonic() + FORBIDDEN_METHOD_SECONDS
+                    log.warning("rpc.method_forbidden", endpoint=endpoint.label, method=method, status=response.status_code,
+                                skip_seconds=FORBIDDEN_METHOD_SECONDS)
                 response.raise_for_status()
                 body = response.json()
                 if "error" in body:
@@ -181,6 +213,7 @@ class RpcManager:
                 endpoint.consecutive_failures = 0
                 endpoint.disabled_until = None
                 endpoint.rate_limited_until = None
+                endpoint.rate_limit_streak = 0
                 endpoint.successes += 1
                 endpoint.last_success_at = _now_iso()
                 ms = (time.monotonic() - started) * 1000
@@ -246,6 +279,20 @@ class RpcManager:
                 "success_rate": round(e.successes / (e.successes + e.failures), 4) if (e.successes + e.failures) else None,
                 "latency_ms": e.latency_ms, "last_success_at": e.last_success_at, "last_failure_at": e.last_failure_at,
                 "last_error": e.last_error, "active": e.label == self.active_label,
+                "forbidden_methods": sorted(m for m, until in e.forbidden.items() if until > now),
             }
             for e in self.endpoints
         ]
+
+
+async def call_optional(rpc: Any, method: str, params: list | None = None) -> Any:
+    """For lookups that only enrich an analysis and whose absence is already
+    reported as "unavailable" (early-buyer funding). While every endpoint
+    is cooling down after HTTP 429 the request is not sent at all, so
+    optional analysis never extends a provider's rate limit or floods the
+    alerts. Calls a trade depends on use rpc.call, which still tries every
+    endpoint."""
+    wait = rpc.cooling_down(method) if isinstance(rpc, RpcManager) else None
+    if wait is not None:
+        raise RpcRateLimitedError(f"all RPC endpoints are rate-limited (HTTP 429) for {wait:.0f}s more; {method} skipped")
+    return await rpc.call(method, params)

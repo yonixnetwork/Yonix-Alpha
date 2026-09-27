@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { ErrorNotice, Section } from "@/components/ui";
-import { apiGet, apiPut, ApiError } from "@/lib/api";
+import { apiGet, apiPost, apiPut, ApiError } from "@/lib/api";
 import type { ModesOut, SettingsOut } from "@/lib/types";
 import RuntimeApply from "@/components/RuntimeApply";
 
@@ -65,7 +65,7 @@ export default function SnipePanel({ modes, onModes }: { modes: ModesOut; onMode
         const [l, fresh, s] = await Promise.all([
           apiGet<Live>("/api/live/settings"),
           apiGet<Strategy>("/api/strategies/solana_fresh"),
-          apiGet<SettingsOut>("/api/control/settings/solana_fresh"),
+          apiGet<SettingsOut>("/api/control/settings/GLOBAL"),
         ]);
         setLive(l);
         setSlippage(l.settings.entry_slippage_pct ?? "");
@@ -119,29 +119,18 @@ export default function SnipePanel({ modes, onModes }: { modes: ModesOut; onMode
       setLive(l);
     });
 
-  // Saved in GLOBAL (which every engine follows); an engine that
-  // overrides one of these keys gets the same value, which removes that
-  // override, so the three Pump.fun engines end up filtering alike.
+  // One change for every engine: saved in GLOBAL and removed from any engine
+  // that had its own value for these keys (one server transaction).
   const applySafety = () =>
     apply("Filters", async () => {
-      const withValues = (cur: SettingsOut) => {
-        const payload: Record<string, unknown> = { ...cur.effective };
-        for (const k of SAFETY_KEYS) {
-          const orig = cur.effective[k];
-          const v = safety[k];
-          payload[k] = typeof orig === "boolean" ? v === "true" : typeof orig === "number" ? Number(v) : v;
-        }
-        return payload;
-      };
       const g = await apiGet<SettingsOut>("/api/control/settings/GLOBAL");
-      await apiPut("/api/control/settings/GLOBAL", { settings: withValues(g), note: "Settings → Pump.fun snipe settings" });
-      for (const scope of SCOPES) {
-        const cur = await apiGet<SettingsOut>(`/api/control/settings/${scope}`);
-        const wanted = withValues(cur);
-        if (SAFETY_KEYS.some((k) => String(cur.effective[k]) !== String(wanted[k]))) {
-          await apiPut(`/api/control/settings/${scope}`, { settings: wanted, note: "Settings → Pump.fun snipe settings" });
-        }
+      const changes: Record<string, unknown> = {};
+      for (const k of SAFETY_KEYS) {
+        const orig = g.effective[k];
+        const v = safety[k];
+        changes[k] = typeof orig === "boolean" ? v === "true" : typeof orig === "number" ? Number(v) : v;
       }
+      await apiPost("/api/control/settings-all", { changes, note: "Settings → Pump.fun snipe settings" });
     });
 
   const field = (k: string, label: string, help: string) => (

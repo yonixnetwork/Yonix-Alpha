@@ -79,7 +79,7 @@ function fromInput(original: Value, text: string): Value {
 
 export default function RiskSettingsPage() {
   const router = useRouter();
-  const [scope, setScope] = useState("solana_fresh");
+  const [scope, setScope] = useState("GLOBAL");
   const [data, setData] = useState<SettingsOut | null>(null);
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [note, setNote] = useState("");
@@ -126,17 +126,16 @@ export default function RiskSettingsPage() {
     }).filter((g) => g.keys.length);
   }, [data]);
 
-  const [applyToOverrides, setApplyToOverrides] = useState(true);
   const overriddenBy = data?.scope === "GLOBAL" ? data.scope_links?.overridden_by ?? [] : [];
 
-  async function followGlobal() {
+  async function followGlobal(engine: string = scope, keys?: string[]) {
     if (!data) return;
     setBusy(true);
     setError(null);
     setSaved(null);
     try {
-      const r = await apiPost<{ version: SettingsVersionOut }>(`/api/control/settings/${scope}/follow-global`);
-      setSaved(`${scope} now follows GLOBAL for every value (version ${r.version.version}).`);
+      const r = await apiPost<{ version: SettingsVersionOut }>(`/api/control/settings/${engine}/follow-global`, keys ? { keys } : {});
+      setSaved(`${engine} now uses GLOBAL for ${keys ? keys.join(", ") : "every value"} (version ${r.version.version}).`);
       await load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Save failed.");
@@ -145,38 +144,35 @@ export default function RiskSettingsPage() {
     }
   }
 
-  async function save() {
+  const valueOf = (k: string) => fromInput(data!.effective[k], draft[k] ?? toInput(data!.effective[k]));
+
+  /** `all`: one change for every engine — written into GLOBAL and removed
+   * from every engine that had its own value for it (one server transaction).
+   * Otherwise only this scope is saved. */
+  async function save(all: boolean) {
     if (!data) return;
     setBusy(true);
     setError(null);
     setSaved(null);
     try {
-      // Always the complete set: a key left out would fall back to the code
-      // default on the server rather than keep its current value.
-      const payload = Object.fromEntries(Object.entries(data.effective).map(([k, v]) => [k, fromInput(v, draft[k] ?? toInput(v))]));
-      const res = await apiPut<{ version: SettingsVersionOut; clamp_notes: string[] }>(`/api/control/settings/${scope}`, {
-        settings: payload,
-        note: note || null,
-      });
-      let also = "";
-      if (scope === "GLOBAL" && applyToOverrides && overriddenBy.length && changed.size) {
-        // Engines with their own settings ignore GLOBAL: apply the same
-        // changed keys to each of them (their other values stay as they are).
-        const done: string[] = [];
-        for (const o of overriddenBy) {
-          const cur = await apiGet<SettingsOut>(`/api/control/settings/${o.scope}`);
-          const merged = Object.fromEntries(Object.entries(cur.effective).map(([k, v]) =>
-            [k, changed.has(k) ? fromInput(data.effective[k], draft[k]) : v]));
-          const r = await apiPut<{ version: SettingsVersionOut }>(`/api/control/settings/${o.scope}`,
-            { settings: merged, note: note || "applied from GLOBAL" });
-          done.push(`${o.scope} v${r.version.version}`);
-        }
-        also = ` Also applied to ${done.join(", ")}.`;
+      if (all) {
+        const changes = Object.fromEntries([...changed].map((k) => [k, valueOf(k)]));
+        const res = await apiPost<{ version: SettingsVersionOut; clamp_notes: string[]; engines_updated: string[] }>(
+          "/api/control/settings-all", { changes, note: note || null });
+        setSaved(`Saved for ALL engines (GLOBAL version ${res.version.version}).` +
+          (res.engines_updated.length ? ` Removed the engine-only value in ${res.engines_updated.join(", ")}.` : "") +
+          (res.clamp_notes.length ? ` Bounded by hard limits: ${res.clamp_notes.join("; ")}` : ""));
+      } else {
+        // Always the complete set: a key left out would fall back to the code
+        // default on the server rather than keep its current value.
+        const payload = Object.fromEntries(Object.keys(data.effective).map((k) => [k, valueOf(k)]));
+        const res = await apiPut<{ version: SettingsVersionOut; clamp_notes: string[] }>(`/api/control/settings/${scope}`, {
+          settings: payload,
+          note: note || null,
+        });
+        setSaved(`Saved for ${scope === "GLOBAL" ? "GLOBAL (engines with their own value for a key keep it)" : `${scope} ONLY`} ` +
+          `as version ${res.version.version}.` + (res.clamp_notes.length ? ` Bounded by hard limits: ${res.clamp_notes.join("; ")}` : ""));
       }
-      setSaved(
-        `Saved as version ${res.version.version}.` + also +
-          (res.clamp_notes.length ? ` Bounded by hard limits: ${res.clamp_notes.join("; ")}` : ""),
-      );
       setNote("");
       await load();
     } catch (err) {
@@ -185,6 +181,8 @@ export default function RiskSettingsPage() {
       setBusy(false);
     }
   }
+
+  const show = (v: unknown) => (Array.isArray(v) ? v.join(", ") : v === null || v === undefined ? "none" : String(v));
 
   return (
     <div>
@@ -217,33 +215,38 @@ export default function RiskSettingsPage() {
 
       {data?.scope === "GLOBAL" && (
         <div className={overriddenBy.length ? "notice notice-danger" : "notice"}>
-          GLOBAL applies to every engine
-          {overriddenBy.length > 0 ? (
+          {overriddenBy.length === 0 ? "Every engine uses these GLOBAL values." : (
             <>
-              {" "}except for these engine-specific values:
-              <ul className="reason-list">{overriddenBy.map((o) => (
-                <li key={o.scope}><b>{o.scope}</b>{o.mode === "legacy_full_copy" ? " — full copy (ignores GLOBAL completely)" : `: ${o.keys.join(", ")}`}</li>))}
-              </ul>
-              <label style={{ display: "block", marginTop: 6 }}>
-                <input type="checkbox" checked={applyToOverrides} onChange={(e) => setApplyToOverrides(e.target.checked)} /> Also
-                use the values I change here in those engines (removes their override for those keys)
-              </label>
+              <b>Engines that use a different value than GLOBAL</b> — these values win over GLOBAL for that engine:
+              <table className="data-table" style={{ marginTop: 6 }}>
+                <thead><tr><th>Engine</th><th>Setting</th><th>Engine value</th><th>GLOBAL value</th><th /></tr></thead>
+                <tbody>{overriddenBy.flatMap((o) => o.keys.map((k) => (
+                  <tr key={`${o.scope}-${k}`}>
+                    <td>{o.scope}</td><td>{k}</td><td>{show(o.values?.[k])}</td><td>{show(data.effective[k])}</td>
+                    <td><button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => followGlobal(o.scope, [k])}>Use GLOBAL</button></td>
+                  </tr>)))}
+                </tbody>
+              </table>
+              {overriddenBy.map((o) => (
+                <button key={o.scope} className="btn btn-ghost btn-sm" style={{ marginRight: 6 }} disabled={busy}
+                  onClick={() => followGlobal(o.scope)}>{o.scope}: use GLOBAL for everything</button>))}
             </>
-          ) : "."}
+          )}
         </div>
       )}
       {data && data.scope !== "GLOBAL" && (
-        <div className="notice">
+        <div className={data.scope_links?.follows_global ? "notice" : "notice notice-danger"}>
           {data.scope_links?.follows_global
-            ? <>{data.scope} follows GLOBAL for every value. Saving here overrides only the values you change.</>
-            : data.scope_links?.mode === "legacy_full_copy"
-              ? <>{data.scope} has a full copy that ignores GLOBAL completely.</>
-              : <>{data.scope} follows GLOBAL except: <b>{(data.scope_links?.override_keys ?? []).join(", ")}</b>.</>}
-          {!data.scope_links?.follows_global && (
-            <button className="btn btn-ghost btn-sm" style={{ marginLeft: 8 }} disabled={busy} onClick={followGlobal}>
-              Follow GLOBAL for all values
-            </button>
-          )}
+            ? <>{data.scope} uses GLOBAL for every value. “Save for ALL engines” changes GLOBAL; “Save for {data.scope} only” gives
+              this engine its own value for the keys you change.</>
+            : <>
+              {data.scope} uses GLOBAL except these values of its own:
+              <ul className="reason-list">{(data.scope_links?.override_keys ?? []).map((k) => (
+                <li key={k}><b>{k}</b> = {show(data.effective[k])} (GLOBAL: {show(data.scope_links?.global_values?.[k])}){" "}
+                  <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => followGlobal(data.scope, [k])}>Use GLOBAL</button></li>))}
+              </ul>
+              <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => followGlobal()}>Use GLOBAL for all values</button>
+            </>}
         </div>
       )}
       {data?.source.errors && (
@@ -302,8 +305,11 @@ export default function RiskSettingsPage() {
       {data && (
         <div className="inline-form" style={{ marginTop: 20 }}>
           <input placeholder="Change note (optional)" value={note} onChange={(e) => setNote(e.target.value)} maxLength={256} />
-          <button className="btn" disabled={busy || changed.size === 0} onClick={save}>
-            {busy ? "Saving…" : `Save ${changed.size} change${changed.size === 1 ? "" : "s"}`}
+          <button className="btn" disabled={busy || changed.size === 0} onClick={() => save(true)}>
+            {busy ? "Saving…" : `Save ${changed.size} change${changed.size === 1 ? "" : "s"} for ALL engines`}
+          </button>
+          <button className="btn btn-ghost" disabled={busy || changed.size === 0} onClick={() => save(false)}>
+            {scope === "GLOBAL" ? "Save GLOBAL only (keep engine values)" : `Save for ${scope} only`}
           </button>
           <button className="btn btn-ghost" disabled={changed.size === 0} onClick={load}>
             Discard

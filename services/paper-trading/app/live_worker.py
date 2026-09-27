@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
-from yonixalpha_core import live_trading
+from yonixalpha_core import kill_switch, live_trading
 from yonixalpha_core.db.models import ExecutionOrder
 from yonixalpha_core.live_trading import LIVE_ACCOUNT, READY_KEY
 from yonixalpha_core.logging import get_logger
@@ -39,12 +39,15 @@ async def _publish(redis, status: str, reason: str | None = None, **extra) -> No
                                            **{k: str(v) for k, v in extra.items()}}), ex=READY_TTL_SECONDS)
 
 
-async def cancel_live_orders(session_factory, redis, app_settings, reason: str) -> int:
+async def cancel_live_orders(session_factory, redis, app_settings, reason: str, side: str | None = None) -> int:
     now = datetime.now(timezone.utc)
     async with session_factory() as session:
-        orders = (await session.execute(select(ExecutionOrder).where(
+        q = select(ExecutionOrder).where(
             ExecutionOrder.mode == "LIVE", ExecutionOrder.provider == live_trading.LIVE_PROVIDER,
-            ExecutionOrder.status == "PENDING"))).scalars().all()
+            ExecutionOrder.status == "PENDING")
+        if side is not None:
+            q = q.where(ExecutionOrder.side == side)
+        orders = (await session.execute(q)).scalars().all()
         for order in orders:
             await live_trading.apply_outcome(session, redis, app_settings, order, ExecOutcome("FAILED", error=reason), now)
             order.status = "CANCELLED"
@@ -92,11 +95,20 @@ async def live_worker_loop(session_factory, redis, app_settings, rpc, http_clien
                 if reconciled_once:
                     await _publish(redis, "ready", wallet=executor.wallet.pubkey, min_sol_reserve=live.min_sol_reserve,
                                    wallet_max_age_seconds=live.wallet_max_age_seconds, account=LIVE_ACCOUNT)
+                    # Kill switch: a BUY queued just before it was engaged is not
+                    # sent; SELLs (exits) keep running.
+                    killed = await kill_switch.is_engaged(redis)
+                    if killed and (n := await cancel_live_orders(session_factory, redis, app_settings,
+                                                                 "kill switch engaged", side="BUY")):
+                        log.warning("live.buys_cancelled_kill_switch", count=n)
                     async with session_factory() as session:
-                        ids = (await session.execute(select(ExecutionOrder.id).where(
+                        q = select(ExecutionOrder.id).where(
                             ExecutionOrder.mode == "LIVE", ExecutionOrder.provider == live_trading.LIVE_PROVIDER,
                             ExecutionOrder.status == "PENDING")
-                            .order_by(ExecutionOrder.side.desc(), ExecutionOrder.created_at))).scalars().all()  # SELLs first
+                        if killed:
+                            q = q.where(ExecutionOrder.side != "BUY")
+                        ids = (await session.execute(
+                            q.order_by(ExecutionOrder.side.desc(), ExecutionOrder.created_at))).scalars().all()  # SELLs first
                     for order_id in ids:
                         status = await live_trading.process_order(session_factory, redis, app_settings, executor, order_id)
                         log.info("live.order_processed", order_id=str(order_id), status=status)

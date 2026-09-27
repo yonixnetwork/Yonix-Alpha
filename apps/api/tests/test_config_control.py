@@ -62,8 +62,8 @@ async def test_global_edit_warns_about_engine_overrides_and_duplicate_policy_is_
     r = await client.put("/api/control/settings/solana_fresh", json={"settings": payload}, headers=auth_headers)
     assert r.status_code == 200, r.text
     g = (await client.get("/api/control/settings/GLOBAL", headers=auth_headers)).json()
-    assert {"scope": "solana_fresh", "version": 1, "mode": "overrides", "keys": ["skip_duplicate_names"]} \
-        in g["scope_links"]["overridden_by"]
+    assert {"scope": "solana_fresh", "version": 1, "mode": "overrides", "keys": ["skip_duplicate_names"],
+            "values": {"skip_duplicate_names": False}} in g["scope_links"]["overridden_by"]
     assert "solana_momentum" in g["scope_links"]["follows_global"]
     async with app.state.db_session_factory() as s:  # the value the gate and assembler use
         eff, meta = await store.load_settings(s, "solana_fresh")
@@ -102,6 +102,36 @@ async def test_global_edit_reaches_engines_that_override_other_keys(app, client,
     f = (await client.get("/api/control/settings/solana_fresh", headers=auth_headers)).json()
     assert f["scope_links"]["follows_global"] is True
     assert (await client.post("/api/control/settings/GLOBAL/follow-global", headers=auth_headers)).status_code == 422
+
+
+async def test_save_for_all_engines_from_the_dashboard(app, client, auth_headers):
+    cur = (await client.get("/api/control/settings/solana_momentum", headers=auth_headers)).json()
+    await client.put("/api/control/settings/GLOBAL",
+                     json={"settings": {**cur["effective"], "skip_duplicate_names": False}}, headers=auth_headers)
+    await client.put("/api/control/settings/solana_momentum",
+                     json={"settings": {**cur["effective"], "skip_duplicate_names": True, "min_name_length": 6}}, headers=auth_headers)
+    async with app.state.db_session_factory() as s:  # the trap: GLOBAL says allowed, momentum still rejects
+        assert (await store.load_settings(s, "solana_momentum"))[0].skip_duplicate_names is True
+    g = (await client.get("/api/control/settings/GLOBAL", headers=auth_headers)).json()
+    row = next(o for o in g["scope_links"]["overridden_by"] if o["scope"] == "solana_momentum")
+    assert row["values"] == {"skip_duplicate_names": True, "min_name_length": 6}
+
+    r = await client.post("/api/control/settings-all", json={"changes": {"skip_duplicate_names": False}}, headers=auth_headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["engines_updated"] == ["solana_momentum"] and "x-config-revision" in r.headers
+    async with app.state.db_session_factory() as s:
+        for engine in ("solana_fresh", "solana_migration", "solana_momentum"):
+            assert (await store.load_settings(s, engine))[0].skip_duplicate_names is False, engine
+        assert (await store.load_settings(s, "solana_momentum"))[0].min_name_length == 6
+    m = (await client.get("/api/control/settings/solana_momentum", headers=auth_headers)).json()
+    assert m["scope_links"]["override_keys"] == ["min_name_length"] and m["scope_links"]["global_values"]["min_name_length"] is not None
+
+    r = await client.post("/api/control/settings/solana_momentum/follow-global", json={"keys": ["min_name_length"]}, headers=auth_headers)
+    assert r.status_code == 200
+    m = (await client.get("/api/control/settings/solana_momentum", headers=auth_headers)).json()
+    assert m["scope_links"]["follows_global"] is True
+    bad = await client.post("/api/control/settings-all", json={"changes": {"nope": 1}}, headers=auth_headers)
+    assert bad.status_code == 422
 
 
 def _mock_http(app, status=200):

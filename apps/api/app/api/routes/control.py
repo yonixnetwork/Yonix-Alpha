@@ -26,13 +26,16 @@ from app.schemas.control import (
     CustomRuleIn,
     CustomRuleOut,
     EnabledUpdate,
+    FollowGlobal,
     ModesOut,
     ModeUpdate,
     PaperAccountOut,
     PaperResetIn,
     PipelineOut,
+    SettingsChanges,
     SettingsOut,
     SettingsSaved,
+    SettingsSavedAll,
     SettingsUpdate,
     SettingsVersionOut,
     TimelineEventOut,
@@ -102,15 +105,18 @@ async def get_risk_settings(scope: str, db: AsyncSession = Depends(get_db), _: s
 
 async def _scope_links(db: AsyncSession, scope: str) -> dict:
     """GLOBAL applies to every engine except for the keys an engine
-    overrides; a legacy full copy (pre-overrides) replaces GLOBAL entirely."""
+    overrides (listed with the engine's value)."""
     engines = {s: await store.engine_overrides(db, s) for s in SCOPES if s != store.GLOBAL_SCOPE}
     if scope == store.GLOBAL_SCOPE:
-        return {"overridden_by": [{"scope": s, "version": e["version"], "mode": e["mode"], "keys": e["keys"]}
-                                  for s, e in engines.items() if e["mode"] != "follows_global"],
-                "follows_global": [s for s, e in engines.items() if e["mode"] == "follows_global"]}
+        return {"overridden_by": [{"scope": s, "version": e["version"], "mode": e["mode"], "keys": e["keys"],
+                                   "values": e["values"]}
+                                  for s, e in engines.items() if e["keys"]],
+                "follows_global": [s for s, e in engines.items() if not e["keys"]]}
     e = engines[scope]
-    return {"own_settings": e["mode"] != "follows_global", "follows_global": e["mode"] == "follows_global",
-            "mode": e["mode"], "override_keys": e["keys"]}
+    glob, _ = await store.load_settings(db, store.GLOBAL_SCOPE)
+    g = settings_to_dict(glob)
+    return {"own_settings": bool(e["keys"]), "follows_global": not e["keys"], "mode": e["mode"],
+            "override_keys": e["keys"], "global_values": {k: g.get(k) for k in e["keys"]}}
 
 
 @router.put("/settings/{scope}", response_model=SettingsSaved)
@@ -128,15 +134,31 @@ async def put_risk_settings(
 
 
 @router.post("/settings/{scope}/follow-global", response_model=SettingsSaved)
-async def follow_global(scope: str, request: Request, db: AsyncSession = Depends(get_db),
+async def follow_global(scope: str, request: Request, body: FollowGlobal | None = None, db: AsyncSession = Depends(get_db),
                         username: str = Depends(get_current_username)) -> SettingsSaved:
-    """Drops every override of this engine scope: it uses GLOBAL for all values."""
+    """This engine uses GLOBAL for `keys` (every value when no keys are given)."""
     _check_scope(scope)
     if scope == store.GLOBAL_SCOPE:
         raise HTTPException(422, "GLOBAL cannot follow itself")
-    row = await store.follow_global(db, scope, await _user_id(db, username))
+    row = await store.follow_global(db, scope, await _user_id(db, username), keys=body.keys if body else None)
     await db.commit()
     return SettingsSaved(version=SettingsVersionOut.model_validate(row), clamp_notes=[])
+
+
+@router.post("/settings-all", response_model=SettingsSavedAll)
+async def save_for_all_engines(body: SettingsChanges, request: Request, db: AsyncSession = Depends(get_db),
+                               username: str = Depends(get_current_username)) -> SettingsSavedAll:
+    """Saves the changed keys once for every engine: written into GLOBAL, and
+    removed from every engine that overrode them. One transaction."""
+    if not body.changes:
+        raise HTTPException(422, "no changes")
+    try:
+        row, notes, touched = await store.save_for_all_engines(db, body.changes, await _user_id(db, username),
+                                                               [s for s in SCOPES if s != store.GLOBAL_SCOPE], body.note)
+    except store.SettingsError as exc:
+        raise HTTPException(422, {"errors": exc.errors}) from exc
+    await db.commit()
+    return SettingsSavedAll(version=SettingsVersionOut.model_validate(row), clamp_notes=notes, engines_updated=touched)
 
 
 @router.get("/settings/{scope}/history", response_model=list[SettingsVersionOut])

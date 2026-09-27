@@ -39,6 +39,19 @@ class SettingsSaved(BaseModel):
     clamp_notes: list[str]
 
 
+class SettingsSavedAll(SettingsSaved):
+    engines_updated: list[str]
+
+
+class SettingsChanges(BaseModel):
+    changes: dict[str, Any]
+    note: str | None = Field(None, max_length=256)
+
+
+class FollowGlobal(BaseModel):
+    keys: list[str] | None = None
+
+
 class ModesOut(BaseModel):
     global_mode: str
     strategies: dict[str, str]

@@ -188,8 +188,9 @@ export interface SettingsOut {
   enums?: Record<string, string[]>;
   // An engine uses GLOBAL plus the keys it overrides (a legacy full copy ignores GLOBAL).
   scope_links?: {
-    overridden_by?: { scope: string; version: number | null; mode: string; keys: string[] }[];
+    overridden_by?: { scope: string; version: number | null; mode: string; keys: string[]; values?: Record<string, unknown> }[];
     follows_global?: string[] | boolean; own_settings?: boolean; mode?: string; override_keys?: string[];
+    global_values?: Record<string, unknown>;
   };
 }
 

@@ -229,6 +229,19 @@ def record_ml_sample(session: AsyncSession, a: Assessment, assessment_id: uuid.U
     ))
 
 
+def settings_source(meta: dict | None) -> str:
+    """Which saved risk settings a decision used, so a rejection by a
+    setting names where to change it."""
+    if not meta:
+        return ""
+    src = f"{meta.get('scope')} v{meta.get('version')}"
+    if meta.get("overrides") and meta.get("global_version"):
+        src += f" over GLOBAL v{meta['global_version']}; this engine's own values: {', '.join(meta['overrides'])[:120]}"
+    elif meta.get("legacy_full_copy"):
+        src += " (full copy, ignores GLOBAL)"
+    return f"\n[risk settings: {src} — Risk Settings page]"
+
+
 async def after_decision(session: AsyncSession, redis: Redis | None, app_settings: Any, a: Assessment, row: RiskAssessment,
                          dedupe_key: str) -> None:
     """Events for every decision; notifications only for what an operator
@@ -253,7 +266,8 @@ async def after_decision(session: AsyncSession, redis: Redis | None, app_setting
         codes = {f.code for f in a.findings if f.action == FinalDecision.REJECT}
         kind = "blacklist_rejection" if "BLACKLISTED" in codes else "risk_rejection"
         await events.notify(session, redis, app_settings, kind, f"Rejected: {a.symbol} ({a.engine})",
-                            "; ".join(a.reasons)[:500], "info", {"assessment_id": str(row.id)})
+                            ("; ".join(a.reasons)[:420] + settings_source(a.versions.get("settings")))[:600], "info",
+                            {"assessment_id": str(row.id)})
 
 
 async def after_entry(session: AsyncSession, redis: Redis | None, app_settings: Any, a: Assessment, position) -> None:

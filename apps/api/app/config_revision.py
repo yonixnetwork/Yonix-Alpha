@@ -24,6 +24,7 @@ WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 CONFIG_ROUTES = [
     (re.compile(r"^/api/control/modes/(global|strategy/(?P<strategy>[^/]+))$"), "mode"),
     (re.compile(r"^/api/control/settings/(?P<scope>[^/]+)(/follow-global)?$"), "risk_settings"),
+    (re.compile(r"^/api/control/settings-all$"), "risk_settings"),
     (re.compile(r"^/api/control/blacklist(/.*)?$"), "blacklist"),
     (re.compile(r"^/api/control/rules(/.*)?$"), "rules"),
     (re.compile(r"^/api/strategies/(?P<strategy>[^/]+)/(mode|config)$"), "strategy"),

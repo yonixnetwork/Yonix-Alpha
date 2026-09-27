@@ -190,26 +190,70 @@ async def save_settings(
     return row, notes
 
 
-async def follow_global(session: AsyncSession, engine: str, user_id: uuid.UUID | None) -> RiskSettingsVersion:
-    """New version for `engine` with no overrides: it uses GLOBAL for every value."""
-    latest = await _latest_settings_row(session, engine)
-    row = RiskSettingsVersion(scope=engine, version=(latest.version + 1) if latest else 1, settings={OVERRIDES: {}},
-                              note="follow GLOBAL for all values", created_by=user_id)
+async def _engine_own(session: AsyncSession, engine: str) -> tuple[RiskSettingsVersion | None, dict[str, Any]]:
+    """(latest row, the keys it sets differently from GLOBAL with its values).
+    A legacy full copy is compared with GLOBAL, so only real differences show."""
+    own = await _latest_settings_row(session, engine)
+    if own is None:
+        return None, {}
+    if is_override_row(own):
+        return own, dict(own.settings[OVERRIDES])
+    base = _base_dict(await _latest_settings_row(session, GLOBAL_SCOPE), engine)
+    return own, to_overrides(dict(own.settings), base)
+
+
+async def follow_global(session: AsyncSession, engine: str, user_id: uuid.UUID | None,
+                        keys: list[str] | None = None) -> RiskSettingsVersion:
+    """New version for `engine` that uses GLOBAL for `keys` (every value when
+    None); its other overrides stay."""
+    latest, overrides = await _engine_own(session, engine)
+    kept = {} if keys is None else {k: v for k, v in overrides.items() if k not in set(keys)}
+    row = RiskSettingsVersion(scope=engine, version=(latest.version + 1) if latest else 1, settings={OVERRIDES: kept},
+                              note="follow GLOBAL for " + ("all values" if keys is None else ", ".join(sorted(keys)))[:200],
+                              created_by=user_id)
     session.add(row)
-    session.add(AuditLog(user_id=user_id, event_type="risk_settings.follow_global", detail={"scope": engine, "version": row.version}))
+    session.add(AuditLog(user_id=user_id, event_type="risk_settings.follow_global",
+                         detail={"scope": engine, "version": row.version, "keys": sorted(keys) if keys else None,
+                                 "removed": sorted(set(overrides) - set(kept))}))
     await session.flush()
     return row
 
 
+async def save_for_all_engines(session: AsyncSession, changes: dict[str, Any], user_id: uuid.UUID | None,
+                               engines: list[str], note: str | None = None) -> tuple[RiskSettingsVersion, list[str], list[str]]:
+    """One change for every engine: `changes` are written into GLOBAL, and
+    every engine that overrides one of those keys drops that override, so
+    the new value is what every engine uses. Other engine-specific values
+    stay. Returns (GLOBAL row, clamp notes, engines whose override was removed).
+    Raises SettingsError (nothing written) when the result is invalid."""
+    glob = await _latest_settings_row(session, GLOBAL_SCOPE)
+    current = _base_dict(glob, GLOBAL_SCOPE) if glob else settings_to_dict(default_settings_for(GLOBAL_SCOPE))
+    unknown = sorted(set(changes) - set(current))
+    if unknown:
+        raise SettingsError([f"unknown setting: {k}" for k in unknown])
+    row, notes = await save_settings(session, GLOBAL_SCOPE, {**current, **changes}, user_id, note)
+    touched = []
+    for engine in engines:
+        if engine == GLOBAL_SCOPE:
+            continue
+        own, overrides = await _engine_own(session, engine)
+        if own is None:
+            continue
+        if set(overrides) & set(changes) or not is_override_row(own):
+            await follow_global(session, engine, user_id, keys=list(changes))
+            if set(overrides) & set(changes):
+                touched.append(engine)
+    return row, notes, touched
+
+
 async def engine_overrides(session: AsyncSession, engine: str) -> dict[str, Any]:
-    """{"mode": "overrides"|"legacy_full_copy"|"follows_global", "keys": [...], "version": n}."""
-    own = await _latest_settings_row(session, engine)
+    """{"mode": "overrides"|"legacy_full_copy"|"follows_global", "keys": [...],
+    "values": {key: engine value}, "version": n} — only keys that differ from GLOBAL."""
+    own, overrides = await _engine_own(session, engine)
     if own is None:
-        return {"mode": "follows_global", "keys": [], "version": None}
-    if not is_override_row(own):
-        return {"mode": "legacy_full_copy", "keys": sorted(own.settings), "version": own.version}
-    keys = sorted(own.settings[OVERRIDES])
-    return {"mode": "overrides" if keys else "follows_global", "keys": keys, "version": own.version}
+        return {"mode": "follows_global", "keys": [], "values": {}, "version": None}
+    mode = "legacy_full_copy" if not is_override_row(own) else ("overrides" if overrides else "follows_global")
+    return {"mode": mode, "keys": sorted(overrides), "values": overrides, "version": own.version}
 
 
 def _diff(before: dict | None, after: dict) -> dict[str, Any]:
@@ -264,7 +308,9 @@ async def set_strategy_mode(session: AsyncSession, strategy: str, mode: Strategy
 
 async def load_blacklist(session: AsyncSession) -> list[BlacklistRule]:
     rows = (await session.execute(select(BlacklistEntry).where(BlacklistEntry.enabled.is_(True)))).scalars().all()
-    return [BlacklistRule(str(r.id), r.scope, r.field, r.value, r.match_type, r.enabled) for r in rows]
+    # The action must be carried: without it every ALLOW (exemption) rule
+    # saved on the Word Filters page would load as a BLOCK rule.
+    return [BlacklistRule(str(r.id), r.scope, r.field, r.value, r.match_type, r.enabled, r.action or "BLOCK") for r in rows]
 
 
 async def load_custom_rules(session: AsyncSession) -> list[CustomRule]:

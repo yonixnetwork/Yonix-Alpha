@@ -193,3 +193,61 @@ async def test_legacy_full_copy_still_replaces_global(db):
     s, meta = await store.load_settings(db, "solana_fresh")
     assert s.min_liquidity_quote == Decimal("5") and meta["legacy_full_copy"] is True
     assert (await store.engine_overrides(db, "solana_fresh"))["mode"] == "legacy_full_copy"
+
+
+async def test_save_for_all_engines_reaches_an_engine_that_had_its_own_value(db):
+    """The reported case: duplicates allowed from the dashboard, yet momentum
+    still rejected them because it kept its own stored value."""
+    g = settings_to_dict(settings_from_dict({}))
+    await store.save_settings(db, "GLOBAL", g, None)
+    await store.save_settings(db, "solana_momentum", {**g, "skip_duplicate_names": True, "min_name_length": 5}, None)
+    db.add(RiskSettingsVersion(scope="solana_migration", version=1, settings={**g, "skip_duplicate_names": True}))  # legacy copy
+    await store.save_settings(db, "GLOBAL", {**g, "skip_duplicate_names": True}, None)
+    await db.commit()
+    assert (await store.engine_overrides(db, "solana_momentum"))["values"] == {"min_name_length": 5}  # equal to GLOBAL now
+
+    row, _, touched = await store.save_for_all_engines(db, {"skip_duplicate_names": False}, None,
+                                                       ["solana_fresh", "solana_migration", "solana_momentum"], "allow duplicates")
+    await db.commit()
+    for engine in ("solana_fresh", "solana_migration", "solana_momentum", "binance_futures"):
+        s, _ = await store.load_settings(db, engine)
+        assert s.skip_duplicate_names is False, engine
+    s, _ = await store.load_settings(db, "solana_momentum")
+    assert s.min_name_length == 5  # other engine-specific values stay
+    assert (await store.engine_overrides(db, "solana_migration"))["mode"] == "follows_global"  # legacy copy converted
+
+    # An engine that keeps its own value for the key is overruled by "all engines".
+    await store.save_settings(db, "solana_fresh", {**settings_to_dict((await store.load_settings(db, "solana_fresh"))[0]),
+                                                   "skip_duplicate_names": True}, None)
+    await db.commit()
+    _, _, touched = await store.save_for_all_engines(db, {"skip_duplicate_names": False}, None, ["solana_fresh"])
+    await db.commit()
+    assert touched == ["solana_fresh"] and (await store.load_settings(db, "solana_fresh"))[0].skip_duplicate_names is False
+
+    with pytest.raises(store.SettingsError):
+        await store.save_for_all_engines(db, {"no_such_setting": 1}, None, ["solana_fresh"])
+
+
+async def test_follow_global_for_one_key_keeps_the_others(db):
+    g = settings_to_dict(settings_from_dict({}))
+    await store.save_settings(db, "GLOBAL", g, None)
+    await store.save_settings(db, "solana_fresh", {**g, "skip_duplicate_names": False, "min_name_length": 4}, None)
+    await store.follow_global(db, "solana_fresh", None, keys=["skip_duplicate_names"])
+    await db.commit()
+    o = await store.engine_overrides(db, "solana_fresh")
+    assert o["keys"] == ["min_name_length"] and o["values"] == {"min_name_length": 4}
+
+
+async def test_allow_word_filter_saved_in_the_dashboard_is_loaded_as_allow(db):
+    """An ALLOW rule used to load as BLOCK (the action was dropped), so an
+    exempted word blocked tokens instead."""
+    from yonixalpha_core.db.models import BlacklistEntry
+    from yonixalpha_core.safety.rules import match_blacklist
+
+    db.add(BlacklistEntry(scope="GLOBAL", field="name", match_type="substring", value="elon", action="BLOCK"))
+    db.add(BlacklistEntry(scope="GLOBAL", field="name", match_type="exact", value="elon dog", action="ALLOW"))
+    await db.commit()
+    rules = await store.load_blacklist(db)
+    assert sorted(r.action for r in rules) == ["ALLOW", "BLOCK"]
+    assert match_blacklist(rules, "solana_momentum", "elon dog", "ED", "M1") is None  # exempted
+    assert match_blacklist(rules, "solana_momentum", "elon cat", "EC", "M2") is not None  # still blocked
