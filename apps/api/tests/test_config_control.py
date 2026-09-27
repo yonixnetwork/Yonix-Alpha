@@ -62,7 +62,9 @@ async def test_global_edit_warns_about_engine_overrides_and_duplicate_policy_is_
     r = await client.put("/api/control/settings/solana_fresh", json={"settings": payload}, headers=auth_headers)
     assert r.status_code == 200, r.text
     g = (await client.get("/api/control/settings/GLOBAL", headers=auth_headers)).json()
-    assert {"scope": "solana_fresh", "version": 1} in g["scope_links"]["overridden_by"]
+    assert {"scope": "solana_fresh", "version": 1, "mode": "overrides", "keys": ["skip_duplicate_names"]} \
+        in g["scope_links"]["overridden_by"]
+    assert "solana_momentum" in g["scope_links"]["follows_global"]
     async with app.state.db_session_factory() as s:  # the value the gate and assembler use
         eff, meta = await store.load_settings(s, "solana_fresh")
         assert eff.skip_duplicate_names is False and meta["scope"] == "solana_fresh"
@@ -70,6 +72,36 @@ async def test_global_edit_warns_about_engine_overrides_and_duplicate_policy_is_
         assert eff_m.skip_duplicate_names is True  # momentum still follows GLOBAL (shown on Configuration Health)
     h = (await client.get("/api/config/health", headers=auth_headers)).json()
     assert h["effective_in_database"]["risk_settings"]["solana_fresh"]["skip_duplicate_names"] is False
+
+
+async def test_global_edit_reaches_engines_that_override_other_keys(app, client, auth_headers):
+    """The reported problem: an engine saved once (e.g. by the Snipe panel)
+    stopped following GLOBAL. Now it keeps only the keys it overrides."""
+    cur = (await client.get("/api/control/settings/solana_fresh", headers=auth_headers)).json()
+    r = await client.put("/api/control/settings/solana_fresh",
+                         json={"settings": {**cur["effective"], "skip_duplicate_names": False}}, headers=auth_headers)
+    assert r.status_code == 200 and r.json()["version"]["settings"] == {"__overrides__": {"skip_duplicate_names": False}}
+    g = (await client.get("/api/control/settings/GLOBAL", headers=auth_headers)).json()
+    new_min = str(Decimal(str(g["effective"]["min_liquidity_quote"])) + 7)
+    r = await client.put("/api/control/settings/GLOBAL",
+                         json={"settings": {**g["effective"], "min_liquidity_quote": new_min}}, headers=auth_headers)
+    assert r.status_code == 200, r.text
+    async with app.state.db_session_factory() as s:
+        eff, meta = await store.load_settings(s, "solana_fresh")
+        assert eff.min_liquidity_quote == Decimal(new_min)  # the GLOBAL edit reached the engine
+        assert eff.skip_duplicate_names is False  # its own override kept
+        assert meta["overrides"] == ["skip_duplicate_names"] and meta["global_version"] == r.json()["version"]["version"]
+    f = (await client.get("/api/control/settings/solana_fresh", headers=auth_headers)).json()
+    assert f["scope_links"]["mode"] == "overrides" and f["scope_links"]["override_keys"] == ["skip_duplicate_names"]
+
+    r = await client.post("/api/control/settings/solana_fresh/follow-global", headers=auth_headers)
+    assert r.status_code == 200 and "x-config-revision" in r.headers
+    async with app.state.db_session_factory() as s:
+        eff, meta = await store.load_settings(s, "solana_fresh")
+        assert eff.skip_duplicate_names is True and meta["scope"] == "GLOBAL"
+    f = (await client.get("/api/control/settings/solana_fresh", headers=auth_headers)).json()
+    assert f["scope_links"]["follows_global"] is True
+    assert (await client.post("/api/control/settings/GLOBAL/follow-global", headers=auth_headers)).status_code == 422
 
 
 def _mock_http(app, status=200):

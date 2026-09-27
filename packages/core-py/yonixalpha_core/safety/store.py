@@ -86,29 +86,67 @@ async def _latest_settings_row(session: AsyncSession, scope: str) -> RiskSetting
     return result.scalar_one_or_none()
 
 
+OVERRIDES = "__overrides__"
+
+
+def _base_dict(global_row: RiskSettingsVersion | None, engine: str) -> dict[str, Any]:
+    """GLOBAL's full key set (normalised, so a key added after GLOBAL was
+    saved has its default), or the engine's code defaults."""
+    if global_row is None:
+        return settings_to_dict(default_settings_for(engine))
+    return settings_to_dict(settings_from_dict(dict(global_row.settings)))
+
+
+def to_overrides(full: dict[str, Any], base: dict[str, Any]) -> dict[str, Any]:
+    """The keys of a full settings dict that differ from `base`."""
+    norm = settings_to_dict(settings_from_dict(full))
+    return {k: v for k, v in norm.items() if base.get(k) != v}
+
+
+def is_override_row(row: RiskSettingsVersion | None) -> bool:
+    return row is not None and isinstance(row.settings, dict) and OVERRIDES in row.settings
+
+
 async def load_settings(session: AsyncSession, engine: str) -> tuple[SafetySettings, dict[str, Any]]:
-    """Effective settings for `engine`: its own latest version if one exists,
-    else the GLOBAL latest, else the engine's code defaults. Always re-clamped, so a row
-    written before a hard limit was tightened can't bypass it."""
-    row = await _latest_settings_row(session, engine) or await _latest_settings_row(session, GLOBAL_SCOPE)
-    if row is None:
+    """Effective settings for `engine`: GLOBAL (or the engine's code
+    defaults when no GLOBAL version exists) with the engine's own overridden
+    keys on top — so a GLOBAL change reaches every engine except for keys
+    that engine deliberately sets differently. A legacy engine row (a full
+    copy, from before overrides) still replaces GLOBAL entirely until it is
+    converted. Always re-clamped, so a row written before a hard limit was
+    tightened can't bypass it."""
+    glob = await _latest_settings_row(session, GLOBAL_SCOPE)
+    own = await _latest_settings_row(session, engine) if engine != GLOBAL_SCOPE else None
+    if own is not None and not is_override_row(own):
+        data, meta = dict(own.settings), {"scope": own.scope, "version": own.version, "id": str(own.id), "legacy_full_copy": True}
+    elif own is not None:
+        overrides = dict(own.settings[OVERRIDES])
+        data = {**_base_dict(glob, engine), **overrides}
+        meta = {"scope": own.scope if overrides else (GLOBAL_SCOPE if glob else "DEFAULT"),
+                "version": own.version if overrides else (glob.version if glob else 0), "id": str(own.id),
+                "overrides": sorted(overrides), "global_version": glob.version if glob else None}
+    elif glob is not None:
+        data, meta = dict(glob.settings), {"scope": glob.scope, "version": glob.version, "id": str(glob.id)}
+    else:
         settings, notes = clamp(default_settings_for(engine))
         return settings, {"scope": "DEFAULT", "version": 0, "clamp_notes": notes}
-    settings, notes = clamp(settings_from_dict(row.settings))
+    settings, notes = clamp(settings_from_dict(data))
     errors = validate(settings)
     if errors:
         # A stored row that no longer validates is not silently used.
         settings, _ = clamp(default_settings_for(engine))
-        return settings, {"scope": "DEFAULT", "version": 0, "rejected_row": str(row.id), "errors": errors}
-    return settings, {"scope": row.scope, "version": row.version, "id": str(row.id), "clamp_notes": notes}
+        return settings, {"scope": "DEFAULT", "version": 0, "rejected_row": meta.get("id"), "errors": errors}
+    return settings, {**meta, "clamp_notes": notes}
 
 
 async def save_settings(
     session: AsyncSession, scope: str, data: dict[str, Any], user_id: uuid.UUID | None, note: str | None = None
 ) -> tuple[RiskSettingsVersion, list[str]]:
-    """Validates, clamps, and appends a new version. Returns the row and the
-    clamp notes (values that were bounded). Raises SettingsError when the
-    settings are inconsistent — nothing is written then."""
+    """Validates, clamps, and appends a new version. GLOBAL stores the full
+    set; an engine scope stores only the keys that differ from GLOBAL (its
+    overrides), so later GLOBAL changes keep reaching it. Returns the row
+    and the clamp notes. Raises SettingsError when the settings are
+    inconsistent — nothing is written then."""
     try:
         parsed = settings_from_dict(data)
     except (ValueError, TypeError, ArithmeticError) as exc:
@@ -117,12 +155,19 @@ async def save_settings(
     errors = validate(settings)
     if errors:
         raise SettingsError(errors)
+    full = settings_to_dict(settings)
     latest = await _latest_settings_row(session, scope)
-    previous = latest.settings if latest else None
+    if scope == GLOBAL_SCOPE:
+        stored, previous = full, latest.settings if latest else None
+    else:
+        base = _base_dict(await _latest_settings_row(session, GLOBAL_SCOPE), scope)
+        stored = {OVERRIDES: to_overrides(full, base)}
+        previous = ({**base, **latest.settings[OVERRIDES]} if is_override_row(latest)
+                    else (latest.settings if latest else base))
     row = RiskSettingsVersion(
         scope=scope,
         version=(latest.version + 1) if latest else 1,
-        settings=settings_to_dict(settings),
+        settings=stored,
         note=note,
         created_by=user_id,
     )
@@ -134,7 +179,8 @@ async def save_settings(
             detail={
                 "scope": scope,
                 "version": row.version,
-                "changed": _diff(previous, row.settings),
+                "changed": _diff(previous, full),
+                "overrides": sorted(stored[OVERRIDES]) if OVERRIDES in stored else None,
                 "clamp_notes": notes,
                 "note": note,
             },
@@ -142,6 +188,28 @@ async def save_settings(
     )
     await session.flush()
     return row, notes
+
+
+async def follow_global(session: AsyncSession, engine: str, user_id: uuid.UUID | None) -> RiskSettingsVersion:
+    """New version for `engine` with no overrides: it uses GLOBAL for every value."""
+    latest = await _latest_settings_row(session, engine)
+    row = RiskSettingsVersion(scope=engine, version=(latest.version + 1) if latest else 1, settings={OVERRIDES: {}},
+                              note="follow GLOBAL for all values", created_by=user_id)
+    session.add(row)
+    session.add(AuditLog(user_id=user_id, event_type="risk_settings.follow_global", detail={"scope": engine, "version": row.version}))
+    await session.flush()
+    return row
+
+
+async def engine_overrides(session: AsyncSession, engine: str) -> dict[str, Any]:
+    """{"mode": "overrides"|"legacy_full_copy"|"follows_global", "keys": [...], "version": n}."""
+    own = await _latest_settings_row(session, engine)
+    if own is None:
+        return {"mode": "follows_global", "keys": [], "version": None}
+    if not is_override_row(own):
+        return {"mode": "legacy_full_copy", "keys": sorted(own.settings), "version": own.version}
+    keys = sorted(own.settings[OVERRIDES])
+    return {"mode": "overrides" if keys else "follows_global", "keys": keys, "version": own.version}
 
 
 def _diff(before: dict | None, after: dict) -> dict[str, Any]:

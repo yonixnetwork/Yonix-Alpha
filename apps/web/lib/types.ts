@@ -181,12 +181,16 @@ export interface SystemEventOut {
 export interface SettingsOut {
   scope: string;
   effective: Record<string, string | number | boolean | string[] | null>;
-  source: { scope: string; version: number; clamp_notes?: string[]; errors?: string[] };
+  source: { scope: string; version: number; clamp_notes?: string[]; errors?: string[]; overrides?: string[];
+    global_version?: number | null; legacy_full_copy?: boolean };
   defaults: Record<string, string | number | boolean | string[] | null>;
   hard_limits: Record<string, { kind: "min" | "max"; bound: string }>;
   enums?: Record<string, string[]>;
-  // An engine with its own saved settings ignores GLOBAL entirely.
-  scope_links?: { overridden_by?: { scope: string; version: number }[]; follows_global?: string[] | boolean; own_settings?: boolean };
+  // An engine uses GLOBAL plus the keys it overrides (a legacy full copy ignores GLOBAL).
+  scope_links?: {
+    overridden_by?: { scope: string; version: number | null; mode: string; keys: string[] }[];
+    follows_global?: string[] | boolean; own_settings?: boolean; mode?: string; override_keys?: string[];
+  };
 }
 
 export interface SettingsVersionOut {

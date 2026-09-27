@@ -1,9 +1,14 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { ErrorNotice, Section } from "@/components/ui";
 import { apiGet, apiPost, ApiError } from "@/lib/api";
 import { useApi } from "@/lib/useApi";
+
+// Backup RPC endpoints are managed on System → RPC & Data Providers: they
+// apply to the running services immediately, with no .env rewrite or restart.
+const RPC_PAGE_KEYS = new Set(["SOLANA_RPC_BACKUP_URL", "SOLANA_RPC_BACKUP_URL_2", "SOLANA_RPC_BACKUP_URL_3"]);
 
 type Key = { key: string; kind: "secret" | "url" | "text"; configured: boolean; value: string | null };
 type Status = { installed: boolean; keys: Key[]; server_only: string[]; install: string };
@@ -34,6 +39,7 @@ export default function KeysPanel() {
         setResult(r);
         if (r.status === "QUEUED" || r.status === "UNKNOWN") {
           if (n < POLL_LIMIT) poll(id, n + 1);
+          else setResult({ ...r, status: "NOT APPLIED", errors: ["the server helper did not pick up this change within ~4 minutes: .env was not changed. On the server check: systemctl status yonixalpha-env-updater.path"] });
         } else {
           status.reload();
         }
@@ -76,6 +82,11 @@ export default function KeysPanel() {
         services that use them. Current values are never shown or sent to the browser. Wallet private keys, passwords,
         testnet flags and the trading locks can only be changed on the server (<code>scripts/set-keys.sh</code>).
       </div>
+      <div className="notice">
+        Backup RPC endpoints: add them on <Link href="/dashboard/rpc">System → RPC &amp; Data Providers</Link> — they apply to the
+        running services immediately. The keys below are written into the server&apos;s .env by the key helper and the affected
+        services are restarted.
+      </div>
       {s && !s.installed && (
         <div className="notice notice-danger">
           The key updater is not installed on this server yet. Run once, as root, in /opt/yonixalpha:{" "}
@@ -87,7 +98,7 @@ export default function KeysPanel() {
           <table className="data-table">
             <thead><tr><th>Key</th><th>Now</th><th>New value</th><th>Clear</th></tr></thead>
             <tbody>
-              {s.keys.map((k) => (
+              {s.keys.filter((k) => !RPC_PAGE_KEYS.has(k.key)).map((k) => (
                 <tr key={k.key}>
                   <td><code>{k.key}</code></td>
                   <td>

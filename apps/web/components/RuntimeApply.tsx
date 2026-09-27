@@ -5,7 +5,7 @@ import Link from "next/link";
 import { apiGet, CONFIG_SAVED_EVENT, lastConfigRevision } from "@/lib/api";
 
 export interface ServiceSync {
-  service: string; applies: string; status: "SYNCED" | "OUT_OF_SYNC" | "NOT_REPORTING"; revision: number | null;
+  service: string; applies: string; status: "SYNCED" | "OUT_OF_SYNC" | "NOT_REPORTING" | "NOT_DEPLOYED"; revision: number | null;
   loaded_at: string | null; ack_age_seconds: number | null; error: string | null;
 }
 export interface ConfigHealth {
@@ -41,7 +41,7 @@ export default function RuntimeApply({ inline = false, since }: { inline?: boole
         if (cancelled) return;
         try {
           const h = await apiGet<ConfigHealth>("/api/config/health");
-          const reporting = h.services.filter((s) => s.status !== "NOT_REPORTING");
+          const reporting = h.services.filter((s) => s.status !== "NOT_REPORTING" && s.status !== "NOT_DEPLOYED");
           const behind = reporting.filter((s) => (s.revision ?? -1) < revision || s.error);
           if (reporting.length > 0 && behind.length === 0) {
             setPhase({ kind: "applied", revision, synced: reporting.length });

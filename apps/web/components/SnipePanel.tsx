@@ -13,11 +13,29 @@ type Strategy = { name: string; config: Record<string, unknown>; mode?: string }
 const SNIPE_MODES = ["fresh_launch", "migration", "both", "off"] as const;
 type SnipeMode = (typeof SNIPE_MODES)[number];
 
-// Name filters and the dev-token ceiling are safety settings, saved in both
-// Pump.fun scopes so fresh and migrated tokens are filtered alike.
+// Name filters and the dev-token ceiling are safety settings, saved in GLOBAL
+// so the fresh, migrated and momentum engines filter alike.
 const SAFETY_KEYS = ["min_name_length", "skip_duplicate_names", "ascii_names_only", "max_creator_tokens_created",
   "cooldown_after_loss_seconds"] as const;
 const SCOPES = ["solana_fresh", "solana_migration", "solana_momentum"];
+
+type Entry = "AUTO" | "MANUAL" | "PAPER";
+
+function entryOf(m: ModesOut): Entry {
+  const on = [m.strategies.solana_fresh, m.strategies.solana_migration].filter((x) => x && x !== "OFF");
+  return on.includes("AUTO") ? "AUTO" : on.includes("MANUAL") ? "MANUAL" : on.includes("PAPER") ? "PAPER" : "AUTO";
+}
+
+/** What a strategy mode actually does under the current global mode (the
+ * same rule as the safety gate's execution target). */
+export function modeEffect(mode: string | undefined, m: ModesOut): string {
+  const live = m.global_mode === "LIVE" && m.env.live_permitted;
+  if (!mode || mode === "OFF") return "OFF — not evaluated, no entries";
+  if (mode === "PAPER") return "PAPER — automatic entries, simulated only (never real SOL, even when the global mode is LIVE)";
+  if (mode === "MANUAL") return live ? "MANUAL — each LIVE entry waits for your approval" : `MANUAL — each entry waits for approval; executes on paper (global mode ${m.global_mode})`;
+  if (m.global_mode === "MANUAL") return "AUTO — but the global mode is MANUAL, so every entry waits for approval";
+  return live ? "AUTO — LIVE automatic entries with real SOL" : `AUTO — automatic entries on paper (global mode ${m.global_mode}${m.global_mode === "LIVE" ? ", server live locks closed" : ""})`;
+}
 
 function snipeModeOf(m: ModesOut): SnipeMode {
   const fresh = (m.strategies.solana_fresh ?? "OFF") !== "OFF";
@@ -31,7 +49,7 @@ function snipeModeOf(m: ModesOut): SnipeMode {
  * safety gate; URLs and keys stay on the server. */
 export default function SnipePanel({ modes, onModes }: { modes: ModesOut; onModes: (m: ModesOut) => void }) {
   const [snipe, setSnipe] = useState<SnipeMode>(snipeModeOf(modes));
-  const [autoBuy, setAutoBuy] = useState(modes.strategies.solana_fresh === "AUTO" || modes.strategies.solana_migration === "AUTO");
+  const [entry, setEntry] = useState<Entry>(entryOf(modes));
   const [buyAmount, setBuyAmount] = useState("");
   const [live, setLive] = useState<Live | null>(null);
   const [slippage, setSlippage] = useState("");
@@ -77,7 +95,7 @@ export default function SnipePanel({ modes, onModes }: { modes: ModesOut; onMode
 
   const applyModes = () =>
     apply("Snipe mode", async () => {
-      const on = autoBuy ? "AUTO" : "MANUAL";
+      const on = entry;
       const want: Record<string, string> = {
         solana_fresh: snipe === "fresh_launch" || snipe === "both" ? on : "OFF",
         solana_migration: snipe === "migration" || snipe === "both" ? on : "OFF",
@@ -101,17 +119,28 @@ export default function SnipePanel({ modes, onModes }: { modes: ModesOut; onMode
       setLive(l);
     });
 
+  // Saved in GLOBAL (which every engine follows); an engine that
+  // overrides one of these keys gets the same value, which removes that
+  // override, so the three Pump.fun engines end up filtering alike.
   const applySafety = () =>
     apply("Filters", async () => {
-      for (const scope of SCOPES) {
-        const cur = await apiGet<SettingsOut>(`/api/control/settings/${scope}`);
+      const withValues = (cur: SettingsOut) => {
         const payload: Record<string, unknown> = { ...cur.effective };
         for (const k of SAFETY_KEYS) {
           const orig = cur.effective[k];
           const v = safety[k];
           payload[k] = typeof orig === "boolean" ? v === "true" : typeof orig === "number" ? Number(v) : v;
         }
-        await apiPut(`/api/control/settings/${scope}`, { settings: payload, note: "Settings → Pump.fun snipe settings" });
+        return payload;
+      };
+      const g = await apiGet<SettingsOut>("/api/control/settings/GLOBAL");
+      await apiPut("/api/control/settings/GLOBAL", { settings: withValues(g), note: "Settings → Pump.fun snipe settings" });
+      for (const scope of SCOPES) {
+        const cur = await apiGet<SettingsOut>(`/api/control/settings/${scope}`);
+        const wanted = withValues(cur);
+        if (SAFETY_KEYS.some((k) => String(cur.effective[k]) !== String(wanted[k]))) {
+          await apiPut(`/api/control/settings/${scope}`, { settings: wanted, note: "Settings → Pump.fun snipe settings" });
+        }
       }
     });
 
@@ -149,11 +178,16 @@ export default function SnipePanel({ modes, onModes }: { modes: ModesOut; onMode
         </div>
         <div className="form-row">
           <label htmlFor="snipe-auto">AUTO_BUY</label>
-          <select id="snipe-auto" value={autoBuy ? "true" : "false"} onChange={(e) => setAutoBuy(e.target.value === "true")}>
-            <option value="true">ON — AUTO</option>
-            <option value="false">OFF — MANUAL (every entry waits for approval)</option>
+          <select id="snipe-auto" value={entry} onChange={(e) => setEntry(e.target.value as Entry)}>
+            <option value="AUTO">ON — AUTO (buys without asking; LIVE when the global mode is LIVE)</option>
+            <option value="MANUAL">OFF — MANUAL (every entry waits for approval)</option>
+            <option value="PAPER">PAPER — automatic, simulated only (never real SOL)</option>
           </select>
-          <span className="form-hint">Current: fresh {modes.strategies.solana_fresh ?? "—"} · migration {modes.strategies.solana_migration ?? "—"}</span>
+          <span className="form-hint">
+            Running now (global mode {modes.global_mode}):<br />
+            Fresh: {modeEffect(modes.strategies.solana_fresh, modes)}<br />
+            Migrated: {modeEffect(modes.strategies.solana_migration, modes)}
+          </span>
         </div>
       </div>
       <div className="btn-row"><button className="btn btn-sm" disabled={busy} onClick={applyModes}>Apply snipe mode</button></div>
@@ -191,7 +225,7 @@ export default function SnipePanel({ modes, onModes }: { modes: ModesOut; onMode
         {field("max_creator_tokens_created", "MAX_DEV_TOKENS", "Creator wallets with this many pump.fun tokens or more need approval (serial-launcher indicator). 0 = off.")}
         {field("cooldown_after_loss_seconds", "COOLDOWN_SECONDS", "Pause after a losing trade. There is no pause after every buy; per-token re-evaluation is paced by the engine.")}
       </div>
-      <div className="btn-row"><button className="btn btn-sm" disabled={busy} onClick={applySafety}>Save filters (fresh + migration)</button></div>
+      <div className="btn-row"><button className="btn btn-sm" disabled={busy} onClick={applySafety}>Save filters (all Pump.fun engines)</button></div>
 
       <table className="data-table">
         <thead><tr><th>Key</th><th>Where / status</th></tr></thead>

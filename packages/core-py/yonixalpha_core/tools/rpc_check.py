@@ -76,7 +76,7 @@ async def main() -> int:
             eps = ((ack.get("status") or {}).get("rpc") or {}).get("endpoints")
             if eps is None:
                 print(f"  {s['service']:26} {s['status']:14} (no RPC loaded / not reporting)")
-                if s["status"] == "NOT_REPORTING" and s["service"] != "execution-futures":
+                if s["status"] == "NOT_REPORTING" and s["service"] != "execution-futures":  # NOT_DEPLOYED = legacy, fine
                     problems.append(f"{s['service']} is not reporting: stopped, crashed, idle (no SOLANA_RPC_URL) or running "
                                     "code from before the runtime-config update (redeploy)")
                 continue

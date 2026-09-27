@@ -23,6 +23,8 @@ This document covers:
 | Strategy parameters | `PUT /api/strategies/{name}/config` | `strategy_configs` | Each evaluation |
 | RPC / provider URLs and keys | Settings → keys (host helper writes `.env`, restarts services) | `.env` | Once, at process start |
 
+Backup RPC endpoints now belong on **System → RPC & Data Providers** (database, hot reload). The Settings → keys panel no longer lists `SOLANA_RPC_BACKUP_URL[_2|_3]`; it links there instead. If the key helper does not pick up a request within about 4 minutes, the panel says **NOT APPLIED** and names the systemd unit to check. It no longer keeps saying "waiting".
+
 **Finding.** The database-backed settings were already read fresh on every evaluation; nothing cached them. The mismatches came from four other places.
 
 1. **Scope override (root cause of "duplicates allowed in the dashboard, still rejected").**
@@ -79,17 +81,22 @@ This page shows:
 - Each service's acknowledged revision, marked:
   - **SYNCED**;
   - **OUT OF SYNC** (older revision or failed reload);
-  - **NOT REPORTING** (stopped, disabled, or not deployed).
+  - **NOT REPORTING** (stopped, crashed, or disabled);
+  - **NOT DEPLOYED** (the legacy engine-solana-momentum / engine-solana-migration services, which the production compose does not run; discovery and the decision engine do that work). Expected, not an error.
 - Each module's stored setting against its runtime state:
   - **OFF**, **RUNNING**;
   - or **BLOCKED** with the reason, e.g. a configuration error or "no healthy RPC provider".
 - The effective settings in the database side by side with what the decision engine last read: modes, the risk-settings source per engine, and the duplicate-name policy.
 
-### Risk settings scopes
+### Risk settings scopes (overrides, migration 0015)
 
-- **GLOBAL page:** lists the engines that override GLOBAL. The option "Apply the keys I change here to those engines too" (on by default) writes the same changed keys into each overriding engine.
-- **Engine page:** says whether the engine follows GLOBAL, and warns before giving it its own settings.
-- **Snipe panel:** now saves name filters to all three Pump.fun scopes.
+- **An engine scope stores only the keys it overrides** (`{"__overrides__": {...}}`). Its effective settings are GLOBAL (or the engine's code defaults when GLOBAL was never saved) with those keys on top. A GLOBAL change therefore reaches every engine, except for the keys that engine deliberately sets differently.
+- **Why:** before, saving an engine scope once (the Snipe panel did this for every Pump.fun engine) stored a full copy, and that engine ignored GLOBAL from then on. GLOBAL edits were saved and shown, but had no effect on that engine.
+- **Migration 0015** converts each existing full copy into overrides of the current GLOBAL. The effective settings are identical before and after (verified on a copy of legacy rows); it only changes what later GLOBAL edits reach.
+- **GLOBAL page:** lists each engine's overridden keys. "Also use the values I change here in those engines" (on by default) removes the override for the keys you change.
+- **Engine page:** "follows GLOBAL for every value" / "follows GLOBAL except: …" and a **Follow GLOBAL for all values** button (`POST /api/control/settings/{scope}/follow-global`).
+- **Snipe panel:** saves the name filters to GLOBAL, and removes any engine override of those keys. AUTO_BUY shows what each strategy mode actually does under the current global mode (PAPER strategy mode = automatic but simulated, even in global LIVE).
+- **Configuration Health:** the risk source reads `GLOBAL vN`, `solana_fresh vM over GLOBAL vN`, or `… (full copy, ignores GLOBAL)`.
 
 ## 3. RPC & data providers (System → RPC & Data Providers)
 

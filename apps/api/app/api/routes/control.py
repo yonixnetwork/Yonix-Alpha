@@ -101,17 +101,16 @@ async def get_risk_settings(scope: str, db: AsyncSession = Depends(get_db), _: s
 
 
 async def _scope_links(db: AsyncSession, scope: str) -> dict:
-    own = {}
-    for s in SCOPES:
-        if s == store.GLOBAL_SCOPE:
-            continue
-        v = (await db.execute(select(func.max(RiskSettingsVersion.version)).where(RiskSettingsVersion.scope == s))).scalar_one_or_none()
-        if v:
-            own[s] = v
+    """GLOBAL applies to every engine except for the keys an engine
+    overrides; a legacy full copy (pre-overrides) replaces GLOBAL entirely."""
+    engines = {s: await store.engine_overrides(db, s) for s in SCOPES if s != store.GLOBAL_SCOPE}
     if scope == store.GLOBAL_SCOPE:
-        return {"overridden_by": [{"scope": s, "version": v} for s, v in own.items()],
-                "follows_global": [s for s in SCOPES if s != store.GLOBAL_SCOPE and s not in own]}
-    return {"own_settings": scope in own, "follows_global": scope not in own}
+        return {"overridden_by": [{"scope": s, "version": e["version"], "mode": e["mode"], "keys": e["keys"]}
+                                  for s, e in engines.items() if e["mode"] != "follows_global"],
+                "follows_global": [s for s, e in engines.items() if e["mode"] == "follows_global"]}
+    e = engines[scope]
+    return {"own_settings": e["mode"] != "follows_global", "follows_global": e["mode"] == "follows_global",
+            "mode": e["mode"], "override_keys": e["keys"]}
 
 
 @router.put("/settings/{scope}", response_model=SettingsSaved)
@@ -126,6 +125,18 @@ async def put_risk_settings(
         raise HTTPException(422, {"errors": exc.errors}) from exc
     await db.commit()
     return SettingsSaved(version=SettingsVersionOut.model_validate(row), clamp_notes=notes)
+
+
+@router.post("/settings/{scope}/follow-global", response_model=SettingsSaved)
+async def follow_global(scope: str, request: Request, db: AsyncSession = Depends(get_db),
+                        username: str = Depends(get_current_username)) -> SettingsSaved:
+    """Drops every override of this engine scope: it uses GLOBAL for all values."""
+    _check_scope(scope)
+    if scope == store.GLOBAL_SCOPE:
+        raise HTTPException(422, "GLOBAL cannot follow itself")
+    row = await store.follow_global(db, scope, await _user_id(db, username))
+    await db.commit()
+    return SettingsSaved(version=SettingsVersionOut.model_validate(row), clamp_notes=[])
 
 
 @router.get("/settings/{scope}/history", response_model=list[SettingsVersionOut])

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { apiGet, apiPut, ApiError } from "@/lib/api";
+import { apiGet, apiPost, apiPut, ApiError } from "@/lib/api";
 import { formatDate } from "@/lib/format";
 import type { SettingsOut, SettingsVersionOut } from "@/lib/types";
 import RuntimeApply from "@/components/RuntimeApply";
@@ -129,6 +129,22 @@ export default function RiskSettingsPage() {
   const [applyToOverrides, setApplyToOverrides] = useState(true);
   const overriddenBy = data?.scope === "GLOBAL" ? data.scope_links?.overridden_by ?? [] : [];
 
+  async function followGlobal() {
+    if (!data) return;
+    setBusy(true);
+    setError(null);
+    setSaved(null);
+    try {
+      const r = await apiPost<{ version: SettingsVersionOut }>(`/api/control/settings/${scope}/follow-global`);
+      setSaved(`${scope} now follows GLOBAL for every value (version ${r.version.version}).`);
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Save failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function save() {
     if (!data) return;
     setBusy(true);
@@ -192,23 +208,42 @@ export default function RiskSettingsPage() {
           <span className="muted">
             Effective source: {data.source.scope}
             {data.source.version ? ` v${data.source.version}` : " (code defaults)"}
+            {Array.isArray(data.source.overrides) && data.source.overrides.length > 0 && data.source.global_version
+              ? ` on top of GLOBAL v${data.source.global_version}` : ""}
+            {data.source.legacy_full_copy ? " (full copy — ignores GLOBAL)" : ""}
           </span>
         )}
       </div>
 
-      {data?.scope === "GLOBAL" && overriddenBy.length > 0 && (
-        <div className="notice notice-danger">
-          These engines have their own saved settings and do <b>not</b> use GLOBAL:{" "}
-          {overriddenBy.map((o) => `${o.scope} v${o.version}`).join(", ")}. A GLOBAL change alone does not reach them.
-          <label style={{ display: "block", marginTop: 6 }}>
-            <input type="checkbox" checked={applyToOverrides} onChange={(e) => setApplyToOverrides(e.target.checked)} /> Apply
-            the keys I change here to those engines too
-          </label>
+      {data?.scope === "GLOBAL" && (
+        <div className={overriddenBy.length ? "notice notice-danger" : "notice"}>
+          GLOBAL applies to every engine
+          {overriddenBy.length > 0 ? (
+            <>
+              {" "}except for these engine-specific values:
+              <ul className="reason-list">{overriddenBy.map((o) => (
+                <li key={o.scope}><b>{o.scope}</b>{o.mode === "legacy_full_copy" ? " — full copy (ignores GLOBAL completely)" : `: ${o.keys.join(", ")}`}</li>))}
+              </ul>
+              <label style={{ display: "block", marginTop: 6 }}>
+                <input type="checkbox" checked={applyToOverrides} onChange={(e) => setApplyToOverrides(e.target.checked)} /> Also
+                use the values I change here in those engines (removes their override for those keys)
+              </label>
+            </>
+          ) : "."}
         </div>
       )}
-      {data && data.scope !== "GLOBAL" && data.scope_links?.follows_global === true && (
+      {data && data.scope !== "GLOBAL" && (
         <div className="notice">
-          {data.scope} currently follows GLOBAL. Saving here gives it its own settings; later GLOBAL changes will then not reach it.
+          {data.scope_links?.follows_global
+            ? <>{data.scope} follows GLOBAL for every value. Saving here overrides only the values you change.</>
+            : data.scope_links?.mode === "legacy_full_copy"
+              ? <>{data.scope} has a full copy that ignores GLOBAL completely.</>
+              : <>{data.scope} follows GLOBAL except: <b>{(data.scope_links?.override_keys ?? []).join(", ")}</b>.</>}
+          {!data.scope_links?.follows_global && (
+            <button className="btn btn-ghost btn-sm" style={{ marginLeft: 8 }} disabled={busy} onClick={followGlobal}>
+              Follow GLOBAL for all values
+            </button>
+          )}
         </div>
       )}
       {data?.source.errors && (
@@ -278,7 +313,7 @@ export default function RiskSettingsPage() {
 
       <div className="section-title">History</div>
       {history.length === 0 ? (
-        <div className="muted">No saved versions for this scope; code defaults apply.</div>
+        <div className="muted">No saved versions for this scope; {scope === "GLOBAL" ? "code defaults apply" : "it follows GLOBAL (or code defaults when GLOBAL was never saved)"}.</div>
       ) : (
         <table className="data-table">
           <thead>

@@ -8,7 +8,7 @@ import { useApi } from "@/lib/useApi";
 
 function pill(status: string): string {
   return status === "SYNCED" || status === "RUNNING" ? "pill pill-ok" : status === "OFF" ? "pill pill-off"
-    : status === "NOT_REPORTING" ? "pill pill-warn" : "pill pill-danger";
+    : status === "NOT_REPORTING" ? "pill pill-warn" : status === "NOT_DEPLOYED" ? "pill pill-off" : "pill pill-danger";
 }
 
 type Effective = { global_mode?: string; modes?: Record<string, string>;
@@ -51,7 +51,8 @@ export default function ConfigHealthPage() {
           </tbody>
         </table>
         <p className="muted">SYNCED: the service runs the database revision. OUT OF SYNC: it runs an older one or its reload failed. NOT
-          REPORTING: stopped, disabled (e.g. no RPC configured) or not deployed.</p>
+          REPORTING: stopped, crashed or disabled (e.g. no RPC configured). NOT DEPLOYED: a legacy service that the current
+          deployment does not run (its work is done by discovery + decision engine) — this is expected.</p>
       </Section>
 
       <Section title="Modules — stored setting vs runtime">
@@ -82,8 +83,8 @@ export default function ConfigHealthPage() {
                 <td>{de?.risk_settings?.[k] ? `${de.risk_settings[k].source} · duplicate names ${de.risk_settings[k].skip_duplicate_names ? "REJECTED" : "ALLOWED"}` : "—"}</td></tr>))}
           </tbody>
         </table>
-        <p className="muted">An engine with its own saved risk settings (source “solana_fresh vN”) does not use GLOBAL at all; edit that
-          engine&apos;s scope, or use “apply to engines” on the Risk Settings page.</p>
+        <p className="muted">“GLOBAL vN” = the engine follows GLOBAL. “GLOBAL vN + solana_fresh vM” = GLOBAL with that engine&apos;s own
+          overrides on top. A legacy full copy (“solana_fresh vN”) ignores GLOBAL; it is converted to overrides on deploy.</p>
       </Section>
 
       <Section title="Changes that still need the server">

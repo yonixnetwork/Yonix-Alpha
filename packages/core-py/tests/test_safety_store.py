@@ -19,7 +19,7 @@ from yonixalpha_core.db.models import AuditLog, PaperPosition, RiskSettingsVersi
 from yonixalpha_core.safety import store  # noqa: E402
 from yonixalpha_core.safety.gate import assess  # noqa: E402
 from yonixalpha_core.safety.models import GlobalMode, StrategyMode  # noqa: E402
-from yonixalpha_core.safety.settings import SafetySettings, default_settings_for  # noqa: E402
+from yonixalpha_core.safety.settings import SafetySettings, default_settings_for, settings_from_dict, settings_to_dict  # noqa: E402
 
 from tests.test_safety_gate import NOW, healthy  # noqa: E402
 
@@ -61,11 +61,12 @@ async def test_settings_default_then_versioned_and_audited(db):
     settings, meta = await store.load_settings(db, "solana_fresh")
     assert settings.max_position_size_quote == Decimal("0.4") and meta == {**meta, "scope": "GLOBAL", "version": 2}
 
-    # An engine-scoped row takes precedence over GLOBAL.
+    # An engine-scoped value takes precedence over GLOBAL for that key only.
     await store.save_settings(db, "solana_fresh", {"max_position_size_quote": "0.2"}, None)
     await db.commit()
     settings, meta = await store.load_settings(db, "solana_fresh")
     assert settings.max_position_size_quote == Decimal("0.2") and meta["scope"] == "solana_fresh"
+    assert meta["overrides"] == ["max_position_size_quote"]
 
     audits = (await db.execute(select(AuditLog).where(AuditLog.event_type == "risk_settings.updated"))).scalars().all()
     assert len(audits) == 3
@@ -164,3 +165,31 @@ async def test_assessment_with_decimal_inputs_snapshot_persists(db):
     row, _ = await store.persist_assessment(db, a, None, "k3")
     await db.commit()
     assert row.assessment["inputs_snapshot"]["price"] == "3E-8"
+
+
+async def test_engine_scope_keeps_following_global_for_keys_it_does_not_override(db):
+    await store.save_settings(db, "GLOBAL", {"min_liquidity_quote": "100"}, None)
+    g = settings_to_dict(settings_from_dict({"min_liquidity_quote": "100"}))
+    row, _ = await store.save_settings(db, "solana_fresh", {**g, "skip_duplicate_names": False}, None)
+    assert row.settings == {store.OVERRIDES: {"skip_duplicate_names": False}}
+    await store.save_settings(db, "GLOBAL", {**g, "min_liquidity_quote": "250"}, None)
+    await db.commit()
+    s, meta = await store.load_settings(db, "solana_fresh")
+    assert s.min_liquidity_quote == Decimal("250") and s.skip_duplicate_names is False
+    assert meta["global_version"] == 2 and (await store.engine_overrides(db, "solana_fresh"))["keys"] == ["skip_duplicate_names"]
+
+    await store.follow_global(db, "solana_fresh", None)
+    await db.commit()
+    s, meta = await store.load_settings(db, "solana_fresh")
+    assert s.skip_duplicate_names is True and meta["scope"] == "GLOBAL" and meta["version"] == 2
+    assert (await store.engine_overrides(db, "solana_fresh"))["mode"] == "follows_global"
+
+
+async def test_legacy_full_copy_still_replaces_global(db):
+    await store.save_settings(db, "GLOBAL", {"min_liquidity_quote": "100"}, None)
+    db.add(RiskSettingsVersion(scope="solana_fresh", version=1, settings=settings_to_dict(
+        settings_from_dict({"min_liquidity_quote": "5", "skip_duplicate_names": False}))))
+    await db.commit()
+    s, meta = await store.load_settings(db, "solana_fresh")
+    assert s.min_liquidity_quote == Decimal("5") and meta["legacy_full_copy"] is True
+    assert (await store.engine_overrides(db, "solana_fresh"))["mode"] == "legacy_full_copy"

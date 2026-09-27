@@ -135,7 +135,12 @@ def test_sync_status():
     assert st["decision-engine"] == "SYNCED" and st["paper-trading"] == "OUT_OF_SYNC"
     assert st["data-solana"] == "NOT_REPORTING" and st["engine-solana-discovery"] == "OUT_OF_SYNC"
     assert st["execution-futures"] == "NOT_REPORTING"
+    # Legacy engines the production compose does not run: not an alarm.
+    assert st["engine-solana-momentum"] == "NOT_DEPLOYED" and st["engine-solana-migration"] == "NOT_DEPLOYED"
     assert runtime_config.sync_status(5, acks, now)["status"] == "OUT_OF_SYNC"
+    acks["engine-solana-momentum"] = {"revision": 5, "at": fresh, "ok": True}  # started anyway: tracked normally
+    assert {s["service"]: s["status"] for s in runtime_config.sync_status(5, acks, now)["services"]}[
+        "engine-solana-momentum"] == "SYNCED"
 
 
 # --- RPC providers ---------------------------------------------------------------

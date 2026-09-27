@@ -50,6 +50,9 @@ SERVICES: dict[str, str] = {
     "data-solana": "RPC endpoints",
     "execution-futures": "futures live settings and strategy modes",
 }
+# Legacy containers (compose profile "legacy"), not started by the default
+# deployment: Momentum and Migration run inside discovery + decision-engine.
+OPTIONAL = {"engine-solana-momentum", "engine-solana-migration"}
 
 
 async def current(session: AsyncSession) -> dict[str, Any]:
@@ -99,7 +102,9 @@ def sync_status(db_revision: int, acks: dict[str, dict[str, Any]], now: datetime
                 age = (now - datetime.fromisoformat(ack["at"])).total_seconds()
             except ValueError:
                 age = None
-        if ack is None or age is None or age > ACK_TTL_SECONDS:
+        if (ack is None or age is None or age > ACK_TTL_SECONDS) and name in OPTIONAL:
+            status = "NOT_DEPLOYED"
+        elif ack is None or age is None or age > ACK_TTL_SECONDS:
             status = "NOT_REPORTING"
         elif not ack.get("ok", True):
             status = "OUT_OF_SYNC"
@@ -112,7 +117,7 @@ def sync_status(db_revision: int, acks: dict[str, dict[str, Any]], now: datetime
                          "ack_age_seconds": round(age, 1) if age is not None else None,
                          "error": ack.get("error") if ack else None, "reloaded": ack.get("reloaded") if ack else None,
                          "effective": ack.get("effective") if ack else None})
-    reporting = [s for s in services if s["status"] != "NOT_REPORTING"]
+    reporting = [s for s in services if s["status"] not in ("NOT_REPORTING", "NOT_DEPLOYED")]
     overall = ("SYNCED" if reporting and all(s["status"] == "SYNCED" for s in reporting)
                else "OUT_OF_SYNC" if any(s["status"] == "OUT_OF_SYNC" for s in services) else "NOT_REPORTING")
     return {"status": overall, "services": services}
@@ -128,7 +133,12 @@ async def effective_snapshot(session: AsyncSession) -> dict[str, Any]:
     risk = {}
     for engine in ("solana_fresh", "solana_migration", "solana_momentum"):
         s, meta = await store.load_settings(session, engine)
-        risk[engine] = {"source": f"{meta['scope']} v{meta['version']}", "skip_duplicate_names": s.skip_duplicate_names}
+        source = f"{meta['scope']} v{meta['version']}"
+        if meta.get("overrides") and meta.get("global_version"):
+            source += f" over GLOBAL v{meta['global_version']}"
+        elif meta.get("legacy_full_copy"):
+            source += " (full copy, ignores GLOBAL)"
+        risk[engine] = {"source": source, "skip_duplicate_names": s.skip_duplicate_names}
     return {"global_mode": (await store.load_global_mode(session)).value,
             "modes": {k: (await store.load_strategy_mode(session, k)).value for k in MODE_KEYS},
             "risk_settings": risk}
