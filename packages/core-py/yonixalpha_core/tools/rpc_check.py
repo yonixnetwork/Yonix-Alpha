@@ -10,7 +10,6 @@ On the server, in /opt/yonixalpha:
 """
 
 import asyncio
-import json
 from datetime import datetime, timezone
 
 import httpx
