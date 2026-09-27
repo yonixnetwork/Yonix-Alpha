@@ -452,3 +452,45 @@ async def test_curve_position_keeps_managing_through_migration_and_sells_on_pump
     async with session_factory() as s:
         p = await s.get(PaperPosition, pid)
     assert p.status == "closed" and p.realized_pnl < 0
+
+
+async def test_smoke_test_cycle_buy_fill_pnl_test_close_sell_closed(session_factory, redis_client):
+    """LIVE_EXECUTION_SMOKE_TEST scenario on the real worker/manager code
+    (provider boundary scripted): every stage is read back from the order
+    and position rows, and the test-close uses the ordinary exit path."""
+    from yonixalpha_core import live_smoke
+    from yonixalpha_core.db.models import LiveSmokeTest
+
+    curve, a, pid, cid, ex, spent = await open_live(session_factory, redis_client)
+    async with session_factory() as s:
+        run = LiveSmokeTest(category="FRESH", max_sol=Decimal("0.02"), status="USED", stage="BUY_REQUESTED", armed_by="admin",
+                            expires_at=NOW + timedelta(minutes=30), attempts=[], position_id=pid, mint=MINT, engine="solana_fresh")
+        s.add(run)
+        await s.commit()
+        view = await live_smoke.run_view(s, run, NOW)
+    assert view["buy"]["order_submitted"] and view["buy"]["transaction_confirmed"] and view["buy"]["actually_filled"]
+    assert view["buy"]["signature"] == "sig-buy" and view["stage"] == "POSITION_OPEN"
+    assert view["position"]["price_status"] == "LIVE" and view["position"]["unrealized_pnl"] is not None
+
+    # Live price update from the stream, then the operator's test-close.
+    later = NOW + timedelta(seconds=30)
+    await pump_stream.ingest_logs(redis_client, logs_of(curve.trade(wallet(60), later, 100_000_000, True)), "sig-tick", later)
+    async with session_factory() as s:
+        p = await s.get(PaperPosition, pid)
+        p.exit_requested = True
+        await s.commit()
+    await manage_gate_positions(session_factory, redis_client, None, later, None, LIVE_ON)
+    async with session_factory() as s:
+        sell = (await s.execute(select(ExecutionOrder).where(ExecutionOrder.side == "SELL"))).scalar_one()
+        view = await live_smoke.run_view(s, await s.get(LiveSmokeTest, run.id), later)
+    assert sell.status == "PENDING" and sell.limits["min_sol_out_lamports"] > 0  # slippage-bounded, not a blind dump
+    assert view["stage"] == "POSITION_OPEN" and view["sells"][0]["order_submitted"] is False
+
+    ex.outcomes.append(confirmed("sig-sell", 15_000_000, -3_000_000_000_000))
+    assert await live_trading.process_order(session_factory, redis_client, LIVE_ON, ex, sell.id) == "CONFIRMED"
+    async with session_factory() as s:
+        p = await s.get(PaperPosition, pid)
+        view = await live_smoke.run_view(s, await s.get(LiveSmokeTest, run.id), later)
+    assert p.status == "closed" and p.realized_pnl == (Decimal(15_000_000) - Decimal(spent)) / Decimal(1_000_000_000)
+    assert view["stage"] == "POSITION_CLOSED" and view["sells"][0]["actually_filled"]
+    assert view["sells"][0]["signature"] == "sig-sell" and view["position"]["realized_pnl"] == p.realized_pnl

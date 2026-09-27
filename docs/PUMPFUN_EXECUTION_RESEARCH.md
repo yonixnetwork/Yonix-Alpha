@@ -183,9 +183,14 @@ On the dashboard:
 | Build → guard → sign → simulate → send → confirm → fill, BUY and SELL | IMPLEMENTED — AWAITING CREDENTIAL VERIFICATION (provider boundary tested; no real transaction has been sent) |
 | PAPER cycle on a curve token: gate → entry → management → exit-intelligence sell → realized PnL | VERIFIED in production on 2026-09-27. Momentum on `3eSai…pump`: EXECUTE at 02:22:23 (0.0637 SOL), exit at 02:36:21 (`exit_intel_exit`), realized −0.0060 SOL. Its reasons are in `--mint` → EVENT |
 | Real wallet SOL balance | VERIFIED (read from chain by the order worker; Live page) |
-| Token holdings valued in SOL | NOT COMPLETE (counted, not valued) |
+| Token holdings valued in SOL | IMPLEMENTED — AWAITING PRODUCTION VERIFICATION (curve / PumpSwap pool / WSOL, with source and time; otherwise VALUATION UNAVAILABLE). See EXECUTION_PIPELINE_AND_SMOKE_TEST.md §4 |
 | Live position PnL | PARTIALLY VERIFIED (from actual fills and marks; no real fill has happened yet) |
+| LIVE_EXECUTION_SMOKE_TEST (wallet → buy → confirm → position → PnL → sell → confirm → closed) | IMPLEMENTED — AWAITING CREDENTIAL VERIFICATION. Off by default; needs the .env switch, the admin password and the typed phrase. See EXECUTION_PIPELINE_AND_SMOKE_TEST.md §3 |
+| EXIT_SIGNAL_AT_ENTRY | IMPLEMENTED — AWAITING PRODUCTION VERIFICATION (regression test replays the 3eSai…pump flow) |
 | Trading 0.083 SOL at 1–2% risk | BLOCKED by arithmetic: 2% of 0.083 SOL is 0.0017 SOL of allowed loss. Stop plus costs usually push the size below the 0.01 SOL minimum |
+
+Status ladder (PROMOTE ≠ buy), EXIT_SIGNAL_AT_ENTRY, the smoke test, wallets and the T+5m…T+60m follow-ups are
+documented in [EXECUTION_PIPELINE_AND_SMOKE_TEST.md](EXECUTION_PIPELINE_AND_SMOKE_TEST.md).
 
 ## 8. ML and observation data
 

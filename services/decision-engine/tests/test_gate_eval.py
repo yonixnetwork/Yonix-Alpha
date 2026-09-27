@@ -9,7 +9,7 @@ from yonixalpha_core.safety import store
 from yonixalpha_core.safety.models import GlobalMode, StrategyMode
 from yonixalpha_core.solana.assembler import Sources
 from yonixalpha_core.state_machine import CandidateState
-from yonixalpha_core.testing.pump import MINT, FakeRpc, seed_healthy_launch
+from yonixalpha_core.testing.pump import MINT, FakeRpc, seed_fading_flow, seed_healthy_launch
 
 from app.gate_eval import evaluate_with_gate, is_gate_candidate
 
@@ -224,3 +224,20 @@ async def test_entry_records_the_holder_snapshot_for_exit_monitoring(db_session,
     venue = (await db_session.execute(select(PaperPosition))).scalar_one().plan["venue"]
     assert set(venue["holders_at_entry"]) == {"top1_share", "top10_share", "creator_share"}
     assert int(venue["supply_raw"]) > 0 and len(venue["holder_excluded"]) == 2
+
+
+async def test_exit_signal_at_entry_waits_and_opens_nothing(db_session, redis_client):
+    """Regression (3eSai…pump): the flow exit intelligence would REDUCE on
+    its first tick blocks the entry itself; the token keeps being
+    re-evaluated instead of being bought and sold 15 s later."""
+    curve = await seed_healthy_launch(redis_client, NOW)
+    at = await seed_fading_flow(redis_client, curve, NOW)
+    cand = await make_candidate(db_session)
+    a = await evaluate_with_gate(db_session, redis_client, ENV, Sources(redis_client, FakeRpc(curve)), cand, at)
+    assert not a.executable
+    assert any(f.code == "EXIT_SIGNAL_AT_ENTRY" and f.action.value == "WAIT" for f in a.findings)
+    assert cand.state == CandidateState.ANALYZING.value
+    assert (await db_session.execute(select(PaperPosition))).first() is None
+    row = (await db_session.execute(select(RiskAssessment))).scalar_one()
+    assert "EXIT_SIGNAL_AT_ENTRY" in {f["code"] for f in row.assessment["findings"]}
+    assert row.assessment["inputs_snapshot"]["entry_exit_check"]["action"] == "REDUCE"

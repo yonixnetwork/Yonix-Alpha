@@ -353,3 +353,7 @@ class AssessmentInput:
     # SOL/USD for the migrated-liquidity USD rule; None = no source answered.
     sol_usd: Decimal | None = None
     sol_usd_source: str | None = None
+    # What exit intelligence (yonixalpha_core.exit_intel.solana_exit_decision)
+    # would say about a position opened right now, from the same pre-entry
+    # flow: {"action", "reasons", "metrics"}. None when not evaluated.
+    entry_exit_check: dict | None = None

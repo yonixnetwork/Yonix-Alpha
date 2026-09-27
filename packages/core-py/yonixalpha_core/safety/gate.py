@@ -455,6 +455,22 @@ def _check_observation(inp: AssessmentInput, out: list[Finding]) -> None:
                             + ("; ".join(obs.get("positive") or []) or "no change"), FinalDecision.EXECUTE))
 
 
+ENTRY_EXIT_BLOCKING = ("REDUCE", "EXIT", "EXIT_NOW")
+
+
+def _check_entry_exit(inp: AssessmentInput, out: list[Finding]) -> None:
+    """EXIT_SIGNAL_AT_ENTRY: never open a position the existing exit
+    intelligence would start selling on its first tick. Same rules, same
+    thresholds, same pre-entry trades (see solana.assembler); the token waits
+    and is re-evaluated with fresh data."""
+    chk = inp.entry_exit_check
+    if not chk or chk.get("action") not in ENTRY_EXIT_BLOCKING:
+        return
+    out.append(_finding(RiskCategory.TRADING, "EXIT_SIGNAL_AT_ENTRY", RiskLevel.HIGH,
+                        f"exit intelligence would {chk['action']} a position opened now: "
+                        + "; ".join(chk.get("reasons") or []), FinalDecision.WAIT))
+
+
 _CREATOR_ACTION = {
     "WARN": (FinalDecision.EXECUTE, RiskLevel.MODERATE, "WARNING"),
     "REDUCE_SIZE": (FinalDecision.REDUCE_SIZE, RiskLevel.MODERATE, "WARNING"),
@@ -806,6 +822,7 @@ def assess(inp: AssessmentInput, settings: SafetySettings, versions: dict[str, A
     _check_flow(inp, settings, findings)
     _check_creator_history(inp, settings, findings)
     _check_observation(inp, findings)
+    _check_entry_exit(inp, findings)
     _check_market(inp, findings)
     _check_account(inp, settings, findings)
 

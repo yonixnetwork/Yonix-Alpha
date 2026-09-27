@@ -902,3 +902,33 @@ class TokenObservation(Base):
     report: Mapped[dict] = mapped_column(JSONB, nullable=False)
     candidate_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    # Later snapshots of the same token (T+5m / T+10m / T+30m / T+60m after
+    # launch, the migration event), filled by paper-trading's follow-up job:
+    # {"T+30m": {"at", "price_raw", "change_pct", "liquidity_sol", "source"}, ...}.
+    # Observation data only; never used for training by this job.
+    followups: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+
+class LiveSmokeTest(Base):
+    """One armed LIVE_EXECUTION_SMOKE_TEST run (yonixalpha_core.live_smoke).
+    The run only records the arming, the candidate attempts and the position
+    it opened; buy/sell/confirmation status is always derived from the real
+    execution_orders and paper_positions rows, never stored here."""
+
+    __tablename__ = "live_smoke_tests"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    category: Mapped[str] = mapped_column(String(16), nullable=False)  # FRESH / MIGRATED / MOMENTUM
+    max_sol: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)  # ARMED / USED / EXPIRED / CANCELLED
+    stage: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    stage_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    armed_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    attempts: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    position_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("paper_positions.id", ondelete="SET NULL"), nullable=True)
+    assessment_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    mint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    engine: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -64,6 +64,26 @@ def _print_funnel(f: dict) -> None:
         print("\nEXECUTION FAILURES:")
         for e in f["execution_failures"]:
             print(f"  {e['event_type']:22} {e['n']:4}x  {e['reason']}")
+    pl = f.get("pipeline") or {}
+    if pl:
+        print("\nPIPELINE (tokens reaching each stage; PROMOTE is NOT a buy):")
+        for stage, n in pl["stages"].items():
+            print(f"  {stage:20} {n:6}")
+        print("BLOCKED (tokens with a BUY signal that never became executable, by blocker group):")
+        print("  " + ", ".join(f"{g} {n}" for g, n in pl["blocked_by"].items()))
+        if pl["promoted_not_assessed"]:
+            print("PROMOTED BUT NEVER ASSESSED BY THE GATE (candidate state -> its recorded reason):")
+            for r in pl["promoted_not_assessed"]:
+                print(f"  {r['engine']:10} {r['state']:12} {r['tokens']:5}  {r['reason']}")
+        print("FINAL BLOCKER per stage (engine, furthest stage, code -> tokens):")
+        for r in pl["final_blockers"][:25]:
+            print(f"  {r['engine']:17} {r['stage']:20} {r['code']:36} {r['tokens']:5}")
+        print("LATEST TOKENS (furthest stage and exact final blocker):")
+        for tok in pl["tokens"][:30]:
+            fb = tok["final_blocker"] or {}
+            print(f"  {tok['mint'][:6]}…{tok['mint'][-4:]} {str(tok['engine'])[:16]:16} {tok['stage']:20} "
+                  f"{str(fb.get('code') or '-'):32} {str(fb.get('reason') or '')[:90]}")
+
     print("\nDIAGNOSIS:")
     for n in f["diagnosis"] or ["no activity in this window"]:
         print(f"  - {n}")
@@ -71,6 +91,11 @@ def _print_funnel(f: dict) -> None:
 
 def _print_trace(t: dict) -> None:
     print(f"TOKEN {t['mint']}")
+    pl = t.get("pipeline") or {}
+    fb = pl.get("final_blocker") or {}
+    print(f"  PIPELINE: furthest stage {pl.get('stage')}; final blocker {fb.get('code') or '-'}"
+          + (f" — {fb.get('reason')}" if fb.get("reason") else "")
+          + (f"; route {pl.get('execution_route')} via {pl.get('execution_provider')}" if pl.get("execution_route") else ""))
     for o in t["observation"]:
         print(f"  observation: {o['outcome']} trend={o['trend']} at {o['decided_at']} — {(o['reasons'] or [''])[-1]}")
     for c in t["candidates"]:

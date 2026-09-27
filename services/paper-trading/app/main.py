@@ -21,6 +21,7 @@ from yonixalpha_core.venues.registry import build_venues
 
 from app.entry import try_open_position
 from app.gate_manage import manage_gate_positions, track_outcomes
+from yonixalpha_core.solana.followups import track_observation_followups
 from app.grid_engine import run_grid
 from app.live_worker import live_worker_loop
 from app.manage import evaluate_open_position
@@ -128,6 +129,8 @@ async def _paper_trading_loop(
                     log.info("gate_loop.completed", **counts)
                 async with session_factory() as session:
                     await track_outcomes(session, redis, now)
+                async with session_factory() as session:
+                    await track_observation_followups(session, redis, rpc, now)
                 if venues is not None:
                     grid_status = await run_grid(session_factory, redis, app_settings, venues, now)
                     if grid_status.get("fills"):

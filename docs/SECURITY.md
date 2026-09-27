@@ -130,6 +130,19 @@ is installed the page refuses changes. Applied changes are listed by `journalctl
 example, they could point the RPC at a hostile endpoint. They still cannot move the wallet, open the live-trading
 locks or switch testnet to mainnet. Keep the admin password strong.
 
+### Live execution smoke test
+
+`LIVE_SMOKE_TEST_ENABLED`, `LIVE_SMOKE_TEST_MAX_SOL` and `LIVE_SMOKE_TEST_MAX_TRADES` are server-only. They are not
+in the dashboard key updater's editable list.
+
+- **Arming a run** needs the admin password again (5 failures lock arming for 15 minutes) and the typed phrase
+  `SPEND REAL SOL`. Every arm, refusal and cancel is audited.
+- **Buys** pass the full safety gate against the live wallet. The global mode is never changed.
+- **The wallet view and smoke-test APIs** return the shortened public address, balances and signatures only. Keys
+  stay in the order worker.
+
+See [EXECUTION_PIPELINE_AND_SMOKE_TEST.md](EXECUTION_PIPELINE_AND_SMOKE_TEST.md).
+
 ## 6. Transport security
 
 - TLS termination happens at the `reverse-proxy` (nginx) container —

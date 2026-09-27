@@ -165,5 +165,19 @@ async def seed_healthy_launch(redis, now: datetime) -> Curve:
     return curve
 
 
+async def seed_fading_flow(redis, curve: Curve, now: datetime) -> datetime:
+    """The shape of 3eSai…pump (production, 2026-09-27): a healthy launch
+    whose buying has stopped. Two minutes on, the heavy buying sits in the
+    previous 120 s window and the current one holds one small buy and two
+    sellers: exit intelligence says REDUCE ("volume collapsed … sellers
+    outnumber buyers 2:1"). Returns the time to evaluate at."""
+    at = now + timedelta(seconds=125)
+    events = [curve.trade(wallet(30), now + timedelta(seconds=60), 50_000_000, True),
+              curve.trade(wallet(1), now + timedelta(seconds=90), 20_000_000, False),
+              curve.trade(wallet(2), now + timedelta(seconds=100), 20_000_000, False)]
+    await pump_stream.ingest_logs(redis, logs_of(*events), "sigfade", at - timedelta(seconds=2))
+    return at
+
+
 def empty_account(equity: Decimal = Decimal(10)) -> AccountState:
     return AccountState(equity, equity, 0, Decimal(0), Decimal(0), None, Decimal(0), False)

@@ -26,7 +26,7 @@ from datetime import datetime
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yonixalpha_core import live_trading, paper_engine, paper_execution
+from yonixalpha_core import live_smoke, live_trading, paper_engine, paper_execution
 from yonixalpha_core.ml.gate_features import FEATURE_VERSION
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import TradingCandidate
@@ -156,6 +156,20 @@ async def evaluate_with_gate(
                   "venue": {"pool": pool, "creator": evidence.get("creator") or None,
                             "real_liquidity_at_entry": str(inp.market.liquidity_quote) if inp.market else None,
                             **await _holder_snapshot(redis, mint, inp)}}
+    if not live_intent and inp.signal is not None and inp.signal.qualified:
+        # LIVE_EXECUTION_SMOKE_TEST: only while an admin-armed run exists for
+        # this category; the full gate runs again against the live wallet and
+        # decides. Normal trading stays in its own mode either way.
+        run = await live_smoke.armed_run(session, now)
+        if run is not None and live_smoke.CATEGORY_ENGINE.get(run.category) == engine:
+            position = await live_smoke.try_entry(session, redis, settings, run, candidate=candidate, engine=engine, inp=inp,
+                                                  versions=vers, evidence=a.inputs_snapshot, lifecycle=lifecycle,
+                                                  provenance=provenance, now=now)
+            if position is not None:
+                await session.commit()
+                log.info("gate.smoke_test_entry", candidate_id=str(candidate.id), mint=mint, engine=engine,
+                         run=str(run.id), route=position.execution_route)
+                return a
     if a.executable and a.execution_target.value == "LIVE":
         try:
             position = await live_trading.enter_live(session, redis, account, a, row.id, candidate, now, lifecycle,

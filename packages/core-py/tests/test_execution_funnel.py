@@ -143,3 +143,57 @@ async def test_live_sizing_respects_the_sol_reserve(db):
 class _NoRedis:
     async def get(self, key):
         return None
+
+
+async def test_pipeline_ladder_and_final_blockers(db):
+    """Each token's furthest stage and exact final blocker, from its own
+    records: never "PROMOTE = bought"."""
+    # PROMOTED but never assessed (e.g. rejected before the gate ran).
+    token = Token(mint_address="P" * 44, first_seen_source="pump_stream")
+    db.add(token)
+    await db.flush()
+    db.add(TradingCandidate(token_id=token.id, engine="discovery", state="rejected",
+                            state_history=[{"state": "rejected", "at": NOW.isoformat(), "reason": "strategy solana_fresh is OFF"}],
+                            detail={"source": "pump_stream", "mint": "P" * 44}, created_at=NOW))
+    # BUY signal, but exit intelligence would sell at once.
+    await _persist(db, replace(_token("X" * 44), entry_exit_check={"action": "REDUCE", "reasons": ["volume collapsed"],
+                                                                   "metrics": {}}), "p2")
+    # Risk-approved, stopped by sizing (no room left under the exposure cap).
+    base = _token("S" * 44)
+    await _persist(db, replace(base, account=replace(base.account, current_exposure=Decimal("3"))), "p3")
+    # Executable and bought in paper.
+    a4, row4, cand4 = await _persist(db, _token("E" * 44), "p4")
+    db.add(PaperPosition(candidate_id=cand4.id, symbol="E", provider="paper", side="LONG", entry_price=Decimal(1),
+                         quantity=Decimal(1), entry_at=NOW, status="open", engine="solana_fresh", asset_id="E" * 44,
+                         assessment_id=row4.id, execution_mode="PAPER", execution_route="pump"))
+    # Executable LIVE, the buy never landed.
+    a5, row5, cand5 = await _persist(db, _token("L" * 44), "p5")
+    live = PaperPosition(candidate_id=cand5.id, symbol="L", provider="live", side="LONG", entry_price=Decimal(1),
+                         quantity=Decimal(0), entry_at=NOW, status="failed", engine="solana_fresh", asset_id="L" * 44,
+                         assessment_id=row5.id, execution_mode="LIVE", execution_route="pump", execution_provider="pumpportal_local")
+    db.add(live)
+    await db.flush()
+    db.add(ExecutionOrder(position_id=live.id, mode="LIVE", side="BUY", reason="entry", mint="L" * 44, provider="pumpportal_local",
+                          route="pump", amount="0.01", amount_kind="sol", slippage_pct=Decimal(10), priority_fee_sol=Decimal("0.0001"),
+                          status="FAILED", idempotency_key="entry:p5", signature="sig5", error="simulation failed: slippage",
+                          submitted_at=None))
+    await db.commit()
+
+    pl = (await execution_funnel.funnel(db, NOW - timedelta(hours=1)))["pipeline"]
+    by = {t["mint"][0]: t for t in pl["tokens"]}
+    assert by["P"]["stage"] == "PROMOTE" and by["P"]["final_blocker"]["code"] == "CANDIDATE_REJECTED"
+    assert by["P"]["final_blocker"]["reason"] == "strategy solana_fresh is OFF"
+    assert pl["promoted_not_assessed"][0]["tokens"] == 1 and "OFF" in pl["promoted_not_assessed"][0]["reason"]
+    assert by["X"]["stage"] == "BUY_SIGNAL" and by["X"]["final_blocker"]["code"] == "EXIT_SIGNAL_AT_ENTRY"
+    assert "exit_signal_at_entry" in by["X"]["final_blocker"]["groups"]
+    assert by["S"]["stage"] == "RISK_APPROVED" and by["S"]["final_blocker"]["code"] == "SIZE_BELOW_MINIMUM"
+    assert by["S"]["final_blocker"]["groups"] == ["sizing_account"]
+    assert by["E"]["stage"] == "POSITION_OPEN" and by["E"]["final_blocker"] is None and by["E"]["execution_route"] == "pump"
+    assert by["L"]["stage"] == "EXECUTION_APPROVED" and by["L"]["final_blocker"]["code"] == "BUY_SIMULATION_FAILED"
+    s = pl["stages"]
+    assert s["PROMOTE"] == 5 and s["BUY_SIGNAL"] == 4 and s["RISK_APPROVED"] == 3 and s["EXECUTION_APPROVED"] == 2
+    assert s["BUY_SUBMITTED"] == 1 and s["POSITION_OPEN"] == 1
+    assert pl["blocked_by"]["exit_signal_at_entry"] == 1 and pl["blocked_by"]["sizing_account"] == 1
+
+    t = await execution_funnel.token_trace(db, "X" * 44)
+    assert t["pipeline"]["stage"] == "BUY_SIGNAL" and t["pipeline"]["final_blocker"]["code"] == "EXIT_SIGNAL_AT_ENTRY"

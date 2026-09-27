@@ -39,6 +39,7 @@ from yonixalpha_core.solana.flow import (
     synchronized_buy_cluster,
     trade_flow,
 )
+from yonixalpha_core.exit_intel import ExitConfig, solana_exit_decision
 from yonixalpha_core.solana import creator_history, funding, sol_price
 from yonixalpha_core.solana.market_data import DexScreenerClient, JupiterClient
 from yonixalpha_core.solana.pumpfun import BondingCurveState, decode_bonding_curve
@@ -79,6 +80,19 @@ class Controls:
     live_trading_permitted: bool = False
     manual_approval_granted: bool = False
     overrides: ManualOverrides = field(default_factory=ManualOverrides)
+
+
+def entry_exit_check(trades, now: datetime, creator: str | None, liquidity: Decimal | None,
+                     settings) -> dict[str, Any]:
+    """Runs the existing exit intelligence on the pre-entry flow as if a
+    position were opened now: entry liquidity = current liquidity and no
+    holder change or price high since entry yet, so only the flow rules
+    (sell pressure, seller dominance, volume collapse, creator selling) can
+    fire. The gate turns REDUCE / EXIT into EXIT_SIGNAL_AT_ENTRY (WAIT)."""
+    d = solana_exit_decision(trades, now, creator, liquidity, liquidity, None, None,
+                             cfg=ExitConfig.from_settings(settings), highest_price=None, current_price=None)
+    return {"action": d.action, "reasons": list(d.reasons),
+            "metrics": {k: (v if isinstance(v, (bool, int, list)) or v is None else str(v)) for k, v in d.metrics.items()}}
 
 
 async def fetch_mint(rpc, mint: str, now: datetime) -> tuple[TokenProgramInfo | None, str | None]:
@@ -323,6 +337,9 @@ async def assemble_fresh(src: Sources, mint: str, now: datetime, c: Controls,
     inp.flow.creator_launches_24h = await pump_stream.creator_launches(src.redis, creator, now)
     await _wallet_analysis(src, inp, trades, creator, now, decimals, c, ev)
     await _creator_and_name(src, inp, c, meta, mint, curve_addr, now, ev)
+    inp.entry_exit_check = entry_exit_check(trades, now, creator, inp.market.liquidity_quote if inp.market else None,
+                                            c.settings)
+    ev["entry_exit_check"] = inp.entry_exit_check
 
     if token is not None and curve_addr:
         inp.holders, err = await fetch_holders(src.rpc, mint, token.supply_raw, {curve_addr}, creator, now)
@@ -425,6 +442,9 @@ async def assemble_migrated(src: Sources, mint: str, now: datetime, c: Controls)
         inp.flow.round_trip_share = round_trip_volume_share(trades, now, FLOW_WINDOW_SECONDS)
         inp.flow.creator_launches_24h = await pump_stream.creator_launches(src.redis, creator, now)
         await _wallet_analysis(src, inp, trades, creator, now, decimals, c, ev)
+        # Same pool flow exit intelligence reads for a PumpSwap position.
+        inp.entry_exit_check = entry_exit_check(trades, now, creator, pool_state.liquidity_sol, c.settings)
+        ev["entry_exit_check"] = inp.entry_exit_check
         hour = [t for t in trades if (now - t.at).total_seconds() <= 3600]
         inp.signal = post_migration_signal(sum(1 for t in hour if t.is_buy), sum(1 for t in hour if not t.is_buy), age)
     else:

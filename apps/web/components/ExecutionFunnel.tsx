@@ -16,7 +16,76 @@ type Funnel = {
   execution_failures: { event_type: string; reason: string; n: number }[];
   modes: { global: string; strategies: Record<string, string>; live_ready?: boolean; live_not_ready_reason?: string | null };
   diagnosis: string[];
+  pipeline?: Pipeline;
 };
+type FinalBlocker = { stage: string; code: string; reason?: string | null; groups?: string[] } | null;
+type PipelineToken = { mint: string; symbol: string | null; engine: string; stage: string; final_blocker: FinalBlocker;
+  execution_route: string | null; promoted_at: string };
+type Pipeline = {
+  stages: Record<string, number>; blocked_by: Record<string, number>;
+  promoted_not_assessed: { engine: string; state: string; reason: string; tokens: number }[];
+  final_blockers: { engine: string; stage: string; code: string; tokens: number }[];
+  tokens: PipelineToken[];
+};
+
+const STAGE_LABEL: Record<string, string> = {
+  OBSERVED: "Observed", ANALYSIS_POSITIVE: "Analysis positive", PROMOTE: "Promoted (to the gate)", BUY_SIGNAL: "BUY signal",
+  RISK_APPROVED: "Risk approved", EXECUTION_APPROVED: "Execution approved", BUY_SUBMITTED: "Buy submitted",
+  BUY_CONFIRMED: "Buy confirmed", POSITION_OPEN: "Position opened", SELL_SUBMITTED: "Sell submitted",
+  SELL_CONFIRMED: "Sell confirmed", POSITION_CLOSED: "Position closed",
+};
+const GROUP_LABEL: Record<string, string> = {
+  exit_signal_at_entry: "EXIT_SIGNAL_AT_ENTRY", liquidity: "Liquidity", sellability: "Sellability",
+  stale_or_missing_data: "Stale / missing data", route: "Route", sizing_account: "Sizing / account limits", mode: "Mode",
+  risk: "Risk (token, holders, flow, market)",
+};
+
+function stagePill(stage: string): string {
+  if (["POSITION_OPEN", "SELL_SUBMITTED", "SELL_CONFIRMED", "POSITION_CLOSED", "BUY_CONFIRMED"].includes(stage)) return "pill pill-ok";
+  if (["EXECUTION_APPROVED", "BUY_SUBMITTED", "RISK_APPROVED"].includes(stage)) return "pill pill-warn";
+  return "pill pill-off";
+}
+
+function PipelineView({ pl }: { pl: Pipeline }) {
+  return (
+    <>
+      <div className="status-label">Pipeline — where tokens stopped (PROMOTE is not a buy)</div>
+      <table className="data-table">
+        <thead><tr><th>Stage</th><th>Tokens</th></tr></thead>
+        <tbody>{Object.entries(pl.stages).map(([s, n]) => (
+          <tr key={s}><td>{STAGE_LABEL[s] ?? s}</td><td>{n}</td></tr>))}</tbody>
+      </table>
+      <div className="status-label">BUY signal but not executable — blocked by</div>
+      <div className="stat-grid">
+        {Object.entries(pl.blocked_by).map(([g, n]) => <Stat key={g} label={GROUP_LABEL[g] ?? g}>{n}</Stat>)}
+      </div>
+      {pl.promoted_not_assessed.length > 0 && (
+        <>
+          <div className="status-label">Promoted but never evaluated by the safety gate</div>
+          <table className="data-table">
+            <thead><tr><th>Engine</th><th>Candidate state</th><th>Recorded reason</th><th>Tokens</th></tr></thead>
+            <tbody>{pl.promoted_not_assessed.map((r, i) => (
+              <tr key={i}><td>{r.engine}</td><td>{r.state}</td><td className="muted">{r.reason}</td><td>{r.tokens}</td></tr>))}</tbody>
+          </table>
+        </>
+      )}
+      <div className="status-label">Latest tokens — furthest stage and exact final blocker</div>
+      <table className="data-table">
+        <thead><tr><th>Token</th><th>Engine</th><th>Stage</th><th>Final blocker</th><th>Route</th></tr></thead>
+        <tbody>{pl.tokens.slice(0, 40).map((tk) => (
+          <tr key={`${tk.mint}-${tk.promoted_at}`}>
+            <td><code>{tk.symbol ?? `${tk.mint.slice(0, 6)}…`}</code></td>
+            <td>{ENGINE_LABEL[tk.engine] ?? tk.engine}</td>
+            <td><span className={stagePill(tk.stage)}>{STAGE_LABEL[tk.stage] ?? tk.stage}</span></td>
+            <td className="muted">{tk.final_blocker ? <><code>{tk.final_blocker.code}</code>{tk.final_blocker.reason ? ` — ${tk.final_blocker.reason}` : ""}</> : "—"}</td>
+            <td>{tk.execution_route ?? "—"}</td>
+          </tr>))}
+          {pl.tokens.length === 0 && <tr><td colSpan={5} className="muted">No candidates in this window.</td></tr>}
+        </tbody>
+      </table>
+    </>
+  );
+}
 
 const ENGINE_LABEL: Record<string, string> = { solana_fresh: "Fresh (curve)", solana_momentum: "Momentum (curve)",
   solana_migration: "Migrated (PumpSwap)" };
@@ -108,6 +177,7 @@ export default function ExecutionFunnel() {
               </ul>
             </>
           )}
+          {f.pipeline && <PipelineView pl={f.pipeline} />}
           <div className="muted">Since {formatDate(f.since)}. Server command: <code>python -m yonixalpha_core.tools.execution_funnel</code></div>
         </>
       )}
@@ -122,6 +192,7 @@ type Trace = {
   positions: { execution_mode: string; status: string; entry_at: string; lifecycle: string | null; exit_reason: string | null;
     realized_pnl: string | null }[];
   orders: { side: string; status: string; signature: string | null; error: string | null; created_at: string }[];
+  pipeline?: { stage: string; final_blocker: FinalBlocker; execution_route?: string | null; execution_provider?: string | null };
   position_events?: { occurred_at: string; event_type: string;
     detail: { reasons?: string[]; reason?: string; error?: string } | null }[];
 };
@@ -159,6 +230,14 @@ export function TokenPipeline({ mint }: { mint: string }) {
         <Stat label="Execution"><span className={exec.cls}>{exec.label}</span></Stat>
         <Stat label="Position">{pos ? `${pos.execution_mode} ${pos.status.toUpperCase()}${pos.lifecycle ? ` · ${pos.lifecycle}` : ""}` : "NOT ENTERED"}</Stat>
       </div>
+      {t.pipeline && (
+        <div className="notice">
+          Furthest stage: <span className={stagePill(t.pipeline.stage)}>{STAGE_LABEL[t.pipeline.stage] ?? t.pipeline.stage}</span>
+          {t.pipeline.final_blocker && <> · stopped by <code>{t.pipeline.final_blocker.code}</code>
+            {t.pipeline.final_blocker.reason ? ` — ${t.pipeline.final_blocker.reason}` : ""}</>}
+          {t.pipeline.execution_route && <> · route {t.pipeline.execution_route} via {t.pipeline.execution_provider}</>}
+        </div>
+      )}
       {t.assessments.length > 0 && (
         <table className="data-table">
           <thead><tr><th>Evaluated</th><th>Engine</th><th>Signal</th><th>Decision</th><th>Size</th><th>Blocking reason</th></tr></thead>

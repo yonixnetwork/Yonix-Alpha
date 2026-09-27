@@ -402,13 +402,12 @@ async def apply_outcome(session: AsyncSession, redis: Redis | None, app_settings
                                 f"attempt {position.exit_failures}: {order.error}", "critical", {"position_id": str(position.id)})
 
 
-def _failure_code(order: ExecutionOrder) -> str:
+def failure_code_of(side: str, status: str, error: str | None, signature: str | None, result: dict | None) -> str:
     """BUY_/SELL_ + the stage that failed, from what the executor recorded
     (solana.live_exec): build -> guard -> simulate -> submit -> confirm."""
-    side = order.side
-    err = (order.error or "").lower()
-    sent = bool((order.result or {}).get("sent"))
-    if order.status == "EXPIRED":
+    err = (error or "").lower()
+    sent = bool((result or {}).get("sent"))
+    if status == "EXPIRED":
         return f"{side}_CONFIRMATION_TIMEOUT"
     if "guard refused" in err:
         return f"{side}_REFUSED_BY_TRANSACTION_GUARD"
@@ -416,11 +415,15 @@ def _failure_code(order: ExecutionOrder) -> str:
         return f"{side}_SIMULATION_FAILED"
     if "failed on chain" in err:
         return f"{side}_FAILED_ON_CHAIN"
-    if "could not decode" in err or not order.signature:
+    if "could not decode" in err or not signature:
         return f"{side}_TRANSACTION_BUILD_FAILED"
     if not sent:
         return f"{side}_SUBMISSION_FAILED"
     return f"{side}_CONFIRMATION_FAILED"
+
+
+def _failure_code(order: ExecutionOrder) -> str:
+    return failure_code_of(order.side, order.status, order.error, order.signature, order.result)
 
 
 async def _reconcile_event(session, kind: str, severity: str, order: ExecutionOrder | None, position: PaperPosition | None,
@@ -480,8 +483,14 @@ async def reconcile(session_factory, redis: Redis | None, app_settings: Any, exe
     sol = Decimal(lamports) / LAMPORTS
     report["sol"] = str(sol)
     if redis is not None:
+        from yonixalpha_core.solana.valuation import value_holdings
+
+        try:
+            valuation = await value_holdings(redis, rpc, tokens, now)
+        except Exception as exc:  # noqa: BLE001 - valuation is display-only; reconciliation must go on
+            valuation = {"holdings": [], "error": f"valuation failed: {type(exc).__name__}"}
         await redis.set(WALLET_KEY, json.dumps({"sol": str(sol), "at": now.isoformat(), "pubkey": executor.wallet.pubkey,
-                                                "tokens": len(tokens)}), ex=3600)
+                                                "tokens": len(tokens), "valuation": valuation}), ex=3600)
     async with session_factory() as session:
         acct = await get_live_account(session)
         if acct.cash_balance != sol:

@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { CheckCircle2, Send, XCircle } from "lucide-react";
 import FuturesLive from "@/components/FuturesLive";
+import LiveWalletsPanel from "@/components/LiveWalletsPanel";
+import SmokeTestPanel from "@/components/SmokeTestPanel";
 import { ErrorNotice, Loading, Money, PageHeader, Section, Stat } from "@/components/ui";
 import { apiPut, ApiError } from "@/lib/api";
 import type { ExecutionOrderRow } from "@/lib/cc";
@@ -49,6 +51,19 @@ interface LivePosition {
   pending_order_id: string | null;
   exit_failures: number;
   entry_at: string;
+  current_price: string | null;
+  price_status: string;
+  price_at: string | null;
+  price_age_seconds: number | null;
+  current_value: string | null;
+  unrealized_pnl: string | null;
+  unrealized_pnl_pct: string | null;
+  take_profits: string[];
+  tp_hits: number[];
+  trailing_stop: string | null;
+  execution_provider: string | null;
+  entry_signature: string | null;
+  smoke_test_run: string | null;
 }
 
 interface ReconEvent {
@@ -93,7 +108,7 @@ export default function LiveExecutionPage() {
   const status = useApi<LiveStatus>("/api/live/status", undefined, { refreshMs: 10000 });
   const settings = useApi<LiveSettings>("/api/live/settings");
   const positions = useApi<LivePosition[]>("/api/live/positions", undefined, {
-    refreshMs: 15000,
+    refreshMs: 5000,
     reloadOn: ["trade.created", "trade.updated", "trade.closed", "position.updated"],
   });
   const orders = useApi<ExecutionOrderRow[]>("/api/live/orders", { limit: 50 }, { refreshMs: 15000 });
@@ -229,6 +244,9 @@ export default function LiveExecutionPage() {
 
       <FuturesLive />
 
+      <LiveWalletsPanel />
+      <SmokeTestPanel />
+
       <Section title="Live positions">
         {!positions.data || positions.data.length === 0 ? (
           <div className="muted">No live positions.</div>
@@ -239,10 +257,12 @@ export default function LiveExecutionPage() {
                 <th>Token</th>
                 <th>Status</th>
                 <th>Lifecycle / route</th>
+                <th>Entry → current</th>
                 <th>Remaining</th>
-                <th>Cost (SOL)</th>
-                <th>Proceeds (SOL)</th>
+                <th>Cost → value (SOL)</th>
+                <th>Unrealized</th>
                 <th>Realized</th>
+                <th>Stop / TPs / trailing</th>
                 <th>Opened</th>
               </tr>
             </thead>
@@ -259,14 +279,42 @@ export default function LiveExecutionPage() {
                   </td>
                   <td>
                     {p.lifecycle ?? "—"} / {p.route ?? "—"}
+                    <div className="muted">{p.execution_provider}{p.smoke_test_run ? " · smoke test" : ""}</div>
+                  </td>
+                  <td>
+                    {p.entry_price} → {p.current_price ?? "—"}
+                    <div>
+                      <span className={p.price_status === "LIVE" ? "pill pill-ok" : "pill pill-warn"}>{p.price_status}</span>{" "}
+                      <span className="muted">{p.price_age_seconds !== null ? `${p.price_age_seconds}s old` : ""}</span>
+                    </div>
                   </td>
                   <td>{formatDecimal(p.remaining, 4)}</td>
-                  <td>{formatDecimal(p.entry_cost_sol, 6)}</td>
-                  <td>{formatDecimal(p.proceeds_sol, 6)}</td>
+                  <td>
+                    {formatDecimal(p.entry_cost_sol, 6)} → {formatDecimal(p.current_value, 6)}
+                    {p.proceeds_sol && p.proceeds_sol !== "0" && <div className="muted">proceeds {formatDecimal(p.proceeds_sol, 6)}</div>}
+                  </td>
+                  <td>
+                    {p.status === "open" ? (
+                      <>
+                        <Money value={p.unrealized_pnl} currency="SOL" digits={6} />
+                        <div className={Number(p.unrealized_pnl_pct) >= 0 ? "pos" : "neg"}>
+                          {p.unrealized_pnl_pct !== null ? `${Number(p.unrealized_pnl_pct) >= 0 ? "+" : ""}${p.unrealized_pnl_pct}%` : "—"}
+                          {p.price_status !== "LIVE" && " (STALE)"}
+                        </div>
+                      </>
+                    ) : "—"}
+                  </td>
                   <td>
                     <Money value={p.realized_pnl} currency="SOL" digits={6} />
                   </td>
-                  <td>{formatDate(p.entry_at)}</td>
+                  <td className="muted">
+                    SL {p.stop_loss ?? "—"} · TP {(p.take_profits ?? []).map((tp, i) => `${(p.tp_hits ?? []).includes(i) ? "✓" : ""}${tp}`).join(", ") || "—"}
+                    {p.trailing_stop ? ` · trail ${p.trailing_stop}` : ""}
+                  </td>
+                  <td>
+                    {formatDate(p.entry_at)}
+                    <Sig sig={p.entry_signature} />
+                  </td>
                 </tr>
               ))}
             </tbody>

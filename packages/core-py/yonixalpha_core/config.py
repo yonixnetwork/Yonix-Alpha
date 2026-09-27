@@ -146,6 +146,16 @@ class Settings(BaseSettings):
     # say. Live execution needs TRADING_ENABLED and LIVE_TRADING_ENABLED true
     # AND this false (yonixalpha_core.safety.store.live_trading_permitted).
     PAPER_TRADING: bool = True
+    # LIVE_EXECUTION_SMOKE_TEST (yonixalpha_core.live_smoke): an execution
+    # verification tool, not a strategy. Off unless this is true in .env AND
+    # an admin arms a run on the Live page with the admin password and a typed
+    # confirmation. It never switches the global mode, spends at most
+    # LIVE_SMOKE_TEST_MAX_SOL per buy (no default: unset = cannot arm) and at
+    # most LIVE_SMOKE_TEST_MAX_TRADES buys in total, and every buy passes the
+    # full safety gate against the live wallet. Not editable from the dashboard.
+    LIVE_SMOKE_TEST_ENABLED: bool = False
+    LIVE_SMOKE_TEST_MAX_SOL: Optional[Decimal] = None
+    LIVE_SMOKE_TEST_MAX_TRADES: int = 1
     MAX_DAILY_LOSS: Optional[float] = None
     MAX_POSITION_SIZE: Optional[float] = None
     MAX_OPEN_POSITIONS: Optional[int] = None

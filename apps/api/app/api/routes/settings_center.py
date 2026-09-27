@@ -24,16 +24,13 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_username, get_db, get_redis, get_settings
-from app.api.util import audit
+from app.api.util import PASSWORD_MAX_FAILURES, audit, require_password  # noqa: F401 (limit shared with the live smoke test)
 from yonixalpha_core import env_updates, provider_tests
 from yonixalpha_core.config import Settings
-from yonixalpha_core.db.models import User
 from yonixalpha_core.redact import redact_url
-from yonixalpha_core.security import verify_password
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -131,7 +128,6 @@ async def test_provider(name: str, request: Request, settings: Settings = Depend
 # scripts/install-env-updater.sh makes it writable for this container only).
 ENV_SPOOL = os.environ.get("ENV_SPOOL_DIR", "/app/runtime/env-requests")
 KEY_UPDATE_COOLDOWN_SECONDS = 10
-PASSWORD_MAX_FAILURES, PASSWORD_LOCKOUT_SECONDS = 5, 900
 
 
 def updater_installed() -> bool:
@@ -162,17 +158,7 @@ async def queue_key_update(body: KeyUpdate, request: Request, db: AsyncSession =
     """Queues new provider key values for the server helper, which writes
     them into .env and restarts the affected services. Needs the admin
     password again; values are never logged, stored elsewhere or returned."""
-    fails_key = f"yx:provider_keys:pwfail:{username}"
-    if int(await redis.get(fails_key) or 0) >= PASSWORD_MAX_FAILURES:
-        raise HTTPException(429, "too many wrong passwords — try again in 15 minutes")
-    user = (await db.execute(select(User).where(User.username == username, User.is_active.is_(True)))).scalar_one_or_none()
-    if user is None or not verify_password(body.password, user.password_hash):
-        await redis.incr(fails_key)
-        await redis.expire(fails_key, PASSWORD_LOCKOUT_SECONDS)
-        await audit(db, username, request, "provider_keys.password_rejected", {"keys": sorted(body.updates)})
-        await db.commit()
-        raise HTTPException(403, "password incorrect")
-    await redis.delete(fails_key)
+    await require_password(db, redis, username, body.password, request, "provider_keys", {"keys": sorted(body.updates)})
     errors = env_updates.validate_all(body.updates)
     if errors:
         raise HTTPException(422, {"errors": errors})
