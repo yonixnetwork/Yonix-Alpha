@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 import httpx
 
 from yonixalpha_core.logging import get_logger
+from yonixalpha_core.notify import alert_error
 from yonixalpha_core.redact import redact_text, redact_url
 
 log = get_logger("data-solana.rpc")
@@ -23,6 +24,18 @@ REQUEST_ERROR_CODES = {-32600, -32601, -32602}
 
 class RpcRequestError(RuntimeError):
     pass
+
+
+def _reason(exc: Exception, urls: list[str]) -> str:
+    """Short, credential-free cause of one endpoint's failure (e.g. "HTTP 429",
+    "timeout"), so "all endpoints failed" says why."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP {exc.response.status_code}"
+    if isinstance(exc, httpx.TimeoutException):
+        return "timeout"
+    if isinstance(exc, httpx.TransportError):
+        return f"connection error ({type(exc).__name__})"
+    return redact_text(str(exc), urls)[:160] or type(exc).__name__
 
 
 @dataclass
@@ -82,6 +95,8 @@ class RpcManager:
         payload = {"jsonrpc": "2.0", "id": self._request_id, "method": method, "params": params or []}
 
         last_error: Exception | None = None
+        reasons: list[str] = []
+        urls = [e.url for e in self.endpoints]
         for endpoint in self._candidates():
             try:
                 response = await self.client.post(endpoint.url, json=payload, timeout=self.timeout_seconds)
@@ -98,11 +113,13 @@ class RpcManager:
             except RpcRequestError as exc:
                 # The endpoint is healthy; another endpoint may still support the request.
                 last_error = exc
+                reasons.append(f"{endpoint.label}: {_reason(exc, urls)}")
                 log.info("rpc.call.rejected", endpoint=endpoint.label, method=method,
                          error=redact_text(str(exc), [e.url for e in self.endpoints]))
                 continue
             except Exception as exc:  # noqa: BLE001 - any transport/parse/RPC failure triggers failover
                 last_error = exc
+                reasons.append(f"{endpoint.label}: {_reason(exc, urls)}")
                 endpoint.consecutive_failures += 1
                 log.warning(
                     "rpc.call.failed",
@@ -116,7 +133,9 @@ class RpcManager:
                     log.warning("rpc.endpoint.disabled", endpoint=endpoint.label, cooldown_seconds=self.cooldown_seconds)
                 continue
 
-        raise RpcAllEndpointsFailedError(f"All RPC endpoints failed for method={method}") from last_error
+        detail = "; ".join(reasons)
+        await alert_error("solana-rpc", "rpc.all_endpoints_failed", f"method={method} ({detail})")
+        raise RpcAllEndpointsFailedError(f"All RPC endpoints failed for method={method} ({detail})") from last_error
 
     def health_snapshot(self) -> list[dict]:
         now = time.monotonic()
