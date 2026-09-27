@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Activity, ArrowRightLeft, Bell, Bot, Brain, CandlestickChart, ClipboardCheck, Coins, Eye, Filter, Gauge, Grid3x3, Layers, LayoutDashboard, ListChecks, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Radio, Rocket, Scale, Send, Server, Settings, ShieldAlert, Sparkles, TrendingUp, Wallet, Waves, type LucideIcon } from "lucide-react";
+import { Activity, ArrowRightLeft, Bell, Bot, Brain, CandlestickChart, ClipboardCheck, Coins, Eye, FlaskConical, Filter, Gauge, Grid3x3, Layers, LayoutDashboard, ListChecks, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Radio, Rocket, Scale, Send, Server, Settings, ShieldAlert, Sparkles, TrendingUp, Wallet, WalletCards, Waves, Workflow, type LucideIcon } from "lucide-react";
 import NotificationsBell from "@/components/NotificationsBell";
 import { modeClass, stateClass } from "@/components/ui";
 import { getAccessToken, logout } from "@/lib/api";
@@ -49,6 +49,9 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
       { href: "/dashboard/decisions", label: "Decisions", icon: ClipboardCheck },
       { href: "/dashboard/paper", label: "Paper Trading", icon: Wallet },
       { href: "/dashboard/live", label: "Live Execution", icon: Send },
+      { href: "/dashboard/wallets", label: "Wallets (Live / Paper)", icon: WalletCards },
+      { href: "/dashboard/smoke-test", label: "Live Smoke Test", icon: FlaskConical },
+      { href: "/dashboard/funnel", label: "Execution Funnel", icon: Workflow },
       { href: "/dashboard/candidates", label: "Candidates", icon: Coins },
     ],
   },

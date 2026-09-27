@@ -1,6 +1,6 @@
 "use client";
 
-import { ErrorNotice, Money, Section, Stat } from "@/components/ui";
+import { ErrorNotice, Loading, Money, Section, Stat } from "@/components/ui";
 import { formatDate, formatDecimal } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
 
@@ -27,8 +27,13 @@ export default function LiveWalletsPanel() {
   const { data, error } = useApi<Wallets>("/api/live/wallets", undefined, {
     refreshMs: 10000, reloadOn: ["balance.updated", "trade.created", "trade.closed"],
   });
-  if (error) return <ErrorNotice error={error} />;
-  if (!data) return null;
+  if (!data) {
+    return (
+      <Section title="Wallets — LIVE and PAPER (never mixed)">
+        {error ? <ErrorNotice error={error} /> : <Loading what="Loading wallets…" />}
+      </Section>
+    );
+  }
   const { live, paper } = data;
   return (
     <Section title="Wallets — LIVE and PAPER (never mixed)">

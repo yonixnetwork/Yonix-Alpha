@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ErrorNotice, Section, Stat } from "@/components/ui";
+import { ErrorNotice, Loading, Section, Stat } from "@/components/ui";
 import { apiPost, ApiError } from "@/lib/api";
 import { formatDate, formatDecimal } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
@@ -85,8 +85,13 @@ export default function SmokeTestPanel() {
     }
   }
 
-  if (error) return <ErrorNotice error={error} />;
-  if (!data) return null;
+  if (!data) {
+    return (
+      <Section title="Live execution smoke test — verification with real SOL">
+        {error ? <ErrorNotice error={error} /> : <Loading what="Loading smoke test status…" />}
+      </Section>
+    );
+  }
   const c = data.config;
   const blocked = c.problems.length > 0;
   return (
@@ -97,7 +102,13 @@ export default function SmokeTestPanel() {
         (NO_TEST_EXECUTION_CANDIDATE). The global mode stays as it is. It is an execution check, not a strategy.
       </div>
       {blocked && (
-        <ul className="reason-list">{c.problems.map((p) => <li key={p}>{p}</li>)}</ul>
+        <>
+          <div style={{ marginTop: 8 }}>
+            <span className="pill pill-warn">BLOCKED</span> The server does not allow arming a test buy until all of these are
+            fixed in its .env (then redeploy):
+          </div>
+          <ul className="reason-list">{c.problems.map((p) => <li key={p}>{p}</li>)}</ul>
+        </>
       )}
       {!data.armed && !blocked && data.trades_used < c.max_trades && (
         <form className="form-grid" onSubmit={(e) => { e.preventDefault(); act("/api/live/smoke-test/arm", {

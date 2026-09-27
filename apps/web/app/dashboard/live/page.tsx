@@ -158,6 +158,9 @@ export default function LiveExecutionPage() {
         </div>
       </div>
 
+      <LiveWalletsPanel />
+      <SmokeTestPanel />
+
       <Section title="Preflight">
         <table className="data-table">
           <thead>
@@ -243,9 +246,6 @@ export default function LiveExecutionPage() {
       </Section>
 
       <FuturesLive />
-
-      <LiveWalletsPanel />
-      <SmokeTestPanel />
 
       <Section title="Live positions">
         {!positions.data || positions.data.length === 0 ? (
