@@ -6,6 +6,7 @@ import ExecutionFunnel, { TokenPipeline } from "@/components/ExecutionFunnel";
 import { Empty, ErrorNotice, PageHeader, Section, Stat, TokenLink } from "@/components/ui";
 import { formatDate } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
+import { BuyButton } from "@/components/ManualTrade";
 
 type Metrics = Record<string, string | number | boolean | null>;
 type Row = { mint: string; symbol: string | null; outcome: string; trend: string | null; reasons: string[]; decided_at: string;
@@ -124,7 +125,7 @@ export default function ObservingPage() {
         {live.data && live.data.length === 0 && <Empty>No token is inside its observation window right now.</Empty>}
         {live.data && live.data.length > 0 && (
           <table className="data-table">
-            <thead><tr><th>Token</th><th>State</th><th>Age</th><th>Trend</th><th>Trades</th><th>Buyers</th><th>Liquidity state</th><th>Why</th></tr></thead>
+            <thead><tr><th>Token</th><th>State</th><th>Age</th><th>Trend</th><th>Trades</th><th>Buyers</th><th>Liquidity state</th><th>Why</th><th>Action</th></tr></thead>
             <tbody>{live.data.map((r) => (
               <tr key={r.mint}>
                 <td><TokenLink mint={r.mint} label={r.symbol} /></td>
@@ -132,6 +133,7 @@ export default function ObservingPage() {
                 <td>{r.age_seconds === null ? "—" : `${Math.round(r.age_seconds)}s`}</td>
                 <td>{r.trend ?? "—"}</td><td><M m={r.metrics} k="trades_total" /></td><td><M m={r.metrics} k="unique_buyers_total" /></td>
                 <td><M m={r.metrics} k="liquidity_state" /></td><td className="muted">{r.reasons?.[r.reasons.length - 1]}</td>
+                <td><BuyButton mint={r.mint} engine="solana_fresh" source="observation" /></td>
               </tr>))}</tbody>
           </table>
         )}
@@ -152,7 +154,7 @@ export default function ObservingPage() {
         {list.data && list.data.items.length > 0 && (
           <table className="data-table">
             <thead><tr><th>Token</th><th>Outcome</th><th>Trend</th><th>Trades</th><th>Buyers</th><th>Sellers</th><th>Volume</th>
-              <th>Curve</th><th>Reason</th><th>Decided</th></tr></thead>
+              <th>Curve</th><th>Reason</th><th>Decided</th><th>Action</th></tr></thead>
             <tbody>{list.data.items.map((r) => (
               <Fragment key={r.mint}>
                 <tr onClick={() => setOpen(open === r.mint ? null : r.mint)} className="clickable">
@@ -162,9 +164,10 @@ export default function ObservingPage() {
                   <td><M m={r.metrics} k="unique_sellers_total" /></td><td><M m={r.metrics} k="volume_total_sol" /></td>
                   <td><M m={r.metrics} k="liquidity_state" /></td>
                   <td className="muted">{r.reasons[r.reasons.length - 1]}</td><td>{formatDate(r.decided_at)}</td>
+                  <td onClick={(e) => e.stopPropagation()}><BuyButton mint={r.mint} engine="solana_fresh" source="observation" /></td>
                 </tr>
                 {open === r.mint && (
-                  <tr><td colSpan={10}><Explain mint={r.mint} /></td></tr>
+                  <tr><td colSpan={11}><Explain mint={r.mint} /></td></tr>
                 )}
               </Fragment>
             ))}</tbody>

@@ -394,3 +394,5 @@ its own "what's verified vs. not" section. Summary:
 - See `ARCHITECTURE_AUDIT.md` §3 for what was verified clean (and what
   wasn't) in the five reference repositories this codebase draws patterns
   from.
+
+Dashboard settings, RPC providers and manual trading are applied at runtime without restarts: see [docs/RUNTIME_CONTROL_PLANE.md](docs/RUNTIME_CONTROL_PLANE.md).

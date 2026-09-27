@@ -11,6 +11,8 @@ from yonixalpha_core.db.models import SystemEvent
 from yonixalpha_core.logging import configure_logging, get_logger
 from yonixalpha_core.notify import send_telegram_alert
 from yonixalpha_core.solana.rpc import RpcManager
+from yonixalpha_core.solana.rpc_registry import WsUrls
+from yonixalpha_core.runtime_watch import run_watcher
 from yonixalpha_core.solana.token_program import TOKEN_PROGRAM_ID, extract_transfer_checked, logs_mention_transfer_checked
 from yonixalpha_core.solana.ws import SolanaWsClient
 
@@ -105,12 +107,8 @@ async def run() -> None:
                 async with session_factory() as session:
                     await record_transfer_and_evaluate(session, transfer_info, occurred_at)
 
-        ws_index = {"i": 0}
-
-        def next_ws_url() -> str:
-            url = ws_urls[ws_index["i"] % len(ws_urls)]
-            ws_index["i"] += 1
-            return url
+        # Follows the dashboard's WebSocket providers (runtime reload).
+        next_ws_url = WsUrls(ws_urls)
 
         # Same mentions-filter caveat as engine-solana-discovery: see that
         # service's main.py for why this may need a dedicated indexer in
@@ -140,6 +138,7 @@ async def run() -> None:
                 heartbeat_loop(settings, "engine-solana-momentum", stop_event, lambda: {"rpc": rpc.health_snapshot()}),
                 ws_client.run(stop_event),
                 _health_check_loop(rpc, session_factory, stop_event),
+                run_watcher("engine-solana-momentum", settings, session_factory, stop_event, rpc=rpc, ws_urls=next_ws_url),
             )
         finally:
             await _record_system_event(session_factory, "service_stopped", "info")

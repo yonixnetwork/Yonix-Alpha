@@ -11,6 +11,7 @@ from yonixalpha_core.db.models import SystemEvent
 from yonixalpha_core.logging import configure_logging, get_logger
 from yonixalpha_core.notify import send_telegram_alert
 from yonixalpha_core.solana.rpc import RpcManager
+from yonixalpha_core.runtime_watch import run_watcher
 from yonixalpha_core.solana.ws import SolanaWsClient
 
 from app.candidates import record_migration_detected
@@ -153,7 +154,8 @@ async def run() -> None:
         log.info("engine-solana-migration.started", configured_programs=program_ids)
 
         try:
-            await asyncio.gather(*tasks, heartbeat_loop(settings, "engine-solana-migration", stop_event))
+            await asyncio.gather(*tasks, heartbeat_loop(settings, "engine-solana-migration", stop_event),
+                                 run_watcher("engine-solana-migration", settings, session_factory, stop_event, rpc=rpc))
         finally:
             await _record_system_event(session_factory, "service_stopped", "info")
             await engine.dispose()

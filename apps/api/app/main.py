@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 
 from app.api.router import api_router
+from app.config_revision import ConfigRevisionMiddleware
 from yonixalpha_core import config_validation
 from yonixalpha_core.config import get_settings
 from yonixalpha_core.logging import configure_logging, get_logger
@@ -89,12 +90,15 @@ def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
 
+    # Innermost: runs after the route committed, before CORS headers are added.
+    app.add_middleware(ConfigRevisionMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["X-Config-Revision"],
     )
 
     app.include_router(api_router, prefix="/api")

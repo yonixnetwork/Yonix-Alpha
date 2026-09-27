@@ -185,6 +185,8 @@ export interface SettingsOut {
   defaults: Record<string, string | number | boolean | string[] | null>;
   hard_limits: Record<string, { kind: "min" | "max"; bound: string }>;
   enums?: Record<string, string[]>;
+  // An engine with its own saved settings ignores GLOBAL entirely.
+  scope_links?: { overridden_by?: { scope: string; version: number }[]; follows_global?: string[] | boolean; own_settings?: boolean };
 }
 
 export interface SettingsVersionOut {

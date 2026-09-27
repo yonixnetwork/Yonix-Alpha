@@ -6,6 +6,7 @@ import { ErrorNotice, modeClass, Money, Pct, Stat } from "@/components/ui";
 import { apiPut } from "@/lib/api";
 import type { StrategyOut } from "@/lib/cc";
 import { formatDate } from "@/lib/format";
+import RuntimeApply from "@/components/RuntimeApply";
 
 const MODES = ["OFF", "MANUAL", "PAPER", "AUTO"];
 const MODE_HELP: Record<string, string> = {
@@ -40,13 +41,16 @@ export default function StrategyPanel({ s, onChange }: { s: StrategyOut; onChang
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const [modeSaved, setModeSaved] = useState(false);
 
   useEffect(() => {
     setDraft(Object.fromEntries(s.editable.map((k) => [k, asText(s.config[k])])));
   }, [s]);
 
   async function setMode(mode: string) {
+    setModeSaved(false);
     onChange(await apiPut<StrategyOut>(`/api/strategies/${s.name}/mode`, { mode }));
+    setModeSaved(true);
   }
 
   async function save() {
@@ -86,6 +90,7 @@ export default function StrategyPanel({ s, onChange }: { s: StrategyOut; onChang
             ))}
           </div>
           <div className="muted" style={{ marginTop: 8 }}>
+            {modeSaved && <div><RuntimeApply inline /></div>}
             Stored <span className={modeClass(s.mode)}>{s.mode}</span> · effective{" "}
             <span className={modeClass(s.effective_mode)}>{s.effective_mode}</span>
             {s.venue_mode_key && s.venue_mode_key !== s.name && <> (most restrictive of this and venue {s.venue_mode_key})</>}
@@ -129,7 +134,7 @@ export default function StrategyPanel({ s, onChange }: { s: StrategyOut; onChang
             ))}
           </div>
           <ErrorNotice error={error} />
-          {saved && <div className="success">Saved. Engines pick it up on their next cycle.</div>}
+          {saved && <div><RuntimeApply inline /></div>}
           <div className="btn-row" style={{ marginTop: 12 }}>
             <button className="btn btn-sm" onClick={save}>
               Save configuration

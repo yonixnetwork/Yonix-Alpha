@@ -3,8 +3,9 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Activity, ArrowRightLeft, Bell, Bot, Brain, CandlestickChart, ClipboardCheck, Coins, Eye, FlaskConical, Filter, Gauge, Grid3x3, Layers, LayoutDashboard, ListChecks, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Radio, Rocket, Scale, Send, Server, Settings, ShieldAlert, Sparkles, TrendingUp, Wallet, WalletCards, Waves, Workflow, type LucideIcon } from "lucide-react";
+import { Activity, ArrowRightLeft, Bell, Bot, Brain, CandlestickChart, ClipboardCheck, Coins, Eye, FlaskConical, Filter, Gauge, Grid3x3, Layers, LayoutDashboard, ListChecks, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Radio, Rocket, Scale, Send, Server, Settings, ShieldAlert, SlidersHorizontal, Network, Sparkles, TrendingUp, Wallet, WalletCards, Waves, Workflow, type LucideIcon } from "lucide-react";
 import NotificationsBell from "@/components/NotificationsBell";
+import RuntimeApply from "@/components/RuntimeApply";
 import { modeClass, stateClass } from "@/components/ui";
 import { getAccessToken, logout } from "@/lib/api";
 import type { SummaryOut } from "@/lib/cc";
@@ -74,6 +75,8 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     title: "System",
     items: [
       { href: "/dashboard/health", label: "System Health", icon: Server },
+      { href: "/dashboard/config", label: "Configuration Health", icon: SlidersHorizontal },
+      { href: "/dashboard/rpc", label: "RPC & Data Providers", icon: Network },
       { href: "/dashboard/bots", label: "External Bots", icon: Bot },
       { href: "/dashboard/notifications", label: "Notifications", icon: Bell },
       { href: "/dashboard/settings", label: "Settings", icon: Settings },
@@ -200,9 +203,9 @@ function Shell({ children }: { children: React.ReactNode }) {
           <Link href="/dashboard" className="brand">
             YonixAlpha
           </Link>
-          <span className="pill pill-warn" title="All execution is simulated">
-            PAPER
-          </span>
+          {/* Real global mode is shown by TopbarSummary; this shows whether the
+              running services applied the latest dashboard settings. */}
+          <RuntimeApply />
         </div>
         <div className="topbar-status">
           <TopbarSummary />

@@ -34,7 +34,7 @@ EVENT_TYPES = {
     "balance.updated", "position.updated", "trade.created", "trade.updated", "trade.closed",
     "token.discovered", "token.updated", "migration.detected", "signal.created", "signal.updated",
     "risk.updated", "strategy.updated", "system.health.updated", "ml.prediction.updated", "ml.model.updated",
-    "notification.created",
+    "notification.created", "configuration.updated", "rpc.failover", "manual_trade.updated",
 }
 
 # Which notification kinds go to Telegram when no preference is stored.

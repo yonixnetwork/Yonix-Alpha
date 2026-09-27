@@ -16,6 +16,7 @@ from yonixalpha_core.logging import configure_logging, get_logger
 from yonixalpha_core.notify import send_telegram_alert
 from yonixalpha_core.solana.market_data import JupiterClient, RateBudget
 from yonixalpha_core.solana.rpc import RpcManager
+from yonixalpha_core.runtime_watch import run_watcher
 from yonixalpha_core.state_machine import CandidateState
 from yonixalpha_core.venues.registry import build_venues
 
@@ -175,6 +176,7 @@ async def run() -> None:
                                 venues, settings, rpc),
             live_worker_loop(session_factory, redis, settings, rpc, http_client, stop_event),
             heartbeat_loop(settings, "paper-trading", stop_event, lambda: {"venues": venue_health_snapshot()}),
+            run_watcher("paper-trading", settings, session_factory, stop_event, rpc=rpc, redis=redis),
         )
     finally:
         await _record_system_event(session_factory, "service_stopped", "info")

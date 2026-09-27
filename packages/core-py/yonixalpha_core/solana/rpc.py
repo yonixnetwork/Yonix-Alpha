@@ -1,5 +1,7 @@
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any, Awaitable, Callable
 
 import httpx
 
@@ -44,6 +46,36 @@ class _Endpoint:
     label: str
     consecutive_failures: int = 0
     disabled_until: float | None = None  # time.monotonic() timestamp
+    # Dashboard-managed providers (rpc_registry): display name, where it came
+    # from, its own timeout and request budget. None = manager defaults.
+    name: str | None = None
+    source: str = "env"
+    priority: int | None = None
+    timeout: float | None = None
+    rps: float | None = None
+    # Health statistics (real requests only).
+    successes: int = 0
+    failures: int = 0
+    rate_limited_count: int = 0
+    rate_limited_until: float | None = None
+    last_success_at: str | None = None
+    last_failure_at: str | None = None
+    last_error: str | None = None
+    latency_ms: float | None = None  # moving average of successful calls
+    _sent: list = field(default_factory=list)  # monotonic send times in the last second
+
+    def over_budget(self, now: float) -> bool:
+        if not self.rps:
+            return False
+        self._sent = [t for t in self._sent if now - t < 1.0]
+        return len(self._sent) >= self.rps
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+FailoverHook = Callable[[str | None, str, str], Awaitable[None]]
 
 
 @dataclass
@@ -68,6 +100,10 @@ class RpcManager:
     cooldown_seconds: float = 30.0
     timeout_seconds: float = 10.0
     _request_id: int = field(default=0, init=False)
+    # The endpoint that served the last successful call, and a hook called
+    # when that changes (failover or recovery).
+    active_label: str | None = field(default=None, init=False)
+    on_failover: FailoverHook | None = field(default=None, init=False)
 
     @classmethod
     def create(
@@ -93,8 +129,32 @@ class RpcManager:
 
     def _candidates(self) -> list[_Endpoint]:
         now = time.monotonic()
-        healthy = [e for e in self.endpoints if e.disabled_until is None or e.disabled_until <= now]
-        return healthy if healthy else list(self.endpoints)
+        healthy = [e for e in self.endpoints if (e.disabled_until is None or e.disabled_until <= now)
+                   and (e.rate_limited_until is None or e.rate_limited_until <= now)]
+        if not healthy:
+            return list(self.endpoints)
+        # An endpoint at its own request budget is tried last, not skipped.
+        return [e for e in healthy if not e.over_budget(now)] + [e for e in healthy if e.over_budget(now)]
+
+    def replace_endpoints(self, specs: list[dict[str, Any]]) -> None:
+        """Swaps the endpoint list at runtime (dashboard change), keeping the
+        health statistics of endpoints whose URL is unchanged. `specs` are
+        dicts with url, label and optionally name/source/priority/timeout/rps,
+        in failover order. An empty list is ignored (never leave no RPC)."""
+        if not specs:
+            return
+        by_url = {e.url: e for e in self.endpoints}
+        new = []
+        for spec in specs:
+            e = by_url.get(spec["url"]) or _Endpoint(url=spec["url"], label=spec["label"])
+            e.label = spec["label"]
+            e.name = spec.get("name")
+            e.source = spec.get("source", "env")
+            e.priority = spec.get("priority")
+            e.timeout = float(spec["timeout"]) if spec.get("timeout") else None
+            e.rps = float(spec["rps"]) if spec.get("rps") else None
+            new.append(e)
+        self.endpoints = new
 
     async def call(self, method: str, params: list | None = None) -> dict:
         self._request_id += 1
@@ -104,8 +164,13 @@ class RpcManager:
         reasons: list[str] = []
         urls = [e.url for e in self.endpoints]
         for endpoint in self._candidates():
+            started = time.monotonic()
+            endpoint._sent.append(started)
             try:
-                response = await self.client.post(endpoint.url, json=payload, timeout=self.timeout_seconds)
+                response = await self.client.post(endpoint.url, json=payload, timeout=endpoint.timeout or self.timeout_seconds)
+                if response.status_code == 429:
+                    endpoint.rate_limited_count += 1
+                    endpoint.rate_limited_until = time.monotonic() + self.cooldown_seconds
                 response.raise_for_status()
                 body = response.json()
                 if "error" in body:
@@ -115,6 +180,17 @@ class RpcManager:
                     raise cls(f"RPC error from {endpoint.label}: {err}")
                 endpoint.consecutive_failures = 0
                 endpoint.disabled_until = None
+                endpoint.rate_limited_until = None
+                endpoint.successes += 1
+                endpoint.last_success_at = _now_iso()
+                ms = (time.monotonic() - started) * 1000
+                endpoint.latency_ms = round(ms if endpoint.latency_ms is None else endpoint.latency_ms * 0.8 + ms * 0.2, 1)
+                if self.active_label != endpoint.label:
+                    # Before any success, a call that had to skip failing
+                    # higher-priority endpoints is a failover too.
+                    previous = self.active_label or (reasons[0].split(": ", 1)[0] if reasons else None)
+                    self.active_label = endpoint.label
+                    await self._failover(previous, endpoint.label, "; ".join(reasons))
                 return body["result"]
             except RpcRequestError as exc:
                 # The endpoint is healthy; another endpoint may still support the request.
@@ -126,6 +202,9 @@ class RpcManager:
             except Exception as exc:  # noqa: BLE001 - any transport/parse/RPC failure triggers failover
                 last_error = exc
                 reasons.append(f"{endpoint.label}: {_reason(exc, urls)}")
+                endpoint.failures += 1
+                endpoint.last_failure_at = _now_iso()
+                endpoint.last_error = reasons[-1].split(": ", 1)[-1]
                 endpoint.consecutive_failures += 1
                 log.warning(
                     "rpc.call.failed",
@@ -143,6 +222,16 @@ class RpcManager:
         await alert_error("solana-rpc", "rpc.all_endpoints_failed", f"method={method} ({detail})")
         raise RpcAllEndpointsFailedError(f"All RPC endpoints failed for method={method} ({detail})") from last_error
 
+    async def _failover(self, previous: str | None, current: str, reasons: str) -> None:
+        if previous is None:
+            return  # first successful call, not a failover
+        log.warning("rpc.failover", previous=previous, active=current, reasons=reasons)
+        if self.on_failover is not None:
+            try:
+                await self.on_failover(previous, current, reasons)
+            except Exception as exc:  # noqa: BLE001 - reporting must never break a call
+                log.warning("rpc.failover_hook_failed", error=type(exc).__name__)
+
     def health_snapshot(self) -> list[dict]:
         now = time.monotonic()
         return [
@@ -151,6 +240,12 @@ class RpcManager:
                 "url": redact_url(e.url),
                 "consecutive_failures": e.consecutive_failures,
                 "disabled": e.disabled_until is not None and e.disabled_until > now,
+                "name": e.name, "source": e.source, "priority": e.priority,
+                "rate_limited": e.rate_limited_until is not None and e.rate_limited_until > now,
+                "rate_limited_count": e.rate_limited_count, "successes": e.successes, "failures": e.failures,
+                "success_rate": round(e.successes / (e.successes + e.failures), 4) if (e.successes + e.failures) else None,
+                "latency_ms": e.latency_ms, "last_success_at": e.last_success_at, "last_failure_at": e.last_failure_at,
+                "last_error": e.last_error, "active": e.label == self.active_label,
             }
             for e in self.endpoints
         ]

@@ -329,6 +329,10 @@ class AssessmentInput:
     strategy_mode: StrategyMode = StrategyMode.PAPER
     live_trading_permitted: bool = False
     manual_approval_granted: bool = False
+    # The operator pressed BUY for this asset (yonixalpha_core.manual_trade):
+    # the strategy signal and ML confidence are not required; every safety,
+    # liquidity, execution, data and account finding still applies.
+    operator_request: bool = False
     # Live execution readiness (wallet, executor heartbeat, RPC); None when
     # not evaluated. A LIVE target with anything but True is refused.
     live_ready: bool | None = None

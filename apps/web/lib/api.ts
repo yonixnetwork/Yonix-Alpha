@@ -83,6 +83,19 @@ export async function apiGet<T>(path: string, params?: Record<string, string | n
   return res.json() as Promise<T>;
 }
 
+/** Settings writes return the new runtime configuration revision in
+ * X-Config-Revision (apps/api config_revision middleware). Announced so the
+ * dashboard can show whether the running services applied it. */
+export const CONFIG_SAVED_EVENT = "yx:config-saved";
+export let lastConfigRevision: number | null = null;
+
+function announceRevision(res: Response): void {
+  const rev = res.headers.get("x-config-revision");
+  if (!rev || typeof window === "undefined") return;
+  lastConfigRevision = Number(rev);
+  window.dispatchEvent(new CustomEvent(CONFIG_SAVED_EVENT, { detail: { revision: Number(rev) } }));
+}
+
 export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
   const res = await apiFetch(path, {
     method: "POST",
@@ -93,6 +106,7 @@ export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
     const errBody = await res.json().catch(() => ({}));
     throw new ApiError(res.status, describeDetail(errBody.detail) ?? `Request failed (${res.status})`);
   }
+  announceRevision(res);
   return res.json() as Promise<T>;
 }
 
@@ -106,6 +120,7 @@ async function apiSend<T>(method: string, path: string, body?: unknown): Promise
     const errBody = await res.json().catch(() => ({}));
     throw new ApiError(res.status, describeDetail(errBody.detail) ?? `Request failed (${res.status})`);
   }
+  announceRevision(res);
   if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
 }

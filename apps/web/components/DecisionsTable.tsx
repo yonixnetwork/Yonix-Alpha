@@ -8,6 +8,10 @@ import { formatDate, formatDecimal, gateDecisionPillClass } from "@/lib/format";
 import { useEvents } from "@/lib/events";
 import { usePagedList } from "@/lib/usePagedList";
 import type { AssessmentSummary } from "@/lib/types";
+import { BuyButton } from "@/components/ManualTrade";
+
+const SOLANA_ENGINES = new Set(["solana_fresh", "solana_migration", "solana_momentum"]);
+const SOURCE_OF: Record<string, string> = { solana_fresh: "fresh", solana_migration: "migrated", solana_momentum: "momentum" };
 
 const DECISIONS = ["", "EXECUTE", "REDUCE_SIZE", "REQUIRE_MANUAL_APPROVAL", "WAIT", "REJECT", "NO_TRADE"];
 
@@ -47,6 +51,7 @@ export default function DecisionsTable({ engine, strategy, limit = 25 }: { engin
                 <th>Risk</th>
                 <th>Size</th>
                 <th>Why</th>
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
@@ -66,6 +71,11 @@ export default function DecisionsTable({ engine, strategy, limit = 25 }: { engin
                   <td className={`level-${a.overall_risk}`}>{a.overall_risk}</td>
                   <td>{formatDecimal(a.position_size, 6)}</td>
                   <td className="muted small">{a.reasons.slice(0, 2).join("; ")}</td>
+                  <td>
+                    {SOLANA_ENGINES.has(a.engine) && (
+                      <BuyButton mint={a.asset_id} engine={a.engine === "solana_migration" ? undefined : a.engine} source={SOURCE_OF[a.engine] ?? "token"} />
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>

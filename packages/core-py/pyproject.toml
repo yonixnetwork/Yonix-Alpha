@@ -22,6 +22,8 @@ dependencies = [
     # Keypairs, PDAs and versioned transactions for PumpSwap pool derivation
     # and local signing of live orders.
     "solders==0.29.0",
+    # Encrypts dashboard-managed provider URLs (they embed API keys) at rest.
+    "cryptography==50.0.1",
 ]
 
 [project.optional-dependencies]

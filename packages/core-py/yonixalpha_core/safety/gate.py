@@ -691,13 +691,20 @@ def _check_market(inp: AssessmentInput, out: list[Finding]) -> None:
 
 def _check_strategy_and_ml(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) -> None:
     sig = inp.signal
-    if sig is None:
+    if inp.operator_request:
+        # A manual BUY replaces the strategy's entry signal (and the ML
+        # confidence floor) with the operator's decision. Custom rules below
+        # still apply, and nothing else in the gate is affected.
+        out.append(_finding(RiskCategory.STRATEGY, "OPERATOR_BUY_REQUEST", RiskLevel.LOW,
+                            "manual BUY requested by the operator: strategy signal not required; every safety check applies",
+                            FinalDecision.EXECUTE))
+    elif sig is None:
         out.append(_finding(RiskCategory.STRATEGY, "NO_SIGNAL", RiskLevel.LOW, "no strategy signal evaluated", FinalDecision.WAIT))
     elif not sig.qualified:
         out.append(_finding(RiskCategory.STRATEGY, "SIGNAL_NOT_QUALIFIED", RiskLevel.LOW,
                             f"{sig.name} v{sig.version}: " + ("; ".join(sig.reasons) or "no qualifying signal"), FinalDecision.WAIT))
     ml = inp.ml
-    if ml is not None and s.min_ml_confidence is not None and ml.confidence < s.min_ml_confidence:
+    if ml is not None and s.min_ml_confidence is not None and ml.confidence < s.min_ml_confidence and not inp.operator_request:
         out.append(_finding(RiskCategory.ML, "ML_BELOW_MIN", RiskLevel.MODERATE,
                             f"ML {ml.model_name} v{ml.model_version} confidence {ml.confidence:.2f} below minimum {s.min_ml_confidence}",
                             FinalDecision.WAIT))

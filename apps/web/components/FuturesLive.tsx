@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { ErrorNotice, Loading, Section } from "@/components/ui";
 import { apiPut, ApiError } from "@/lib/api";
 import { useApi } from "@/lib/useApi";
+import RuntimeApply from "@/components/RuntimeApply";
 
 interface FuturesStatus {
   settings: Record<string, string>;
@@ -43,7 +44,7 @@ export default function FuturesLive() {
   }
 
   return (
-    <Section title="Futures & FX (Binance · Bybit · Hyperliquid · MT5)" actions={saved ? <span className="pill pill-ok">saved</span> : undefined}>
+    <Section title="Futures & FX (Binance · Bybit · Hyperliquid · MT5)" actions={saved ? <RuntimeApply inline /> : undefined}>
       <p className="muted">
         Meta Muse, Gold vs BTC, Confluence and the Hyperliquid grid trade live only when the environment locks are open, the global mode is LIVE, the
         strategy is AUTO or MANUAL, and the venue below is READY. Every live position gets an exchange-side stop; if the stop cannot be placed the position

@@ -13,6 +13,9 @@ class SettingsOut(BaseModel):
     hard_limits: dict[str, Any]
     # Fields with a fixed set of values (rendered as a select).
     enums: dict[str, list[str]] = {}
+    # How scopes relate: an engine with its own saved settings ignores GLOBAL
+    # entirely (load_settings), so a GLOBAL edit does not reach it.
+    scope_links: dict[str, Any] = {}
 
 
 class SettingsUpdate(BaseModel):

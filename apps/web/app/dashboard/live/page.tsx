@@ -6,11 +6,13 @@ import { CheckCircle2, Send, XCircle } from "lucide-react";
 import FuturesLive from "@/components/FuturesLive";
 import LiveWalletsPanel from "@/components/LiveWalletsPanel";
 import SmokeTestPanel from "@/components/SmokeTestPanel";
-import { ErrorNotice, Loading, Money, PageHeader, Section, Stat } from "@/components/ui";
+import { ErrorNotice, fmtDuration, Loading, Money, PageHeader, Section, Stat } from "@/components/ui";
 import { apiPut, ApiError } from "@/lib/api";
 import type { ExecutionOrderRow } from "@/lib/cc";
 import { formatDate, formatDecimal } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
+import RuntimeApply from "@/components/RuntimeApply";
+import { SellButton } from "@/components/ManualTrade";
 
 interface LiveStatus {
   locks: Record<string, boolean>;
@@ -50,6 +52,7 @@ interface LivePosition {
   exit_reason: string | null;
   pending_order_id: string | null;
   exit_failures: number;
+  exit_requested: boolean;
   entry_at: string;
   current_price: string | null;
   price_status: string;
@@ -213,7 +216,7 @@ export default function LiveExecutionPage() {
         <p className="muted">{s.provider.api}.</p>
       </Section>
 
-      <Section title="Execution settings" actions={saved ? <span className="pill pill-ok">saved</span> : undefined}>
+      <Section title="Execution settings" actions={saved ? <RuntimeApply inline /> : undefined}>
         <p className="muted">
           Runtime values, stored in the database and audited. Secrets are never set here. Every transaction is refused
           before signing if it exceeds these bounds or touches anything but a Pump.fun / PumpSwap buy or sell for our wallet.
@@ -264,6 +267,7 @@ export default function LiveExecutionPage() {
                 <th>Realized</th>
                 <th>Stop / TPs / trailing</th>
                 <th>Opened</th>
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
@@ -313,7 +317,13 @@ export default function LiveExecutionPage() {
                   </td>
                   <td>
                     {formatDate(p.entry_at)}
+                    {p.status === "open" && <div className="muted">age {fmtDuration((Date.now() - new Date(p.entry_at).getTime()) / 1000)}</div>}
                     <Sig sig={p.entry_signature} />
+                  </td>
+                  <td>
+                    {p.status === "open" && !p.exit_requested ? (
+                      <SellButton positionId={p.id} symbol={p.symbol} mode="LIVE" route={p.route} />
+                    ) : p.exit_requested ? <span className="pill pill-warn">sell requested</span> : null}
                   </td>
                 </tr>
               ))}

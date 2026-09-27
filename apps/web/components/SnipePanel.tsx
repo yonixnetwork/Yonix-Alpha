@@ -5,6 +5,7 @@ import Link from "next/link";
 import { ErrorNotice, Section } from "@/components/ui";
 import { apiGet, apiPut, ApiError } from "@/lib/api";
 import type { ModesOut, SettingsOut } from "@/lib/types";
+import RuntimeApply from "@/components/RuntimeApply";
 
 type Live = { settings: Record<string, string>; limits: Record<string, [string, string]> };
 type Strategy = { name: string; config: Record<string, unknown>; mode?: string };
@@ -16,7 +17,7 @@ type SnipeMode = (typeof SNIPE_MODES)[number];
 // Pump.fun scopes so fresh and migrated tokens are filtered alike.
 const SAFETY_KEYS = ["min_name_length", "skip_duplicate_names", "ascii_names_only", "max_creator_tokens_created",
   "cooldown_after_loss_seconds"] as const;
-const SCOPES = ["solana_fresh", "solana_migration"];
+const SCOPES = ["solana_fresh", "solana_migration", "solana_momentum"];
 
 function snipeModeOf(m: ModesOut): SnipeMode {
   const fresh = (m.strategies.solana_fresh ?? "OFF") !== "OFF";
@@ -132,7 +133,7 @@ export default function SnipePanel({ modes, onModes }: { modes: ModesOut; onMode
   return (
     <Section title="Pump.fun snipe settings">
       <ErrorNotice error={err} />
-      {msg && <div className="success">{msg}</div>}
+      {msg && <div className="notice">{msg} <RuntimeApply inline /></div>}
       <div className="notice">
         These map the sniper configuration keys onto the engine that already runs. Every entry still passes the full safety
         gate (holders, creator, liquidity, sellability, tax, slippage, impact, execution). The global mode decides PAPER or LIVE.

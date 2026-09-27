@@ -194,6 +194,17 @@ by accident.
   an existing pinned dependency surfaces the next time CI runs against that
   commit, not just when someone remembers to check manually.
 
+### Dashboard-managed RPC providers
+
+Provider URLs entered on the RPC & Data Providers page usually embed an API key.
+
+- They are encrypted at rest (`rpc_providers.rpc_url_enc`, Fernet via `yonixalpha_core.secretbox`). The key is
+  `CONFIG_ENCRYPTION_KEY`, or is derived with HKDF from `JWT_SECRET`.
+- They are only ever returned or logged as `scheme://host`.
+- Adding a provider or changing its URL needs the admin password: an RPC feeds every safety check.
+
+See docs/RUNTIME_CONTROL_PLANE.md.
+
 ### Secret scanning (gitleaks)
 
 CI runs `gitleaks detect --source . --verbose` over the full history on every push. It stays enabled.

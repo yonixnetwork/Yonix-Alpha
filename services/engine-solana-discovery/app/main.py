@@ -18,6 +18,8 @@ from yonixalpha_core.db.models import PaperPosition
 from yonixalpha_core.solana import pump_stream, pumpportal_ws
 from yonixalpha_core.solana.pumpfun import PUMP_PROGRAM_ID
 from yonixalpha_core.solana.rpc import RpcManager
+from yonixalpha_core.solana.rpc_registry import WsUrls
+from yonixalpha_core.runtime_watch import run_watcher
 from yonixalpha_core.solana.ws import SolanaWsClient
 
 from app.funnel import run_funnel
@@ -114,12 +116,8 @@ async def run() -> None:
             # getTransaction round-trip per event.
             await pump_stream.ingest_logs(redis, value.get("logs", []), value.get("signature"), datetime.now(timezone.utc))
 
-        ws_index = {"i": 0}
-
-        def next_ws_url() -> str:
-            url = ws_urls[ws_index["i"] % len(ws_urls)]
-            ws_index["i"] += 1
-            return url
+        # Follows the dashboard's WebSocket providers (runtime reload).
+        next_ws_url = WsUrls(ws_urls)
 
         # Scoped to the pump.fun program only. The previous subscription to
         # the whole SPL Token program delivered every token transaction on
@@ -167,6 +165,8 @@ async def run() -> None:
                 pumpportal.run(stop_event),
                 _health_check_loop(rpc, session_factory, stop_event),
                 _funnel_loop(redis, session_factory, stop_event),
+                run_watcher("engine-solana-discovery", settings, session_factory, stop_event, rpc=rpc, ws_urls=next_ws_url,
+                            redis=redis),
             )
         finally:
             await _record_system_event(session_factory, "service_stopped", "info")

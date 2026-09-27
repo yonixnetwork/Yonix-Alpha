@@ -5,6 +5,7 @@ from app.api.routes import (
     auth,
     bots,
     candidates,
+    config,
     control,
     health,
     live,
@@ -13,12 +14,14 @@ from app.api.routes import (
     observations,
     paper,
     risk,
+    rpc,
     settings_center,
     signals,
     strategies,
     summary,
     system,
     tokens,
+    trade,
     venues,
     ws,
 )
@@ -34,6 +37,9 @@ api_router.include_router(ml.router)
 api_router.include_router(paper.router)
 api_router.include_router(live.router)
 api_router.include_router(control.router)
+api_router.include_router(config.router)
+api_router.include_router(rpc.router)
+api_router.include_router(trade.router)
 api_router.include_router(analytics.router)
 api_router.include_router(strategies.router)
 api_router.include_router(venues.router)

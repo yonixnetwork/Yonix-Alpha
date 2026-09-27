@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     SOLANA_RPC_BACKUP_URL_2: Optional[str] = None
     SOLANA_RPC_BACKUP_URL_3: Optional[str] = None
     SOLANA_WS_BACKUP_URL: Optional[str] = None
+    # Optional: key for encrypting credentials entered in the dashboard
+    # (provider URLs). Derived from JWT_SECRET when unset.
+    CONFIG_ENCRYPTION_KEY: Optional[str] = None
     HELIUS_API_KEY: Optional[str] = None
     JUPITER_API_KEY: Optional[str] = None
 

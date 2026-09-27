@@ -1064,3 +1064,9 @@ li.unread {
 .warn-card {
   border-color: var(--warn, #d9a441);
 }
+
+/* wide tables (RPC providers, manual trade status) scroll inside their section */
+.table-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+}

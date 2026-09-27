@@ -31,6 +31,7 @@ from sqlalchemy import select
 
 from yonixalpha_core import external_bots, futures_live, grid_live
 from yonixalpha_core.config import get_settings
+from yonixalpha_core.runtime_watch import run_watcher
 from yonixalpha_core.db.base import make_engine, make_session_factory
 from yonixalpha_core.db.models import ExecutionOrder, SystemEvent
 from yonixalpha_core.db.redis import make_redis
@@ -176,6 +177,7 @@ async def run() -> None:
         await asyncio.gather(
             loop(session_factory, redis, settings, providers, venues, http_client, stop_event),
             heartbeat_loop(settings, SERVICE_NAME, stop_event, lambda: {"venues": venue_health_snapshot()}),
+            run_watcher(SERVICE_NAME, settings, session_factory, stop_event, redis=redis),
         )
     finally:
         await _record_system_event(session_factory, "service_stopped", "info")

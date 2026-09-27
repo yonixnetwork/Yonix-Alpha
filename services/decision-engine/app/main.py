@@ -1,10 +1,12 @@
 import asyncio
 import signal
 from datetime import datetime, timezone
+from uuid import UUID
 
 import httpx
 from sqlalchemy import select
 
+from yonixalpha_core import manual_trade
 from yonixalpha_core.config import get_settings
 from yonixalpha_core.events import heartbeat_loop
 from yonixalpha_core.db.base import make_engine, make_session_factory
@@ -16,6 +18,7 @@ from yonixalpha_core.notify import send_telegram_alert
 from yonixalpha_core.solana.assembler import Sources
 from yonixalpha_core.solana.market_data import DexScreenerClient, JupiterClient, RateBudget
 from yonixalpha_core.solana.rpc import RpcManager
+from yonixalpha_core.runtime_watch import run_watcher
 from yonixalpha_core.venues.registry import build_venues
 from yonixalpha_core.state_machine import CandidateState
 
@@ -49,6 +52,44 @@ async def _record_system_event(session_factory, event_type: str, severity: str, 
         )
 
 
+async def _manual_loop(session_factory, redis, settings, stop_event: asyncio.Event, sources: Sources | None) -> None:
+    """Manual BUY requests from the dashboard, evaluated as soon as they
+    arrive through the same gate and execution code (gate_eval)."""
+    while not stop_event.is_set():
+        request_id = None
+        try:
+            request_id = await manual_trade.next_request(redis, timeout=2)
+            if request_id is None:
+                continue
+            req = await manual_trade.get(redis, request_id)
+            if req is None:
+                continue
+            if sources is None:
+                await manual_trade.update(redis, request_id, "BLOCKED", stage="RPC_NOT_CONFIGURED",
+                                          reason="no Solana RPC configured: the safety gate cannot evaluate the token")
+                continue
+            await manual_trade.update(redis, request_id, "EVALUATING")
+            async with session_factory() as session:
+                candidate = await session.get(TradingCandidate, UUID(req["candidate_id"]))
+                if candidate is None or candidate.state not in EVALUABLE_STATES:
+                    await manual_trade.update(redis, request_id, "BLOCKED", stage="CANDIDATE_CLOSED",
+                                              reason=f"the token's candidate is {candidate.state if candidate else 'missing'}; "
+                                                     "press BUY again")
+                    continue
+                operator = {"id": request_id}
+                await evaluate_with_gate(session, redis, settings, sources, candidate, datetime.now(timezone.utc), operator)
+            result = operator.get("result") or {"status": "BLOCKED", "reason": "not evaluated (unknown reason)"}
+            await manual_trade.update(redis, request_id, result.pop("status"), **result)
+            log.info("manual_buy.evaluated", request=request_id, mint=req.get("mint"), status=(await manual_trade.get(redis, request_id) or {}).get("status"))
+        except Exception as exc:  # noqa: BLE001 - one bad request must not stop the queue
+            log.error("manual_buy.failed", request=request_id, error=f"{type(exc).__name__}: {exc}"[:300])
+            if request_id:
+                await manual_trade.update(redis, request_id, "FAILED", stage="EVALUATION_FAILED",
+                                          reason=f"{diagnostics.error_type(exc)}: {exc}"[:300])
+            await _record_system_event(session_factory, "manual_buy_failed", "error",
+                                       {"request": request_id, "error": f"{type(exc).__name__}: {exc}"[:300]})
+
+
 async def _evaluation_loop(session_factory, redis, settings, stop_event: asyncio.Event, sources: Sources | None = None) -> None:
     while not stop_event.is_set():
         try:
@@ -66,6 +107,8 @@ async def _evaluation_loop(session_factory, redis, settings, stop_event: asyncio
                         candidate = await session.get(TradingCandidate, candidate_id)
                         if candidate is None or candidate.state not in EVALUABLE_STATES:
                             continue  # state changed since the query above
+                        if (candidate.detail or {}).get("manual_only"):
+                            continue  # evaluated only by its manual BUY request (_manual_loop)
                         if is_gate_candidate(candidate):
                             if sources is None:
                                 continue
@@ -160,8 +203,11 @@ async def run() -> None:
         venues = build_venues(http_client, settings)
         await asyncio.gather(
             _evaluation_loop(session_factory, redis, settings, stop_event, sources),
+            _manual_loop(session_factory, redis, settings, stop_event, sources),
             _futures_loop(session_factory, redis, settings, venues, stop_event),
             heartbeat_loop(settings, "decision-engine", stop_event, lambda: {"venues": venue_health_snapshot()}),
+            run_watcher("decision-engine", settings, session_factory, stop_event, rpc=sources.rpc if sources else None,
+                        redis=redis),
         )
     finally:
         await _record_system_event(session_factory, "service_stopped", "info")

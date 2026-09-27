@@ -932,3 +932,31 @@ class LiveSmokeTest(Base):
     engine: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class RpcProvider(Base):
+    """A Solana RPC / WebSocket provider added from the dashboard
+    (yonixalpha_core.solana.rpc_registry). URLs usually embed the API key,
+    so they are stored encrypted (yonixalpha_core.secretbox) and only ever
+    returned as scheme://host. Services reload this table on every
+    configuration revision; no restart is needed."""
+
+    __tablename__ = "rpc_providers"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    name: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    chain: Mapped[str] = mapped_column(String(16), nullable=False, default="solana")
+    provider_type: Mapped[str] = mapped_column(String(32), nullable=False, default="custom")  # helius / alchemy / ...
+    rpc_url_enc: Mapped[str] = mapped_column(String(2048), nullable=False)
+    ws_url_enc: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    rpc_display: Mapped[str] = mapped_column(String(256), nullable=False)
+    ws_display: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=150)
+    timeout_seconds: Mapped[Decimal] = mapped_column(Numeric(6, 2), nullable=False, default=Decimal("10"))
+    rate_limit_rps: Mapped[Decimal | None] = mapped_column(Numeric(8, 2), nullable=True)
+    notes: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    last_test: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

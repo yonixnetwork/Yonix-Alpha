@@ -90,6 +90,7 @@ async def get_risk_settings(scope: str, db: AsyncSession = Depends(get_db), _: s
     _check_scope(scope)
     effective, source = await store.load_settings(db, scope)
     return SettingsOut(
+        scope_links=await _scope_links(db, scope),
         scope=scope,
         effective=settings_to_dict(effective),
         source=source,
@@ -97,6 +98,20 @@ async def get_risk_settings(scope: str, db: AsyncSession = Depends(get_db), _: s
         hard_limits={k: {"kind": kind, "bound": str(bound)} for k, (kind, bound) in HARD_LIMITS.items()},
         enums={k: list(v) for k, v in ENUM_FIELDS.items()},
     )
+
+
+async def _scope_links(db: AsyncSession, scope: str) -> dict:
+    own = {}
+    for s in SCOPES:
+        if s == store.GLOBAL_SCOPE:
+            continue
+        v = (await db.execute(select(func.max(RiskSettingsVersion.version)).where(RiskSettingsVersion.scope == s))).scalar_one_or_none()
+        if v:
+            own[s] = v
+    if scope == store.GLOBAL_SCOPE:
+        return {"overridden_by": [{"scope": s, "version": v} for s, v in own.items()],
+                "follows_global": [s for s in SCOPES if s != store.GLOBAL_SCOPE and s not in own]}
+    return {"own_settings": scope in own, "follows_global": scope not in own}
 
 
 @router.put("/settings/{scope}", response_model=SettingsSaved)

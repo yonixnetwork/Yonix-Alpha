@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { apiGet, apiPut, ApiError } from "@/lib/api";
 import { formatDate } from "@/lib/format";
 import type { SettingsOut, SettingsVersionOut } from "@/lib/types";
+import RuntimeApply from "@/components/RuntimeApply";
 
 const SCOPES = ["GLOBAL", "solana_fresh", "solana_migration", "solana_momentum", "binance_futures", "bybit_futures", "hyperliquid_perps"];
 
@@ -125,6 +126,9 @@ export default function RiskSettingsPage() {
     }).filter((g) => g.keys.length);
   }, [data]);
 
+  const [applyToOverrides, setApplyToOverrides] = useState(true);
+  const overriddenBy = data?.scope === "GLOBAL" ? data.scope_links?.overridden_by ?? [] : [];
+
   async function save() {
     if (!data) return;
     setBusy(true);
@@ -138,8 +142,23 @@ export default function RiskSettingsPage() {
         settings: payload,
         note: note || null,
       });
+      let also = "";
+      if (scope === "GLOBAL" && applyToOverrides && overriddenBy.length && changed.size) {
+        // Engines with their own settings ignore GLOBAL: apply the same
+        // changed keys to each of them (their other values stay as they are).
+        const done: string[] = [];
+        for (const o of overriddenBy) {
+          const cur = await apiGet<SettingsOut>(`/api/control/settings/${o.scope}`);
+          const merged = Object.fromEntries(Object.entries(cur.effective).map(([k, v]) =>
+            [k, changed.has(k) ? fromInput(data.effective[k], draft[k]) : v]));
+          const r = await apiPut<{ version: SettingsVersionOut }>(`/api/control/settings/${o.scope}`,
+            { settings: merged, note: note || "applied from GLOBAL" });
+          done.push(`${o.scope} v${r.version.version}`);
+        }
+        also = ` Also applied to ${done.join(", ")}.`;
+      }
       setSaved(
-        `Saved as version ${res.version.version}.` +
+        `Saved as version ${res.version.version}.` + also +
           (res.clamp_notes.length ? ` Bounded by hard limits: ${res.clamp_notes.join("; ")}` : ""),
       );
       setNote("");
@@ -177,13 +196,28 @@ export default function RiskSettingsPage() {
         )}
       </div>
 
+      {data?.scope === "GLOBAL" && overriddenBy.length > 0 && (
+        <div className="notice notice-danger">
+          These engines have their own saved settings and do <b>not</b> use GLOBAL:{" "}
+          {overriddenBy.map((o) => `${o.scope} v${o.version}`).join(", ")}. A GLOBAL change alone does not reach them.
+          <label style={{ display: "block", marginTop: 6 }}>
+            <input type="checkbox" checked={applyToOverrides} onChange={(e) => setApplyToOverrides(e.target.checked)} /> Apply
+            the keys I change here to those engines too
+          </label>
+        </div>
+      )}
+      {data && data.scope !== "GLOBAL" && data.scope_links?.follows_global === true && (
+        <div className="notice">
+          {data.scope} currently follows GLOBAL. Saving here gives it its own settings; later GLOBAL changes will then not reach it.
+        </div>
+      )}
       {data?.source.errors && (
         <div className="notice notice-danger">
           The stored settings failed validation and are being ignored in favour of defaults: {data.source.errors.join("; ")}
         </div>
       )}
       {error && <div className="error">{error}</div>}
-      {saved && <div className="success">{saved}</div>}
+      {saved && <div className="notice">{saved} <RuntimeApply inline /></div>}
 
       {data &&
         grouped.map((g) => (

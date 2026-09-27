@@ -10,6 +10,7 @@ import { apiPost, apiPut, ApiError } from "@/lib/api";
 import { formatDate, formatDecimal } from "@/lib/format";
 import type { PaperAccountOut } from "@/lib/types";
 import { useApi } from "@/lib/useApi";
+import RuntimeApply from "@/components/RuntimeApply";
 
 function AccountCard({ a, onReset }: { a: PaperAccountOut; onReset: () => void }) {
   const [balance, setBalance] = useState(a.starting_balance.replace(/\.?0+$/, ""));
@@ -146,7 +147,7 @@ function ExecutionFailures() {
         </div>
       </div>
       <ErrorNotice error={saveError} />
-      {saved && <div className="success">Saved. Applies to the next entry and exit attempts.</div>}
+      {saved && <div><RuntimeApply inline /></div>}
       <div className="btn-row" style={{ marginTop: 12 }}>
         <button className="btn btn-sm" onClick={save}>
           Save

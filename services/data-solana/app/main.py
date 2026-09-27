@@ -12,6 +12,8 @@ from yonixalpha_core.db.writers import write_market_snapshot
 from yonixalpha_core.logging import configure_logging, get_logger
 from yonixalpha_core.notify import send_telegram_alert
 from yonixalpha_core.solana.rpc import RpcManager
+from yonixalpha_core.solana.rpc_registry import WsUrls
+from yonixalpha_core.runtime_watch import run_watcher
 from yonixalpha_core.solana.ws import SolanaWsClient
 
 from app.ingest import normalize_logs_notification, normalize_slot_notification
@@ -108,12 +110,8 @@ async def run() -> None:
             await idle_while_disabled(settings, "data-solana", "SOLANA_WS_URL not set")
             return
 
-        ws_index = {"i": 0}
-
-        def next_ws_url() -> str:
-            url = ws_urls[ws_index["i"] % len(ws_urls)]
-            ws_index["i"] += 1
-            return url
+        # Follows the dashboard's WebSocket providers (runtime reload).
+        next_ws_url = WsUrls(ws_urls)
 
         ws_client = SolanaWsClient(
             url_provider=next_ws_url,
@@ -134,6 +132,7 @@ async def run() -> None:
                 heartbeat_loop(settings, "data-solana", stop_event, lambda: {"rpc": rpc.health_snapshot()}),
                 ws_client.run(stop_event),
                 _health_check_loop(rpc, session_factory, stop_event),
+                run_watcher("data-solana", settings, session_factory, stop_event, rpc=rpc, ws_urls=next_ws_url),
             )
         finally:
             await _record_system_event(session_factory, "service_stopped", "info")
