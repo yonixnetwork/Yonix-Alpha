@@ -69,6 +69,7 @@ async def test_manual_buy_is_blocked_without_data(db_session, redis_client):
     src = Sources(redis_client, FakeRpc(None, fail={"getAccountInfo", "getTokenLargestAccounts"}))
     await evaluate_with_gate(db_session, redis_client, ENV, src, cand, NOW, op)
     assert op["result"]["status"] == "BLOCKED" and op["result"]["decision"] == "NO_TRADE"
+    assert any("rpc" in e for e in op["result"]["data_errors"]), op["result"]  # the cause, not only "unavailable"
     assert (await db_session.execute(select(PaperPosition))).first() is None
 
 

@@ -258,7 +258,9 @@ async def evaluate_with_gate(
         blockers = [{"code": f.code, "category": f.category.value, "message": f.message}
                     for f in a.findings if f.action == a.decision]
         operator["result"] = {"status": "BLOCKED", "decision": a.decision.value, "stage": a.status_label,
-                              "reason": "; ".join(a.reasons), "blockers": blockers}
+                              "reason": "; ".join(a.reasons), "blockers": blockers,
+                              # Why data was missing (e.g. "curve rpc: All RPC endpoints failed (env:primary: HTTP 429)").
+                              "data_errors": [str(e)[:300] for e in (evidence.get("errors") or [])][:8]}
         if (candidate.detail or {}).get("manual_only") and candidate.state not in (CandidateState.REJECTED.value,):
             apply_transition(candidate, CandidateState.REJECTED, reason=f"manual BUY not executable: {a.status_label}")
     if operator is not None:

@@ -17,6 +17,7 @@ interface Req {
   id: string; status: string; route: string; engine: string; stage?: string; reason?: string; decision?: string; target?: string;
   size?: string | null; position_id?: string; failure_stage?: string | null;
   blockers?: { code: string; category: string; message: string }[];
+  data_errors?: string[];
   history: { status: string; at: string; reason?: string }[];
   order?: { signature: string | null; status: string; error: string | null } | null;
 }
@@ -116,6 +117,13 @@ export function BuyButton({ mint, engine, source, label = "BUY" }: { mint: strin
               {req.reason && <div className={req.status === "BLOCKED" || req.status === "FAILED" ? "neg" : "muted"}>{req.reason}</div>}
               {req.blockers && req.blockers.length > 0 && (
                 <ul className="reason-list">{req.blockers.map((b, i) => <li key={i}><b>{b.code}</b> ({b.category}): {b.message}</li>)}</ul>)}
+              {req.data_errors && req.data_errors.length > 0 && (
+                <div className="notice">Why data was missing:
+                  <ul className="reason-list">{req.data_errors.map((e, i) => <li key={i} className="mono">{e}</li>)}</ul>
+                  {req.data_errors.some((e) => /RPC endpoints failed|429/.test(e)) && (
+                    <div>The RPC provider refused or failed these requests. Add or enable a backup under{" "}
+                      <Link href="/dashboard/rpc">System → RPC &amp; Data Providers</Link>.</div>)}
+                </div>)}
               {req.order?.signature && <div className="mono muted">tx {req.order.signature}</div>}
               <ol className="muted">{req.history.map((h, i) => <li key={i}>{h.status} · {formatDate(h.at)}</li>)}</ol>
               {req.position_id && <Link href={`/dashboard/trades/${req.position_id}`}>open position</Link>}
