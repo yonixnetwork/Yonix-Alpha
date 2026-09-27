@@ -60,3 +60,20 @@ async def test_success_sends_nothing(alerts):
 
     assert await _manager(handler).call("getAccountInfo", ["x"]) == {"value": None}
     assert alerts == []
+
+
+async def test_up_to_three_backups_are_tried_in_order(alerts):
+    tried = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        tried.append(request.url.host)
+        if request.url.host == "b3.example":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": 42})
+        return httpx.Response(429)
+
+    rpc = RpcManager.create(client=httpx.AsyncClient(transport=httpx.MockTransport(handler)), primary_url=PRIMARY,
+                            backup_url="https://b1.example/k1", extra_backup_urls=[None, "https://b2.example/k2", "", "https://b3.example/k3"])
+    assert [e.label for e in rpc.endpoints] == ["primary", "backup", "backup2", "backup3"]
+    assert await rpc.call("getSlot") == 42
+    assert tried == ["primary.example", "b1.example", "b2.example", "b3.example"]
+    assert alerts == []

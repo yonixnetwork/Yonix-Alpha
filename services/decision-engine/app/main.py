@@ -148,7 +148,8 @@ async def run() -> None:
     if settings.SOLANA_RPC_URL:
         sources = Sources(
             redis=redis,
-            rpc=RpcManager.create(client=http_client, primary_url=settings.SOLANA_RPC_URL, backup_url=settings.SOLANA_RPC_BACKUP_URL),
+            rpc=RpcManager.create(client=http_client, primary_url=settings.SOLANA_RPC_URL, backup_url=settings.SOLANA_RPC_BACKUP_URL,
+                                  extra_backup_urls=[settings.SOLANA_RPC_BACKUP_URL_2, settings.SOLANA_RPC_BACKUP_URL_3]),
             jupiter=JupiterClient(http_client, settings.JUPITER_API_KEY, RateBudget(JUPITER_REQUESTS_PER_MINUTE)),
             dexscreener=DexScreenerClient(http_client, RateBudget(DEXSCREENER_REQUESTS_PER_MINUTE)),
         )

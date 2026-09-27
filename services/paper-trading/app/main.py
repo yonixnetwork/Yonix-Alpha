@@ -166,7 +166,8 @@ async def run() -> None:
     venues = build_venues(http_client, settings)
     # Pool pricing for migrated positions and the LIVE worker both need RPC;
     # without it pumpswap positions report "unpriced" and LIVE is disabled.
-    rpc = (RpcManager.create(client=http_client, primary_url=settings.SOLANA_RPC_URL, backup_url=settings.SOLANA_RPC_BACKUP_URL)
+    rpc = (RpcManager.create(client=http_client, primary_url=settings.SOLANA_RPC_URL, backup_url=settings.SOLANA_RPC_BACKUP_URL,
+                             extra_backup_urls=[settings.SOLANA_RPC_BACKUP_URL_2, settings.SOLANA_RPC_BACKUP_URL_3])
            if settings.SOLANA_RPC_URL else None)
     try:
         await asyncio.gather(

@@ -39,8 +39,10 @@ LAST_RESULT_TTL = 7 * 86400
 
 # (group, provider test name or None, secrets, non-secret values shown as-is, URL values shown as scheme://host)
 PROVIDERS = {
-    "solana": ("Solana", ["solana_rpc", "solana_ws", "solana_rpc_backup"], ["HELIUS_API_KEY"], [],
-               ["SOLANA_RPC_URL", "SOLANA_WS_URL", "SOLANA_RPC_BACKUP_URL", "SOLANA_WS_BACKUP_URL"]),
+    "solana": ("Solana", ["solana_rpc", "solana_ws", "solana_rpc_backup", "solana_rpc_backup_2", "solana_rpc_backup_3"],
+               ["HELIUS_API_KEY"], [],
+               ["SOLANA_RPC_URL", "SOLANA_WS_URL", "SOLANA_RPC_BACKUP_URL", "SOLANA_RPC_BACKUP_URL_2", "SOLANA_RPC_BACKUP_URL_3",
+                "SOLANA_WS_BACKUP_URL"]),
     "helius": ("Helius", ["helius"], ["HELIUS_API_KEY"], [], []),
     "pumpportal": ("Pump.fun / PumpPortal", ["pumpportal"], ["PUMPPORTAL_API_KEY"], [], []),
     "jupiter": ("Jupiter", ["jupiter"], ["JUPITER_API_KEY"], [], []),

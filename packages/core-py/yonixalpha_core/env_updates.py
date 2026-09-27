@@ -34,6 +34,8 @@ EDITABLE_KEYS: dict[str, str] = {
     "SOLANA_RPC_URL": "url",
     "SOLANA_WS_URL": "url",
     "SOLANA_RPC_BACKUP_URL": "url",
+    "SOLANA_RPC_BACKUP_URL_2": "url",
+    "SOLANA_RPC_BACKUP_URL_3": "url",
     "SOLANA_WS_BACKUP_URL": "url",
     "JUPITER_API_KEY": "secret",
     "PUMPPORTAL_API_KEY": "secret",

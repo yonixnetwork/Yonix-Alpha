@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     SOLANA_RPC_URL: Optional[str] = Field(None, validation_alias=AliasChoices("SOLANA_RPC_URL", "HELIUS_RPC_URL"))
     SOLANA_WS_URL: Optional[str] = Field(None, validation_alias=AliasChoices("SOLANA_WS_URL", "HELIUS_WS_URL"))
     SOLANA_RPC_BACKUP_URL: Optional[str] = None
+    # Further backups, tried in order after SOLANA_RPC_BACKUP_URL (use a
+    # different provider for each, so one rate limit can't stop them all).
+    SOLANA_RPC_BACKUP_URL_2: Optional[str] = None
+    SOLANA_RPC_BACKUP_URL_3: Optional[str] = None
     SOLANA_WS_BACKUP_URL: Optional[str] = None
     HELIUS_API_KEY: Optional[str] = None
     JUPITER_API_KEY: Optional[str] = None

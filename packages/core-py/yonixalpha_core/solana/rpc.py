@@ -76,11 +76,17 @@ class RpcManager:
         primary_url: str,
         backup_url: str | None = None,
         emergency_url: str | None = None,
+        extra_backup_urls: list[str | None] | None = None,
         **kwargs,
     ) -> "RpcManager":
+        """Endpoints in failover order: primary, backup, then each extra
+        backup (labelled backup2, backup3, ...), then emergency. Empty URLs
+        are skipped."""
         endpoints = [_Endpoint(url=primary_url, label="primary")]
         if backup_url:
             endpoints.append(_Endpoint(url=backup_url, label="backup"))
+        for i, url in enumerate((u for u in (extra_backup_urls or []) if u), start=2):
+            endpoints.append(_Endpoint(url=url, label=f"backup{i}"))
         if emergency_url:
             endpoints.append(_Endpoint(url=emergency_url, label="emergency"))
         return cls(endpoints=endpoints, client=client, **kwargs)

@@ -28,6 +28,8 @@ fi
 KEYS=$(cat <<'EOF'
 Solana data (Helius)|HELIUS_API_KEY|secret|dashboard.helius.dev -> API key
 Solana data (Helius)|SOLANA_RPC_BACKUP_URL|secret|optional second RPC URL (Enter to skip)
+Solana data (Helius)|SOLANA_RPC_BACKUP_URL_2|secret|optional third RPC URL, another provider (Enter to skip)
+Solana data (Helius)|SOLANA_RPC_BACKUP_URL_3|secret|optional fourth RPC URL, another provider (Enter to skip)
 Solana data (Helius)|SOLANA_WS_BACKUP_URL|secret|optional second WebSocket URL (Enter to skip)
 Jupiter|JUPITER_API_KEY|secret|portal.jup.ag -> API key
 PumpPortal (optional, paid data only)|PUMPPORTAL_API_KEY|secret|pumpportal.fun (leave empty unless you want the paid feed)

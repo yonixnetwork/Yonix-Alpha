@@ -91,14 +91,15 @@ async def listen_pump(ws_url: str, seconds: int) -> dict[str, Any]:
 async def main(seconds: int, as_json: bool) -> int:
     settings = get_settings()
     report = Report([settings.SOLANA_RPC_URL, settings.SOLANA_WS_URL, settings.SOLANA_RPC_BACKUP_URL,
-                     settings.SOLANA_WS_BACKUP_URL, settings.JUPITER_API_KEY, settings.HELIUS_API_KEY])
+                     settings.SOLANA_RPC_BACKUP_URL_2, settings.SOLANA_RPC_BACKUP_URL_3, settings.SOLANA_WS_BACKUP_URL, settings.JUPITER_API_KEY, settings.HELIUS_API_KEY])
     print(f"verify_live {datetime.now(timezone.utc).isoformat()} rpc={redact_url(settings.SOLANA_RPC_URL)} "
           f"ws={redact_url(settings.SOLANA_WS_URL)} jupiter={'keyed' if settings.JUPITER_API_KEY else 'free (lite-api)'}")
 
     async with httpx.AsyncClient() as http:
         rpc = None
         if settings.SOLANA_RPC_URL:
-            rpc = RpcManager.create(client=http, primary_url=settings.SOLANA_RPC_URL, backup_url=settings.SOLANA_RPC_BACKUP_URL)
+            rpc = RpcManager.create(client=http, primary_url=settings.SOLANA_RPC_URL, backup_url=settings.SOLANA_RPC_BACKUP_URL,
+                                    extra_backup_urls=[settings.SOLANA_RPC_BACKUP_URL_2, settings.SOLANA_RPC_BACKUP_URL_3])
             try:
                 t0 = time.monotonic()
                 slot = await rpc.call("getSlot")

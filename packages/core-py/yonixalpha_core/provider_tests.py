@@ -48,8 +48,8 @@ class _Result(Exception):
 
 
 def _secrets(settings: Any) -> list[str | None]:
-    names = ["HELIUS_API_KEY", "SOLANA_RPC_URL", "SOLANA_WS_URL", "SOLANA_RPC_BACKUP_URL", "SOLANA_WS_BACKUP_URL",
-             "JUPITER_API_KEY", "PUMPPORTAL_API_KEY", "BINANCE_API_KEY", "BINANCE_API_SECRET", "BYBIT_API_KEY",
+    names = ["HELIUS_API_KEY", "SOLANA_RPC_URL", "SOLANA_WS_URL", "SOLANA_RPC_BACKUP_URL", "SOLANA_RPC_BACKUP_URL_2",
+             "SOLANA_RPC_BACKUP_URL_3", "SOLANA_WS_BACKUP_URL", "JUPITER_API_KEY", "PUMPPORTAL_API_KEY", "BINANCE_API_KEY", "BINANCE_API_SECRET", "BYBIT_API_KEY",
              "BYBIT_API_SECRET", "HYPERLIQUID_API_WALLET_PRIVATE_KEY", "MT5_BRIDGE_TOKEN", "TELEGRAM_BOT_TOKEN",
              "WALLET_PRIVATE_KEY"]
     out = []
@@ -178,6 +178,12 @@ async def test_provider(name: str, settings: Any, client: httpx.AsyncClient) -> 
         _need(settings, "SOLANA_RPC_BACKUP_URL")
         return f"getSlot={await _json_rpc(client, settings.SOLANA_RPC_BACKUP_URL, 'getSlot')}"
 
+    def backup_n(key: str) -> Callable[[], Awaitable[str]]:
+        async def test() -> str:
+            _need(settings, key)
+            return f"getSlot={await _json_rpc(client, getattr(settings, key), 'getSlot')}"
+        return test
+
     async def solana_ws() -> str:
         _need(settings, "SOLANA_WS_URL")
         return await _ws_probe(settings.SOLANA_WS_URL, {"jsonrpc": "2.0", "id": 1, "method": "slotSubscribe"}, "slotSubscribe")
@@ -242,7 +248,9 @@ async def test_provider(name: str, settings: Any, client: httpx.AsyncClient) -> 
         return f"bot @{body['result'].get('username')} ({chat}; no message sent)"
 
     tests: dict[str, Callable[[], Awaitable[str]]] = {
-        "solana_rpc": solana_rpc, "solana_rpc_backup": solana_rpc_backup, "solana_ws": solana_ws, "helius": helius,
+        "solana_rpc": solana_rpc, "solana_rpc_backup": solana_rpc_backup,
+        "solana_rpc_backup_2": backup_n("SOLANA_RPC_BACKUP_URL_2"), "solana_rpc_backup_3": backup_n("SOLANA_RPC_BACKUP_URL_3"),
+        "solana_ws": solana_ws, "helius": helius,
         "jupiter": jupiter, "pumpportal": pumpportal, "binance": lambda: venue("binance"), "bybit": lambda: venue("bybit"),
         "hyperliquid": lambda: venue("hyperliquid"), "mt5": lambda: venue("mt5"), "telegram": telegram,
     }
@@ -253,5 +261,5 @@ async def test_provider(name: str, settings: Any, client: httpx.AsyncClient) -> 
     return await _run(name, settings, fn)
 
 
-PROVIDERS = ["solana_rpc", "solana_rpc_backup", "solana_ws", "helius", "jupiter", "pumpportal", "binance", "bybit",
+PROVIDERS = ["solana_rpc", "solana_rpc_backup", "solana_rpc_backup_2", "solana_rpc_backup_3", "solana_ws", "helius", "jupiter", "pumpportal", "binance", "bybit",
              "hyperliquid", "mt5", "telegram"]

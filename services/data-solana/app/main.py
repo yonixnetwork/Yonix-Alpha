@@ -98,6 +98,7 @@ async def run() -> None:
             client=http_client,
             primary_url=settings.SOLANA_RPC_URL,
             backup_url=settings.SOLANA_RPC_BACKUP_URL,
+            extra_backup_urls=[settings.SOLANA_RPC_BACKUP_URL_2, settings.SOLANA_RPC_BACKUP_URL_3],
         )
 
         ws_urls = [u for u in (settings.SOLANA_WS_URL, settings.SOLANA_WS_BACKUP_URL) if u]

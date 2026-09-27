@@ -15,7 +15,8 @@ type Group = {
 type Overview = { groups: Group[]; sections: { section: string; where: string; covers: string }[]; secret_update: string };
 
 const LABEL: Record<string, string> = {
-  solana_rpc: "Solana RPC", solana_ws: "Solana WebSocket", solana_rpc_backup: "Backup RPC", helius: "Helius key",
+  solana_rpc: "Solana RPC", solana_ws: "Solana WebSocket", solana_rpc_backup: "Backup RPC",
+  solana_rpc_backup_2: "Backup RPC 2", solana_rpc_backup_3: "Backup RPC 3", helius: "Helius key",
   jupiter: "Jupiter", pumpportal: "PumpPortal", binance: "Binance", bybit: "Bybit", hyperliquid: "Hyperliquid", mt5: "MT5 bridge",
   telegram: "Telegram",
 };

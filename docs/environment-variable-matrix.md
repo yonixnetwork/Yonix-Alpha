@@ -39,7 +39,7 @@ How to read the columns:
 | `REDIS_URL` | redis | overrides the above | yes | O | – | `config.py` | – | – | per deployment | Settings | |
 | `SOLANA_RPC_URL` (alias `HELIUS_RPC_URL`) | solana_* | chain reads, PumpSwap pools, live send/confirm, reconciliation | yes (URL embeds the key) | P (Pump.fun) | derived from HELIUS_API_KEY | discovery, decision-engine, paper-trading, data-solana | yes | yes | per deployment | config_validation (solana_*) | |
 | `SOLANA_WS_URL` (alias `HELIUS_WS_URL`) | solana_* | `logsSubscribe` on the Pump.fun program | yes | P (Pump.fun) | derived | engine-solana-discovery, data-solana | yes | yes | per deployment | config_validation | |
-| `SOLANA_RPC_BACKUP_URL`, `SOLANA_WS_BACKUP_URL` | solana_* | failover endpoints | yes | O | – | `RpcManager`, `SolanaWsClient` | – | recommended | per deployment | Settings | |
+| `SOLANA_RPC_BACKUP_URL`, `SOLANA_RPC_BACKUP_URL_2`, `SOLANA_RPC_BACKUP_URL_3`, `SOLANA_WS_BACKUP_URL` | solana_* | failover endpoints (RPC: up to three backups, tried in order) | yes | O | – | `RpcManager`, `SolanaWsClient` | – | recommended | per deployment | Settings | |
 | `HELIUS_API_KEY` | solana_* | derives the Helius mainnet RPC/WS URLs | **yes** | O | – | `config.py` validator | – | – | per deployment | Settings | health: `helius` |
 | `SOLANA_WATCHED_ADDRESSES` | data-solana | extra addresses for the generic event table | no | O | empty | `services/data-solana/app/main.py` | – | – | per deployment | – | raw getenv |
 | `MIGRATION_AMM_PROGRAM_IDS` | engine-solana-migration | generic AMM detector (ships without parsers) | no | O | empty | `services/engine-solana-migration/app/detect.py` | – | – | per deployment | – | raw getenv; not part of the Pump.fun path |
