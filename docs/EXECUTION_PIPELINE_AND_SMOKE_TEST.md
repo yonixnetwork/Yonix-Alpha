@@ -263,7 +263,54 @@ An unpriced snapshot records why it could not be priced.
 
 This is observation data only. The ML promotion process is unchanged, and nothing trains on it automatically.
 
-## 6. Security
+## 6. Migrated bonding curves (`decimal.DivisionUndefined`)
+
+**Symptom.** In production, the decision engine logged
+`candidate_evaluation_failed … [<class 'decimal.DivisionUndefined'>]`. The failure then repeated every 30 s for
+the same candidate.
+
+**Cause.** `BondingCurveState.price_sol` (`packages/core-py/yonixalpha_core/solana/pumpfun.py`) computed:
+
+```
+(virtual_quote_reserves / 1e9) / (virtual_token_reserves / 10^decimals)
+```
+
+When a coin migrates, pump.fun empties its bonding curve, so both reserves become 0. The official SDK reads
+`virtualTokenReserves == 0` as "migrated bonding curve". The result was 0 / 0, which Python's `decimal` raises as
+`InvalidOperation([DivisionUndefined])`.
+
+When the price is read in `assemble_fresh` (`solana/assembler.py`) for a fresh or momentum candidate, the RPC can
+already return the empty curve before the stream has recorded the PumpSwap pool. In that window the whole
+evaluation raised and rolled back. As a result, the candidate:
+
+- was never assessed;
+- was retried endlessly;
+- kept its slot in the active-candidate budget.
+
+**Fix.** The price is not faked.
+
+- `price_sol` returns `None` when either reserve is 0: the price is undefined, never 0 and never divided by 1.
+- The assembler records `curve_state = MIGRATED_ON_CHAIN` and the error "bonding curve has no reserves…".
+- It builds no execution model.
+- The existing gates then produce `PRICE_UNAVAILABLE` → `NO_TRADE`.
+- A later evaluation, once the pool is known, prices the coin from the pool as usual.
+
+No threshold was changed.
+
+**Any other failure is no longer invisible.** `services/decision-engine/app/diagnostics.py` records each failure:
+
+- a timeline event with the error type, file, function, line, the scalar inputs of that frame (credential-like
+  names excluded) and the attempt number;
+- a system event, which also goes to Telegram.
+
+After 5 consecutive failures, the candidate is REJECTED with `EVALUATION_FAILED xN: <type> at file:function:line`.
+
+Tests:
+
+- `packages/core-py/tests/test_migrated_curve_price.py`
+- `services/decision-engine/tests/test_evaluation_failures.py`
+
+## 7. Security
 
 - Private keys never leave the server. The APIs return the shortened public address, balances, positions, PnL and
   signatures only.

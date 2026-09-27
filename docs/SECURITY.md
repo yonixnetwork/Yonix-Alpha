@@ -194,6 +194,28 @@ by accident.
   an existing pinned dependency surfaces the next time CI runs against that
   commit, not just when someone remembers to check manually.
 
+### Secret scanning (gitleaks)
+
+CI runs `gitleaks detect --source . --verbose` over the full history on every push. It stays enabled.
+
+`.gitleaksignore` lists exact finding fingerprints (commit:file:rule:line), never paths or rules. Each entry has a
+comment saying why it isn't a secret. Current entries:
+
+| Fingerprint | What it is |
+|---|---|
+| `073e82e…:apps/api/tests/test_live_smoke_api.py:generic-api-key:78` | A public Solana program address, used as a sample public wallet address |
+| `68a1a5c…:packages/core-py/tests/test_provider_tests.py:generic-api-key:11` | The placeholder `HELIUSKEY123456789` |
+| `6ec4289…:packages/core-py/tests/test_pumpswap.py:generic-api-key:30` | The public PumpSwap pool authority from the pump.fun docs |
+
+A fingerprint only matches that line in that commit. The same string anywhere else, or a new secret on the same
+line, is still reported. Never add a real credential here. If gitleaks finds a real one, rotate it first. After that,
+remove it from history.
+
+### mt5-bridge dependencies
+
+`services/mt5-bridge/requirements.txt` pins `fastapi==0.141.1` / `starlette==1.6.0`, the same audited versions as
+`apps/api`. The older `starlette 0.41.3` had 14 `pip-audit` findings.
+
 ## 9. Server hardening
 
 `scripts/bootstrap-server.sh` (Phase 9, extended Phase 10):

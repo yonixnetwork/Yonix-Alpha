@@ -39,10 +39,16 @@ def env(**kw):
 
 
 def test_defaults_are_off_and_unarmable():
+    """The declared defaults, independent of whatever the test environment sets."""
     from yonixalpha_core.config import Settings
 
-    s = Settings(_env_file=None, DATABASE_URL="postgresql+asyncpg://x/y", REDIS_URL="redis://x", JWT_SECRET="x" * 40)
-    assert s.LIVE_SMOKE_TEST_ENABLED is False and s.LIVE_SMOKE_TEST_MAX_SOL is None
+    f = Settings.model_fields
+    assert f["LIVE_SMOKE_TEST_ENABLED"].default is False and f["LIVE_SMOKE_TEST_MAX_SOL"].default is None
+    s = SimpleNamespace(LIVE_SMOKE_TEST_ENABLED=f["LIVE_SMOKE_TEST_ENABLED"].default,
+                        LIVE_SMOKE_TEST_MAX_SOL=f["LIVE_SMOKE_TEST_MAX_SOL"].default,
+                        LIVE_SMOKE_TEST_MAX_TRADES=f["LIVE_SMOKE_TEST_MAX_TRADES"].default,
+                        TRADING_ENABLED=f["TRADING_ENABLED"].default, LIVE_TRADING_ENABLED=f["LIVE_TRADING_ENABLED"].default,
+                        PAPER_TRADING=f["PAPER_TRADING"].default)
     problems = live_smoke.config_status(s)["problems"]
     assert any("ENABLED is false" in p for p in problems) and any("MAX_SOL is not set" in p for p in problems)
 

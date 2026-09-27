@@ -8,6 +8,7 @@ from websockets.exceptions import ConnectionClosed
 
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.redact import redact_text, redact_url
+from yonixalpha_core.notify import alert_error
 
 log = get_logger("data-solana.ws")
 
@@ -62,6 +63,8 @@ class SolanaWsClient:
                 raise
             except Exception as exc:  # noqa: BLE001 - keep the reconnect loop alive on any unexpected error
                 log.error("ws.unexpected_error", url=redact_url(url), error=redact_text(str(exc), [url]))
+                await alert_error("solana-ws", "ws.unexpected_error",
+                                  {"url": redact_url(url), "error": redact_text(f"{type(exc).__name__}: {exc}", [url])})
 
             if stop_event.is_set():
                 break

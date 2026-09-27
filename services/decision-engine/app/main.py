@@ -19,6 +19,7 @@ from yonixalpha_core.solana.rpc import RpcManager
 from yonixalpha_core.venues.registry import build_venues
 from yonixalpha_core.state_machine import CandidateState
 
+from app import diagnostics
 from app.evaluate import evaluate_candidate
 from app.futures_eval import run_all as run_futures
 from app.gate_eval import evaluate_with_gate, is_gate_candidate
@@ -71,12 +72,17 @@ async def _evaluation_loop(session_factory, redis, settings, stop_event: asyncio
                             await evaluate_with_gate(session, redis, settings, sources, candidate, datetime.now(timezone.utc))
                         else:
                             await evaluate_candidate(session, redis, settings, candidate, datetime.now(timezone.utc))
+                    await diagnostics.clear_failures(redis, candidate_id)
                     evaluated += 1
                 except Exception as exc:  # noqa: BLE001
-                    log.error("evaluate.candidate_failed", candidate_id=str(candidate_id), error=str(exc))
-                    await _record_system_event(
-                        session_factory, "candidate_evaluation_failed", "error", {"candidate_id": str(candidate_id), "error": str(exc)}
-                    )
+                    try:
+                        detail = await diagnostics.record_failure(session_factory, redis, candidate_id, exc,
+                                                                  datetime.now(timezone.utc))
+                    except Exception as rec_exc:  # noqa: BLE001 - the alert below must still go out
+                        detail = {"candidate_id": str(candidate_id), "error_type": diagnostics.error_type(exc),
+                                  "error": str(exc)[:300], "diagnostics_failed": str(rec_exc)[:200]}
+                    log.error("evaluate.candidate_failed", **{k: str(v) for k, v in detail.items()})
+                    await _record_system_event(session_factory, "candidate_evaluation_failed", "error", detail)
 
             if evaluated:
                 log.info("evaluation_loop.completed", count=evaluated)

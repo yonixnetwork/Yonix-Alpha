@@ -1,4 +1,6 @@
--e .[ml]
+# [hyperliquid]: the Hyperliquid provider tests sign real orders with the
+# official SDK (tests/test_execution_providers.py); without it they fail.
+-e .[ml,hyperliquid]
 pytest==8.3.4
 pytest-asyncio==0.25.0
 ruff==0.8.4

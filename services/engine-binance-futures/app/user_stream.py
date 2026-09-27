@@ -7,6 +7,7 @@ import websockets
 from websockets.exceptions import ConnectionClosed
 
 from yonixalpha_core.logging import get_logger
+from yonixalpha_core.notify import alert_error
 
 log = get_logger("engine-binance-futures.user_stream")
 
@@ -76,6 +77,7 @@ class UserDataStreamClient:
                     listen_key = await self._ensure_listen_key()
                 except Exception as exc:  # noqa: BLE001
                     log.error("user_stream.listen_key_creation_failed", error=str(exc))
+                    await alert_error("engine-binance-futures", "user_stream.listen_key_creation_failed", {"error": str(exc)})
                     await self._sleep_backoff(stop_event, backoff)
                     backoff = min(backoff * 2, self.max_backoff_seconds)
                     continue
@@ -104,6 +106,8 @@ class UserDataStreamClient:
                     raise
                 except Exception as exc:  # noqa: BLE001
                     log.error("user_stream.unexpected_error", error=str(exc))
+                    await alert_error("engine-binance-futures", "user_stream.unexpected_error",
+                                      {"error": f"{type(exc).__name__}: {exc}"})
 
                 if stop_event.is_set():
                     break

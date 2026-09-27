@@ -5,6 +5,7 @@ import httpx
 from yonixalpha_core.logging import get_logger
 
 from app.auth import build_signed_query
+from yonixalpha_core.notify import alert_error
 
 log = get_logger("engine-binance-futures.client")
 
@@ -43,9 +44,12 @@ class BinanceFuturesClient:
             response = await self._client.request(method, url, headers=headers, timeout=10.0)
         except httpx.HTTPError as exc:
             log.error("client.request_failed", method=method, url=url, error=str(exc))
+            await alert_error("engine-binance-futures", "client.request_failed", {"method": method, "url": url, "error": str(exc)})
             raise BinanceApiError(0, str(exc)) from exc
         if response.status_code >= 400:
             log.error("client.error_response", method=method, url=url, status=response.status_code, body=response.text)
+            await alert_error("engine-binance-futures", "client.error_response",
+                              {"method": method, "url": url, "status": response.status_code, "body": response.text[:300]})
             raise BinanceApiError(response.status_code, response.text)
         return response.json()
 

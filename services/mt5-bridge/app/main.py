@@ -269,6 +269,9 @@ def create_app(mt5=None, env: dict[str, str] | None = None) -> FastAPI:
         raise RuntimeError(f"MT5 login failed: {err}")
     bridge = Bridge(mt5, int(env.get("MT5_BRIDGE_MAGIC", "20260925")), Path(env.get("MT5_BRIDGE_STATE_PATH", "mt5_bridge_state.json")))
     app = FastAPI(title="YonixAlpha MT5 bridge", docs_url=None, redoc_url=None, openapi_url=None)
+    # Which terminal answers: only the official MetaTrader5 package is a real
+    # connection; anything injected (the tests' in-memory stand-in) says so.
+    backend = "REAL_MT5_CONNECTION" if getattr(mt5, "__name__", "") == "MetaTrader5" else "MOCK_TEST_SUCCESS"
 
     def auth(authorization: str = Header(default="")) -> None:
         given = authorization.removeprefix("Bearer ").strip()
@@ -281,7 +284,8 @@ def create_app(mt5=None, env: dict[str, str] | None = None) -> FastAPI:
     def health():
         term = mt5.terminal_info()
         acc = mt5.account_info()
-        return {"connected": bool(term and term.connected and acc), "trade_allowed": bool(term and term.trade_allowed),
+        return {"backend": backend, "connected": bool(term and term.connected and acc),
+                "trade_allowed": bool(term and term.trade_allowed),
                 "account_currency": acc.currency if acc else None, "server": acc.server if acc else None,
                 "time": datetime.now(timezone.utc).isoformat()}
 

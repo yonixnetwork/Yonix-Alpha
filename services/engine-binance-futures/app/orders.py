@@ -10,6 +10,7 @@ from yonixalpha_core.db.models import Order
 from yonixalpha_core.logging import get_logger
 
 from app.client import BinanceApiError, BinanceFuturesClient
+from yonixalpha_core.notify import alert_error
 
 log = get_logger("engine-binance-futures.orders")
 
@@ -122,6 +123,7 @@ async def place_order_idempotent(
         response = await client.place_order(**params)
     except Exception as exc:  # noqa: BLE001 - any failure here leaves the order for reconciliation, never re-submitted
         log.error("orders.submit_failed", client_order_id=client_order_id, error=str(exc))
+        await alert_error("engine-binance-futures", "orders.submit_failed", {"client_order_id": client_order_id, "error": str(exc)})
         order.status = "submit_failed"
         await session.commit()
         return order
@@ -170,6 +172,9 @@ async def reconcile_pending_orders(session: AsyncSession, client: BinanceFutures
                 status=order.status,
                 created_at=str(created_at),
             )
+            await alert_error("engine-binance-futures", "orders.reconcile_stuck",
+                              {"client_order_id": order.client_order_id, "symbol": order.symbol, "status": order.status,
+                               "created_at": str(created_at)})
 
         try:
             response = await client.get_order(order.symbol, orig_client_order_id=order.client_order_id)

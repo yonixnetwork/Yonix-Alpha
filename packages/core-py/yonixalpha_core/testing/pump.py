@@ -84,6 +84,13 @@ class Curve:
         return (Decimal(self.vsol) / Decimal(10**9)) / (Decimal(self.vtok) / Decimal(10) ** decimals)
 
 
+def migrated_curve_account() -> bytes:
+    """A bonding curve after `migrate`: complete, every reserve zero (the
+    official SDK treats virtual_token_reserves == 0 as "migrated bonding
+    curve"). Its price is undefined (0/0), not zero."""
+    return (BONDING_CURVE_ACCOUNT + u64(0) + u64(0) + u64(0) + u64(0) + u64(SUPPLY) + b(True) + pk(CREATOR))
+
+
 def logs_of(*events: bytes) -> list[str]:
     return ["Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P invoke [1]"] + [
         "Program data: " + base64.b64encode(e).decode() for e in events
@@ -108,7 +115,7 @@ def program_accounts(creator_tokens: int, current_curve: str | None = CURVE, mig
 class FakeRpc:
     def __init__(self, curve: Curve, mint_authority: str | None = None, fail: set[str] | frozenset = frozenset(),
                  funders: dict[str, str] | None = None, busy: set[str] | frozenset = frozenset(),
-                 creator_tokens: int = 12):
+                 creator_tokens: int = 12, curve_account: bytes | None = None):
         """`funders` maps a buyer wallet to the wallet that funded it (the
         buyer then looks fresh); funders have a short history unless listed
         in `busy` (an exchange-like wallet); every other wallet has a long
@@ -117,6 +124,9 @@ class FakeRpc:
         self.funders, self.busy = funders or {}, set(busy)
         # Pump.fun tokens created by the creator wallet (getProgramAccounts).
         self.creator_tokens = creator_tokens
+        # Raw bonding-curve account to serve instead of the live curve's
+        # (e.g. migrated_curve_account()).
+        self.curve_account = curve_account
 
     async def call(self, method, params=None):
         self.calls.append(method)
@@ -126,7 +136,8 @@ class FakeRpc:
             info = {"mintAuthority": self.mint_authority, "freezeAuthority": None, "decimals": 6, "supply": str(SUPPLY)}
             return {"value": {"owner": TOKEN_2022, "data": {"parsed": {"type": "mint", "info": info}}}}
         if method == "getAccountInfo":
-            return {"value": {"data": [base64.b64encode(self.curve.account()).decode(), "base64"]}}
+            raw = self.curve_account if self.curve_account is not None else self.curve.account()
+            return {"value": {"data": [base64.b64encode(raw).decode(), "base64"]}}
         if method == "getProgramAccounts":
             return program_accounts(self.creator_tokens)
         if method == "getTokenLargestAccounts":

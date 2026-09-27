@@ -1,8 +1,11 @@
+import re
+import time
+
 import httpx
 
 from yonixalpha_core.config import Settings
 from yonixalpha_core.logging import get_logger
-from yonixalpha_core.redact import redact_text
+from yonixalpha_core.redact import redact_text, redact_url
 
 log = get_logger("core.notify")
 
@@ -46,3 +49,42 @@ async def send_telegram_alert(settings: Settings, text: str, client: httpx.Async
 
     log.info("telegram.alert.sent")
     return True
+
+
+ALERT_THROTTLE_SECONDS = 300
+_URL = re.compile(r"(?:https?|wss?)://[^\s'\"<>]+")
+_last_sent: dict[str, float] = {}
+_suppressed: dict[str, int] = {}
+
+
+def scrub(text: str) -> str:
+    """Every URL in `text` reduced to scheme://host (keys often live in URLs
+    and query strings, e.g. RPC api-key or a signed request's signature)."""
+    return _URL.sub(lambda m: redact_url(m.group(0)), text)
+
+
+async def alert_error(service: str, event: str, detail: dict | str | None = None, settings: Settings | None = None,
+                      now: float | None = None) -> bool:
+    """Sends an error to Telegram. The same (service, event) is sent at most
+    once per ALERT_THROTTLE_SECONDS, so a failure repeating in a loop cannot
+    flood the chat; the next message says how many were suppressed meanwhile.
+    Returns whether a message was sent. Never raises."""
+    try:
+        from yonixalpha_core.config import get_settings
+
+        settings = settings or get_settings()
+        key = f"{service}:{event}"
+        t = time.monotonic() if now is None else now
+        last = _last_sent.get(key)
+        if last is not None and t - last < ALERT_THROTTLE_SECONDS:
+            _suppressed[key] = _suppressed.get(key, 0) + 1
+            return False
+        _last_sent[key] = t
+        more = _suppressed.pop(key, 0)
+        body = scrub(str(detail))[:1500] if detail else ""
+        text = f"⚠️ [{service}] ERROR: {event}" + (f"\n{body}" if body else "") + (
+            f"\n(+{more} more of the same in the last {ALERT_THROTTLE_SECONDS // 60} min)" if more else "")
+        return await send_telegram_alert(settings, text)
+    except Exception as exc:  # noqa: BLE001 - alerting must never take a service down
+        log.warning("telegram.alert_error_failed", error=type(exc).__name__)
+        return False

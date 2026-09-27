@@ -1,0 +1,10 @@
+# Exact gitleaks findings reviewed and confirmed NOT secrets (commit:file:rule:line).
+# Only these three lines are excused; the scanner stays on for everything else,
+# including any new commit that touches these files. See docs/SECURITY.md §8.
+#
+# Public Solana program address used as a sample PUBLIC wallet address in a test.
+073e82ea9d4bb039cf39c17e497f071b16c330f7:apps/api/tests/test_live_smoke_api.py:generic-api-key:78
+# Obvious placeholder ("HELIUSKEY123456789") in a provider-test fixture; no such key exists.
+68a1a5c719a8f646d19866fa72fb3721b1fad142:packages/core-py/tests/test_provider_tests.py:generic-api-key:11
+# Public PumpSwap pool authority copied from pump.fun's official docs (PUMP_SWAP_README.md).
+6ec428974ba0f39066cc17b2b9e190ade824f524:packages/core-py/tests/test_pumpswap.py:generic-api-key:30

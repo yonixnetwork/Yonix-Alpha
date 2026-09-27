@@ -41,6 +41,8 @@ async def test_every_endpoint_requires_the_token(app):
     assert (await c.get("/docs")).status_code == 404  # no public API docs
     body = (await c.get("/health", headers={"Authorization": f"Bearer {TOKEN}"})).json()
     assert body["connected"] and "123" not in str(body) and "pw" not in str(body)  # credentials never returned
+    # A test against the stand-in is never reported as a real terminal.
+    assert body["backend"] == "MOCK_TEST_SUCCESS"
 
 
 async def test_full_trade_through_the_provider(app):

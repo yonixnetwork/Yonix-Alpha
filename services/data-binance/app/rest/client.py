@@ -1,6 +1,7 @@
 import httpx
 
 from yonixalpha_core.logging import get_logger
+from yonixalpha_core.notify import alert_error
 
 log = get_logger("data-binance.rest")
 
@@ -39,6 +40,7 @@ class BinanceMarketDataClient:
             return response.json()
         except httpx.HTTPError as exc:
             log.error("rest.request_failed", url=url, error=str(exc))
+            await alert_error("data-binance", "rest.request_failed", {"url": url, "error": str(exc)})
             raise BinanceRestError(f"GET {path} failed: {exc}") from exc
 
     async def ping(self) -> bool:

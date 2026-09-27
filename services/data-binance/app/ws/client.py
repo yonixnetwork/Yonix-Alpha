@@ -7,6 +7,7 @@ import websockets
 from websockets.exceptions import ConnectionClosed
 
 from yonixalpha_core.logging import get_logger
+from yonixalpha_core.notify import alert_error
 
 log = get_logger("data-binance.ws")
 
@@ -61,6 +62,7 @@ class BinanceWsClient:
                 raise
             except Exception as exc:  # noqa: BLE001 - keep the reconnect loop alive on any unexpected error
                 log.error("ws.unexpected_error", url=self.url, error=str(exc))
+                await alert_error("data-binance", "ws.unexpected_error", {"url": self.url, "error": f"{type(exc).__name__}: {exc}"})
 
             if stop_event.is_set():
                 break

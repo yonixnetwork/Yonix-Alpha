@@ -306,7 +306,15 @@ async def assemble_fresh(src: Sources, mint: str, now: datetime, c: Controls,
             migrated=bool(stream_curve and stream_curve.pool),
             curve_progress=_curve_progress(curve.real_token_reserves, meta),
         )
-        if fee_bps is not None and not curve.complete:
+        if not curve.has_reserves:
+            # Migrated on chain (`migrate` empties the curve) before the stream
+            # recorded the pool: there is no curve price (0/0) and nothing to
+            # simulate. PRICE_UNAVAILABLE blocks; once the stream sees the
+            # pool the migration engine evaluates the token with pool rules.
+            ev["errors"].append("bonding curve has no reserves (complete and migrated on chain): curve price undefined; "
+                                "waiting for the PumpSwap pool")
+            ev["curve_state"] = "MIGRATED_ON_CHAIN"
+        elif fee_bps is not None and not curve.complete:
             inp.liquidity_model = curve.model(decimals, fee_bps)
         elif fee_bps is None:
             ev["errors"].append("fee rate unknown (no trade event seen yet) — curve execution cannot be simulated")

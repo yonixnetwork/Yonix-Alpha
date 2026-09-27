@@ -25,6 +25,7 @@ from yonixalpha_core.safety.store import live_trading_permitted
 from yonixalpha_core.solana.live_exec import ExecOutcome, SolanaLiveExecutor
 from yonixalpha_core.solana.pumpportal import PumpPortalClient
 from yonixalpha_core.solana.wallet import WalletError, load_wallet
+from yonixalpha_core.notify import alert_error
 
 log = get_logger("paper-trading.live")
 
@@ -101,6 +102,7 @@ async def live_worker_loop(session_factory, redis, app_settings, rpc, http_clien
                         log.info("live.order_processed", order_id=str(order_id), status=status)
         except Exception as exc:  # noqa: BLE001 - the worker must keep running; the error is reported
             log.error("live.worker_failed", error=f"{type(exc).__name__}: {exc}")
+            await alert_error("paper-trading", "live.worker_failed", {"error": f"{type(exc).__name__}: {exc}"})
             await _publish(redis, "error", f"{type(exc).__name__}")
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=POLL_SECONDS)

@@ -162,8 +162,18 @@ class BondingCurveState:
     def sol_quoted(self) -> bool:
         return self.quote_mint is None or self.quote_mint in (DEFAULT_PUBKEY, WSOL_MINT)
 
-    def price_sol(self, decimals: int) -> Decimal:
-        """SOL per whole token at the curve's current marginal price."""
+    @property
+    def has_reserves(self) -> bool:
+        """False for a migrated curve: `migrate` empties it, and the official
+        SDK reads virtual_token_reserves == 0 as "migrated bonding curve"."""
+        return self.virtual_token_reserves > 0 and self.virtual_quote_reserves > 0
+
+    def price_sol(self, decimals: int) -> Decimal | None:
+        """SOL per whole token at the curve's current marginal price; None
+        when the curve has no reserves (migrated): the price is undefined
+        (0/0), never zero."""
+        if not self.has_reserves:
+            return None
         return (Decimal(self.virtual_quote_reserves) / LAMPORTS_PER_SOL) / (
             Decimal(self.virtual_token_reserves) / Decimal(10) ** decimals
         )

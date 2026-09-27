@@ -1,5 +1,8 @@
 # Runs on the WINDOWS host next to the MetaTrader 5 terminal, not in the
 # YonixAlpha Docker stack. MetaTrader5 is Windows-only (official package).
-fastapi==0.115.6
+# Same audited pins as apps/api: every starlette < 1.3.1 has open advisories
+# (pip-audit PYSEC-2026-161/248/249/1941/1942/2280/2281).
+fastapi==0.141.1
+starlette==1.6.0
 uvicorn==0.34.0
 MetaTrader5==5.0.6180; sys_platform == "win32"

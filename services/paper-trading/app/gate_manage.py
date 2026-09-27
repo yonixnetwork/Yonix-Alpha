@@ -43,6 +43,7 @@ from yonixalpha_core.solana.assembler import fetch_holders
 from yonixalpha_core.solana.market_data import JupiterClient
 from yonixalpha_core.solana.pumpfun import WSOL_MINT
 from yonixalpha_core.venues.common import VenueError
+from yonixalpha_core.notify import alert_error
 
 log = get_logger("paper-trading.gate_manage")
 
@@ -311,6 +312,8 @@ async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterC
         except Exception as exc:  # noqa: BLE001
             counts["failed"] = counts.get("failed", 0) + 1
             log.error("gate_manage.position_failed", position_id=str(pid), error=str(exc))
+            await alert_error("paper-trading", "gate_manage.position_failed",
+                              {"position_id": str(pid), "error": f"{type(exc).__name__}: {exc}"})
     return counts
 
 
