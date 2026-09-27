@@ -158,14 +158,18 @@ async def _add(s, name, url, priority, enabled=True, rps=None):
 
 async def test_effective_list_merges_env_and_dashboard_by_priority(session_factory):
     async with session_factory() as s:
-        await _add(s, "alchemy", "https://alchemy.example/v2/K1", 150)
-        await _add(s, "chainstack", "https://chainstack.example/K2", 50)
+        await _add(s, "alchemy", "https://alchemy.example/v2/ALCHEMY-SECRET-KEY-1", 150)
+        await _add(s, "chainstack", "https://chainstack.example/CHAINSTACK-SECRET-KEY-2", 50)
         await _add(s, "off", "https://off.example/K3", 10, enabled=False)
         await s.commit()
         labels = [r["label"] for r in await rpc_registry.effective_rpc(s, SETTINGS)]
         assert labels == ["db:chainstack", "env:primary", "db:alchemy"]
         raw = (await s.execute(select(RpcProvider.rpc_url_enc))).scalars().all()
-        assert all("K1" not in r and "K2" not in r for r in raw)  # encrypted at rest
+        # Encrypted at rest. (Long markers: a 2-character one can occur by chance
+        # in random base64 ciphertext and made this check flaky.)
+        assert all("ALCHEMY-SECRET" not in r and "CHAINSTACK-SECRET" not in r for r in raw)
+        assert sorted(secretbox.decrypt(SETTINGS, r) for r in raw)[:2] == [
+            "https://alchemy.example/v2/ALCHEMY-SECRET-KEY-1", "https://chainstack.example/CHAINSTACK-SECRET-KEY-2"]
         # The dashboard disables / reorders the .env endpoint (URL stays in .env).
         from sqlalchemy.dialects.postgresql import insert
         from yonixalpha_core.db.models import PlatformSetting
