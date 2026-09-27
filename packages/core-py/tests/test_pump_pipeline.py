@@ -34,6 +34,7 @@ from yonixalpha_core.testing.pump import (  # noqa: E402
     CREATOR,
     CURVE,
     MINT,
+    Curve,
     FakeRpc,
     b,
     empty_account,
@@ -92,6 +93,19 @@ async def test_stream_ingest_decodes_and_counts(redis):
     assert await pump_stream.mark_promoted(redis, MINT, NOW)
     assert not await pump_stream.mark_promoted(redis, MINT, NOW)
     assert await pump_stream.recent_unpromoted(redis, NOW, 3600) == []
+
+
+async def test_a_zero_fee_event_never_makes_the_curve_look_free(redis):
+    """A trade reporting 0 total fee keeps the last real rate; with no real
+    rate ever seen the fee stays unknown, so the gate can't simulate (and
+    blocks) instead of planning without fees."""
+    c = Curve()
+    await pump_stream.ingest_logs(redis, logs_of(c.trade(wallet(1), NOW, 10**8, True, protocol_bps=0, creator_bps=0)), None, NOW)
+    assert (await pump_stream.load_curve(redis, MINT)).fee_bps is None
+    await pump_stream.ingest_logs(redis, logs_of(c.trade(wallet(2), NOW, 10**8, True)), None, NOW)
+    await pump_stream.ingest_logs(redis, logs_of(c.trade(wallet(3), NOW, 10**8, True, protocol_bps=0, creator_bps=0)), None, NOW)
+    curve = await pump_stream.load_curve(redis, MINT)
+    assert curve.fee_bps == 125 and curve.vsol == c.vsol  # reserves still follow every trade
 
 
 async def test_non_sol_quoted_events_are_skipped(redis):

@@ -123,6 +123,15 @@ Stream curves pick up the corrected fee on the token's next trade.
 - `test_full_trade_event_decodes_every_field_through_quote_mint` (buyback 5000 gives 125);
 - `test_stream_ingest_decodes_and_counts` (the fixture carries buyback 5000).
 
+**Verified in production.** The new code started at 02:04 UTC. In the next 30 minutes there were zero
+`STOP_INSIDE_COSTS`, against 14 tokens in the hour before. The first executable decision followed: a Momentum PAPER
+position.
+
+**Follow-up: a reported fee of 0.** Redis held 4 curves with `fee_bps = 0`. No SOL curve fee tier charges nothing,
+and a 0 would drop fees from every cost estimate. The stream now treats a 0 as unknown: it keeps the last real rate,
+and with none the curve can't be simulated, so the gate blocks. Test:
+`test_a_zero_fee_event_never_makes_the_curve_look_free`.
+
 ## 5. Why zero buys? How the question is now answered with data
 
 The decision logic was **not** changed. Instead, every stage is now counted from the database:

@@ -58,7 +58,7 @@ class Curve:
         self.mint = mint
         self.vsol, self.vtok = VIRTUAL_SOL0, VIRTUAL_TOKEN0
 
-    def trade(self, user: str, ts: datetime, sol: int, is_buy: bool) -> bytes:
+    def trade(self, user: str, ts: datetime, sol: int, is_buy: bool, protocol_bps: int = 95, creator_bps: int = 30) -> bytes:
         if is_buy:
             tokens = self.vtok * sol // (self.vsol + sol)
             self.vsol += sol
@@ -69,7 +69,7 @@ class Curve:
             self.vtok += tokens
         body = pk(self.mint) + u64(sol) + u64(tokens) + b(is_buy) + pk(user) + i64(int(ts.timestamp()))
         body += u64(self.vsol) + u64(self.vtok) + u64(self.vsol - VIRTUAL_SOL0) + u64(self.vtok - REAL_TOKEN_OFFSET)
-        body += pk(CREATOR) + u64(95) + u64(0) + pk(CREATOR) + u64(30) + u64(0)
+        body += pk(CREATOR) + u64(protocol_bps) + u64(0) + pk(CREATOR) + u64(creator_bps) + u64(0)
         body += b(False) + u64(0) + u64(0) + u64(0) + i64(0) + s("buy" if is_buy else "sell") + b(False)
         # cashback 0; buyback 5000 bps as production reports it (a split of the
         # protocol fee, not a trader charge).

@@ -139,8 +139,12 @@ async def ingest_logs(redis: Redis, logs: list[str], signature: str | None, rece
             if "real_sol_reserves" in f:
                 curve["rsol"] = f["real_sol_reserves"]
                 curve["rtok"] = f["real_token_reserves"]
+            # A reported total of 0 is treated as unknown, never as free: no
+            # SOL curve fee tier charges nothing, and a 0 would drop the fee
+            # from every cost estimate. The last real rate is kept; with none,
+            # the curve can't be simulated and the gate blocks.
             fee = total_fee_bps(f)
-            if fee is not None:
+            if fee:
                 curve["fee_bps"] = fee
             pipe.hset(curve_key(mint), mapping=curve)
             pipe.expire(curve_key(mint), CURVE_TTL)
