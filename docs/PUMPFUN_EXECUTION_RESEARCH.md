@@ -94,6 +94,35 @@ Any failed live buy rejected the candidate.
 
 Tests: Scenario D (`test_unfilled_buy_never_opens_a_position`, `test_second_buy_failure_rejects_and_never_duplicates`).
 
+### 4.4 The curve fee was read as 51.25% per side (every fresh buy blocked)
+
+**Found by the production funnel.** `--code STOP_INSIDE_COSTS` showed `curve.fee_bps = 5125` and round-trip costs of
+about 105%: entry 51.27% and exit 54.27%.
+
+**Cause.** `solana.pumpfun.total_fee_bps` summed three fields of the TradeEvent:
+
+- `fee_basis_points` (95);
+- `creator_fee_basis_points` (30);
+- `buyback_fee_basis_points` (5000).
+
+**Evidence that buyback is not a trader charge:**
+
+- The IDL defines `Global.buyback_basis_points`, which is capped at 10 000 (`BuybackBasisPointsOutOfRange`). It is the
+  share of the protocol fee routed to a buyback recipient, not a charge on the trade.
+- The official SDK (`@pump-fun/pump-sdk` 2.0.0, `fees.ts` `getFee`) charges a trader `protocolFeeBps + creatorFeeBps`
+  and nothing else.
+
+**Fix.** The curve fee is now protocol + creator, the same as the SDK (125 bps per side today). PumpSwap was not
+affected: it already derives the fee from the event's own amounts.
+
+**Effect.** This is not a safety change. It corrects an input that overstated every trade's cost about 40 times.
+Stream curves pick up the corrected fee on the token's next trade.
+
+**Tests:**
+
+- `test_full_trade_event_decodes_every_field_through_quote_mint` (buyback 5000 gives 125);
+- `test_stream_ingest_decodes_and_counts` (the fixture carries buyback 5000).
+
 ## 5. Why zero buys? How the question is now answered with data
 
 The decision logic was **not** changed. Instead, every stage is now counted from the database:

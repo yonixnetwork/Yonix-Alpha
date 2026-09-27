@@ -85,7 +85,7 @@ async def test_stream_ingest_decodes_and_counts(redis):
     meta = await pump_stream.load_meta(redis, MINT)
     assert meta["symbol"] == "PIPE" and meta["bonding_curve"] == CURVE and meta["creator"] == CREATOR
     curve = await pump_stream.load_curve(redis, MINT)
-    assert curve.fee_bps == 130 and not curve.complete
+    assert curve.fee_bps == 125 and not curve.complete  # protocol 95 + creator 30; buyback 5000 is a split
     trades = await pump_stream.load_trades(redis, MINT)
     assert len(trades) == 40 and trades[0].at < trades[-1].at
     assert await pump_stream.recent_unpromoted(redis, NOW, 3600) == [(MINT, int((NOW - timedelta(minutes=20)).timestamp()))]

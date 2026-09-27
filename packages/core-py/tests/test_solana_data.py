@@ -54,7 +54,9 @@ def trade_event(is_buy=True, sol=1_000_000_000, tokens=35_000_000_000_000, user=
     if full:
         body += pk(USER) + u64(95) + u64(9_500_000) + pk(USER) + u64(30) + u64(3_000_000)
         body += b(False) + u64(0) + u64(0) + u64(0) + i64(0) + s("buy") + b(False)
-        body += u64(0) + u64(0) + u64(5) + u64(500_000)  # cashback, buyback
+        # cashback, then buyback: 5000 bps is the production value (half of
+        # the protocol fee goes to buyback), not a 50% charge on the trade.
+        body += u64(0) + u64(0) + u64(5000) + u64(4_750_000)
         body += struct.pack("<I", 1) + pk(USER) + struct.pack("<H", 10000)  # shareholders
         body += pk(quote_mint or DEFAULT_PUBKEY)
     return pumpfun.TRADE_EVENT + body
@@ -98,7 +100,10 @@ def test_full_trade_event_decodes_every_field_through_quote_mint():
     assert kind == "trade"
     assert f["mint"] == MINT and f["user"] == USER and f["is_buy"] is True
     assert f["sol_amount"] == 1_000_000_000
-    assert pumpfun.total_fee_bps(f) == 95 + 30 + 5
+    assert f["buyback_fee_basis_points"] == 5000
+    # Protocol + creator, as the official SDK's getFee; buyback is a split of
+    # the protocol fee (regression: 5125 bps made every round trip ~105%).
+    assert pumpfun.total_fee_bps(f) == 95 + 30
     assert pumpfun.is_sol_quoted(f)
     assert f["shareholders"][0]["share_bps"] == 10000
 

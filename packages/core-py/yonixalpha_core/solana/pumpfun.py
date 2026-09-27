@@ -136,13 +136,15 @@ def is_sol_quoted(fields: dict[str, Any]) -> bool:
 
 def total_fee_bps(trade: dict[str, Any]) -> int | None:
     """Every fee a trader pays on the SOL leg of a trade, per the event's own
-    bps fields. Cashback is ignored (a rebate, and deprecated), which keeps
-    the estimate on the conservative side."""
+    bps fields: protocol + creator, exactly as the official SDK's getFee
+    (@pump-fun/pump-sdk fees.ts). buyback_fee_basis_points is NOT added: it
+    is Global.buyback_basis_points (<= 10_000), the share of the protocol
+    fee routed to the buyback recipient, not a charge on the trade — adding
+    it read a 5000 split as a 50% fee. Cashback is ignored (a rebate, and
+    deprecated), which keeps the estimate on the conservative side."""
     if "fee_basis_points" not in trade:
         return None
-    return int(trade.get("fee_basis_points", 0)) + int(trade.get("creator_fee_basis_points", 0)) + int(
-        trade.get("buyback_fee_basis_points", 0)
-    )
+    return int(trade.get("fee_basis_points", 0)) + int(trade.get("creator_fee_basis_points", 0))
 
 
 @dataclass(frozen=True)

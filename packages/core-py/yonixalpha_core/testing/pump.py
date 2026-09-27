@@ -71,7 +71,9 @@ class Curve:
         body += u64(self.vsol) + u64(self.vtok) + u64(self.vsol - VIRTUAL_SOL0) + u64(self.vtok - REAL_TOKEN_OFFSET)
         body += pk(CREATOR) + u64(95) + u64(0) + pk(CREATOR) + u64(30) + u64(0)
         body += b(False) + u64(0) + u64(0) + u64(0) + i64(0) + s("buy" if is_buy else "sell") + b(False)
-        body += u64(0) + u64(0) + u64(5) + u64(0) + struct.pack("<I", 0) + pk(DEFAULT_PUBKEY)
+        # cashback 0; buyback 5000 bps as production reports it (a split of the
+        # protocol fee, not a trader charge).
+        body += u64(0) + u64(0) + u64(5000) + u64(0) + struct.pack("<I", 0) + pk(DEFAULT_PUBKEY)
         return TRADE_EVENT + body
 
     def account(self, complete: bool = False) -> bytes:
