@@ -276,6 +276,13 @@ async def after_entry(session: AsyncSession, redis: Redis | None, app_settings: 
         "size": str(a.plan.position_size.value), "entry": str(position.entry_price),
     }, "paper")
     await events.publish(redis, "balance.updated", {"account_id": str(position.account_id)}, "paper")
-    await events.notify(session, redis, app_settings, "entry", f"Paper entry: {a.symbol} {position.side}",
-                        f"size {a.plan.position_size.value}, stop {a.plan.stop_loss.value}", "info",
-                        {"position_id": str(position.id)})
+    if getattr(position, "execution_mode", None) == "LIVE":
+        # Only the order exists yet: the wallet signs and sends it next, and a
+        # separate message reports the fill or the failure.
+        title = f"LIVE BUY submitted: {a.symbol}"
+        body = (f"size {a.plan.position_size.value:.6f} SOL, stop {a.plan.stop_loss.value} — real order, waiting to be "
+                "signed and confirmed")
+    else:
+        title = f"Paper entry: {a.symbol} {position.side}"
+        body = f"size {a.plan.position_size.value}, stop {a.plan.stop_loss.value}"
+    await events.notify(session, redis, app_settings, "entry", title, body, "info", {"position_id": str(position.id)})
