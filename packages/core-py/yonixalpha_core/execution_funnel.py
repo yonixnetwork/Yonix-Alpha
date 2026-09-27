@@ -108,6 +108,15 @@ def _stage_of(tok: dict[str, Any]) -> str:
     return stage
 
 
+def _execution_trail(order: dict[str, Any]) -> dict[str, Any] | None:
+    res = order.get("result") or {}
+    if not res.get("stages"):
+        return None
+    return {"venue": (res.get("venue") or {}).get("venue"), "venue_reason": (res.get("venue") or {}).get("reason"),
+            "provider": res.get("provider"), "stage": res.get("stage"),
+            "stages": [s.get("stage") for s in res["stages"]], "error": (res.get("error") or "")[:300] or None}
+
+
 def _final_blocker(tok: dict[str, Any]) -> dict[str, Any] | None:
     """Exactly why the token stopped where it did, from its own records."""
     stage = tok["stage"]
@@ -218,6 +227,9 @@ async def pipeline(session: AsyncSession, since: datetime, engines: tuple[str, .
             "sell_confirmed": any(x["status"] == "closed" for x in paper) or any(o["status"] == "CONFIRMED" for o in sells),
             "position_closed": any(x["status"] == "closed" for x in pos),
             "order_status": buys[-1]["status"] if buys else None,
+            # PROMOTE -> ... -> BUY: what the executor did with the latest BUY
+            # order, stage by stage (venue, provider, build, guard, sign, submit, confirm, fill).
+            "execution": _execution_trail(buys[-1]) if buys else None,
         }
         failed = [o for o in buys if o["status"] in ("FAILED", "EXPIRED", "CANCELLED")]
         if failed and not tok["buy_confirmed"]:

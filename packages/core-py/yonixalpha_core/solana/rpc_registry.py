@@ -139,7 +139,8 @@ def make_reloaders(service: str, rpc, settings: Any, session_factory, redis: Red
 def rpc_status(rpc) -> dict:
     """For the watcher's acknowledgement: live endpoint health, no URLs."""
     snap = rpc.health_snapshot()
-    return {"active": rpc.active_label, "endpoints": snap}
+    methods = rpc.method_snapshot() if hasattr(rpc, "method_snapshot") else []
+    return {"active": rpc.active_label, "endpoints": snap, "methods": methods}
 
 
 # --- connection test ------------------------------------------------------------

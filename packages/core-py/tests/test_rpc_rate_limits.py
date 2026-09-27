@@ -93,3 +93,76 @@ async def test_403_for_a_method_skips_that_provider_for_that_method_only():
     sent.clear()
     assert await rpc.call("getSlot") == []  # the backup still serves other methods
     assert sent == [("backup.example", False)]
+
+
+async def test_6_rate_limited_provider_cools_down_and_the_backup_serves():
+    hits = []
+
+    def handler(request):
+        hits.append(request.url.host)
+        if request.url.host == "primary.example":
+            return httpx.Response(429)
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": 7})
+
+    rpc = _manager(handler)
+    assert await rpc.call("getSlot") == 7 and rpc.active_label == "backup"
+    hits.clear()
+    assert await rpc.call("getBalance", ["w"]) == 7
+    assert hits == ["backup.example"]  # the rate-limited primary gets no new burst during its cooldown
+    assert rpc.health_snapshot()[0]["rate_limited"] is True
+
+
+async def test_7_provider_refusing_basic_requests_is_authentication_failed():
+    hits = []
+
+    def handler(request):
+        hits.append(request.url.host)
+        if request.url.host == "backup.example":
+            return httpx.Response(403)
+        return httpx.Response(429)
+
+    rpc = _manager(handler)
+    with pytest.raises(rpc_mod.RpcAllEndpointsFailedError):
+        await rpc.call("getBalance", ["w"])
+    snap = {e["label"]: e for e in rpc.health_snapshot()}
+    assert snap["backup"]["auth_failed"] is True and "AUTHENTICATION_FAILED" in snap["backup"]["last_error"]
+    hits.clear()
+    with pytest.raises(rpc_mod.RpcAllEndpointsFailedError):
+        await rpc.call("getAccountInfo", ["x"])
+    assert "backup.example" not in hits  # skipped for every method until the key/URL is fixed
+
+
+async def test_7b_a_success_clears_the_authentication_failure():
+    state = {"code": 403}
+
+    def handler(request):
+        return httpx.Response(state["code"], json={"jsonrpc": "2.0", "id": 1, "result": 1})
+
+    rpc = RpcManager.create(client=httpx.AsyncClient(transport=httpx.MockTransport(handler)), primary_url=PRIMARY)
+    with pytest.raises(rpc_mod.RpcAllEndpointsFailedError):
+        await rpc.call("getSlot")
+    assert rpc.health_snapshot()[0]["auth_failed"] is True
+    state["code"] = 200
+    assert await rpc.call("getSlot") == 1  # the only endpoint: tried anyway, and its success clears the state
+    assert rpc.health_snapshot()[0]["auth_failed"] is False
+
+
+async def test_8_every_provider_failing_is_one_controlled_error_and_routing_is_recorded():
+    def handler(request):
+        if request.url.host == "primary.example":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": 5})
+        return httpx.Response(503)
+
+    rpc = _manager(handler)
+    await rpc.call("getSlot")
+    routing = {m["method"]: m for m in rpc.method_snapshot()}
+    assert routing["getSlot"]["provider"] == "primary" and routing["getSlot"]["ok"] == 1
+
+    def down(request):
+        return httpx.Response(503)
+
+    dead = _manager(down)
+    with pytest.raises(rpc_mod.RpcAllEndpointsFailedError) as e:
+        await dead.call("getSlot")
+    assert "HTTP 503" in str(e.value) and "SECRET" not in str(e.value)
+    assert {m["method"]: m for m in dead.method_snapshot()}["getSlot"]["fail"] == 2

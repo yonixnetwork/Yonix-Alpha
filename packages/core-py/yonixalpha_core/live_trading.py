@@ -74,11 +74,15 @@ class LiveExecutionSettings:
     max_platform_fee_bps: int = 100  # PumpPortal documents 0.5%; bounded at 1%
     min_sol_reserve: Decimal = Decimal("0.05")  # never spent: rent + fees for exits
     wallet_max_age_seconds: int = 120
+    # Who builds Pump transactions: "native" (built here from on-chain state to
+    # the official layouts) or "pumpportal" (third party; always guarded).
+    tx_builder: str = "native"
 
     def to_dict(self) -> dict[str, str]:
         return {k: str(v) for k, v in asdict(self).items()}
 
 
+TX_BUILDERS = ("native", "pumpportal")
 LIMITS = {"entry_slippage_pct": (Decimal("0.5"), Decimal("50")), "exit_slippage_pct": (Decimal("1"), Decimal("90")),
           "exit_slippage_step_pct": (Decimal("0"), Decimal("30")), "max_exit_slippage_pct": (Decimal("5"), Decimal("95")),
           "priority_fee_sol": (Decimal("0"), Decimal("0.01")), "max_priority_fee_sol": (Decimal("0"), Decimal("0.02")),
@@ -90,6 +94,12 @@ def parse_live_settings(data: dict[str, Any]) -> tuple[LiveExecutionSettings, li
     base = LiveExecutionSettings()
     errors: list[str] = []
     for key, value in (data or {}).items():
+        if key == "tx_builder":
+            if value not in TX_BUILDERS:
+                errors.append(f"tx_builder: must be one of {list(TX_BUILDERS)}")
+            else:
+                base.tx_builder = value
+            continue
         if key not in LIMITS:
             errors.append(f"{key}: unknown setting")
             continue
@@ -407,6 +417,9 @@ def failure_code_of(side: str, status: str, error: str | None, signature: str | 
     (solana.live_exec): build -> guard -> simulate -> submit -> confirm."""
     err = (error or "").lower()
     sent = bool((result or {}).get("sent"))
+    stage = (result or {}).get("stage")
+    if stage in ("NO_EXECUTABLE_ROUTE", "RPC_UNAVAILABLE", "VENUE_UNSTABLE", "TRANSACTION_BUILD_FAILED", "REQUEST_REJECTED"):
+        return f"{side}_{stage}"
     if status == "EXPIRED":
         return f"{side}_CONFIRMATION_TIMEOUT"
     if "guard refused" in err:

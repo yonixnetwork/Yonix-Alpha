@@ -15,12 +15,14 @@ interface Provider {
   rpc_url: string; ws_url: string | null; enabled: boolean; priority: number; timeout_seconds: number | null;
   rate_limit_rps: number | null; notes: string | null; configured: boolean; decrypt_failed: boolean; last_test: TestResult | null;
   connected: boolean; healthy: "YES" | "NO" | "DEGRADED" | "UNKNOWN"; active: boolean; active_in: string[]; rate_limited_now: string[];
+  auth_failed_now?: string[]; refused_methods?: string[];
   success_rate: number | null; error_rate: number | null; successes: number; failures: number; rate_limited_count: number;
   latency_ms: number | null; last_success_at: string | null; last_failure_at: string | null; last_error: string | null; services: string[];
 }
 interface Listing {
   providers: Provider[]; active: string | null; provider_types: string[]; note: string;
   failovers: { service: string; from: string; to: string; reasons: string; at: string }[];
+  routing?: Record<string, { method: string; provider: string | null; ok: number; fail: number; last_error: string | null; at: string | null }[]>;
 }
 
 const yes = (b: boolean) => <span className={b ? "pill pill-ok" : "pill pill-off"}>{b ? "YES" : "NO"}</span>;
@@ -124,7 +126,9 @@ export default function RpcPage() {
                   </td>
                   <td>{yes(p.configured)}</td>
                   <td>{yes(p.connected)}</td>
-                  <td>{health(p.healthy)}{p.rate_limited_now.length > 0 && <div className="pill pill-warn">RATE LIMITED</div>}</td>
+                  <td>{health(p.healthy)}{p.rate_limited_now.length > 0 && <div className="pill pill-warn">RATE LIMITED</div>}
+                    {(p.auth_failed_now ?? []).length > 0 && <div className="pill pill-danger">AUTHENTICATION FAILED</div>}
+                    {(p.refused_methods ?? []).length > 0 && <div className="muted">refuses: {(p.refused_methods ?? []).join(", ")}</div>}</td>
                   <td>{yes(p.active)}{p.active_in.length > 0 && <div className="muted">{p.active_in.join(", ")}</div>}</td>
                   <td>{pct(p.success_rate)} ok · {pct(p.error_rate)} err<div className="muted">{p.successes} / {p.failures} · 429×{p.rate_limited_count}</div></td>
                   <td>{p.latency_ms !== null ? `${p.latency_ms} ms` : "—"}</td>
@@ -189,6 +193,20 @@ export default function RpcPage() {
         </div>
         <p className="muted">The URL is validated, tested, encrypted at rest and never shown again (only scheme://host). The .env Helius
           primary has priority 100 and .env backups 200–400; a new provider defaults to 150 (after the primary).</p>
+      </Section>
+
+      <Section title="Request routing — which endpoint served each request type">
+        {Object.keys(data.routing ?? {}).length === 0 ? <div className="muted">No service has reported yet.</div> : (
+          <table className="data-table">
+            <thead><tr><th>Service</th><th>Method</th><th>Served by</th><th>OK / failed</th><th>Last error</th></tr></thead>
+            <tbody>{Object.entries(data.routing ?? {}).flatMap(([service, rows]) => rows.map((r) => (
+              <tr key={`${service}-${r.method}`}><td>{service}</td><td><code>{r.method}</code></td><td>{r.provider ?? "—"}</td>
+                <td>{r.ok} / {r.fail}</td><td className="muted">{r.last_error ?? ""}</td></tr>)))}
+            </tbody>
+          </table>)}
+        <p className="muted">Each request type goes to the first usable endpoint in priority order. A provider that answers
+          HTTP 401/403 for a method is skipped for that method for 10 minutes; if it refuses a basic request it is marked
+          AUTHENTICATION FAILED and skipped for everything until its key/URL is fixed or a request succeeds.</p>
       </Section>
 
       <Section title="Failover events">

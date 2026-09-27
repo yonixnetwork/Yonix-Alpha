@@ -174,7 +174,7 @@ async def run() -> None:
         await asyncio.gather(
             _paper_trading_loop(session_factory, stop_event, settings.PAPER_TRADING_PER_LEG_COST_BPS, redis, jupiter,
                                 venues, settings, rpc),
-            live_worker_loop(session_factory, redis, settings, rpc, http_client, stop_event),
+            live_worker_loop(session_factory, redis, settings, rpc, http_client, stop_event, jupiter=jupiter),
             heartbeat_loop(settings, "paper-trading", stop_event, lambda: {"venues": venue_health_snapshot()}),
             run_watcher("paper-trading", settings, session_factory, stop_event, rpc=rpc, redis=redis),
         )

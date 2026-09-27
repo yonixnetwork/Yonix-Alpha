@@ -72,6 +72,8 @@ class PoolAccount:
     lp_supply: int
     coin_creator: str | None
     virtual_quote_reserves: int
+    is_mayhem_mode: bool = False
+    is_cashback_coin: bool = False
 
 
 def decode_pool(data: bytes) -> PoolAccount:
@@ -84,14 +86,15 @@ def decode_pool(data: bytes) -> PoolAccount:
     base_vault, quote_vault = r.pubkey(), r.pubkey()
     lp_supply = r.u64()
     coin_creator = virtual = None
+    mayhem = cashback = False
     if r.remaining >= 32:
         coin_creator = r.pubkey()
     if r.remaining >= 2 + 16:
-        r.bool()  # is_mayhem_mode
-        r.bool()  # is_cashback_coin
+        mayhem = r.bool()
+        cashback = r.bool()
         virtual = int.from_bytes(r._take(16), "little", signed=True)
     return PoolAccount(index, creator, base_mint, quote_mint, lp_mint, base_vault, quote_vault, lp_supply,
-                       coin_creator, virtual or 0)
+                       coin_creator, virtual or 0, mayhem, cashback)
 
 
 @dataclass(frozen=True)

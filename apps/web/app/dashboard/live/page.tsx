@@ -89,6 +89,7 @@ const SETTING_LABELS: Record<string, string> = {
   max_platform_fee_bps: "Max provider fee accepted by the guard (bps)",
   min_sol_reserve: "SOL reserve never spent",
   wallet_max_age_seconds: "Max wallet-sync age (s)",
+  tx_builder: "Pump transaction builder",
 };
 
 function statusPill(status: string): string {
@@ -219,12 +220,22 @@ export default function LiveExecutionPage() {
       <Section title="Execution settings" actions={saved ? <RuntimeApply inline /> : undefined}>
         <p className="muted">
           Runtime values, stored in the database and audited. Secrets are never set here. Every transaction is refused
-          before signing if it exceeds these bounds or touches anything but a Pump.fun / PumpSwap buy or sell for our wallet.
+          before signing if it exceeds these bounds or does anything but the requested buy or sell for our wallet (Pump.fun curve, PumpSwap or a Jupiter route, each checked against its own layout).
         </p>
         {saveError && <ErrorNotice error={saveError} />}
         {settings.data ? (
           <div className="form-grid">
-            {Object.keys(settings.data.settings).map((k) => (
+            {Object.keys(settings.data.settings).map((k) => k === "tx_builder" ? (
+              <div className="form-row" key={k}>
+                <label htmlFor="live-tx_builder">{SETTING_LABELS[k]}</label>
+                <select id="live-tx_builder" value={draft[k] ?? "native"} onChange={(e) => setDraft({ ...draft, [k]: e.target.value })}>
+                  <option value="native">native — built here to the official Pump layouts, no platform fee (recommended)</option>
+                  <option value="pumpportal">PumpPortal — third-party builder, 0.5% fee; always checked by the guard</option>
+                </select>
+                <span className="form-hint">Both are checked by the transaction guard before signing. Non-Pump tokens always use
+                  Jupiter; the venue (bonding curve / PumpSwap / Jupiter) is read from chain state for every order.</span>
+              </div>
+            ) : (
               <div className="form-row" key={k}>
                 <label htmlFor={`live-${k}`}>
                   {SETTING_LABELS[k] ?? k} ({settings.data!.limits[k]?.[0]}–{settings.data!.limits[k]?.[1]})

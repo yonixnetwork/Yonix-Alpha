@@ -141,6 +141,27 @@ class JupiterClient:
             return QuoteResult("no_route", error=code)
         return QuoteResult("error", error=f"HTTP {resp.status_code} {code or resp.text[:120]}")
 
+    async def swap_transaction(self, quote: dict[str, Any], user: str, priority_fee_lamports: int) -> str:
+        """POST /swap: Jupiter builds a swap transaction for `quote` (base64,
+        unsigned). Same request shape as Hummingbot's Jupiter connector, but
+        with a fixed priority fee instead of "auto" so the guard can bound it.
+        The transaction is only a proposal: txguard decides whether to sign."""
+        if not await self.budget.acquire():
+            raise RuntimeError("jupiter rate budget exhausted")
+        headers = {"x-api-key": self.api_key} if self.api_key else {}
+        body = {"quoteResponse": quote, "userPublicKey": user, "wrapAndUnwrapSol": True,
+                "dynamicComputeUnitLimit": True, "prioritizationFeeLamports": int(priority_fee_lamports)}
+        try:
+            resp = await self.client.post(f"{self.base}/swap", json=body, headers=headers, timeout=15.0)
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"jupiter swap transport: {type(exc).__name__}") from exc
+        if resp.status_code != 200:
+            raise RuntimeError(f"jupiter swap HTTP {resp.status_code}: {resp.text[:160]}")
+        tx = (resp.json() or {}).get("swapTransaction")
+        if not tx:
+            raise RuntimeError("jupiter swap response has no swapTransaction")
+        return tx
+
     async def execution_quote(
         self, mint: str, size_sol: Decimal, reference_sol: Decimal, slippage_bps: int, venue: Venue = Venue.JUPITER
     ) -> tuple[ExecutionQuote, dict[str, Any]]:

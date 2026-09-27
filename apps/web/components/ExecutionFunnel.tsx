@@ -19,8 +19,10 @@ type Funnel = {
   pipeline?: Pipeline;
 };
 type FinalBlocker = { stage: string; code: string; reason?: string | null; groups?: string[] } | null;
+type ExecutionTrail = { venue: string | null; venue_reason: string | null; provider: string | null; stage: string | null;
+  stages: string[]; error: string | null } | null;
 type PipelineToken = { mint: string; symbol: string | null; engine: string; stage: string; final_blocker: FinalBlocker;
-  execution_route: string | null; promoted_at: string };
+  execution_route: string | null; promoted_at: string; execution?: ExecutionTrail };
 type Pipeline = {
   stages: Record<string, number>; blocked_by: Record<string, number>;
   promoted_not_assessed: { engine: string; state: string; reason: string; tokens: number }[];
@@ -71,14 +73,17 @@ function PipelineView({ pl }: { pl: Pipeline }) {
       )}
       <div className="status-label">Latest tokens — furthest stage and exact final blocker</div>
       <table className="data-table">
-        <thead><tr><th>Token</th><th>Engine</th><th>Stage</th><th>Final blocker</th><th>Route</th></tr></thead>
+        <thead><tr><th>Token</th><th>Engine</th><th>Stage</th><th>Final blocker</th><th>Route / execution</th></tr></thead>
         <tbody>{pl.tokens.slice(0, 40).map((tk) => (
           <tr key={`${tk.mint}-${tk.promoted_at}`}>
             <td><code>{tk.symbol ?? `${tk.mint.slice(0, 6)}…`}</code></td>
             <td>{ENGINE_LABEL[tk.engine] ?? tk.engine}</td>
             <td><span className={stagePill(tk.stage)}>{STAGE_LABEL[tk.stage] ?? tk.stage}</span></td>
             <td className="muted">{tk.final_blocker ? <><code>{tk.final_blocker.code}</code>{tk.final_blocker.reason ? ` — ${tk.final_blocker.reason}` : ""}</> : "—"}</td>
-            <td>{tk.execution_route ?? "—"}</td>
+            <td>{tk.execution ? <>
+              <b>{tk.execution.venue ?? "venue ?"}</b>{tk.execution.provider ? ` via ${tk.execution.provider}` : ""}
+              <div className="muted" style={{ fontSize: "0.8em" }}>PROMOTE → {tk.execution.stages.join(" → ")}</div>
+            </> : (tk.execution_route ?? "—")}</td>
           </tr>))}
           {pl.tokens.length === 0 && <tr><td colSpan={5} className="muted">No candidates in this window.</td></tr>}
         </tbody>

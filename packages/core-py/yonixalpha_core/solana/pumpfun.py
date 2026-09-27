@@ -157,6 +157,8 @@ class BondingCurveState:
     complete: bool
     creator: str | None = None
     quote_mint: str | None = None
+    is_mayhem_mode: bool = False
+    is_cashback_coin: bool = False
 
     @property
     def sol_quoted(self) -> bool:
@@ -215,4 +217,6 @@ def decode_bonding_curve(data: bytes) -> BondingCurveState | None:
         complete=fields["complete"],
         creator=fields.get("creator"),
         quote_mint=fields.get("quote_mint"),
+        is_mayhem_mode=bool(fields.get("is_mayhem_mode", False)),
+        is_cashback_coin=bool(fields.get("is_cashback_coin", False)),
     )

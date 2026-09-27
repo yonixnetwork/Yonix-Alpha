@@ -26,6 +26,12 @@ class RpcRateLimitedError(RpcAllEndpointsFailedError):
 # long; its other methods keep working.
 FORBIDDEN_METHOD_SECONDS = 600.0
 MAX_RATE_LIMIT_BACKOFF = 300.0
+# A 401/403 on one of these (or on several methods) means the key/URL itself
+# is refused: the endpoint is AUTHENTICATION_FAILED and skipped for every
+# method until FORBIDDEN_METHOD_SECONDS pass or a request succeeds.
+CORE_METHODS = {"getSlot", "getBalance", "getAccountInfo", "getMultipleAccounts", "getLatestBlockhash",
+                "sendTransaction", "simulateTransaction", "getSignatureStatuses"}
+AUTH_FAILED_AFTER_METHODS = 3
 
 
 # JSON-RPC codes meaning "this request is invalid / unsupported here"
@@ -33,7 +39,7 @@ MAX_RATE_LIMIT_BACKOFF = 300.0
 # so they don't count against its health — e.g. Helius refusing an
 # unpaginated getProgramAccounts on a huge program must not put the primary
 # RPC, which every other read depends on, into cooldown.
-REQUEST_ERROR_CODES = {-32600, -32601, -32602}
+REQUEST_ERROR_CODES = {-32600, -32601, -32602, -32003}  # -32003: transaction signature verification failure
 
 
 class RpcRequestError(RuntimeError):
@@ -77,6 +83,7 @@ class _Endpoint:
     _sent: list = field(default_factory=list)  # monotonic send times in the last second
     forbidden: dict = field(default_factory=dict)  # method -> monotonic time until which 401/403 is remembered
     rate_limit_streak: int = 0  # consecutive 429s: each doubles the cooldown (reset by a success)
+    auth_failed_until: float | None = None  # key/URL refused (401/403): skipped for every method
 
     def over_budget(self, now: float) -> bool:
         if not self.rps:
@@ -118,6 +125,8 @@ class RpcManager:
     # when that changes (failover or recovery).
     active_label: str | None = field(default=None, init=False)
     on_failover: FailoverHook | None = field(default=None, init=False)
+    # method -> which endpoint served it last and how it went (request routing view)
+    method_stats: dict = field(default_factory=dict, init=False)
 
     @classmethod
     def create(
@@ -143,7 +152,8 @@ class RpcManager:
 
     def _candidates(self, method: str | None = None) -> list[_Endpoint]:
         now = time.monotonic()
-        allowed = [e for e in self.endpoints if method is None or e.forbidden.get(method, 0) <= now]
+        allowed = [e for e in self.endpoints if (method is None or e.forbidden.get(method, 0) <= now)
+                   and (e.auth_failed_until is None or e.auth_failed_until <= now)]
         healthy = [e for e in allowed if (e.disabled_until is None or e.disabled_until <= now)
                    and (e.rate_limited_until is None or e.rate_limited_until <= now)]
         if not healthy:
@@ -200,9 +210,13 @@ class RpcManager:
                     backoff = min(self.cooldown_seconds * 2 ** (endpoint.rate_limit_streak - 1), MAX_RATE_LIMIT_BACKOFF)
                     endpoint.rate_limited_until = time.monotonic() + backoff
                 elif response.status_code in (401, 403):
-                    endpoint.forbidden[method] = time.monotonic() + FORBIDDEN_METHOD_SECONDS
+                    t = time.monotonic()
+                    endpoint.forbidden[method] = t + FORBIDDEN_METHOD_SECONDS
+                    refused = [m for m, until in endpoint.forbidden.items() if until > t]
+                    if method in CORE_METHODS or len(refused) >= AUTH_FAILED_AFTER_METHODS:
+                        endpoint.auth_failed_until = t + FORBIDDEN_METHOD_SECONDS
                     log.warning("rpc.method_forbidden", endpoint=endpoint.label, method=method, status=response.status_code,
-                                skip_seconds=FORBIDDEN_METHOD_SECONDS)
+                                auth_failed=endpoint.auth_failed_until is not None, skip_seconds=FORBIDDEN_METHOD_SECONDS)
                 response.raise_for_status()
                 body = response.json()
                 if "error" in body:
@@ -214,7 +228,10 @@ class RpcManager:
                 endpoint.disabled_until = None
                 endpoint.rate_limited_until = None
                 endpoint.rate_limit_streak = 0
+                endpoint.auth_failed_until = None
+                endpoint.forbidden.pop(method, None)
                 endpoint.successes += 1
+                self._note(method, endpoint.label, ok=True)
                 endpoint.last_success_at = _now_iso()
                 ms = (time.monotonic() - started) * 1000
                 endpoint.latency_ms = round(ms if endpoint.latency_ms is None else endpoint.latency_ms * 0.8 + ms * 0.2, 1)
@@ -238,6 +255,9 @@ class RpcManager:
                 endpoint.failures += 1
                 endpoint.last_failure_at = _now_iso()
                 endpoint.last_error = reasons[-1].split(": ", 1)[-1]
+                if endpoint.auth_failed_until is not None:
+                    endpoint.last_error = f"AUTHENTICATION_FAILED ({endpoint.last_error}): check the provider key/URL and plan"
+                self._note(method, endpoint.label, ok=False, error=reasons[-1])
                 endpoint.consecutive_failures += 1
                 log.warning(
                     "rpc.call.failed",
@@ -265,6 +285,19 @@ class RpcManager:
             except Exception as exc:  # noqa: BLE001 - reporting must never break a call
                 log.warning("rpc.failover_hook_failed", error=type(exc).__name__)
 
+    def _note(self, method: str, label: str, ok: bool, error: str | None = None) -> None:
+        st = self.method_stats.setdefault(method, {"provider": None, "ok": 0, "fail": 0, "last_error": None, "at": None})
+        st["ok" if ok else "fail"] += 1
+        st["at"] = _now_iso()
+        if ok:
+            st["provider"] = label
+        else:
+            st["last_error"] = error
+
+    def method_snapshot(self) -> list[dict]:
+        """Which endpoint serves each request type (request routing view)."""
+        return [{"method": m, **v} for m, v in sorted(self.method_stats.items())]
+
     def health_snapshot(self) -> list[dict]:
         now = time.monotonic()
         return [
@@ -280,6 +313,7 @@ class RpcManager:
                 "latency_ms": e.latency_ms, "last_success_at": e.last_success_at, "last_failure_at": e.last_failure_at,
                 "last_error": e.last_error, "active": e.label == self.active_label,
                 "forbidden_methods": sorted(m for m, until in e.forbidden.items() if until > now),
+                "auth_failed": e.auth_failed_until is not None and e.auth_failed_until > now,
             }
             for e in self.endpoints
         ]

@@ -98,7 +98,7 @@ def _health(label: str, acks: dict, last_test: dict | None, now: datetime) -> di
             ok_at = _parse_ts(e.get("last_success_at"))
             recent_ok = ok_at is not None and now - ok_at <= RECENT
             connected = connected or recent_ok
-            if e.get("disabled") or e.get("rate_limited"):
+            if e.get("disabled") or e.get("rate_limited") or e.get("auth_failed"):
                 healthy_votes.append(False)
             elif recent_ok:
                 healthy_votes.append(True)
@@ -116,6 +116,8 @@ def _health(label: str, acks: dict, last_test: dict | None, now: datetime) -> di
     latencies = [e["latency_ms"] for e in per_service.values() if e.get("latency_ms") is not None]
     return {"connected": connected, "healthy": healthy, "active": bool(active_in), "active_in": active_in,
             "rate_limited_now": [s for s, e in per_service.items() if e.get("rate_limited")],
+            "auth_failed_now": [s for s, e in per_service.items() if e.get("auth_failed")],
+            "refused_methods": sorted({m for e in per_service.values() for m in (e.get("forbidden_methods") or [])}),
             "success_rate": round(totals["successes"] / done, 4) if done else None,
             "error_rate": round(totals["failures"] / done, 4) if done else None, **totals,
             "latency_ms": round(sum(latencies) / len(latencies), 1) if latencies else None,
@@ -147,7 +149,11 @@ async def _listing(db: AsyncSession, redis: Redis, settings: Settings) -> dict:
     active = next((e["label"] for e in out if "decision-engine" in e["active_in"]), None) \
         or next((e["label"] for e in out if e["active"]), None)
     failovers = [json.loads(x) for x in await redis.lrange(rpc_registry.FAILOVER_LOG, 0, 19)]
+    # Request routing: which endpoint each service used last for each RPC method.
+    routing = {service: ((ack.get("status") or {}).get("rpc") or {}).get("methods") or []
+               for service, ack in acks.items() if ((ack.get("status") or {}).get("rpc") or {}).get("methods")}
     return jsonable({"providers": out, "active": active, "failovers": failovers, "provider_types": PROVIDER_TYPES,
+                     "routing": routing,
                      "note": "Order = priority (lowest first). Each request goes to the first usable endpoint; on "
                              "failure or HTTP 429 the same request moves to the next one."})
 

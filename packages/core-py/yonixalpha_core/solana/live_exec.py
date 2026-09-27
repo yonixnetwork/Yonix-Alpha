@@ -1,6 +1,13 @@
-"""Live Solana execution: build → guard → sign → persist signature →
-simulate → send → confirm → read the actual fill from the confirmed
-transaction.
+"""Live Solana execution: resolve the venue from chain state → build with
+the provider for that venue → guard → re-check the venue (a token that
+migrated meanwhile is rebuilt for its new venue, never sent as a stale
+curve trade) → sign → persist signature → simulate → send → confirm →
+read the actual fill from the confirmed transaction.
+
+Every stage is recorded on the outcome (TRANSACTION_BUILT,
+TRANSACTION_GUARD_PASSED, TRANSACTION_SIGNED, SIMULATED,
+TRANSACTION_SUBMITTED, TRANSACTION_CONFIRMED, FILL_VERIFIED, or the stage
+that failed), each with its time and details; none implies the next.
 
 A trade is only reported CONFIRMED when the transaction is confirmed on
 chain without error AND its balance changes show the wallet actually
@@ -21,7 +28,9 @@ from typing import Any, Awaitable, Callable
 from solders.transaction import VersionedTransaction
 
 from yonixalpha_core.logging import get_logger
+from yonixalpha_core.solana import venue as venues
 from yonixalpha_core.solana.pumpportal import PumpPortalClient, PumpPortalError, TradeRequest
+from yonixalpha_core.solana.tx_builders import BuildError, JupiterBuilder, NativePumpBuilder, PumpPortalBuilder
 from yonixalpha_core.solana.txguard import GuardExpectation, inspect
 from yonixalpha_core.solana.wallet import LiveWallet
 
@@ -31,6 +40,8 @@ LAMPORTS = Decimal(1_000_000_000)
 CONFIRM_TIMEOUT_SECONDS = 75  # a blockhash stays valid ~60-90 s
 REBROADCAST_SECONDS = 3
 POLL_SECONDS = 1.0
+MAX_VENUE_REBUILDS = 2  # a venue that keeps changing between build and sign is not traded
+BUILDERS = ("native", "pumpportal")
 
 
 @dataclass
@@ -52,12 +63,18 @@ class ExecOutcome:
     guard: dict[str, Any] | None = None
     logs: list[str] = field(default_factory=list)
     sent: bool = False
+    stage: str | None = None  # the stage that decided the outcome
+    stages: list[dict[str, Any]] = field(default_factory=list)
+    venue: dict[str, Any] | None = None
+    provider: str | None = None
+    unsigned_tx: str | None = None  # base64, kept only when the guard refused it (for diagnosis; unsigned)
 
     def to_dict(self) -> dict[str, Any]:
         f = self.fill
         return {
             "status": self.status, "signature": self.signature, "error": self.error, "sent": self.sent,
-            "guard": self.guard, "logs": self.logs[-30:],
+            "guard": self.guard, "logs": self.logs[-30:], "stage": self.stage, "stages": self.stages,
+            "venue": self.venue, "provider": self.provider, "unsigned_tx": self.unsigned_tx,
             "fill": None if f is None else {
                 "sol_change_lamports": f.sol_change_lamports, "token_change_raw": f.token_change_raw,
                 "fee_lamports": f.fee_lamports, "token_decimals": f.token_decimals, "slot": f.slot, "block_time": f.block_time,
@@ -98,54 +115,134 @@ def parse_fill(tx: dict, wallet: str, mint: str) -> Fill:
 
 
 class SolanaLiveExecutor:
-    def __init__(self, rpc, pumpportal: PumpPortalClient, wallet: LiveWallet,
-                 confirm_timeout: float = CONFIRM_TIMEOUT_SECONDS, sleep=asyncio.sleep, clock=time.monotonic):
+    def __init__(self, rpc, pumpportal: PumpPortalClient | None, wallet: LiveWallet,
+                 confirm_timeout: float = CONFIRM_TIMEOUT_SECONDS, sleep=asyncio.sleep, clock=time.monotonic,
+                 jupiter=None, builder: str = "native"):
         self.rpc, self.pp, self.wallet = rpc, pumpportal, wallet
         self.confirm_timeout, self._sleep, self._clock = confirm_timeout, sleep, clock
+        self.jupiter = jupiter
+        self.builder = builder  # "native" | "pumpportal" (Pump venues only); set per order from live settings
+        self.native = NativePumpBuilder(rpc)
+        self._pp_builder = PumpPortalBuilder(pumpportal) if pumpportal is not None else None
+        self._jup_builder = JupiterBuilder(jupiter, rpc) if jupiter is not None else None
+
+    def _builder_for(self, venue: venues.Venue):
+        if venue.kind == venues.JUPITER_ROUTE:
+            return self._jup_builder
+        if self.builder == "pumpportal" and self._pp_builder is not None:
+            return self._pp_builder
+        return self.native
+
+    async def _resolve(self, req: TradeRequest) -> venues.Venue:
+        amount_raw = None
+        try:
+            amount_raw = int(Decimal(req.amount) * LAMPORTS) if req.action == "buy" else None
+        except Exception:  # noqa: BLE001
+            pass
+        v = await venues.resolve(self.rpc, req.mint, side=req.action, amount_raw=amount_raw, jupiter=self.jupiter,
+                                 slippage_bps=int(Decimal(req.slippage_pct) * 100))
+        if req.action == "sell" and v.kind == venues.NO_EXECUTABLE_ROUTE and self.jupiter is not None and v.decimals is not None:
+            # Sells are sized in tokens; quote Jupiter with the raw amount now that decimals are known.
+            raw = int(Decimal(req.amount) * Decimal(10) ** v.decimals)
+            v = await venues.resolve(self.rpc, req.mint, side="sell", amount_raw=raw, jupiter=self.jupiter,
+                                     slippage_bps=int(Decimal(req.slippage_pct) * 100))
+        return v
 
     async def execute(self, req: TradeRequest, exp: GuardExpectation,
                       on_signed: Callable[[str], Awaitable[None]]) -> ExecOutcome:
-        if req.public_key != self.wallet.pubkey or exp.wallet != self.wallet.pubkey:
-            return ExecOutcome("FAILED", error="request is not for the configured wallet")
-        try:
-            raw = await self.pp.build_transaction(req)
-            unsigned = VersionedTransaction.from_bytes(raw)
-        except PumpPortalError as exc:
-            return ExecOutcome("FAILED", error=str(exc))
-        except Exception as exc:  # noqa: BLE001 - malformed bytes
-            return ExecOutcome("FAILED", error=f"could not decode transaction: {type(exc).__name__}")
+        stages: list[dict[str, Any]] = []
 
-        report = inspect(unsigned, exp)
-        if not report.ok:
-            return ExecOutcome("FAILED", error="transaction guard refused to sign: " + "; ".join(report.violations),
-                               guard=report.to_dict())
-        signed = VersionedTransaction(unsigned.message, [self.wallet.keypair])
+        def stage(name: str, **detail: Any) -> None:
+            stages.append({"stage": name, "at": time.time(), **detail})
+
+        def fail(stage_name: str, error: str, **kw: Any) -> ExecOutcome:
+            stage(stage_name, error=error)
+            return ExecOutcome("FAILED", error=error, stage=stage_name, stages=stages, **kw)
+
+        if req.public_key != self.wallet.pubkey or exp.wallet != self.wallet.pubkey:
+            return fail("REQUEST_REJECTED", "request is not for the configured wallet")
+
+        venue = None
+        built = report = None
+        for attempt in range(MAX_VENUE_REBUILDS + 1):
+            venue = await self._resolve(req)
+            stage("VENUE_RESOLVED", venue=venue.kind, reason=venue.reason, slot=venue.slot)
+            if venue.kind == venues.RPC_UNAVAILABLE:
+                return fail("RPC_UNAVAILABLE", venue.reason, venue=venue.summary())
+            if not venue.executable:
+                return fail("NO_EXECUTABLE_ROUTE", f"{venue.kind}: {venue.reason}", venue=venue.summary())
+            builder = self._builder_for(venue)
+            if builder is None:
+                return fail("NO_EXECUTABLE_ROUTE", f"no provider configured for {venue.kind}", venue=venue.summary())
+            exp.venue = venue.kind
+            try:
+                built = await builder.build(req, venue, exp, self.wallet.pubkey)
+            except (BuildError, PumpPortalError) as exc:
+                return fail("TRANSACTION_BUILD_FAILED", f"{builder.name}: {exc}", venue=venue.summary(), provider=builder.name)
+            except Exception as exc:  # noqa: BLE001 - provider/RPC failure while building
+                return fail("TRANSACTION_BUILD_FAILED", f"{builder.name}: {type(exc).__name__}: {str(exc)[:200]}",
+                            venue=venue.summary(), provider=builder.name)
+            stage("TRANSACTION_BUILT", provider=built.provider, **{k: v for k, v in built.detail.items() if k != "route"})
+            report = inspect(built.tx, exp, built.loaded)
+            if not report.ok:
+                stage("TRANSACTION_GUARD_REJECTED", violations=report.violations)
+                return ExecOutcome("FAILED", error="transaction guard refused to sign: " + "; ".join(report.violations),
+                                   guard=report.to_dict(), stage="TRANSACTION_GUARD_REJECTED", stages=stages,
+                                   venue=venue.summary(), provider=built.provider,
+                                   unsigned_tx=base64.b64encode(bytes(built.tx)).decode())
+            stage("TRANSACTION_GUARD_PASSED", programs=report.programs)
+            if venue.kind == venues.JUPITER_ROUTE:
+                break
+            # Migration race: the venue must still be the one the transaction was built for.
+            again = await venues.resolve(self.rpc, req.mint)
+            if again.kind == venue.kind:
+                break
+            stage("VENUE_CHANGED", before=venue.kind, after=again.kind, reason=again.reason)
+            if attempt == MAX_VENUE_REBUILDS:
+                return fail("VENUE_UNSTABLE", f"venue changed from {venue.kind} to {again.kind} while building; not sent",
+                            venue=again.summary(), provider=built.provider)
+        assert built is not None and report is not None and venue is not None
+
+        signed = VersionedTransaction(built.tx.message, [self.wallet.keypair])
         signature = str(signed.signatures[0])
         wire = base64.b64encode(bytes(signed)).decode()
         await on_signed(signature)
+        stage("TRANSACTION_SIGNED", signature=signature)
+        common = {"guard": report.to_dict(), "stages": stages, "venue": venue.summary(), "provider": built.provider}
 
         try:
             sim = await self.rpc.call("simulateTransaction", [wire, {"encoding": "base64", "sigVerify": True,
                                                                      "commitment": "confirmed"}])
         except Exception as exc:  # noqa: BLE001
+            stage("SIMULATION_UNAVAILABLE", error=type(exc).__name__)
             return ExecOutcome("FAILED", signature, error=f"simulation unavailable: {type(exc).__name__}",
-                               guard=report.to_dict())
+                               stage="SIMULATION_UNAVAILABLE", **common)
         sim_value = (sim or {}).get("value") or {}
         if sim_value.get("err") is not None:
+            stage("SIMULATION_FAILED", error=str(sim_value.get("err"))[:300])
             return ExecOutcome("FAILED", signature, error=f"simulation failed: {sim_value.get('err')}",
-                               guard=report.to_dict(), logs=list(sim_value.get("logs") or []))
+                               logs=list(sim_value.get("logs") or []), stage="SIMULATION_FAILED", **common)
+        stage("SIMULATED", units=sim_value.get("unitsConsumed"))
 
-        return await self._send_and_confirm(wire, signature, req.mint, report.to_dict())
+        outcome = await self._send_and_confirm(wire, signature, req.mint, report.to_dict(), stage)
+        outcome.stages, outcome.venue, outcome.provider = stages, venue.summary(), built.provider
+        return outcome
 
-    async def _send_and_confirm(self, wire: str, signature: str, mint: str, guard: dict) -> ExecOutcome:
+    async def _send_and_confirm(self, wire: str, signature: str, mint: str, guard: dict, stage=None) -> ExecOutcome:
+        stage = stage or (lambda *a, **k: None)
         start = self._clock()
         last_send = None
         sent = False
         while self._clock() - start < self.confirm_timeout:
             if last_send is None or self._clock() - last_send >= REBROADCAST_SECONDS:
+                # Re-sending the SAME signed transaction is idempotent: one
+                # signature can land at most once, so this never buys twice.
                 try:
                     await self.rpc.call("sendTransaction", [wire, {"encoding": "base64", "skipPreflight": True,
                                                                    "maxRetries": 0}])
+                    if not sent:
+                        stage("TRANSACTION_SUBMITTED", endpoint=getattr(self.rpc, "active_label", None),
+                              after_ms=round((self._clock() - start) * 1000))
                     sent = True
                 except Exception as exc:  # noqa: BLE001 - keep polling; the tx may still land
                     log.warning("live.send_failed", signature=signature, error=type(exc).__name__)
@@ -153,6 +250,7 @@ class SolanaLiveExecutor:
             outcome = await self.lookup(signature, mint)
             if outcome.status != "PENDING":
                 outcome.guard, outcome.sent = guard, sent
+                self._record_final(outcome, stage)
                 return outcome
             await self._sleep(POLL_SECONDS)
         # Not seen before the blockhash could have expired: final check with history.
@@ -161,7 +259,20 @@ class SolanaLiveExecutor:
         if outcome.status == "PENDING":
             outcome.status = "EXPIRED"
             outcome.error = f"not confirmed within {self.confirm_timeout:.0f}s; blockhash expired, it can no longer land"
+        self._record_final(outcome, stage)
         return outcome
+
+    @staticmethod
+    def _record_final(outcome: ExecOutcome, stage) -> None:
+        f = outcome.fill
+        if outcome.status == "CONFIRMED" and f is not None:
+            stage("TRANSACTION_CONFIRMED", signature=outcome.signature, slot=f.slot, block_time=f.block_time)
+            stage("FILL_VERIFIED", token_change_raw=f.token_change_raw, sol_change_lamports=f.sol_change_lamports,
+                  fee_lamports=f.fee_lamports)
+            outcome.stage = "FILL_VERIFIED"
+        else:
+            outcome.stage = "TRANSACTION_" + outcome.status  # TRANSACTION_FAILED | TRANSACTION_EXPIRED
+            stage(outcome.stage, error=outcome.error)
 
     async def lookup(self, signature: str, mint: str) -> ExecOutcome:
         """Current state of a signature (also used by reconciliation)."""

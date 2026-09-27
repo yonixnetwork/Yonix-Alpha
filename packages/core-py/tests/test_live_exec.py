@@ -16,12 +16,14 @@ from solders.pubkey import Pubkey
 from solders.system_program import TransferParams, transfer
 from solders.transaction import VersionedTransaction
 
-from yonixalpha_core.solana import txguard
+from yonixalpha_core.solana import pump_tx, txguard
 from yonixalpha_core.solana.codec import b58encode
 from yonixalpha_core.solana.live_exec import SolanaLiveExecutor, parse_fill
 from yonixalpha_core.solana.pumpportal import PumpPortalError, TradeRequest
 from yonixalpha_core.solana.txguard import GuardExpectation, inspect
 from yonixalpha_core.solana.wallet import WalletError, load_wallet, wallet_status
+
+from tests import chain_fake
 
 KP = Keypair()
 WALLET = str(KP.pubkey())
@@ -44,9 +46,20 @@ def cb_limit(units: int) -> Instruction:
     return Instruction(Pubkey.from_string(txguard.COMPUTE_BUDGET), bytes([2]) + struct.pack("<I", units), [])
 
 
+CREATOR = str(Pubkey.new_unique())
+
+
 def pump_ix(disc: bytes, a1: int, a2: int, mint=MINT) -> Instruction:
-    return Instruction(PUMP, disc + struct.pack("<QQ", a1, a2), [
-        AccountMeta(KP.pubkey(), True, True), AccountMeta(Pubkey.from_string(mint), False, False)])
+    """A Pump trade in the program's real account layout (pump_tx, checked
+    byte-for-byte against the official SDK)."""
+    common = dict(user=WALLET, mint=mint, creator=CREATOR, token_program=pump_tx.TOKEN, fee_recipient=str(FEE_ACCOUNT),
+                  buyback_fee_recipient=pump_tx.CURVE_BUYBACK_FEE_RECIPIENTS[0])
+    if disc == BUY:
+        return pump_tx.curve_buy_ix(amount=a1, max_sol_cost=a2, **common)
+    if disc == SELL:
+        return pump_tx.curve_sell_ix(amount=a1, min_sol_output=a2, cashback=False, **common)
+    ix = pump_tx.curve_buy_ix(amount=a1, max_sol_cost=a2, **common)
+    return Instruction(ix.program_id, disc + bytes(ix.data)[8:], list(ix.accounts))
 
 
 BUY = bytes([102, 6, 61, 18, 1, 218, 235, 234])
@@ -144,9 +157,14 @@ class FakeRpc:
         self.sim_err, self.never_lands, self.onchain_err = sim_err, never_lands, onchain_err
         self.pending_polls, self.calls = pending_polls, []
         self.sent = 0
+        # The mint is on an active bonding curve (venue state read before building).
+        self.accounts = {MINT: chain_fake.acct(chain_fake.mint_account(), pump_tx.TOKEN),
+                         pump_tx.bonding_curve_pda(MINT): chain_fake.acct(chain_fake.curve_account(CREATOR), pump_tx.PUMP)}
 
     async def call(self, method, params=None):
         self.calls.append(method)
+        if method == "getMultipleAccounts":
+            return {"context": {"slot": 1}, "value": [self.accounts.get(k) for k in params[0]]}
         if method == "simulateTransaction":
             return {"value": {"err": self.sim_err, "logs": ["sim log"]}}
         if method == "sendTransaction":
@@ -191,7 +209,7 @@ async def run(pp, rpc):
         persisted.append((sig, list(rpc.calls)))
 
     c = Clock()
-    ex = SolanaLiveExecutor(rpc, pp, load_wallet(settings()), confirm_timeout=20, sleep=c.sleep, clock=c)
+    ex = SolanaLiveExecutor(rpc, pp, load_wallet(settings()), confirm_timeout=20, sleep=c.sleep, clock=c, builder="pumpportal")
     return await ex.execute(request(), buy_exp(), on_signed), persisted
 
 
@@ -203,7 +221,9 @@ async def test_confirmed_buy_reports_the_actual_fill_and_persists_signature_befo
     assert out.fill.fee_lamports == 25_000 and out.fill.token_decimals == 6
     sig, calls_before = persisted[0]
     assert sig == out.signature and "sendTransaction" not in calls_before  # stored before anything was sent
-    assert calls_before == []
+    # Before the signature is stored only chain state is read (venue before and
+    # after building): nothing simulated or sent yet.
+    assert set(calls_before) <= {"getMultipleAccounts"}
     assert rpc.calls.index("simulateTransaction") < rpc.calls.index("sendTransaction")
 
 
@@ -216,7 +236,9 @@ async def test_signed_transaction_carries_a_valid_signature_from_our_wallet():
 async def test_guard_violation_means_nothing_is_signed_or_sent():
     rpc = FakeRpc()
     out, persisted = await run(FakePP(buy_tx(max_sol=999_000_000)), rpc)
-    assert out.status == "FAILED" and "guard" in out.error and persisted == [] and rpc.calls == []
+    assert out.status == "FAILED" and "guard" in out.error and persisted == []
+    assert set(rpc.calls) <= {"getMultipleAccounts"}  # venue read only: nothing signed, simulated or sent
+    assert out.stage == "TRANSACTION_GUARD_REJECTED" and out.unsigned_tx  # kept for diagnosis
 
 
 async def test_failed_simulation_is_never_sent():
