@@ -2,6 +2,7 @@
 
     python -m yonixalpha_core.tools.execution_funnel --hours 24
     python -m yonixalpha_core.tools.execution_funnel --mint <MINT>     # one token, evaluation by evaluation
+    python -m yonixalpha_core.tools.execution_funnel --code STOP_INSIDE_COSTS   # the numbers behind a blocking code
     python -m yonixalpha_core.tools.execution_funnel --json
 
 On the server:
@@ -49,6 +50,10 @@ def _print_funnel(f: dict) -> None:
     print("\nALL BLOCKING CODES (any signal):")
     for b in f["blocked_all"][:20]:
         print(f"  {b['engine']:17} {b['code']:32} {b['decision']:24} {b['tokens']:5} tokens")
+    if f.get("data_errors"):
+        print("\nDATA ERRORS behind *_UNAVAILABLE / *_STALE (addresses masked):")
+        for e in f["data_errors"]:
+            print(f"  {e['engine']:17} {e['tokens']:5} tokens  {e['error']}")
     print("\nPOSITIONS OPENED:", json.dumps(f["positions"]) if f["positions"] else "none")
     print("LIVE ORDERS:", json.dumps(f["orders"]) if f["orders"] else "none")
     for e in f["order_errors"]:
@@ -83,13 +88,16 @@ def _print_trace(t: dict) -> None:
         print(f"  ORDER {o['side']} {o['reason']} {o['status']} sig={o['signature']} err={o['error']}")
 
 
-async def main(hours: float, mint: str | None, as_json: bool) -> int:
+async def main(hours: float, mint: str | None, as_json: bool, code: str | None = None) -> int:
     settings = get_settings()
     engine = make_engine(settings)
     redis = from_url(settings.redis_url, decode_responses=True)
     try:
         async with make_session_factory(engine)() as session:
-            if mint:
+            if code:
+                rows = await execution_funnel.code_examples(session, code, execution_funnel.since_hours(hours))
+                print(json.dumps(rows, default=str, indent=2) if rows else f"no assessment with {code} in the last {hours} h")
+            elif mint:
                 data = await execution_funnel.token_trace(session, mint)
                 print(json.dumps(data, default=str, indent=2)) if as_json else _print_trace(data)
             else:
@@ -105,6 +113,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--hours", type=float, default=24)
     ap.add_argument("--mint")
+    ap.add_argument("--code", help="show the numbers behind a blocking code, e.g. STOP_INSIDE_COSTS")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
-    sys.exit(asyncio.run(main(a.hours, a.mint, a.json)))
+    sys.exit(asyncio.run(main(a.hours, a.mint, a.json, a.code)))

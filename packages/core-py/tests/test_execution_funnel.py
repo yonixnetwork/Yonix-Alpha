@@ -97,6 +97,10 @@ async def test_funnel_counts_every_stage_and_names_the_blockers(db):
     assert any("Global mode is PAPER" in n for n in f["diagnosis"])
     assert any("HIGH_VOLATILITY" in n for n in f["diagnosis"])
 
+    ex = await execution_funnel.code_examples(db, "VOLATILITY_EXCEEDS_MAX_STOP", NOW - timedelta(hours=1))
+    assert ex and ex[0]["asset_id"] == mint_vol and "exceeds max_stop_pct" in ex[0]["message"]
+    assert "data_errors" in f
+
     t = await execution_funnel.token_trace(db, mint_vol)
     assert t["assessments"][0]["buy_signal"] is True
     assert t["assessments"][0]["blocking"][0]["code"] == "VOLATILITY_EXCEEDS_MAX_STOP"

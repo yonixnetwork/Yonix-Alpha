@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 
 BPS = Decimal("10000")
@@ -76,12 +76,23 @@ class ConstantProductModel:
         impact = (1 - avg_price / self.marginal_price) * BPS
         return SimulatedSwap(amount_in=tokens_in, amount_out=quote_out, fee_paid=fee, impact_bps=impact)
 
+    def with_entry(self, net_quote_in: Decimal) -> "ConstantProductModel":
+        """The same market after our own buy, for simulating our exit: the
+        SOL we put into a bonding curve is SOL the curve holds when we sell
+        back, so it raises the real-reserve cap. The price formula is left at
+        the pre-entry reserves (selling into the curve as it was — the
+        conservative double impact). Without this, a young curve whose real
+        reserve is ~0 made our own round trip look like a 100% loss."""
+        if self.real_quote_reserve is None or net_quote_in <= 0:
+            return self
+        return replace(self, real_quote_reserve=self.real_quote_reserve + net_quote_in)
+
     def round_trip(self, quote_in: Decimal) -> tuple[SimulatedSwap, SimulatedSwap, Decimal]:
         """(buy, exit-at-current-reserves, loss_bps). loss_bps combines both
         fees and both impacts — the cost of entering and immediately
         exiting at today's liquidity."""
         buy = self.simulate_buy(quote_in)
-        sell = self.simulate_sell(buy.amount_out)
+        sell = self.with_entry(quote_in - buy.fee_paid).simulate_sell(buy.amount_out)
         loss = (1 - sell.amount_out / quote_in) * BPS
         return buy, sell, loss
 
@@ -96,7 +107,7 @@ class ConstantProductModel:
 
         def ok(size: Decimal) -> bool:
             buy = self.simulate_buy(size)
-            sell = self.simulate_sell(buy.amount_out)
+            sell = self.with_entry(size - buy.fee_paid).simulate_sell(buy.amount_out)
             return buy.impact_bps <= max_entry_impact_bps and sell.impact_bps <= max_exit_impact_bps
 
         if ok(upper_bound):
@@ -154,11 +165,21 @@ def close_fill(model, qty: Decimal, side: str = "LONG") -> Fill:
     return model.close_fill(qty, side)
 
 
+def round_trip_fills(model, size_quote: Decimal, side: str = "LONG", only_if_complete: bool = False):
+    """Open `size_quote`, then close the quantity it bought — with our own
+    entry counted in a bonding curve's real reserve (see with_entry).
+    `only_if_complete`: no close (None) when the open did not fully fill."""
+    o = open_fill(model, size_quote, side)
+    if only_if_complete and not o.complete:
+        return o, None
+    exit_model = model.with_entry(o.quote) if isinstance(model, ConstantProductModel) else model
+    return o, close_fill(exit_model, o.quantity, side)
+
+
 def side_costs(model, size_quote: Decimal, side: str = "LONG") -> tuple[Decimal, Decimal]:
     """(entry_cost_bps, exit_cost_bps): impact + fee for opening `size_quote`
     and immediately closing the resulting quantity at today's liquidity."""
-    o = open_fill(model, size_quote, side)
-    c = close_fill(model, o.quantity, side)
+    o, c = round_trip_fills(model, size_quote, side)
     return o.impact_bps + model.fee_bps, c.impact_bps + model.fee_bps
 
 

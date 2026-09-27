@@ -3,7 +3,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from yonixalpha_core.safety.liquidity import BPS, close_fill, open_fill
+from yonixalpha_core.safety.liquidity import BPS, round_trip_fills
 from yonixalpha_core.safety.models import (
     DECISION_PRECEDENCE,
     RISK_ENGINE_VERSION,
@@ -285,8 +285,7 @@ def _check_execution(inp: AssessmentInput, s: SafetySettings, plan: TradePlan, o
         rt = q.round_trip_loss_bps
         entry_impact, exit_impact = q.entry_impact_bps, q.exit_impact_bps
     elif model is not None and size is not None:
-        o = open_fill(model, size, inp.side)
-        c = close_fill(model, o.quantity, inp.side)
+        o, c = round_trip_fills(model, size, inp.side)
         if not (o.complete and c.complete):
             out.append(_finding(RiskCategory.LIQUIDITY, "BOOK_TOO_THIN", RiskLevel.CRITICAL,
                                 "visible order book cannot absorb the planned size in both directions",
@@ -591,8 +590,7 @@ def migrated_liquidity_report(inp: AssessmentInput, s: SafetySettings, plan: Tra
         out["executable_max_size_sol"] = str(depth.quantize(Decimal("0.0001")))
         out["executable_max_size_usd"] = str((depth * inp.sol_usd).quantize(Decimal("0.01"))) if inp.sol_usd else None
     if model is not None and hasattr(model, "marginal_price") and size:
-        o = open_fill(model, size, inp.side)
-        c = close_fill(model, o.quantity, inp.side)
+        o, c = round_trip_fills(model, size, inp.side)
         mp = model.marginal_price
         out["planned_size_sol"] = str(size)
         out["entry_impact_bps"], out["exit_impact_bps"] = str(o.impact_bps.quantize(Decimal("0.01"))), \
@@ -749,8 +747,7 @@ def _sellability(inp: AssessmentInput, plan: TradePlan, findings: list[Finding])
                            "transfer_restrictions": sorted(codes & _TRANSFER_BLOCKERS),
                            "blocking": sorted(codes & (_ROUTE_BLOCKERS | _TRANSFER_BLOCKERS | {"SELL_TAX_EXCESSIVE", "TAX_UNKNOWN"}))}
     if inp.liquidity_model is not None and size:
-        o = open_fill(inp.liquidity_model, size, inp.side)
-        c = close_fill(inp.liquidity_model, o.quantity, inp.side) if o.complete else None
+        o, c = round_trip_fills(inp.liquidity_model, size, inp.side, only_if_complete=True)
         out["route"] = "exact pool/curve simulation"
         if c is not None and c.complete and o.quantity > 0:
             out["expected_sell_price"] = str((c.quote - c.fee) / o.quantity) if inp.side == "LONG" else None
@@ -787,8 +784,7 @@ def _liquidity(inp: AssessmentInput, plan: TradePlan) -> dict[str, Any]:
         "caps": {k: str(v) for k, v in (getattr(plan, "caps", None) or {}).items()},
     }
     if inp.liquidity_model is not None and size:
-        o = open_fill(inp.liquidity_model, size, inp.side)
-        c = close_fill(inp.liquidity_model, o.quantity, inp.side) if o.complete else None
+        o, c = round_trip_fills(inp.liquidity_model, size, inp.side, only_if_complete=True)
         out["entry_impact_bps"] = str(o.impact_bps)
         out["exit_impact_bps"] = str(c.impact_bps) if c is not None and c.complete else None
     return out

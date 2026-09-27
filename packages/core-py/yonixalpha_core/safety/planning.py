@@ -377,10 +377,15 @@ def plan_trade(
         size = new_size
 
     if costs is not None and costs[0] + costs[1] >= stop_pct * BPS:
+        # Recorded so the decision can be audited: at which size, how the
+        # cost splits, and which caps bounded the size.
+        plan.caps, plan.entry_cost_bps, plan.exit_cost_bps = dict(caps), costs[0], costs[1]
         f.append(
             _block(
                 "STOP_INSIDE_COSTS",
-                f"round-trip costs {(costs[0] + costs[1]) / 100:.2f}% meet or exceed the stop distance {stop_pct:.2%} — the trade can't be profitable before the stop",
+                f"round-trip costs {(costs[0] + costs[1]) / 100:.2f}% meet or exceed the stop distance {stop_pct:.2%} — the trade can't be profitable before the stop "
+                f"(at size {size:.6g}: entry {costs[0] / 100:.2f}%, exit {costs[1] / 100:.2f}% incl. {slip / 100:.2f}% slippage allowance"
+                + (f" and {tfee / 100:.2f}% transfer fee" if tfee else "") + ")",
                 RiskCategory.EXECUTION,
             )
         )

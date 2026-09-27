@@ -486,3 +486,19 @@ def test_every_non_execute_decision_has_explicit_reasons():
         a = decide(inp)
         assert a.reasons and all(r.strip() for r in a.reasons)
         assert a.reasons != ["all safety gates passed"]
+
+
+def test_own_entry_counts_in_a_young_curves_real_reserve():
+    """Our round trip on a bonding curve sells back into a curve that holds
+    our own SOL. Capping the exit at the real reserve from BEFORE our buy
+    (≈0 on a young curve) turned any round trip into a 100% loss."""
+    young = ConstantProductModel(Decimal("30"), Decimal("1073000000"), Decimal("125"), real_quote_reserve=Decimal("0"))
+    size = Decimal("0.3")
+    buy = young.simulate_buy(size)
+    assert young.simulate_sell(buy.amount_out).impact_bps == Decimal(10000)  # the pre-entry cap
+    _, sell, loss_bps = young.round_trip(size)
+    assert sell.amount_out > 0 and loss_bps < 500  # fees + the conservative double impact
+    assert young.max_size_within(Decimal(300), Decimal(500), Decimal(1)) > 0
+    from yonixalpha_core.safety.liquidity import side_costs
+    entry, exit_ = side_costs(young, size)
+    assert entry + exit_ < 1000

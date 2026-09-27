@@ -123,6 +123,15 @@ async def funnel(session: AsyncSession, since: datetime, redis=None, app_setting
         FROM b WHERE cardinality(codes) = 1 GROUP BY engine, codes[1] ORDER BY tokens DESC LIMIT 20""",
                                      meta=list(APPROVAL_META), **p)
 
+    # The evidence behind *_UNAVAILABLE / *_STALE: the assembler's recorded errors, addresses masked.
+    out["data_errors"] = await _rows(session, """
+        SELECT ra.engine, left(regexp_replace(e, '[1-9A-HJ-NP-Za-km-z]{32,44}', '<addr>', 'g'), 160) error,
+               count(DISTINCT ra.asset_id) tokens, count(*) assessments
+        FROM risk_assessments ra,
+             jsonb_array_elements_text(coalesce(ra.assessment->'inputs_snapshot'->'errors', '[]'::jsonb)) e
+        WHERE ra.evaluated_at >= :since AND ra.engine = ANY(:engines) AND NOT ra.executable
+        GROUP BY ra.engine, 2 ORDER BY tokens DESC LIMIT 15""", **p)
+
     positions = await _rows(session, """
         SELECT engine, execution_mode, status, count(*) n FROM paper_positions
         WHERE created_at >= :since AND engine = ANY(:engines) GROUP BY engine, execution_mode, status""", **p)
@@ -233,6 +242,27 @@ async def token_trace(session: AsyncSession, mint: str, limit: int = 200) -> dic
                                      FROM execution_orders WHERE mint = :m ORDER BY created_at""", m=mint)
     return {"mint": mint, "observation": obs, "candidates": cands, "assessments": assessments, "positions": positions,
             "orders": orders}
+
+
+async def code_examples(session: AsyncSession, code: str, since: datetime, limit: int = 3) -> list[dict]:
+    """The latest assessments blocked by `code`, with the numbers behind it:
+    the finding, the plan's caps and cost split, the curve/pool reserves and
+    the market features the gate saw."""
+    return await _rows(session, """
+        SELECT ra.evaluated_at, ra.engine, ra.asset_id, ra.decision,
+               (SELECT f->>'message' FROM jsonb_array_elements(ra.assessment->'findings') f
+                WHERE f->>'code' = :code LIMIT 1) message,
+               ra.assessment->'plan'->'caps' caps, ra.assessment->'plan'->>'entry_cost_bps' entry_cost_bps,
+               ra.assessment->'plan'->>'exit_cost_bps' exit_cost_bps, ra.assessment->'plan'->>'stop_distance_pct' stop_pct,
+               ra.assessment->'plan'->'max_loss'->>'value' max_loss,
+               ra.assessment->'inputs_snapshot'->'curve' curve, ra.assessment->'inputs_snapshot'->'pool' pool,
+               ra.assessment->'inputs_snapshot'->'features' features,
+               ra.assessment->'inputs_snapshot'->>'volatility_source' volatility_source,
+               ra.assessment->'inputs_snapshot'->'errors' errors
+        FROM risk_assessments ra
+        WHERE ra.evaluated_at >= :since AND EXISTS (
+            SELECT 1 FROM jsonb_array_elements(ra.assessment->'findings') f WHERE f->>'code' = :code)
+        ORDER BY ra.evaluated_at DESC LIMIT :lim""", code=code, since=since, lim=limit)
 
 
 def since_hours(hours: float) -> datetime:
