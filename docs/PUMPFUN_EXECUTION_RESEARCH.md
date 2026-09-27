@@ -181,6 +181,7 @@ On the dashboard:
 | Item | Status |
 |---|---|
 | Build → guard → sign → simulate → send → confirm → fill, BUY and SELL | IMPLEMENTED — AWAITING CREDENTIAL VERIFICATION (provider boundary tested; no real transaction has been sent) |
+| PAPER cycle on a curve token: gate → entry → management → exit-intelligence sell → realized PnL | VERIFIED in production on 2026-09-27. Momentum on `3eSai…pump`: EXECUTE at 02:22:23 (0.0637 SOL), exit at 02:36:21 (`exit_intel_exit`), realized −0.0060 SOL. Its reasons are in `--mint` → EVENT |
 | Real wallet SOL balance | VERIFIED (read from chain by the order worker; Live page) |
 | Token holdings valued in SOL | NOT COMPLETE (counted, not valued) |
 | Live position PnL | PARTIALLY VERIFIED (from actual fills and marks; no real fill has happened yet) |

@@ -73,9 +73,13 @@ async def test_funnel_counts_every_stage_and_names_the_blockers(db):
     # Executable, and a paper position was opened.
     a4, row4, cand4 = await _persist(db, _token(mint_exec), "k4")
     assert a4.executable
-    db.add(PaperPosition(candidate_id=cand4.id, symbol="E", provider="paper", side="LONG", entry_price=Decimal(1),
-                         quantity=Decimal(1), entry_at=NOW, status="open", engine="solana_fresh", asset_id=mint_exec,
-                         assessment_id=row4.id, execution_mode="PAPER"))
+    pos = PaperPosition(candidate_id=cand4.id, symbol="E", provider="paper", side="LONG", entry_price=Decimal(1),
+                        quantity=Decimal(1), entry_at=NOW, status="open", engine="solana_fresh", asset_id=mint_exec,
+                        assessment_id=row4.id, execution_mode="PAPER")
+    db.add(pos)
+    await db.flush()
+    db.add(TradeTimelineEvent(event_type="exit_intelligence.exit", occurred_at=NOW, position_id=pos.id,
+                              detail={"reasons": ["sell pressure: 3 sellers in 30s"]}))
     # A failed live buy, recorded as it would be by the order worker.
     db.add(ExecutionOrder(mode="LIVE", side="BUY", reason="entry", mint=mint_exec, provider="pumpportal_local", route="pump",
                           amount="0.01", amount_kind="sol", slippage_pct=Decimal(10), priority_fee_sol=Decimal("0.0001"),
@@ -106,6 +110,11 @@ async def test_funnel_counts_every_stage_and_names_the_blockers(db):
     assert t["assessments"][0]["blocking"][0]["code"] == "VOLATILITY_EXCEEDS_MAX_STOP"
     t = await execution_funnel.token_trace(db, mint_exec)
     assert t["positions"][0]["status"] == "open" and t["orders"][0]["status"] == "FAILED"
+    # An executable evaluation lists no "blocking" codes (its findings are
+    # informational), and the position's exit verdict is in the trace.
+    assert t["assessments"][0]["executable"] and t["assessments"][0]["blocking"] is None
+    assert t["position_events"][0]["event_type"] == "exit_intelligence.exit"
+    assert "sell pressure" in t["position_events"][0]["detail"]["reasons"][0]
 
 
 async def test_funnel_diagnoses_signal_as_the_blocker(db):

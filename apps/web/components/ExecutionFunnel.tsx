@@ -122,6 +122,8 @@ type Trace = {
   positions: { execution_mode: string; status: string; entry_at: string; lifecycle: string | null; exit_reason: string | null;
     realized_pnl: string | null }[];
   orders: { side: string; status: string; signature: string | null; error: string | null; created_at: string }[];
+  position_events?: { occurred_at: string; event_type: string;
+    detail: { reasons?: string[]; reason?: string; error?: string } | null }[];
 };
 
 function executionState(t: Trace): { label: string; cls: string } {
@@ -170,6 +172,10 @@ export function TokenPipeline({ mint }: { mint: string }) {
       )}
       {t.orders.map((o, i) => (
         <div key={i} className="muted">{formatDate(o.created_at)} {o.side} {o.status}{o.signature ? ` · ${o.signature}` : ""}{o.error ? ` · ${o.error}` : ""}</div>
+      ))}
+      {(t.position_events ?? []).map((e, i) => (
+        <div key={`ev${i}`} className="muted">{formatDate(e.occurred_at)} <code>{e.event_type}</code>
+          {(e.detail?.reasons ?? []).length ? ` · ${(e.detail?.reasons ?? []).join("; ")}` : e.detail?.reason ? ` · ${e.detail.reason}` : ""}</div>
       ))}
     </div>
   );

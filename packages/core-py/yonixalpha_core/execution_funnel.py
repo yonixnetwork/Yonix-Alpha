@@ -233,15 +233,21 @@ async def token_trace(session: AsyncSession, mint: str, limit: int = 200) -> dic
         SELECT ra.evaluated_at, ra.engine, ra.decision, ra.status_label, ra.executable, ra.execution_target,
                {_SIGNAL_OK} AS buy_signal,
                (SELECT jsonb_agg(jsonb_build_object('code', f->>'code', 'level', f->>'level', 'message', f->>'message'))
-                FROM jsonb_array_elements(ra.assessment->'findings') f WHERE f->>'action' = ra.decision) blocking,
+                FROM jsonb_array_elements(ra.assessment->'findings') f
+                WHERE f->>'action' = ra.decision AND NOT ra.executable) blocking,
                ra.assessment->'plan'->'position_size'->>'value' size
         FROM risk_assessments ra WHERE ra.asset_id = :m ORDER BY ra.evaluated_at LIMIT :lim""", m=mint, lim=limit)
     positions = await _rows(session, """SELECT id, engine, execution_mode, status, entry_at, entry_price, exit_reason, realized_pnl,
                                         lifecycle, execution_route FROM paper_positions WHERE asset_id = :m ORDER BY entry_at""", m=mint)
     orders = await _rows(session, """SELECT side, reason, status, signature, error, created_at, submitted_at, confirmed_at
                                      FROM execution_orders WHERE mint = :m ORDER BY created_at""", m=mint)
+    # What happened to each position after entry: exit-intelligence verdicts
+    # (with their reasons), migrations, live fills and failures.
+    events = await _rows(session, """SELECT e.occurred_at, e.event_type, e.detail FROM trade_timeline_events e
+                                     JOIN paper_positions p ON p.id = e.position_id
+                                     WHERE p.asset_id = :m ORDER BY e.occurred_at LIMIT :lim""", m=mint, lim=limit)
     return {"mint": mint, "observation": obs, "candidates": cands, "assessments": assessments, "positions": positions,
-            "orders": orders}
+            "orders": orders, "position_events": events}
 
 
 async def code_examples(session: AsyncSession, code: str, since: datetime, limit: int = 3) -> list[dict]:

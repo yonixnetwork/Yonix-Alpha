@@ -86,6 +86,10 @@ def _print_trace(t: dict) -> None:
               f"lifecycle={p['lifecycle']} route={p['execution_route']} exit={p['exit_reason']} pnl={p['realized_pnl']}")
     for o in t["orders"]:
         print(f"  ORDER {o['side']} {o['reason']} {o['status']} sig={o['signature']} err={o['error']}")
+    for e in t.get("position_events", []):
+        d = e["detail"] or {}
+        why = "; ".join(d.get("reasons") or []) or d.get("reason") or d.get("error") or ""
+        print(f"  EVENT {e['occurred_at']} {e['event_type']}: {str(why)[:200]}")
 
 
 async def main(hours: float, mint: str | None, as_json: bool, code: str | None = None) -> int:
