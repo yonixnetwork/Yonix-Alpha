@@ -458,6 +458,27 @@ def _check_observation(inp: AssessmentInput, out: list[Finding]) -> None:
 ENTRY_EXIT_BLOCKING = ("REDUCE", "EXIT", "EXIT_NOW")
 
 
+def _check_entry_quality(inp: AssessmentInput, out: list[Finding]) -> None:
+    """ENTRY_DETERIORATION: two or more independent signs that the token is
+    already turning (sellers accelerating, buyers stalling, volume collapsing
+    against its own context, a sharp reversal from the local high, a spike
+    without broad buying). One sign alone is only reported: a short lull is
+    not a collapse. Automatic entries wait and are re-evaluated; a manual
+    BUY shows it and needs the operator's confirmation."""
+    q = inp.entry_quality
+    if not q or not q.get("indicators"):
+        return
+    detail = "; ".join(q.get("evidence") or [])
+    if q.get("strong"):
+        action = FinalDecision.REQUIRE_MANUAL_APPROVAL if inp.operator_request else FinalDecision.WAIT
+        out.append(_finding(RiskCategory.TRADING, "ENTRY_DETERIORATION", RiskLevel.HIGH,
+                            f"flow is deteriorating ({', '.join(q['indicators'])}): {detail}", action))
+    else:
+        out.append(_finding(RiskCategory.TRADING, "ENTRY_WEAKENING", RiskLevel.MODERATE,
+                            f"one sign of weakening ({q['indicators'][0]}): {detail} — not enough alone to wait",
+                            FinalDecision.EXECUTE))
+
+
 def _check_entry_exit(inp: AssessmentInput, out: list[Finding]) -> None:
     """EXIT_SIGNAL_AT_ENTRY: never open a position the existing exit
     intelligence would start selling on its first tick. Same rules, same
@@ -679,8 +700,17 @@ def _check_account(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) 
 
 def _check_market(inp: AssessmentInput, out: list[Finding]) -> None:
     m = inp.market
+    if m is not None and m.volatility is None and m.volatility_confidence == "UNAVAILABLE":
+        # Reported so the operator sees WHY an automatic stop cannot be sized
+        # (planning blocks that on its own); a manual stop needs no volatility.
+        out.append(_finding(RiskCategory.DATA, "VOLATILITY_UNAVAILABLE", RiskLevel.LOW,
+                            f"volatility not measurable: {m.volatility_note}", FinalDecision.EXECUTE))
     if m is None or m.volatility is None:
         return
+    if m.volatility_confidence == "LOW_CONFIDENCE":
+        out.append(_finding(RiskCategory.DATA, "VOLATILITY_LOW_CONFIDENCE", RiskLevel.HIGH,
+                            f"volatility {m.volatility:.1%} estimated from few trades ({m.volatility_note}); "
+                            "the stop is sized from it, so entry needs approval", FinalDecision.REQUIRE_MANUAL_APPROVAL))
     if m.volatility >= Decimal("0.10"):
         out.append(_finding(RiskCategory.MARKET, "HIGH_VOLATILITY", RiskLevel.HIGH,
                             f"window volatility {m.volatility:.1%}", FinalDecision.REDUCE_SIZE))
@@ -830,6 +860,7 @@ def assess(inp: AssessmentInput, settings: SafetySettings, versions: dict[str, A
     _check_creator_history(inp, settings, findings)
     _check_observation(inp, findings)
     _check_entry_exit(inp, findings)
+    _check_entry_quality(inp, findings)
     _check_market(inp, findings)
     _check_account(inp, settings, findings)
 

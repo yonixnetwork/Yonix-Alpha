@@ -31,10 +31,10 @@ from yonixalpha_core.safety.models import (
 from yonixalpha_core.safety.rules import BlacklistRule, CustomRule, evaluate_custom_rules, match_blacklist
 from yonixalpha_core.safety.settings import SafetySettings
 from yonixalpha_core.solana import observation, pump_stream
+from yonixalpha_core.solana.entry_quality import deterioration, volatility_estimate
 from yonixalpha_core.solana.flow import (
     apply_demand_quality,
     early_buy_share,
-    measured_volatility,
     recent_high_above,
     round_trip_volume_share,
     synchronized_buy_cluster,
@@ -48,6 +48,7 @@ from yonixalpha_core.solana.token_safety import UnexpectedShape, parse_holders, 
 from yonixalpha_core.strategies.solana import fresh_launch_signal, momentum_signal, post_migration_signal
 
 FLOW_WINDOW_SECONDS = 300
+DETERIORATION_WINDOW_SECONDS = 60  # current vs previous minute, against the 5 minutes before
 VOLATILITY_WINDOW_SECONDS = 900
 
 # Numeric features a custom rule may reference. Anything else is refused at
@@ -307,11 +308,13 @@ async def assemble_fresh(src: Sources, mint: str, now: datetime, c: Controls,
     age = (now - datetime.fromtimestamp(created_at, tz=timezone.utc)).total_seconds() if created_at else None
 
     if curve is not None and decimals is not None:
-        volatility, ev["volatility_source"] = measured_volatility(trades, now, VOLATILITY_WINDOW_SECONDS, decimals)
+        vest = volatility_estimate(trades, now, VOLATILITY_WINDOW_SECONDS, decimals)
+        ev["volatility_source"], ev["volatility_confidence"] = vest["source"], vest["confidence"]
         inp.market = MarketInfo(
             observation=Observation("rpc:bonding_curve" if curve_obs == now else "pump_stream:curve", curve_obs),
             price=curve.price_sol(decimals),
-            volatility=volatility,
+            volatility=vest["value"],
+            volatility_confidence=vest["confidence"], volatility_note=vest["source"],
             liquidity_quote=curve.real_liquidity_sol(),
             age_seconds=age,
             curve_complete=curve.complete,
@@ -360,6 +363,9 @@ async def assemble_fresh(src: Sources, mint: str, now: datetime, c: Controls,
     inp.entry_exit_check = entry_exit_check(trades, now, creator, inp.market.liquidity_quote if inp.market else None,
                                             c.settings)
     ev["entry_exit_check"] = inp.entry_exit_check
+    if decimals is not None:
+        inp.entry_quality = deterioration(trades, now, DETERIORATION_WINDOW_SECONDS, decimals)
+        ev["entry_quality"] = inp.entry_quality
 
     if token is not None and curve_addr:
         inp.holders, err = await _timed(ev, "holders_rpc", fetch_holders(src.rpc, mint, token.supply_raw, {curve_addr}, creator, now))
@@ -413,9 +419,18 @@ async def assemble_migrated(src: Sources, mint: str, now: datetime, c: Controls)
     trades = []
     pool_state = None
     if decimals is not None:
+        # The pool's trade history (getSignaturesForAddress + getTransaction)
+        # and its state (the pool account and vaults) are separate lookups: a
+        # failed history fetch leaves the flow unavailable, it does not erase
+        # the pool's price and liquidity.
+        pool_trades = []
         try:
             pool_trades = await _timed(ev, "pool_trades_rpc", pumpswap.recent_pool_trades(src.rpc, src.redis, pool_addr))
-            fee_bps = pool_trades[-1].fee_bps if pool_trades else None
+        except Exception as exc:  # noqa: BLE001 - RPC failure is data unavailability
+            ev["errors"].append(f"pumpswap trade history unavailable: {type(exc).__name__}: {str(exc)[:200]}")
+            ev["pool"]["trades_unavailable"] = True
+        fee_bps = pool_trades[-1].fee_bps if pool_trades else None
+        try:
             pool_state = await _timed(ev, "pool_state_rpc", pumpswap.fetch_pool(src.rpc, mint, now, fee_bps, decimals))
             trades = [pumpswap.as_flow_trade(t) for t in pool_trades]
             ev["pool"].update(verified=True, base_reserve_raw=pool_state.base_reserve_raw,
@@ -441,12 +456,14 @@ async def assemble_migrated(src: Sources, mint: str, now: datetime, c: Controls)
         else:
             age = (now - min(pool_trades_at)).total_seconds() if pool_trades_at else None
             ev["pool_age_source"] = "oldest recent pool trade (lower bound: migration time unknown)"
-        vol, how = measured_volatility(trades or curve_trades, now, VOLATILITY_WINDOW_SECONDS, decimals)
-        ev["volatility_source"] = ("pumpswap pool trades" if trades else "pre-migration bonding-curve trades") + f", {how}"
+        vest = volatility_estimate(trades or curve_trades, now, VOLATILITY_WINDOW_SECONDS, decimals)
+        ev["volatility_source"] = ("pumpswap pool trades" if trades else "pre-migration bonding-curve trades") + f", {vest['source']}"
+        ev["volatility_confidence"] = vest["confidence"]
         inp.market = MarketInfo(
             observation=Observation("rpc:pumpswap_pool", now),
             price=pool_state.price,
-            volatility=vol,
+            volatility=vest["value"],
+            volatility_confidence=vest["confidence"], volatility_note=ev["volatility_source"],
             liquidity_quote=pool_state.liquidity_sol,
             age_seconds=age,
             curve_complete=True,
@@ -465,6 +482,8 @@ async def assemble_migrated(src: Sources, mint: str, now: datetime, c: Controls)
         # Same pool flow exit intelligence reads for a PumpSwap position.
         inp.entry_exit_check = entry_exit_check(trades, now, creator, pool_state.liquidity_sol, c.settings)
         ev["entry_exit_check"] = inp.entry_exit_check
+        inp.entry_quality = deterioration(trades, now, DETERIORATION_WINDOW_SECONDS, decimals)
+        ev["entry_quality"] = inp.entry_quality
         hour = [t for t in trades if (now - t.at).total_seconds() <= 3600]
         inp.signal = post_migration_signal(sum(1 for t in hour if t.is_buy), sum(1 for t in hour if not t.is_buy), age)
     else:

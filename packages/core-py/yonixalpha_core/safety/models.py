@@ -237,6 +237,11 @@ class MarketInfo:
     # Share of the bonding curve's sellable tokens already bought (0..1);
     # None off the curve or when the launch reserve is unknown.
     curve_progress: Decimal | None = None
+    # How far `volatility` can be trusted (solana.entry_quality):
+    # AVAILABLE | LOW_CONFIDENCE | UNAVAILABLE; None = not assessed (legacy
+    # inputs, treated as AVAILABLE when a value exists).
+    volatility_confidence: str | None = None
+    volatility_note: str | None = None
 
 
 @dataclass
@@ -361,3 +366,6 @@ class AssessmentInput:
     # would say about a position opened right now, from the same pre-entry
     # flow: {"action", "reasons", "metrics"}. None when not evaluated.
     entry_exit_check: dict | None = None
+    # Multi-window deterioration of the pre-entry flow (solana.entry_quality.
+    # deterioration): {"strong", "indicators", "evidence", "metrics"}.
+    entry_quality: dict | None = None

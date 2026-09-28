@@ -8,6 +8,8 @@ import { formatDate, formatDecimal } from "@/lib/format";
 interface Preview {
   mint: string; symbol: string | null; name: string | null; engine: string; route: string; migration_state: string;
   current_price_sol: string | null; price_source: string; price_at: string | null; execution_mode: "LIVE" | "PAPER";
+  market_cap_sol?: string | null; market_cap_basis?: string; risk_status?: string | null;
+  liquidity?: { sol: string; kind: string; at: string | null } | null;
   global_mode: string; slippage_limit_pct: string; estimated_quantity: string | null; note: string;
   balance: { kind: string; sol: string | null; available_sol: string | null; at: string | null; live_ready?: boolean; live_not_ready_reason?: string | null };
   latest_assessment: null | { evaluated_at: string; age_seconds: number; decision: string; status: string; overall_risk: string;
@@ -98,6 +100,8 @@ export function BuyButton({ mint, engine, source, label = "BUY" }: { mint: strin
                   {p.balance.live_ready === false && <div className="neg">live not ready: {p.balance.live_not_ready_reason}</div>}</td></tr>
                 <tr><td>Route</td><td>{p.route} <span className="muted">· {p.migration_state}</span></td></tr>
                 <tr><td>Current price</td><td>{p.current_price_sol ? `${formatDecimal(p.current_price_sol, 12)} SOL` : "—"} <span className="muted">{p.price_source}{p.price_at ? ` · ${formatDate(p.price_at)}` : ""}</span></td></tr>
+                <tr><td>Market cap</td><td>{p.market_cap_sol ? `${formatDecimal(p.market_cap_sol, 2)} SOL` : "—"} <span className="muted">{p.market_cap_basis ?? ""}</span></td></tr>
+                <tr><td>Liquidity</td><td>{p.liquidity ? `${formatDecimal(p.liquidity.sol, 4)} SOL` : "—"} <span className="muted">{p.liquidity ? `${p.liquidity.kind}${p.liquidity.at ? ` · ${formatDate(p.liquidity.at)}` : ""}` : "not observed"}</span></td></tr>
                 <tr><td>Available balance</td><td>{p.balance.available_sol ? `${formatDecimal(p.balance.available_sol, 6)} SOL` : "unknown"} <span className="muted">{p.balance.kind}</span></td></tr>
                 <tr><td>Estimated amount</td><td>{a?.planned_size_sol ? `${formatDecimal(a.planned_size_sol, 6)} SOL` : "set by the gate at execution"}
                   {p.estimated_quantity && <span className="muted"> ≈ {formatDecimal(p.estimated_quantity, 2)} tokens</span>}</td></tr>

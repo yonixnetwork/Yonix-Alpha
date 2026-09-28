@@ -39,6 +39,9 @@ class BuyIn(BaseModel):
     confirm: bool = False
 
 
+PUMP_SUPPLY_TOKENS = Decimal(1_000_000_000)
+
+
 def _curve_price(curve) -> Decimal | None:
     if curve is None or curve.vsol <= 0 or curve.vtok <= 0:
         return None  # a migrated curve has no reserves: no price, never 0
@@ -87,12 +90,29 @@ async def preview(mint: str, engine: str | None = None, db: AsyncSession = Depen
                   "stop_loss": (plan.get("stop_loss") or {}).get("value"), "safety_blockers": blockers[:10]}
     price = _curve_price(curve) if resolved != "solana_migration" else None
     est_qty = (Decimal(latest["planned_size_sol"]) / price) if latest and latest["planned_size_sol"] and price else None
+    # Market cap = price × total supply. Pump.fun mints a fixed 1,000,000,000
+    # tokens at creation, so market cap and FDV coincide there; liquidity is
+    # the SOL actually in the curve (or pool), a different number.
+    market_cap = (price * PUMP_SUPPLY_TOKENS) if price is not None else None
+    liquidity = None
+    if curve is not None and curve.rsol is not None and not curve.pool:
+        liquidity = {"sol": str(Decimal(curve.rsol) / Decimal(10**9)), "kind": "bonding-curve SOL reserve (real)",
+                     "at": curve.updated_at}
+    elif a is not None:
+        pool = ((a.assessment or {}).get("inputs_snapshot") or {}).get("pool") or {}
+        if pool.get("quote_reserve_lamports"):
+            liquidity = {"sol": str(Decimal(pool["quote_reserve_lamports"]) / Decimal(10**9)),
+                         "kind": "PumpSwap pool SOL reserve (last assessment)", "at": a.evaluated_at}
     return jsonable({
         "mint": mint, "symbol": meta.get("symbol"), "name": meta.get("name"),
         "engine": resolved, "route": manual_trade.ROUTE_LABEL[resolved],
         "migration_state": "MIGRATED (PumpSwap pool)" if curve and curve.pool else
                            ("CURVE COMPLETE — migrating" if curve and curve.complete else "BONDING CURVE (not migrated)"),
         "current_price_sol": str(price) if price is not None else None,
+        "market_cap_sol": str(market_cap.quantize(Decimal("0.01"))) if market_cap is not None else None,
+        "market_cap_basis": "price × 1,000,000,000 (Pump.fun fixed supply; market cap = FDV)",
+        "liquidity": liquidity,
+        "risk_status": (latest or {}).get("overall_risk"),
         "price_source": "pump.fun stream (bonding curve)" if price is not None else
                         "pool price is read by the gate at execution" if resolved == "solana_migration" else "unavailable",
         "price_at": curve.updated_at if curve else None,
