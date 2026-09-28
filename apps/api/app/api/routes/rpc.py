@@ -111,7 +111,8 @@ def _health(label: str, acks: dict, last_test: dict | None, now: datetime) -> di
         healthy = "YES" if all(healthy_votes) else "DEGRADED" if any(healthy_votes) else "NO"
     else:
         healthy = "YES" if tested_ok else "UNKNOWN"
-    totals = {k: sum((e.get(k) or 0) for e in per_service.values()) for k in ("successes", "failures", "rate_limited_count")}
+    totals = {k: sum((e.get(k) or 0) for e in per_service.values())
+              for k in ("successes", "failures", "rate_limited_count", "forbidden_count")}
     done = totals["successes"] + totals["failures"]
     latencies = [e["latency_ms"] for e in per_service.values() if e.get("latency_ms") is not None]
     return {"connected": connected, "healthy": healthy, "active": bool(active_in), "active_in": active_in,
@@ -124,7 +125,32 @@ def _health(label: str, acks: dict, last_test: dict | None, now: datetime) -> di
             "last_success_at": max((e.get("last_success_at") or "" for e in per_service.values()), default="") or None,
             "last_failure_at": max((e.get("last_failure_at") or "" for e in per_service.values()), default="") or None,
             "last_error": next((e.get("last_error") for e in per_service.values() if e.get("last_error")), None),
-            "services": sorted(per_service)}
+            "services": sorted(per_service), **_capabilities(per_service, last_test)}
+
+
+def _capabilities(per_service: dict, last_test: dict | None) -> dict:
+    """Method capability matrix for one endpoint: the latest observation per
+    method from real traffic (any service) or from the TEST probe."""
+    caps: dict[str, dict] = {}
+    probe = (last_test or {}).get("capabilities") or {}
+    for method, entry in (probe.get("methods") or {}).items():
+        caps[method] = {"status": entry.get("status"), "at": probe.get("probed_at"), "source": "probe",
+                        "detail": entry.get("detail"), "latency_ms": entry.get("latency_ms")}
+    for service, e in per_service.items():
+        for method, entry in (e.get("capabilities") or {}).items():
+            cur = caps.get(method)
+            if cur is None or (entry.get("at") or "") > (cur.get("at") or ""):
+                caps[method] = {"status": entry.get("status"), "at": entry.get("at"), "source": f"traffic:{service}",
+                                "detail": entry.get("error"), "latency_ms": None}
+    versions: dict[str, int] = dict(probe.get("tx_versions_seen") or {})
+    rl_by_method: dict[str, int] = {}
+    for e in per_service.values():
+        for v, n in (e.get("tx_versions") or {}).items():
+            versions[v] = versions.get(v, 0) + n
+        for m, n in (e.get("rate_limited_by_method") or {}).items():
+            rl_by_method[m] = rl_by_method.get(m, 0) + n
+    return {"capabilities": caps, "tx_versions_seen": versions, "rate_limited_by_method": rl_by_method,
+            "unsupported_methods": sorted({m for e in per_service.values() for m in (e.get("unsupported_methods") or [])})}
 
 
 async def _listing(db: AsyncSession, redis: Redis, settings: Settings) -> dict:
@@ -291,6 +317,9 @@ async def test_provider(provider_id: str, request: Request, db: AsyncSession = D
         if row is None:
             raise HTTPException(404, "that .env endpoint is not configured")
         result = await rpc_registry.test_rpc(request.app.state.http, row["url"])
+        if result.get("status") == rpc_registry.CONNECTED:
+            result["capabilities"] = await rpc_registry.probe_capabilities(request.app.state.http, row["url"],
+                                                                           settings.WALLET_PUBLIC_KEY)
         overrides = await rpc_registry.env_overrides(db)
         overrides[provider_id] = {**(overrides.get(provider_id) or {}), "last_test": result}
         await db.execute(insert(PlatformSetting).values(key=rpc_registry.ENV_OVERRIDES_KEY, value=overrides)
@@ -306,6 +335,10 @@ async def test_provider(provider_id: str, request: Request, db: AsyncSession = D
         result = (await rpc_registry.test_rpc(request.app.state.http, url, float(p.timeout_seconds)) if url else
                   {"status": rpc_registry.INVALID, "detail": "stored URL cannot be decrypted (encryption key changed) — re-enter it",
                    "latency_ms": None, "tested_at": datetime.now(timezone.utc).isoformat()})
+        if url and result.get("status") == rpc_registry.CONNECTED:
+            result["capabilities"] = await rpc_registry.probe_capabilities(request.app.state.http, url,
+                                                                           settings.WALLET_PUBLIC_KEY,
+                                                                           float(p.timeout_seconds))
         p.last_test = result
     await db.commit()
     return result

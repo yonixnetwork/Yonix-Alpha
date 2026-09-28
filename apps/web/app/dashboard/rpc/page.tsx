@@ -15,7 +15,9 @@ interface Provider {
   rpc_url: string; ws_url: string | null; enabled: boolean; priority: number; timeout_seconds: number | null;
   rate_limit_rps: number | null; notes: string | null; configured: boolean; decrypt_failed: boolean; last_test: TestResult | null;
   connected: boolean; healthy: "YES" | "NO" | "DEGRADED" | "UNKNOWN"; active: boolean; active_in: string[]; rate_limited_now: string[];
-  auth_failed_now?: string[]; refused_methods?: string[];
+  auth_failed_now?: string[]; refused_methods?: string[]; unsupported_methods?: string[]; forbidden_count?: number;
+  capabilities?: Record<string, { status: string; at: string | null; source: string; detail: string | null; latency_ms: number | null }>;
+  tx_versions_seen?: Record<string, number>; rate_limited_by_method?: Record<string, number>;
   success_rate: number | null; error_rate: number | null; successes: number; failures: number; rate_limited_count: number;
   latency_ms: number | null; last_success_at: string | null; last_failure_at: string | null; last_error: string | null; services: string[];
 }
@@ -28,6 +30,10 @@ interface Listing {
 const yes = (b: boolean) => <span className={b ? "pill pill-ok" : "pill pill-off"}>{b ? "YES" : "NO"}</span>;
 const health = (h: string) => <span className={h === "YES" ? "pill pill-ok" : h === "UNKNOWN" ? "pill pill-off" : h === "DEGRADED" ? "pill pill-warn" : "pill pill-danger"}>{h}</span>;
 const testPill = (s: string) => <span className={s === "CONNECTED" ? "pill pill-ok" : s === "RATE_LIMITED" || s === "TIMEOUT" ? "pill pill-warn" : "pill pill-danger"}>{s}</span>;
+const MATRIX_METHODS = ["getLatestBlockhash", "sendTransaction", "simulateTransaction", "getSignatureStatuses", "getTransaction",
+  "getSignaturesForAddress", "getBalance", "getTokenAccountsByOwner", "getMultipleAccounts", "getAccountInfo"];
+const capClass = (s?: string) => s === "SUPPORTED" ? "pill pill-ok" : s === "UNSUPPORTED" || s === "FORBIDDEN" ? "pill pill-danger"
+  : s === "RATE_LIMITED" || s === "ERROR" ? "pill pill-warn" : "pill pill-off";
 const pct = (v: number | null) => (v === null ? "—" : `${(v * 100).toFixed(1)}%`);
 
 const EMPTY = { name: "", provider_type: "alchemy", rpc_url: "", ws_url: "", priority: "150", timeout_seconds: "10", rate_limit_rps: "", notes: "", password: "" };
@@ -193,6 +199,35 @@ export default function RpcPage() {
         </div>
         <p className="muted">The URL is validated, tested, encrypted at rest and never shown again (only scheme://host). The .env Helius
           primary has priority 100 and .env backups 200–400; a new provider defaults to 150 (after the primary).</p>
+      </Section>
+
+      <Section title="Capability matrix — what each provider actually serves">
+        <div className="table-scroll">
+          <table className="data-table">
+            <thead><tr><th>Provider</th><th>Healthy</th><th>Latency</th><th>429s</th><th>Tx versions seen</th>
+              {MATRIX_METHODS.map((m) => <th key={m}><code>{m}</code></th>)}</tr></thead>
+            <tbody>{data.providers.map((p) => (
+              <tr key={p.label}>
+                <td><strong>{p.name}</strong><div className="muted">{p.rpc_url}</div></td>
+                <td>{health(p.healthy)}</td>
+                <td>{p.latency_ms === null ? "—" : `${p.latency_ms} ms`}</td>
+                <td title={Object.entries(p.rate_limited_by_method ?? {}).map(([m, n]) => `${m}: ${n}`).join("\n")}>{p.rate_limited_count}</td>
+                <td>{Object.keys(p.tx_versions_seen ?? {}).length === 0 ? "—"
+                  : Object.entries(p.tx_versions_seen ?? {}).map(([v, n]) => `v${v}: ${n}`).join(", ")}</td>
+                {MATRIX_METHODS.map((m) => {
+                  const c = p.capabilities?.[m];
+                  return <td key={m} title={c ? `${c.source}${c.at ? ` · ${formatDate(c.at)}` : ""}${c.detail ? ` · ${c.detail}` : ""}` : "not observed yet"}>
+                    <span className={capClass(c?.status)}>{c?.status ?? "UNKNOWN"}</span></td>;
+                })}
+              </tr>))}
+            </tbody>
+          </table>
+        </div>
+        <p className="muted">From real requests made by the services and from the TEST button&apos;s read-only probe (it never
+          sends a transaction; sendTransaction is known only from real trades). A provider that answers &quot;method not
+          available&quot; is not asked for that method again for 6 hours; every getTransaction declares transaction version 1.
+          Execution requests (quote state, blockhash, simulate, send, confirm) are critical; history and analytics
+          lookups are background work that is dropped, not queued, while a provider is rate-limited.</p>
       </Section>
 
       <Section title="Request routing — which endpoint served each request type">

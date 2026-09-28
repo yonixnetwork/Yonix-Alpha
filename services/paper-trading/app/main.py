@@ -15,7 +15,7 @@ from yonixalpha_core.venues.common import venue_health_snapshot
 from yonixalpha_core.logging import configure_logging, get_logger
 from yonixalpha_core.notify import send_telegram_alert
 from yonixalpha_core.solana.market_data import JupiterClient, RateBudget
-from yonixalpha_core.solana.rpc import RpcManager
+from yonixalpha_core.solana.rpc import RpcManager, with_priority
 from yonixalpha_core.runtime_watch import run_watcher
 from yonixalpha_core.state_machine import CandidateState
 from yonixalpha_core.venues.registry import build_venues
@@ -131,7 +131,7 @@ async def _paper_trading_loop(
                 async with session_factory() as session:
                     await track_outcomes(session, redis, now)
                 async with session_factory() as session:
-                    await track_observation_followups(session, redis, rpc, now)
+                    await track_observation_followups(session, redis, with_priority(rpc, "background"), now)
                 if venues is not None:
                     grid_status = await run_grid(session_factory, redis, app_settings, venues, now)
                     if grid_status.get("fills"):

@@ -34,6 +34,7 @@ from solders.pubkey import Pubkey
 from yonixalpha_core.safety.liquidity import ConstantProductModel
 from yonixalpha_core.solana.codec import BorshReader, TruncatedData
 from yonixalpha_core.solana.flow import Trade
+from yonixalpha_core.solana.rpc import RpcUnsupportedTransactionVersionError, get_transaction_params
 
 PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 PUMP_AMM_PROGRAM = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
@@ -241,8 +242,12 @@ async def recent_pool_trades(rpc, redis, pool: str, limit: int = 25) -> list[Poo
         if cached is not None:
             rows = json.loads(cached)
         else:
-            tx = await rpc.call("getTransaction", [sig, {"encoding": "json", "commitment": "confirmed",
-                                                         "maxSupportedTransactionVersion": 0}])
+            # Only log messages are read (version-independent), so any version
+            # the node can return is accepted.
+            try:
+                tx = await rpc.call("getTransaction", get_transaction_params(sig, encoding="json"))
+            except RpcUnsupportedTransactionVersionError:
+                continue  # a version newer than we declare: skipped, never misread
             logs = ((tx or {}).get("meta") or {}).get("logMessages") or []
             rows = [[t.at.isoformat(), t.user, t.is_buy, t.base_raw, t.quote_lamports, t.pool_base, t.pool_quote,
                      t.fee_bps, t.pool] for t in trades_from_logs(logs, pool)]

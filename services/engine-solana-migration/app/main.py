@@ -10,7 +10,7 @@ from yonixalpha_core.db.base import make_engine, make_session_factory
 from yonixalpha_core.db.models import SystemEvent
 from yonixalpha_core.logging import configure_logging, get_logger
 from yonixalpha_core.notify import send_telegram_alert
-from yonixalpha_core.solana.rpc import RpcManager
+from yonixalpha_core.solana.rpc import RpcManager, get_transaction_params
 from yonixalpha_core.runtime_watch import run_watcher
 from yonixalpha_core.solana.ws import SolanaWsClient
 
@@ -106,7 +106,7 @@ async def run() -> None:
                 try:
                     tx_result = await rpc.call(
                         "getTransaction",
-                        [signature, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0, "commitment": "confirmed"}],
+                        get_transaction_params(signature),
                     )
                 except Exception as exc:  # noqa: BLE001
                     log.warning("main.get_transaction_failed", signature=signature, error=str(exc))

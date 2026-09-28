@@ -14,6 +14,10 @@ async def run_watcher(service: str, settings, session_factory, stop_event: async
     redis = redis or make_redis(settings)
     reloaders, status = {}, {}
     if rpc is not None:
+        if hasattr(rpc, "shared") and getattr(rpc, "shared", None) is None:
+            # 429 cooldowns and the background budget are per provider key,
+            # so every service shares them through Redis.
+            rpc.shared = redis
         reloaders = rpc_registry.make_reloaders(service, rpc, settings, session_factory, redis, ws_urls)
         status = {"rpc": lambda: rpc_registry.rpc_status(rpc)}
     watcher = RuntimeConfigWatcher(service, session_factory, redis, reloaders, status)

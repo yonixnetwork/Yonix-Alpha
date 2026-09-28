@@ -29,6 +29,8 @@ from solders.transaction import VersionedTransaction
 
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.solana import venue as venues
+from yonixalpha_core.solana.rpc import get_transaction_params, with_priority
+from yonixalpha_core.solana.txversion import UnsupportedTransactionLayout, require_version
 from yonixalpha_core.solana.pumpportal import PumpPortalClient, PumpPortalError, TradeRequest
 from yonixalpha_core.solana.tx_builders import BuildError, JupiterBuilder, NativePumpBuilder, PumpPortalBuilder
 from yonixalpha_core.solana.txguard import GuardExpectation, inspect
@@ -92,6 +94,9 @@ def _key_list(tx: dict) -> list[str]:
 def parse_fill(tx: dict, wallet: str, mint: str) -> Fill:
     """Actual balance changes of `wallet` in a confirmed transaction
     (getTransaction, encoding jsonParsed)."""
+    # Our own transactions are v0 (MessageV0); anything else was not built
+    # here, so its layout is not assumed.
+    require_version(tx, ("legacy", 0))
     meta = tx.get("meta") or {}
     keys = _key_list(tx)
     if wallet not in keys:
@@ -118,13 +123,14 @@ class SolanaLiveExecutor:
     def __init__(self, rpc, pumpportal: PumpPortalClient | None, wallet: LiveWallet,
                  confirm_timeout: float = CONFIRM_TIMEOUT_SECONDS, sleep=asyncio.sleep, clock=time.monotonic,
                  jupiter=None, builder: str = "native"):
-        self.rpc, self.pp, self.wallet = rpc, pumpportal, wallet
+        # Trade execution is critical traffic: never shed behind background work.
+        self.rpc, self.pp, self.wallet = with_priority(rpc, "critical"), pumpportal, wallet
         self.confirm_timeout, self._sleep, self._clock = confirm_timeout, sleep, clock
         self.jupiter = jupiter
         self.builder = builder  # "native" | "pumpportal" (Pump venues only); set per order from live settings
-        self.native = NativePumpBuilder(rpc)
+        self.native = NativePumpBuilder(self.rpc)
         self._pp_builder = PumpPortalBuilder(pumpportal) if pumpportal is not None else None
-        self._jup_builder = JupiterBuilder(jupiter, rpc) if jupiter is not None else None
+        self._jup_builder = JupiterBuilder(jupiter, self.rpc) if jupiter is not None else None
 
     def _builder_for(self, venue: venues.Venue):
         if venue.kind == venues.JUPITER_ROUTE:
@@ -288,8 +294,7 @@ class SolanaLiveExecutor:
         if status.get("confirmationStatus") not in ("confirmed", "finalized"):
             return ExecOutcome("PENDING", signature)
         try:
-            tx = await self.rpc.call("getTransaction", [signature, {"encoding": "jsonParsed", "commitment": "confirmed",
-                                                                    "maxSupportedTransactionVersion": 0}])
+            tx = await self.rpc.call("getTransaction", get_transaction_params(signature))
         except Exception as exc:  # noqa: BLE001
             return ExecOutcome("PENDING", signature, error=f"transaction fetch failed: {type(exc).__name__}")
         if not tx:
@@ -299,7 +304,7 @@ class SolanaLiveExecutor:
                                logs=list((tx.get("meta") or {}).get("logMessages") or []))
         try:
             fill = parse_fill(tx, self.wallet.pubkey, mint)
-        except (KeyError, ValueError, IndexError) as exc:
+        except (KeyError, ValueError, IndexError, UnsupportedTransactionLayout) as exc:
             return ExecOutcome("FAILED", signature, error=f"confirmed but fill unreadable: {exc}")
         return ExecOutcome("CONFIRMED", signature, fill=fill, logs=list((tx.get("meta") or {}).get("logMessages") or []))
 

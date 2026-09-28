@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from yonixalpha_core.db.models import TokenObservation
 from yonixalpha_core.solana import pump_stream, pumpswap
+from yonixalpha_core.solana.rpc import RpcRateLimitedError
 
 OFFSETS = (("T+5m", 300), ("T+10m", 600), ("T+30m", 1800), ("T+60m", 3600))
 LATE_AFTER_SECONDS = 600  # a snapshot taken this long after its mark is flagged late
@@ -61,6 +62,8 @@ async def snapshot(redis, rpc, mint: str, now: datetime, pool_budget: list[int])
         state = await pumpswap.fetch_pool(rpc, mint, now, None, 6)
     except pumpswap.PoolUnavailable as exc:
         return {"unavailable": str(exc)[:160], "migrated": True}
+    except RpcRateLimitedError:
+        return None  # background request shed (providers limited): retried next run, not recorded as missing
     except Exception as exc:  # noqa: BLE001 - a failed source is recorded, never guessed around
         return {"unavailable": f"pool lookup failed: {type(exc).__name__}", "migrated": True}
     return {"price_raw": str(Decimal(state.quote_reserve_lamports) / Decimal(state.base_reserve_raw)),

@@ -17,7 +17,7 @@ distinct funder, all cached for a week.
 import json
 from typing import Any
 
-from yonixalpha_core.solana.rpc import RpcAllEndpointsFailedError, call_optional
+from yonixalpha_core.solana.rpc import RpcAllEndpointsFailedError, call_optional, get_transaction_params
 
 FRESH_SIGNATURES = 25
 BUSY_FUNDER_SIGNATURES = 1000
@@ -61,7 +61,7 @@ async def wallet_funder(rpc, redis, wallet: str) -> dict[str, Any]:
         if not sigs:
             return {"fresh": True, "funder": None}
         oldest = sigs[-1]["signature"]
-        tx = await call_optional(rpc, "getTransaction", [oldest, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}])
+        tx = await call_optional(rpc, "getTransaction", get_transaction_params(oldest))
         return {"fresh": True, "funder": funder_from_transaction(tx, wallet)}
     return await _cached(redis, f"yx:funder:{wallet}", fetch)
 

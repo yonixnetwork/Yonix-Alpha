@@ -205,3 +205,108 @@ async def test_rpc(client, url: str | None, timeout: float = 10.0) -> dict[str, 
     if not isinstance(body, dict) or not isinstance(body.get("result"), int):
         return {"status": UNAVAILABLE, "detail": "unexpected getSlot answer", "latency_ms": ms, "tested_at": now}
     return {"status": CONNECTED, "detail": f"slot {body['result']}", "latency_ms": ms, "tested_at": now}
+
+
+# --- capability probe -------------------------------------------------------------
+
+PROBE_METHODS = ("getLatestBlockhash", "getBalance", "getTokenAccountsByOwner", "getSignaturesForAddress",
+                 "getTransaction", "getSignatureStatuses", "simulateTransaction", "sendTransaction")
+_PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+_TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+
+
+def _probe_tx_b64() -> str:
+    """An unsigned transaction with one ComputeBudget instruction and a
+    random fee payer: simulating it (sigVerify off) shows whether the
+    provider serves simulateTransaction; it can never be sent."""
+    import base64
+
+    from solders.compute_budget import set_compute_unit_limit
+    from solders.hash import Hash
+    from solders.keypair import Keypair
+    from solders.message import MessageV0
+    from solders.signature import Signature
+    from solders.transaction import VersionedTransaction
+
+    msg = MessageV0.try_compile(Keypair().pubkey(), [set_compute_unit_limit(10_000)], [], Hash.default())
+    return base64.b64encode(bytes(VersionedTransaction.populate(msg, [Signature.default()]))).decode()
+
+
+async def probe_capabilities(client, url: str, owner: str | None = None, timeout: float = 10.0) -> dict[str, Any]:
+    """Read-only capability probe of one endpoint: which methods it serves
+    and which transaction versions its getTransaction returns. Nothing is
+    ever sent: sendTransaction is reported from real traffic only."""
+    import re
+    import time
+
+    import httpx
+
+    from yonixalpha_core.solana.rpc import MAX_SUPPORTED_TRANSACTION_VERSION, get_transaction_params
+
+    owner = owner or "11111111111111111111111111111111"
+    out: dict[str, Any] = {}
+    versions: dict[str, int] = {}
+
+    async def one(method: str, params: list) -> Any:
+        started = time.monotonic()
+        entry: dict[str, Any] = {"status": "ERROR", "latency_ms": None, "detail": None}
+        out[method] = entry
+        try:
+            r = await client.post(url, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params}, timeout=timeout)
+        except httpx.TimeoutException:
+            entry["detail"] = "timeout"
+            return None
+        except httpx.TransportError as exc:
+            entry["detail"] = f"connection error ({type(exc).__name__})"
+            return None
+        entry["latency_ms"] = round((time.monotonic() - started) * 1000, 1)
+        if r.status_code in (401, 403):
+            entry.update(status="FORBIDDEN", detail=f"HTTP {r.status_code}")
+            return None
+        if r.status_code == 429:
+            entry.update(status="RATE_LIMITED", detail="HTTP 429")
+            return None
+        try:
+            body = r.json()
+        except ValueError:
+            entry["detail"] = f"HTTP {r.status_code}, not JSON-RPC"
+            return None
+        err = body.get("error") if isinstance(body, dict) else None
+        if err:
+            msg = str(err.get("message", err) if isinstance(err, dict) else err)
+            code = err.get("code") if isinstance(err, dict) else None
+            if code == -32601 or re.search(r"\bmethod\b.*\b(not found|does not exist|is not available|not supported)", msg, re.I):
+                entry.update(status="UNSUPPORTED", detail=msg[:160])
+            elif code == -32015:
+                entry.update(status="SUPPORTED", detail=f"version above {MAX_SUPPORTED_TRANSACTION_VERSION}: {msg[:120]}")
+            else:
+                entry.update(status="ERROR", detail=msg[:160])
+            return None
+        entry["status"] = "SUPPORTED"
+        return body.get("result")
+
+    await one("getLatestBlockhash", [{"commitment": "confirmed"}])
+    await one("getBalance", [owner, {"commitment": "confirmed"}])
+    await one("getTokenAccountsByOwner", [owner, {"programId": _TOKEN_PROGRAM}, {"encoding": "jsonParsed"}])
+    sigs = await one("getSignaturesForAddress", [_PUMP_PROGRAM, {"limit": 5, "commitment": "confirmed"}])
+    sigs = sigs if isinstance(sigs, list) else []
+    first = None
+    for sig in [x.get("signature") for x in sigs if isinstance(x, dict)][:3]:
+        tx = await one("getTransaction", get_transaction_params(sig))
+        if isinstance(tx, dict):
+            v = str(tx.get("version", "legacy"))
+            versions[v] = versions.get(v, 0) + 1
+        first = first or sig
+    if first is None:
+        out.setdefault("getTransaction", {"status": "NOT_PROBED", "latency_ms": None,
+                                          "detail": "no recent signature to look up"})
+    await one("getSignatureStatuses", [[first or "1" * 88], {"searchTransactionHistory": False}])
+    try:
+        await one("simulateTransaction", [_probe_tx_b64(), {"encoding": "base64", "sigVerify": False,
+                                                             "replaceRecentBlockhash": True}])
+    except Exception as exc:  # noqa: BLE001 - probe construction failure is reported, not raised
+        out["simulateTransaction"] = {"status": "NOT_PROBED", "latency_ms": None, "detail": type(exc).__name__}
+    out["sendTransaction"] = {"status": "NOT_PROBED", "latency_ms": None,
+                              "detail": "never probed (it would broadcast); see live traffic"}
+    return {"methods": out, "tx_versions_seen": versions, "max_version_declared": MAX_SUPPORTED_TRANSACTION_VERSION,
+            "probed_at": datetime.now(timezone.utc).isoformat()}
