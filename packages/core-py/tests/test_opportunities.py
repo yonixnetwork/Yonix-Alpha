@@ -162,3 +162,40 @@ async def test_comparison_separates_winners_losers_and_rejected_that_went_up(db)
     assert c["winning_trades"]["n"] == 1 and c["losing_trades"]["n"] == 1 and c["rejected"]["n"] == 2
     assert c["winning_trades"]["market_cap_sol"] == "40.0000" and c["losing_trades"]["market_cap_sol"] == "80.0000"
     assert c["rejected_later_up"]["n"] == 1 and c["loss_classes"] == {"SIGNAL_FAILURE": 1}
+
+
+async def test_loss_report_explains_old_losing_trades(db, monkeypatch, capsys):
+    from yonixalpha_core.config import get_settings
+    from yonixalpha_core.db.models import RiskAssessment
+    from yonixalpha_core.tools import loss_report
+
+    a = RiskAssessment(idempotency_key="lr1", engine="solana_fresh", strategy="s", asset_id="M1", symbol="L1", decision="EXECUTE",
+                       status_label="x", executable=True, execution_target="LIVE", overall_risk="MODERATE", risk_engine_version="1",
+                       evaluated_at=T0, assessment={"qualified": True, "findings": [
+                           {"code": "ACTIVITY_DETERIORATING", "level": "MODERATE", "action": "EXECUTE", "message": "sellers rising"}],
+                           "inputs_snapshot": {"features": {"unique_buyers": "4"}, "volatility_source": "10-second returns",
+                                               "entry_exit_check": {"action": "HOLD", "reasons": []}}})
+    b = RiskAssessment(idempotency_key="lr2", engine="solana_fresh", strategy="s", asset_id="M2", symbol="L2", decision="NO_TRADE",
+                       status_label="x", executable=False, execution_target="LIVE", overall_risk="HIGH", risk_engine_version="1",
+                       evaluated_at=datetime.now(timezone.utc), assessment={"findings": [{"code": "AUTO_SL_NO_VOLATILITY"}],
+                                                                           "inputs_snapshot": {"volatility_source": "unavailable: 2 trades"}})
+    db.add_all([a, b])
+    await db.flush()
+    now = datetime.now(timezone.utc)
+    db.add(PaperPosition(symbol="L1", provider="live", side="LONG", entry_price=Decimal("1"), quantity=Decimal(1), entry_at=now - timedelta(minutes=5),
+                         status="closed", exit_at=now, exit_reason="stop_loss", realized_pnl=Decimal("-0.01"), realized_pnl_pct=Decimal("-0.2"),
+                         highest_price=Decimal("1.001"), lowest_price=Decimal("0.8"), execution_mode="LIVE", assessment_id=a.id,
+                         engine="solana_fresh", asset_id="M1"))
+    await db.commit()
+    monkeypatch.setenv("JWT_SECRET", "x" * 40)
+    monkeypatch.setenv("ADMIN_PASSWORD_HASH", "$2b$12$" + "x" * 53)
+    get_settings.cache_clear()
+    try:
+        assert await loss_report.main(["--json"]) == 0
+    finally:
+        get_settings.cache_clear()
+    out = json.loads(capsys.readouterr().out)
+    loss = out["losses"][0]
+    assert loss["symbol"] == "L1" and loss["mfe_pct"] == "0.10" and loss["loss_analysis"]["classification"] == "SIGNAL_FAILURE"
+    assert loss["warnings_at_entry"][0].startswith("ACTIVITY_DETERIORATING")
+    assert out["volatility"]["blocked_no_volatility"] == 1 and "unavailable: 2 trades" in out["volatility"]["by_reason"]

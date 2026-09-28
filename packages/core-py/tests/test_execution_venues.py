@@ -353,3 +353,27 @@ async def test_order_inspect_describes_each_instruction_with_its_program():
     assert lines[0].startswith(f"fee payer {WALLET}")
     assert any("[Pump]" in ln and p.BUY.hex() in ln and "accounts=18" in ln for ln in lines)
     assert not any("NOT ALLOWED" in ln for ln in lines)
+
+
+# --- compute-unit limit setting -------------------------------------------------------
+async def test_compute_unit_limit_setting_is_applied_and_bounded():
+    from solders.compute_budget import set_compute_unit_limit
+
+    from yonixalpha_core.live_trading import LiveExecutionSettings, parse_live_settings
+
+    assert LiveExecutionSettings().compute_unit_limit_curve == 200_000  # the working default is unchanged
+    chain = FakeChain()
+    chain.add_mint(MINT)
+    chain.add_curve(MINT, CREATOR)
+    chain.fill = (WALLET, MINT, -SIZE, 3_000_000_000)
+    ex = executor(chain)
+    ex.native.cu_limits = {"PUMP_BONDING_CURVE": 130_000, "PUMP_AMM": 350_000}
+    out, _ = await run(ex, buy_req(), buy_exp())
+    assert out.status == "CONFIRMED"
+    tx = sent_tx(chain)
+    datas = [bytes(ix.data) for ix in tx.message.instructions]
+    assert bytes(set_compute_unit_limit(130_000).data) in datas
+    built = next(s for s in out.stages if s["stage"] == "TRANSACTION_BUILT")
+    assert built["compute_unit_limit"] == 130_000
+    _, errors = parse_live_settings({"compute_unit_limit_curve": 50_000})
+    assert errors and "between 120000 and 400000" in errors[0]

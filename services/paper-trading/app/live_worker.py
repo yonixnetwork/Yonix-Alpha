@@ -89,6 +89,9 @@ async def live_worker_loop(session_factory, redis, app_settings, rpc, http_clien
                     live = await live_trading.load_live_settings(session)
                 if hasattr(executor, "builder"):
                     executor.builder = live.tx_builder  # dashboard setting, applied per loop
+                if hasattr(executor, "native"):
+                    executor.native.cu_limits = {"PUMP_BONDING_CURVE": live.compute_unit_limit_curve,
+                                                 "PUMP_AMM": live.compute_unit_limit_amm}
                 now = datetime.now(timezone.utc)
                 if last_reconcile is None or (now - last_reconcile).total_seconds() >= RECONCILE_SECONDS:
                     report = await live_trading.reconcile(session_factory, redis, app_settings, executor, now)

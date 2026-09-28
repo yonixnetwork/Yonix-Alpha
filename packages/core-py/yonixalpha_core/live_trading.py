@@ -77,6 +77,12 @@ class LiveExecutionSettings:
     # Who builds Pump transactions: "native" (built here from on-chain state to
     # the official layouts) or "pumpportal" (third party; always guarded).
     tx_builder: str = "native"
+    # Compute-unit limit requested by native Pump transactions. The priority
+    # fee stays priority_fee_sol in total; a tighter limit (measured usage:
+    # ~96k curve, ~142k PumpSwap) raises the price per CU validators rank
+    # by. Defaults are the values the working path has always used.
+    compute_unit_limit_curve: int = 200_000
+    compute_unit_limit_amm: int = 350_000
 
     def to_dict(self) -> dict[str, str]:
         return {k: str(v) for k, v in asdict(self).items()}
@@ -87,7 +93,11 @@ LIMITS = {"entry_slippage_pct": (Decimal("0.5"), Decimal("50")), "exit_slippage_
           "exit_slippage_step_pct": (Decimal("0"), Decimal("30")), "max_exit_slippage_pct": (Decimal("5"), Decimal("95")),
           "priority_fee_sol": (Decimal("0"), Decimal("0.01")), "max_priority_fee_sol": (Decimal("0"), Decimal("0.02")),
           "max_platform_fee_bps": (Decimal("0"), Decimal("200")), "min_sol_reserve": (Decimal("0.01"), Decimal("100")),
-          "wallet_max_age_seconds": (Decimal("30"), Decimal("900"))}
+          "wallet_max_age_seconds": (Decimal("30"), Decimal("900")),
+          # Floors keep headroom over the measured consumption; a limit below
+          # what the program needs makes the transaction fail on chain.
+          "compute_unit_limit_curve": (Decimal("120000"), Decimal("400000")),
+          "compute_unit_limit_amm": (Decimal("180000"), Decimal("600000"))}
 
 
 def parse_live_settings(data: dict[str, Any]) -> tuple[LiveExecutionSettings, list[str]]:

@@ -66,7 +66,10 @@ async def analyse(session, order: ExecutionOrder, wallet: str | None = None) -> 
             "error": order.error, "symbol": position.symbol if position else None,
             "position_status": position.status if position else None,
             "realized_pnl_sol": str(position.realized_pnl) if position is not None and position.realized_pnl is not None else None,
-            "timing": out.get("timing"), "price": out.get("price"), "decision": out.get("decision")}
+            "timing": out.get("timing"), "price": out.get("price"), "decision": out.get("decision"),
+            "priority_fee_sol": str(order.priority_fee_sol),
+            "compute_unit_limit": next((st.get("compute_unit_limit") for st in reversed((order.result or {}).get("stages") or [])
+                                        if st.get("stage") == "TRANSACTION_BUILT"), None)}
 
 
 def _fmt(v) -> str:
@@ -83,6 +86,18 @@ def summary(rows: list[dict]) -> dict[str, Any]:
     agg["classifications"] = dict(Counter((r.get("price") or {}).get("classification") for r in rows
                                           if r["status"] == "CONFIRMED" and r["side"] == "BUY"))
     agg["failures"] = dict(Counter(r["failure_code"] for r in rows if r.get("failure_code")))
+    # Does a higher priority fee (or tighter CU limit) land faster? Measured per setting.
+    groups: dict[str, list[dict]] = {}
+    for r in rows:
+        if r["status"] == "CONFIRMED" and r.get("timing"):
+            groups.setdefault(f"fee {r.get('priority_fee_sol')} SOL / CU limit {r.get('compute_unit_limit') or '—'}", []).append(r["timing"])
+    agg["by_priority_setting"] = {
+        k: {"n": len(v),
+            "avg_submit_to_confirm_ms": round(statistics.mean(x)) if (x := [t["submit_to_confirm_ms"] for t in v
+                                                                           if isinstance(t.get("submit_to_confirm_ms"), int)]) else None,
+            "avg_slots_to_land": round(statistics.mean(y), 1) if (y := [t["slots_to_land"] for t in v
+                                                                        if isinstance(t.get("slots_to_land"), int)]) else None}
+        for k, v in groups.items()}
     return agg
 
 
@@ -141,6 +156,9 @@ async def main(argv: list[str] | None = None) -> int:
             print(f"  {m:30} n={v['n']:<3} avg {v['avg']:<7} median {v['median']:<7} worst {v['worst']}")
     print(f"  price causes (confirmed buys): {agg['classifications'] or '—'}")
     print(f"  failures: {agg['failures'] or '—'}")
+    print("  by priority setting (confirmed orders; compare only with enough samples):")
+    for k, v in agg["by_priority_setting"].items():
+        print(f"    {k:48} n={v['n']:<3} submit→confirm {v['avg_submit_to_confirm_ms']} ms, slots to land {v['avg_slots_to_land']}")
     return 0
 
 

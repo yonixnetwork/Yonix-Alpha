@@ -90,6 +90,8 @@ const SETTING_LABELS: Record<string, string> = {
   min_sol_reserve: "SOL reserve never spent",
   wallet_max_age_seconds: "Max wallet-sync age (s)",
   tx_builder: "Pump transaction builder",
+  compute_unit_limit_curve: "Compute-unit limit, bonding curve (measured use ~96k)",
+  compute_unit_limit_amm: "Compute-unit limit, PumpSwap (measured use ~142k)",
 };
 
 function statusPill(status: string): string {

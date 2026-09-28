@@ -79,6 +79,7 @@ class NativePumpBuilder:
     def __init__(self, rpc, clock=time.monotonic):
         self.rpc, self._clock = rpc, clock
         self._global: tuple[float, p.PumpGlobal] | None = None
+        self.cu_limits: dict[str, int] = dict(CU_LIMIT)  # dashboard setting (live_trading), applied per order
         self._config: tuple[float, p.AmmGlobalConfig] | None = None
 
     async def _account(self, address: str) -> bytes:
@@ -161,12 +162,12 @@ class NativePumpBuilder:
         value = (blockhash or {}).get("value") or {}
         if not value.get("blockhash"):
             raise BuildError("no recent blockhash")
-        msg = MessageV0.try_compile(Pubkey.from_string(wallet), priority_ixs(req, CU_LIMIT[venue.kind]) + trade, [],
+        msg = MessageV0.try_compile(Pubkey.from_string(wallet), priority_ixs(req, self.cu_limits.get(venue.kind, CU_LIMIT[venue.kind])) + trade, [],
                                     Hash.from_string(value["blockhash"]))
         # Native transactions pay no platform fee: nothing may leave the wallet as one.
         exp.max_fee_transfer_lamports = 0
         detail["blockhash_slot"] = ((blockhash or {}).get("context") or {}).get("slot")  # diagnostics only
-        detail["compute_unit_limit"] = CU_LIMIT[venue.kind]
+        detail["compute_unit_limit"] = self.cu_limits.get(venue.kind, CU_LIMIT[venue.kind])
         return BuiltTx(unsigned(msg), self.name, None, detail, value.get("lastValidBlockHeight"))
 
 
