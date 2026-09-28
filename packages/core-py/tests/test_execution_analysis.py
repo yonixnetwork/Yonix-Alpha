@@ -180,3 +180,139 @@ async def test_trade_report_measures_old_and_new_orders(capsys, monkeypatch):
     assert row["timing"]["queue_wait_ms"] == 700 and row["timing"]["submit_to_confirm_ms"] == 1000
     assert row["decision"]["reconstructed"] and row["price"]["decision_price_sol"] == str(spot0)
     assert out["summary"]["submit_to_confirm_ms"]["worst"] == 1000
+
+
+# --- where the wallet's SOL went ------------------------------------------------
+
+ATA_RENT = 2_039_280
+
+
+def parsed_tx(accounts: list[tuple[str, int, int]], fee: int, inner: list[dict], token_balances: list[tuple]) -> dict:
+    """A getTransaction (jsonParsed) result: accounts are (key, pre, post)
+    lamports, fee payer first; token_balances are (index, mint, owner, pre, post)."""
+    def tb(which):
+        return [{"accountIndex": i, "mint": m, "owner": o, "uiTokenAmount": {"amount": str(pre if which == "pre" else post),
+                                                                            "decimals": DEC}}
+                for i, m, o, pre, post in token_balances if (pre if which == "pre" else post) is not None]
+    return {"version": 0, "slot": 5, "transaction": {"signatures": ["s"], "message": {
+                "accountKeys": [{"pubkey": k, "signer": i == 0, "writable": True} for i, (k, _, _) in enumerate(accounts)],
+                "instructions": []}},
+            "meta": {"err": None, "fee": fee, "preBalances": [a[1] for a in accounts], "postBalances": [a[2] for a in accounts],
+                     "preTokenBalances": tb("pre"), "postTokenBalances": tb("post"),
+                     "innerInstructions": [{"index": 1, "instructions": inner}], "logMessages": []}}
+
+
+def create(src: str, new: str, lamports: int, space: int) -> dict:
+    return {"program": "system", "parsed": {"type": "createAccount",
+                                            "info": {"source": src, "newAccount": new, "lamports": lamports, "space": space}}}
+
+
+def test_cost_breakdown_itemizes_a_curve_buy_that_opened_a_token_account():
+    """A 0.004 SOL buy that creates the token account: the rent deposit, not
+    the market, makes the all-in price ~50% above the trade price."""
+    ata, curve_acct = wallet(20), wallet(21)
+    trade, fees, fee = 4_000_000, 50_000, 105_000
+    spent = trade + fees + fee + ATA_RENT
+    tx = parsed_tx([(WALLET, 10**9, 10**9 - spent), (ata, 0, ATA_RENT), (curve_acct, 5 * 10**9, 5 * 10**9 + trade)],
+                   fee, [create(WALLET, ata, ATA_RENT, 165)], [(1, MINT, WALLET, None, 1000)])
+    ev = {"venue": "PUMP_BONDING_CURVE", "is_buy": True, "quote_lamports": trade, "token_raw": 1000,
+          "fee_lamports": 40_000, "creator_fee_lamports": 10_000,
+          "reserves_before": {"quote": trade * 10**4, "base": 1000 * 10**4}}
+    c = xa.cost_breakdown(tx, WALLET, MINT, ev)
+    assert c["wallet_change_lamports"] == -spent and c["trade_lamports"] == trade and c["program_fees_lamports"] == fees
+    assert c["network_fee_lamports"] == fee and c["priority_fee_lamports"] == 100_000
+    assert c["net_deposits_lamports"] == ATA_RENT == c["token_account_rent_lamports"] and c["residual_lamports"] == 0
+    assert c["deposits"][0]["what"].startswith("token account for this token")
+
+    res = {"fill": {"sol_change_lamports": -spent, "token_change_raw": 1000, "fee_lamports": fee}, "trade_event": ev,
+           "costs": c, "stages": []}
+    out = xa.price_analysis("BUY", "0.004", DEC, res, {"price_sol": str(Decimal(trade) / 10**9 / (Decimal(1000) / 10**DEC))}, {})
+    assert out["classification"] == "ACCOUNT_RENT", out
+    assert out["components_pct"]["deposits_pct"] == "50.98" and out["components_pct"]["program_fees_pct"] == "1.25"
+    assert out["costs_sol"]["token_account_rent_lamports"] == "0.00203928"
+    assert not any("within the slippage limit" in e for e in out["evidence"])
+
+
+def test_cost_breakdown_nets_a_wrapped_sol_account_opened_and_closed_in_the_same_swap():
+    """PumpSwap buy: the temporary wrapped-SOL account's deposit comes back
+    when it is closed; only the token account's rent stays deposited."""
+    ata, wsol, pool = wallet(30), wallet(31), wallet(32)
+    trade, lp_fees, fee = 3_000_000, 30_000, 105_000
+    spent = trade + lp_fees + fee + ATA_RENT
+    tx = parsed_tx([(WALLET, 10**9, 10**9 - spent), (ata, 0, ATA_RENT), (wsol, 0, 0), (pool, 10**10, 10**10 + trade + lp_fees)],
+                   fee, [create(WALLET, wsol, ATA_RENT, 165), create(WALLET, ata, ATA_RENT, 170),
+                         {"program": "spl-token", "parsed": {"type": "closeAccount",
+                                                             "info": {"account": wsol, "destination": WALLET, "owner": WALLET}}}],
+                   [(1, MINT, WALLET, None, 500), (2, "So11111111111111111111111111111111111111112", WALLET, None, 0)])
+    ev = {"venue": "PUMP_AMM", "is_buy": True, "quote_lamports": trade, "user_quote_lamports": trade + lp_fees, "token_raw": 500}
+    c = xa.cost_breakdown(tx, WALLET, MINT, ev)
+    assert c["net_deposits_lamports"] == ATA_RENT and c["program_fees_lamports"] == lp_fees and c["residual_lamports"] == 0
+    assert {d["what"] for d in c["deposits"]} == {"wrapped-SOL token account",
+                                                  "token account for this token (rent: returned when the account is closed)"}
+
+
+def test_cost_breakdown_reports_what_it_cannot_explain():
+    tx = parsed_tx([(WALLET, 10**9, 10**9 - 5_000_000)], 105_000, [], [])
+    ev = {"venue": "PUMP_BONDING_CURVE", "is_buy": True, "quote_lamports": 4_000_000, "token_raw": 1,
+          "fee_lamports": 0, "creator_fee_lamports": 0}
+    assert xa.cost_breakdown(tx, WALLET, MINT, ev)["residual_lamports"] == 895_000
+    assert xa.cost_breakdown(tx, WALLET, MINT, None)["residual_lamports"] is None  # no event: nothing is guessed
+
+
+async def test_cost_report_itemizes_confirmed_orders_and_counts_empty_token_accounts(capsys, monkeypatch):
+    import json
+
+    import httpx
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from yonixalpha_core.db.base import Base, make_session_factory
+    from yonixalpha_core.db.models import ExecutionOrder
+    from yonixalpha_core.tools import cost_report
+
+    engine = create_async_engine(os.environ["DATABASE_URL"])
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+    async with make_session_factory(engine)() as s:
+        s.add(ExecutionOrder(mode="LIVE", side="BUY", reason="entry", mint=MINT, provider="pumpportal_local", route="pump",
+                             amount="0.004", amount_kind="sol", slippage_pct=Decimal(10), priority_fee_sol=Decimal("0.0001"),
+                             status="CONFIRMED", idempotency_key="c1", signature="sig-c1", created_at=T0))
+        await s.commit()
+    await engine.dispose()
+
+    ata = wallet(20)
+    trade, fee = 4_000_000, 105_000
+    tx = parsed_tx([(WALLET, 10**9, 10**9 - trade - fee - ATA_RENT), (ata, 0, ATA_RENT)], fee,
+                   [create(WALLET, ata, ATA_RENT, 165)], [(1, MINT, WALLET, None, 1000)])
+    tx["meta"]["logMessages"] = logs_of(Curve().trade(WALLET, T0, trade, True))
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls.append(body["method"])
+        if body["method"] == "getTransaction":
+            return httpx.Response(200, json={"result": tx})
+        if body["method"] == "getTokenAccountsByOwner":
+            accs = [{"pubkey": wallet(40 + i), "account": {"lamports": ATA_RENT, "data": {"parsed": {"info": {
+                "mint": wallet(60 + i), "tokenAmount": {"amount": "0" if i < 3 else "7"}}}}}} for i in range(4)]
+            return httpx.Response(200, json={"result": {"value": accs if "Tokenkeg" in body["params"][1]["programId"] else []}})
+        return httpx.Response(200, json={"error": {"code": -32601, "message": "unexpected"}})
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(cost_report.httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handler)))
+    monkeypatch.setenv("WALLET_PUBLIC_KEY", WALLET)
+    monkeypatch.setenv("SOLANA_RPC_URL", "https://rpc.example/key")
+    monkeypatch.setenv("JWT_SECRET", "x" * 40)
+    monkeypatch.setenv("ADMIN_PASSWORD_HASH", "$2b$12$" + "x" * 53)
+    from yonixalpha_core.config import get_settings
+    get_settings.cache_clear()
+    try:
+        assert await cost_report.main(["--json"]) == 0
+    finally:
+        get_settings.cache_clear()
+    out = json.loads(capsys.readouterr().out)
+    c = out["orders"][0]["costs"]
+    assert c["trade_lamports"] == trade and c["token_account_rent_lamports"] == ATA_RENT and c["residual_lamports"] == 0
+    acc = out["token_accounts"]
+    assert len(acc["empty"]) == 3 and acc["empty_lamports"] == 3 * ATA_RENT and acc["with_balance_lamports"] == ATA_RENT
+    assert set(calls) == {"getTransaction", "getTokenAccountsByOwner"}  # read-only: nothing signed or sent

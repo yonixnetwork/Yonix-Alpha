@@ -249,5 +249,6 @@ export interface ExecutionDiagnostics {
     decision_price_sol?: string | null; spot_at_build_sol?: string | null; expected_price_sol?: string | null;
     spot_before_trade_sol?: string | null; trade_price_sol?: string | null; all_in_price_sol?: string | null;
     network_fee_sol?: string | null; priority_fee_sol?: string | null;
+    costs_sol?: Record<string, string | null>;
   };
 }

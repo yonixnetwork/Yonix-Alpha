@@ -27,7 +27,7 @@ from typing import Any, Awaitable, Callable
 
 from solders.transaction import VersionedTransaction
 
-from yonixalpha_core.execution_analysis import own_trade_event
+from yonixalpha_core.execution_analysis import cost_breakdown, own_trade_event
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.solana import venue as venues
 from yonixalpha_core.solana.rpc import get_transaction_params, with_priority
@@ -74,6 +74,7 @@ class ExecOutcome:
     trade_event: dict[str, Any] | None = None  # our decoded Pump/PumpSwap trade event (execution analysis)
     seen: dict[str, Any] | None = None  # status seen before confirmation (slot, confirmationStatus)
     rpc_calls: list[dict[str, Any]] = field(default_factory=list)
+    costs: dict[str, Any] | None = None  # where the wallet's SOL went (execution analysis)
 
     def to_dict(self) -> dict[str, Any]:
         f = self.fill
@@ -81,7 +82,7 @@ class ExecOutcome:
             "status": self.status, "signature": self.signature, "error": self.error, "sent": self.sent,
             "guard": self.guard, "logs": self.logs[-30:], "stage": self.stage, "stages": self.stages,
             "venue": self.venue, "provider": self.provider, "unsigned_tx": self.unsigned_tx,
-            "trade_event": self.trade_event, "rpc_calls": self.rpc_calls[-40:],
+            "trade_event": self.trade_event, "rpc_calls": self.rpc_calls[-40:], "costs": self.costs,
             "fill": None if f is None else {
                 "sol_change_lamports": f.sol_change_lamports, "token_change_raw": f.token_change_raw,
                 "fee_lamports": f.fee_lamports, "token_decimals": f.token_decimals, "slot": f.slot, "block_time": f.block_time,
@@ -349,7 +350,11 @@ class SolanaLiveExecutor:
             event = own_trade_event(logs, self.wallet.pubkey, mint)
         except Exception:  # noqa: BLE001 - diagnostics only; the fill above is what counts
             event = None
-        return ExecOutcome("CONFIRMED", signature, fill=fill, logs=logs, trade_event=event, seen=seen)
+        try:
+            costs = cost_breakdown(tx, self.wallet.pubkey, mint, event)
+        except Exception:  # noqa: BLE001 - diagnostics only
+            costs = None
+        return ExecOutcome("CONFIRMED", signature, fill=fill, logs=logs, trade_event=event, seen=seen, costs=costs)
 
 
 async def wallet_balances(rpc, owner: str) -> tuple[int, dict[str, dict]]:

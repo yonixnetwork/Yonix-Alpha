@@ -151,6 +151,30 @@ async def test_live_auto_creates_a_pending_buy_order_not_a_position(db_session, 
     assert (await db_session.execute(select(MLFeatureSnapshot))).scalar_one().label is None
 
 
+async def test_live_buy_is_committed_before_the_entry_notification(db_session, redis_client, monkeypatch):
+    """The order worker only sees committed orders: the entry notification
+    (a Telegram HTTP call) must not hold the BUY back."""
+    from yonixalpha_core.db.models import ExecutionOrder, Notification
+    from yonixalpha_core.safety import pipeline
+
+    seen = {}
+    original = pipeline.after_entry
+
+    async def spy(session, *args):
+        seen["in_transaction"] = session.in_transaction()
+        await original(session, *args)
+
+    monkeypatch.setattr(pipeline, "after_entry", spy)
+    curve = await seed_healthy_launch(redis_client, NOW)
+    await _live_mode(db_session, redis_client, ready=True)
+    cand = await make_candidate(db_session)
+    a = await evaluate_with_gate(db_session, redis_client, LIVE_ENV, Sources(redis_client, FakeRpc(curve)), cand, NOW)
+    assert a.execution_target.value == "LIVE" and seen == {"in_transaction": False}
+    assert (await db_session.execute(select(ExecutionOrder))).scalar_one().status == "PENDING"
+    titles = (await db_session.execute(select(Notification.title))).scalars().all()
+    assert any(t.startswith("LIVE BUY submitted") for t in titles)
+
+
 async def test_live_without_a_ready_worker_is_no_trade(db_session, redis_client):
     from yonixalpha_core.db.models import ExecutionOrder
 

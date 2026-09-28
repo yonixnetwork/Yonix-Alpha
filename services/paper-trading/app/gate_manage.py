@@ -175,7 +175,8 @@ async def _exit_intelligence(redis: Redis, p: PaperPosition, model, now: datetim
     d = solana_exit_decision(trades, now, venue.get("creator"), entry_liq, model.liquidity_quote,
                              venue.get("holders_at_entry"), holders,
                              cfg=ExitConfig.from_settings(settings) if settings is not None else None,
-                             highest_price=max(p.highest_price or Decimal(0), price or Decimal(0)) or None, current_price=price)
+                             highest_price=max(live_trading.market_reference(p)["high"] or Decimal(0), price or Decimal(0)) or None,
+                             current_price=price)
     if d.action == "HOLD":
         return None
     remaining = p.remaining_quantity if p.remaining_quantity is not None else p.quantity
@@ -193,11 +194,14 @@ async def _exit_intelligence(redis: Redis, p: PaperPosition, model, now: datetim
 async def _manage_live(session, redis: Redis, app_settings, p: PaperPosition, price, model, extra, now: datetime,
                        source: str) -> None:
     out = await live_trading.manage_live_position(session, p, price, model, now, extra)
+    # Commit the SELL before the notification (Telegram): the order worker
+    # only sees a committed order.
+    await session.commit()
     if out["requested"]:
         await events.notify(session, redis, app_settings, NOTIFY_KIND.get(out["requested"], "close"),
                             f"LIVE exit requested: {p.symbol}", f"{out['requested'].replace('_', ' ')} at {price}", "warning",
                             {"position_id": str(p.id)})
-    await session.commit()
+        await session.commit()
     await events.publish(redis, "position.updated", {"position_id": str(p.id), "price": str(price), "source": source,
                                                      "exit_requested": out["requested"]}, "live")
 

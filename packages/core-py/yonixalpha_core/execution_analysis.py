@@ -150,6 +150,97 @@ def own_trade_event(logs: list[str], wallet: str, mint: str) -> dict[str, Any] |
     return None
 
 
+# --- what the wallet paid -------------------------------------------------------------
+
+BASE_FEE_PER_SIGNATURE = 5000
+
+
+def _all_keys(tx: dict) -> list[str]:
+    keys = ((tx.get("transaction") or {}).get("message") or {}).get("accountKeys") or []
+    out = [k["pubkey"] if isinstance(k, dict) else k for k in keys]
+    loaded = (tx.get("meta") or {}).get("loadedAddresses") or {}
+    return out + list(loaded.get("writable") or []) + list(loaded.get("readonly") or [])
+
+
+def _parsed_instructions(tx: dict) -> list[dict]:
+    outer = ((tx.get("transaction") or {}).get("message") or {}).get("instructions") or []
+    inner = [ix for group in ((tx.get("meta") or {}).get("innerInstructions") or []) for ix in (group.get("instructions") or [])]
+    return [ix for ix in outer + inner if isinstance(ix, dict) and isinstance(ix.get("parsed"), dict)]
+
+
+def cost_breakdown(tx: dict, wallet: str, mint: str, event: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Where the wallet's SOL went in one confirmed transaction (lamports),
+    from the transaction itself (getTransaction, jsonParsed):
+
+      trade             SOL into (buy) / out of (sell) the curve or pool, before fees
+      program_fees      protocol + creator (+ LP) fees, from our trade event
+      network_fee       base + priority fee (meta.fee)
+      deposits          SOL put into accounts this transaction created
+                        (system createAccount from the wallet); a token
+                        account's deposit is rent, returned only when that
+                        account is closed
+      refunds           SOL returned by accounts closed to the wallet (e.g.
+                        the temporary wrapped-SOL account)
+      residual          wallet change not explained by the above (0 when
+                        everything is accounted for)
+    """
+    meta = tx.get("meta") or {}
+    keys = _all_keys(tx)
+    i = keys.index(wallet)
+    pre, post = meta["preBalances"], meta["postBalances"]
+    wallet_change = int(post[i]) - int(pre[i])
+    token_owner: dict[str, tuple[str | None, str | None]] = {}
+    for b in (meta.get("preTokenBalances") or []) + (meta.get("postTokenBalances") or []):
+        idx = b.get("accountIndex")
+        if isinstance(idx, int) and idx < len(keys):
+            token_owner.setdefault(keys[idx], (b.get("mint"), b.get("owner")))
+
+    deposits, refunds = [], []
+    for ix in _parsed_instructions(tx):
+        kind, info = ix["parsed"].get("type"), ix["parsed"].get("info") or {}
+        if ix.get("program") == "system" and kind in ("createAccount", "createAccountWithSeed") and info.get("source") == wallet:
+            acct = info.get("newAccount")
+            m, owner = token_owner.get(acct, (None, None))
+            what = ("token account for this token (rent: returned when the account is closed)" if m == mint and owner == wallet
+                    else "wrapped-SOL token account" if owner == wallet else "program account")
+            deposits.append({"account": acct, "lamports": int(info.get("lamports") or 0), "what": what, "space": info.get("space")})
+        elif ix.get("program") in ("spl-token", "spl-token-2022") and kind == "closeAccount" and info.get("destination") == wallet:
+            acct = info.get("account")
+            j = keys.index(acct) if acct in keys else None
+            refunds.append({"account": acct, "lamports": int(pre[j]) if j is not None else 0})
+    # An account created and closed in the same transaction returned its deposit
+    # plus whatever it held (wrapped SOL): count only the deposit as refunded.
+    created = {d["account"]: d["lamports"] for d in deposits}
+    for r in refunds:
+        if r["account"] in created:
+            r["lamports"] = created[r["account"]]
+    net_deposits = sum(d["lamports"] for d in deposits) - sum(r["lamports"] for r in refunds)
+
+    fee = int(meta.get("fee") or 0) if i == 0 else 0
+    sigs = len(((tx.get("transaction") or {}).get("signatures")) or []) or 1
+    trade = program_fees = None
+    if event:
+        if event.get("venue") == "PUMP_BONDING_CURVE":
+            trade = int(event["quote_lamports"])
+            program_fees = int(event.get("fee_lamports") or 0) + int(event.get("creator_fee_lamports") or 0)
+        elif event.get("user_quote_lamports") is not None:
+            trade = int(event["quote_lamports"])
+            program_fees = abs(int(event["user_quote_lamports"]) - trade)
+    residual = None
+    if trade is not None:
+        if event.get("is_buy"):
+            residual = -wallet_change - (trade + program_fees + fee + net_deposits)
+        else:
+            residual = wallet_change - (trade - program_fees - fee - net_deposits)
+    return {
+        "wallet_change_lamports": wallet_change, "trade_lamports": trade, "program_fees_lamports": program_fees,
+        "network_fee_lamports": fee, "priority_fee_lamports": max(0, fee - BASE_FEE_PER_SIGNATURE * sigs) if fee else 0,
+        "deposits": deposits, "refunds": refunds, "net_deposits_lamports": net_deposits,
+        "token_account_rent_lamports": sum(d["lamports"] for d in deposits if d["what"].startswith("token account for")),
+        "residual_lamports": residual,
+    }
+
+
 # --- timing ---------------------------------------------------------------------------
 
 STAGE_ORDER = ("VENUE_RESOLVED", "TRANSACTION_BUILT", "TRANSACTION_GUARD_PASSED", "TRANSACTION_SIGNED", "SIMULATED",
@@ -283,10 +374,20 @@ def price_analysis(side: str, amount_sol: Any, decimals: int | None, result: dic
         "decision_to_build_pct": _pct(spot_build, p_decision),  # market moved while deciding/queueing
         "build_to_landing_pct": _pct(spot_pre, spot_build),  # other trades landed before ours
         "price_impact_pct": _pct(trade_price, spot_pre),  # our own size against the reserves
-        "fees_pct": fees_pct,  # protocol + creator (+ network + priority) on top of the trade price
+        "fees_pct": fees_pct,  # all the wallet paid beyond the trade: program fees, network fee, new-account deposits
         "vs_expected_pct": _pct(all_in, expected_price),  # all-in vs the build's own expectation
         "total_vs_decision_pct": _pct(all_in, p_decision),
     }
+    costs = res.get("costs") or None
+    if costs and costs.get("trade_lamports"):
+        trade_l = Decimal(costs["trade_lamports"])
+        comp["program_fees_pct"] = _pct(trade_l + Decimal(costs.get("program_fees_lamports") or 0), trade_l)
+        comp["network_fee_pct"] = _pct(trade_l + Decimal(costs.get("network_fee_lamports") or 0), trade_l)
+        comp["deposits_pct"] = _pct(trade_l + Decimal(costs.get("net_deposits_lamports") or 0), trade_l)
+        out["costs_sol"] = {k: str(Decimal(costs[k]) / LAMPORTS) if costs.get(k) is not None else None
+                            for k in ("trade_lamports", "program_fees_lamports", "network_fee_lamports",
+                                      "priority_fee_lamports", "net_deposits_lamports", "token_account_rent_lamports",
+                                      "residual_lamports")}
     out["components_pct"] = {k: (str(v) if v is not None else None) for k, v in comp.items()}
     out.update({"decision_price_sol": str(p_decision) if p_decision is not None else None,
                 "spot_at_build_sol": str(spot_build) if spot_build is not None else None,
@@ -331,10 +432,25 @@ def price_analysis(side: str, amount_sol: Any, decimals: int | None, result: dic
         out["classification"] = "PRICE_IMPACT"
         out["evidence"].append(f"our {amount_sol} SOL moved the price {comp[top]}% against the reserves")
     elif top == "fees_pct":
-        out["classification"] = "FEES"
-        out["evidence"].append(f"fees added {comp[top]}% on top of the trade price")
+        dep, pf, nf = comp.get("deposits_pct"), comp.get("program_fees_pct"), comp.get("network_fee_pct")
+        if dep is not None and dep > (pf or 0) + (nf or 0):
+            out["classification"] = "ACCOUNT_RENT"
+            out["evidence"].append(
+                f"{out['costs_sol']['net_deposits_lamports']} SOL (+{dep}%) went into new accounts, of which "
+                f"{out['costs_sol']['token_account_rent_lamports']} SOL is the token account's rent (returned only when "
+                f"that account is closed); program fees +{pf}%, network fee +{nf}%")
+        else:
+            out["classification"] = "FEES"
+            if dep is not None:
+                out["evidence"].append(f"costs on top of the trade price: program fees +{pf}%, network fee +{nf}%, "
+                                       f"new-account deposits +{dep}%")
+            else:
+                out["evidence"].append(
+                    f"costs added {comp[top]}% on top of the trade price: program fees, the network + priority fee and "
+                    "SOL deposited into any new account (token account rent); cost_report itemizes them")
     if comp.get("vs_expected_pct") is not None and comp["vs_expected_pct"] > SIGNIFICANT_PCT:
-        out["evidence"].append(f"paid {comp['vs_expected_pct']}% more than the build expected (within the slippage limit)")
+        out["evidence"].append(f"all-in {comp['vs_expected_pct']}% above the build's expected price (the slippage limit "
+                               "covers the trade amount only; fees and new-account deposits come on top)")
     return out
 
 

@@ -27,7 +27,8 @@ from sqlalchemy import select
 from yonixalpha_core import opportunities
 from yonixalpha_core.config import get_settings
 from yonixalpha_core.db.base import make_engine, make_session_factory
-from yonixalpha_core.db.models import ExecutionOrder, PaperPosition, RiskAssessment
+from yonixalpha_core.db.models import ExecutionOrder, PaperPosition, RiskAssessment, TradeTimelineEvent
+from yonixalpha_core.tools import trade_report
 
 FEATURES = ("unique_buyers", "trade_count", "buy_sell_volume_ratio", "window_volume", "volatility", "liquidity_quote",
             "top10_share", "creator_launches_24h", "age_seconds", "round_trip_share", "sync_buy_cluster")
@@ -40,7 +41,7 @@ def _pct(a, b) -> str | None:
         return None
 
 
-async def losses(session, mode: str, since: datetime, last: int) -> list[dict[str, Any]]:
+async def losses(session, mode: str, since: datetime, last: int, wallet: str | None = None) -> list[dict[str, Any]]:
     rows = (await session.execute(select(PaperPosition).where(
         PaperPosition.execution_mode == mode, PaperPosition.status == "closed", PaperPosition.realized_pnl < 0,
         PaperPosition.exit_at >= since).order_by(PaperPosition.exit_at.desc()).limit(last))).scalars().all()
@@ -56,13 +57,20 @@ async def losses(session, mode: str, since: datetime, last: int) -> list[dict[st
         buy = (await session.execute(select(ExecutionOrder).where(ExecutionOrder.position_id == p.id, ExecutionOrder.side == "BUY")
                                      .order_by(ExecutionOrder.created_at))).scalars().first()
         diag = (buy.diagnostics or {}) if buy is not None else {}
+        if buy is not None and buy.status == "CONFIRMED" and not diag.get("price"):
+            # Orders from before execution diagnostics: analysed from what they recorded.
+            rebuilt = await trade_report.analyse(session, buy, wallet)
+            diag = {**diag, "price": rebuilt.get("price"), "timing": rebuilt.get("timing")}
+        exit_intel = (await session.execute(select(TradeTimelineEvent).where(
+            TradeTimelineEvent.position_id == p.id, TradeTimelineEvent.event_type.like("exit_intelligence.%"))
+            .order_by(TradeTimelineEvent.occurred_at.desc()))).scalars().first()
         snapshot = {"data_errors": ev.get("errors") or [], "volatility_confidence": ev.get("volatility_confidence"),
                     "deterioration_indicators": (ev.get("entry_quality") or {}).get("indicators"),
                     "entry_exit_check": (ev.get("entry_exit_check") or {}).get("action"),
                     "signal_qualified": doc.get("qualified"), "signal_strength": None,
                     "price_age_seconds": (diag.get("decision") or {}).get("price_age_seconds")}
         result = {"pnl_sol": str(p.realized_pnl), "pnl_pct": str(p.realized_pnl_pct), "exit_reason": p.exit_reason,
-                  "mfe_pct": _pct(p.highest_price, p.entry_price), "mae_pct": _pct(p.lowest_price, p.entry_price)}
+                  **opportunities.excursions(p)}
         la = opportunities.classify_loss(snapshot, result, diag, Decimal(p.max_loss_quote) if p.max_loss_quote else None)
         out.append({
             "symbol": p.symbol, "mint": p.asset_id, "engine": p.engine, "entry_at": p.entry_at.isoformat(),
@@ -75,7 +83,11 @@ async def losses(session, mode: str, since: datetime, last: int) -> list[dict[st
             "data_errors": [str(e)[:160] for e in (ev.get("errors") or [])][:5],
             "warnings_at_entry": warnings[:10],
             "execution": {"decision_to_confirm_ms": (diag.get("timing") or {}).get("decision_to_confirm_ms"),
-                          "price_cause": (diag.get("price") or {}).get("classification")},
+                          "price_cause": (diag.get("price") or {}).get("classification"),
+                          "entry_costs_pct": ((diag.get("price") or {}).get("components_pct") or {}).get("fees_pct")},
+            "exit_intelligence": ({"action": exit_intel.event_type.split(".", 1)[1], "reasons": (exit_intel.detail or {}).get("reasons"),
+                                   "price_drop_from_high": (exit_intel.detail or {}).get("price_drop_from_high")}
+                                  if exit_intel is not None else None),
             "loss_analysis": la,
         })
     return out
@@ -105,9 +117,10 @@ async def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
     since = datetime.now(timezone.utc) - timedelta(hours=a.hours)
-    engine = make_engine(get_settings())
+    settings = get_settings()
+    engine = make_engine(settings)
     async with make_session_factory(engine)() as s:
-        rows = await losses(s, a.mode, since, a.last)
+        rows = await losses(s, a.mode, since, a.last, trade_report.wallet_public_key(settings))
         vol = await volatility_blocks(s, since)
     await engine.dispose()
     if a.json:
@@ -116,7 +129,10 @@ async def main(argv: list[str] | None = None) -> int:
     for r in rows:
         la = r["loss_analysis"]
         print(f"=== {r['entry_at'][:19]} {r['symbol']:12} {r['engine']}  PnL {r['pnl_sol']} SOL ({r['pnl_pct']})  "
-              f"exit {r['exit_reason']} after {r['hold_seconds']}s  MFE {r['mfe_pct']}% / MAE {r['mae_pct']}%")
+              f"exit {r['exit_reason']} after {r['hold_seconds']}s  MFE {r['mfe_pct']}% / MAE {r['mae_pct']}% "
+              f"(vs {r['mfe_mae_basis']})")
+        if r["exit_intelligence"]:
+            print(f"    exit intelligence: {r['exit_intelligence']['action']} {r['exit_intelligence']['reasons']}")
         print(f"    class {la['classification']}  flags {la['flags']}  {'; '.join(la['evidence'])}")
         print(f"    entry: {r['entry_decision']}  planned {r['planned_entry']} → filled {r['fill_entry']}  exec {r['execution']}")
         print(f"    features: {json.dumps(r['features'], default=str)}")

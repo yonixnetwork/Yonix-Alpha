@@ -101,7 +101,8 @@ async def _closed_trade(db, *, pnl: str, high: str, low: str, snapshot: dict, en
     pos = PaperPosition(symbol="TR", provider="live", side="LONG", entry_price=Decimal("1"), quantity=Decimal(1), entry_at=T0,
                         status="closed", exit_at=T0 + timedelta(minutes=3), exit_reason=exit_reason, exit_price=Decimal("0.8"),
                         realized_pnl=Decimal(pnl), realized_pnl_pct=Decimal(pnl) / 10, highest_price=Decimal(high),
-                        lowest_price=Decimal(low), max_loss_quote=Decimal("0.05"), execution_mode="LIVE")
+                        lowest_price=Decimal(low), max_loss_quote=Decimal("0.05"), execution_mode="LIVE",
+                        plan={"entry_price": "1", "fill": {"market_price": "1", "market_price_basis": "trade price"}})
     db.add(pos)
     await db.flush()
     if entry_diag is not None:
@@ -185,7 +186,7 @@ async def test_loss_report_explains_old_losing_trades(db, monkeypatch, capsys):
     db.add(PaperPosition(symbol="L1", provider="live", side="LONG", entry_price=Decimal("1"), quantity=Decimal(1), entry_at=now - timedelta(minutes=5),
                          status="closed", exit_at=now, exit_reason="stop_loss", realized_pnl=Decimal("-0.01"), realized_pnl_pct=Decimal("-0.2"),
                          highest_price=Decimal("1.001"), lowest_price=Decimal("0.8"), execution_mode="LIVE", assessment_id=a.id,
-                         engine="solana_fresh", asset_id="M1"))
+                         engine="solana_fresh", asset_id="M1", plan={"entry_price": "1"}))
     await db.commit()
     monkeypatch.setenv("JWT_SECRET", "x" * 40)
     monkeypatch.setenv("ADMIN_PASSWORD_HASH", "$2b$12$" + "x" * 53)
@@ -199,3 +200,40 @@ async def test_loss_report_explains_old_losing_trades(db, monkeypatch, capsys):
     assert loss["symbol"] == "L1" and loss["mfe_pct"] == "0.10" and loss["loss_analysis"]["classification"] == "SIGNAL_FAILURE"
     assert loss["warnings_at_entry"][0].startswith("ACTIVITY_DETERIORATING")
     assert out["volatility"]["blocked_no_volatility"] == 1 and "unavailable: 2 trades" in out["volatility"]["by_reason"]
+
+
+def test_excursions_use_the_market_entry_price_not_the_cost_basis():
+    # Filled after the fix: marks start at the trade price (0.6); the cost
+    # basis (1.0) includes fees and new-account rent.
+    new = PaperPosition(execution_mode="LIVE", entry_price=Decimal("1.0"), highest_price=Decimal("0.66"),
+                        lowest_price=Decimal("0.54"), plan={"entry_price": "0.6", "fill": {"market_price": "0.6"}})
+    e = opp.excursions(new)
+    assert e["mfe_pct"] == "10.00" and e["mae_pct"] == "-10.00"
+
+    # Filled before the fix: high and low were seeded from the cost basis.
+    # A high equal to the seed is not a market price and a low equal to it is
+    # unknown, so neither is reported as an excursion.
+    old = PaperPosition(execution_mode="LIVE", entry_price=Decimal("1.0"), highest_price=Decimal("1.0"),
+                        lowest_price=Decimal("1.0"), plan={"entry_price": "0.6"})
+    e = opp.excursions(old)
+    assert e["mfe_pct"] is None and e["mae_pct"] is None and "planned entry price" in e["mfe_mae_basis"]
+    from yonixalpha_core.live_trading import market_reference
+    assert market_reference(old)["high"] == Decimal("0.6")  # exit intelligence's reference: a lower bound
+    old.lowest_price = Decimal("0.5")  # a real mark below the seed
+    assert opp.excursions(old)["mae_pct"] == "-16.67"
+
+    # Paper positions are unchanged: their entry price is a market price.
+    paper = PaperPosition(execution_mode="PAPER", entry_price=Decimal("1.0"), highest_price=Decimal("1.2"), lowest_price=Decimal("0.9"))
+    assert opp.excursions(paper)["mfe_pct"] == "20.00"
+
+
+def test_legacy_cost_seeded_high_is_not_a_signal_failure():
+    """Before the fix every LIVE loss read "never went up (MFE 0.00%)"
+    because the high started at the cost basis."""
+    snapshot = {"signal_qualified": True}
+    old = PaperPosition(execution_mode="LIVE", entry_price=Decimal("1.0"), highest_price=Decimal("1.0"),
+                        lowest_price=Decimal("0.55"), plan={"entry_price": "0.6"})
+    result = {"pnl_sol": "-0.003", "pnl_pct": "-0.44", "exit_reason": "exit_intel_exit_now", **opp.excursions(old)}
+    la = opp.classify_loss(snapshot, result, {"price": {"components_pct": {"fees_pct": "70.79"}}}, Decimal("0.0008"))
+    assert "SIGNAL_FAILURE" not in la["flags"] and la["classification"] == "RISK_MODEL_FAILURE"
+    assert any("entry costs were +70.79%" in e for e in la["evidence"])

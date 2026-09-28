@@ -247,7 +247,10 @@ def classify_loss(snapshot: dict[str, Any], result: dict[str, Any], entry_diag: 
                   f"{timing.get('decision_to_confirm_ms')} ms ({price.get('classification')})")
     if pnl is not None and max_loss_sol is not None and max_loss_sol > 0 and -pnl > max_loss_sol * Decimal("1.2"):
         flags.append("RISK_MODEL_FAILURE")
-        ev.append(f"loss {-pnl} SOL exceeded the planned maximum {max_loss_sol} SOL by more than 20%")
+        fees = (price.get("components_pct") or {}).get("fees_pct") if price else None
+        ev.append(f"loss {-pnl} SOL exceeded the planned maximum {max_loss_sol} SOL by more than 20%"
+                  + (f"; entry costs were +{fees}% on top of the trade price and the planned maximum does not include "
+                     "them" if fees is not None and Decimal(fees) >= EXECUTION_SLIPPAGE_PCT else ""))
     if "liquidity" in (result.get("exit_reason") or "").lower():
         flags.append("LIQUIDITY_COLLAPSE")
         ev.append(f"exit reason {result.get('exit_reason')}")
@@ -268,6 +271,18 @@ def classify_loss(snapshot: dict[str, Any], result: dict[str, Any], entry_diag: 
     return {"classification": primary, "flags": flags, "evidence": ev}
 
 
+def excursions(position: Any) -> dict[str, Any]:
+    """MFE / MAE of a position against its MARKET entry price (for LIVE, the
+    fill's trade price, not the cost basis that includes fees and rent)."""
+    from yonixalpha_core.live_trading import market_reference  # import cycle: live_trading → paper_engine → here
+
+    m = market_reference(position)
+    ref, high, low = m["entry"], m["high"] if m["high_measured"] else None, m["low"]
+    return {"mfe_pct": _s(_pct(Decimal(high), Decimal(ref))) if high is not None and ref else None,
+            "mae_pct": _s(_pct(Decimal(low), Decimal(ref))) if low is not None and ref else None,
+            "mfe_mae_basis": m["basis"], "mfe_mae_resolution": "position marks (every management tick, ~15 s)"}
+
+
 async def on_position_closed(session: AsyncSession, position: Any) -> None:
     """Trade result (and LOSS_ANALYSIS for a loss) on the opportunity row of
     a closed position. Never raises into the close."""
@@ -277,7 +292,6 @@ async def on_position_closed(session: AsyncSession, position: Any) -> None:
             OpportunityOutcome.candidate_id == position.candidate_id, OpportunityOutcome.traded.is_(True)))).scalars().first()
     if row is None:
         return
-    entry = Decimal(position.entry_price) if position.entry_price else None
     snap = row.snapshot or {}
     dec = snap.get("decimals")
     supply = Decimal(snap["supply_raw"]) if snap.get("supply_raw") else None
@@ -294,9 +308,7 @@ async def on_position_closed(session: AsyncSession, position: Any) -> None:
         "pnl_sol": _s(position.realized_pnl), "pnl_pct": _s(position.realized_pnl_pct),
         "entry_price_sol": _s(position.entry_price), "exit_price_sol": _s(position.exit_price),
         "market_cap_entry_sol": mcap(position.entry_price), "market_cap_exit_sol": mcap(position.exit_price),
-        "mfe_pct": _s(_pct(Decimal(position.highest_price), entry)) if position.highest_price and entry else None,
-        "mae_pct": _s(_pct(Decimal(position.lowest_price), entry)) if position.lowest_price and entry else None,
-        "mfe_mae_resolution": "position marks (every management tick, ~15 s)",
+        **excursions(position),
         "exit_reason": position.exit_reason, "hold_seconds": hold, "execution_mode": position.execution_mode,
         "entry_execution": {"decision_to_confirm_ms": (diag.get("timing") or {}).get("decision_to_confirm_ms"),
                             "price_classification": (diag.get("price") or {}).get("classification"),

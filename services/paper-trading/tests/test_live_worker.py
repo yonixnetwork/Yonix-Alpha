@@ -517,3 +517,57 @@ async def test_smoke_test_cycle_buy_fill_pnl_test_close_sell_closed(session_fact
     assert p.status == "closed" and p.realized_pnl == (Decimal(15_000_000) - Decimal(spent)) / Decimal(1_000_000_000)
     assert view["stage"] == "POSITION_CLOSED" and view["sells"][0]["actually_filled"]
     assert view["sells"][0]["signature"] == "sig-sell" and view["position"]["realized_pnl"] == p.realized_pnl
+
+
+async def open_live_with_costs(session_factory, redis, cost_multiple: int):
+    """A confirmed buy whose wallet cost is `cost_multiple` × the trade
+    (fees and new-account rent on a small size), with our trade event."""
+    curve, a, pid, oid, cid = await enter(session_factory, redis)
+    size_l = int(a.plan.position_size.value * 1_000_000_000)
+    tokens = 3_000_000_000_000
+    out = confirmed("sig-buy", -size_l * cost_multiple, tokens)
+    out.trade_event = {"venue": "PUMP_BONDING_CURVE", "is_buy": True, "quote_lamports": size_l, "token_raw": tokens,
+                       "fee_lamports": 0, "creator_fee_lamports": 0,
+                       "reserves_before": {"quote": curve.vsol, "base": curve.vtok}}
+    ex = FakeExecutor()
+    ex.outcomes.append(out)
+    assert await live_trading.process_order(session_factory, redis, LIVE_ON, ex, oid) == "CONFIRMED"
+    return curve, a, pid, size_l, tokens
+
+
+async def test_fill_marks_start_at_the_market_price_and_pnl_keeps_the_cost_basis(session_factory, redis_client):
+    _, _, pid, size_l, tokens = await open_live_with_costs(session_factory, redis_client, 2)
+    async with session_factory() as s:
+        p = await s.get(PaperPosition, pid)
+    market = (Decimal(size_l) / Decimal(10**9)) / (Decimal(tokens) / Decimal(10**6))
+    assert abs(p.highest_price - market) < Decimal("1e-17") and p.lowest_price == p.highest_price == p.last_price
+    assert abs(p.entry_price - 2 * market) < Decimal("1e-17")  # cost basis: what the wallet paid, for PnL
+    assert p.plan["fill"]["market_price_basis"] == "trade price from the program's trade event"
+
+
+async def test_costs_on_a_small_buy_are_not_read_as_a_price_crash(session_factory, redis_client):
+    """Production 2026-09-28: fees and account rent made the cost basis 1.4-2.1x
+    the trade price; the high since entry started there, so exit intelligence
+    saw a 35-52% "drop from the high" and sold within 5-19 s with the market
+    unchanged. The high is now a market price."""
+    curve, _, pid, _, _ = await open_live_with_costs(session_factory, redis_client, 2)
+    later = NOW + timedelta(seconds=15)
+    counts = await manage_gate_positions(session_factory, redis_client, None, later, None, LIVE_ON)
+    async with session_factory() as s:
+        p = await s.get(PaperPosition, pid)
+        sells = (await s.execute(select(ExecutionOrder).where(ExecutionOrder.side == "SELL"))).scalars().all()
+    assert counts["managed"] == 1 and p.status == "open" and sells == [], [x.reason for x in sells]
+
+
+async def test_worker_wakes_for_a_new_order_but_not_for_one_it_already_handled(session_factory, redis_client):
+    from app.live_worker import wait_for_work
+
+    _, _, _, oid, _ = await enter(session_factory, redis_client)
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    await wait_for_work(session_factory, stop, set(), timeout=2.0, check=0.05)
+    assert loop.time() - t0 < 0.5  # a new PENDING order: picked up at once
+    t0 = loop.time()
+    await wait_for_work(session_factory, stop, {oid}, timeout=0.4, check=0.05)
+    assert loop.time() - t0 >= 0.35  # still pending after the last loop (awaiting confirmation): no busy loop

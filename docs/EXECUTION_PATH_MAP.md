@@ -15,8 +15,8 @@ decision and submission is listed here.
 | 2a | Data assembly (fresh) | `solana/assembler.py::assemble_fresh` | `getAccountInfo` (mint), `getAccountInfo` (curve), `getTokenLargestAccounts` + `getMultipleAccounts` (holders), funding links (`getSignaturesForAddress`/`getTransaction` per early buyer, cached), creator history. All run **sequentially**. | new: `inputs_snapshot.timings_ms` |
 | 2b | Data assembly (migrated) | `assemble_migrated` | the above plus pool trades (`getSignaturesForAddress` + `getTransaction`), pool state, SOL/USD, a Jupiter quote | same |
 | 3 | **Approval**: `assess()` → executable LIVE plan | `safety/gate.py`, `safety/planning.py` | none | same as 2 |
-| 4 | **Order**: pending position + `execution_orders` BUY row (`status=PENDING`, limits: max SOL in, max fee transfer, max priority fee) | `live_trading.enter_live` | none (DB) | `execution_orders.created_at` |
-| 5 | **Pickup**: the order worker polls PENDING orders | `paper-trading/app/live_worker.py`, `POLL_SECONDS = 1.0`; orders are processed **one at a time** | DB only | first stage `at` |
+| 4 | **Order**: pending position + `execution_orders` BUY row (`status=PENDING`, limits: max SOL in, max fee transfer, max priority fee), committed; the "LIVE BUY submitted" notification (Telegram) is sent **after** the commit | `live_trading.enter_live`, `gate_eval.py` | none (DB) | `execution_orders.created_at` |
+| 5 | **Pickup**: the order worker picks up PENDING orders | `paper-trading/app/live_worker.py`: loop every `POLL_SECONDS = 1.0`, and between loops a new PENDING order is picked up within `PENDING_CHECK_SECONDS = 0.2`; the 30 s wallet reconcile runs after the orders, not before; orders are processed **one at a time** | DB only | first stage `at` |
 | 6 | **Venue** (from on-chain state) | `solana/venue.py::resolve` | 1 × `getMultipleAccounts` [mint, curve PDA, canonical pool] | stage `VENUE_RESOLVED` |
 | 7 | **Route / quote**: native builder computes the output from the reserves just read (Jupiter is used only for non-Pump venues) | `solana/tx_builders.py::NativePumpBuilder` | `getAccountInfo` Global / GlobalConfig only when the 60 s cache is stale | stage `TRANSACTION_BUILT` |
 | 8 | **Transaction build**: compute budget + ATA + Pump `buy` (18 accounts) / PumpSwap WSOL wrap + `buy` (26 accounts) | `pump_tx.py` | 1 × `getLatestBlockhash` (fetched right before compiling) | `TRANSACTION_BUILT` |
@@ -26,7 +26,7 @@ decision and submission is listed here.
 | 12 | **Simulate** (`sigVerify: true`) | `live_exec.execute` | 1 × `simulateTransaction` | `SIMULATED` |
 | 13 | **Submit** (`skipPreflight`, `maxRetries: 0`); the same signed bytes are rebroadcast every 3 s | `_send_and_confirm` | `sendTransaction` | `TRANSACTION_SUBMITTED` |
 | 14 | **Confirmation**: poll every 1 s | `lookup` | `getSignatureStatuses`, then `getTransaction` (jsonParsed, version 0: our own transactions are v0) | `TRANSACTION_CONFIRMED` |
-| 15 | **Position**: the fill comes from the wallet's pre/post balances; the position opens | `live_trading.apply_outcome` | none | `FILL_VERIFIED`, `execution_orders.confirmed_at` |
+| 15 | **Position**: the fill comes from the wallet's pre/post balances; the position opens. Entry price = cost basis (all the wallet paid, for PnL); high, low and last price start at the **market** price of the fill (our trade event's price) | `live_trading.apply_outcome`, `market_fill_price` | none | `FILL_VERIFIED`, `execution_orders.confirmed_at`, `plan.fill` |
 
 **RPC requests between the BUY decision and submission** (order pickup →
 submit):
@@ -58,8 +58,11 @@ added in this phase (`execution_orders.timing`), not assumed.
    a loop that wakes every 15 s.
 2. **Sequential data assembly**: each RPC lookup in 2a/2b waits for the
    previous one.
-3. **Order pickup**: a 1 s poll, so on average about 0.5 s passes between
-   the order row and the worker.
+3. **Order pickup**: measured on 2026-09-28 at 1.26 s average (median
+   1.33 s, worst 2.05 s, n = 10). It had three parts: the Telegram
+   notification was sent before the order was committed (BUY and SELL);
+   a 1 s poll; the 30 s wallet reconcile ran before the orders. All three
+   were fixed (see the phase report); the new figure is to be measured.
 4. **One order at a time**: while a BUY waits up to 75 s for confirmation,
    a SELL queued behind it waits too.
 5. **Exit checks every 15 s**: stops and trailing exits are evaluated on the

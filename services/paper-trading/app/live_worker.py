@@ -30,6 +30,7 @@ from yonixalpha_core.notify import alert_error
 log = get_logger("paper-trading.live")
 
 POLL_SECONDS = 1.0
+PENDING_CHECK_SECONDS = 0.2  # between loops, a new PENDING order is picked up within this
 RECONCILE_SECONDS = 30
 READY_TTL_SECONDS = 60
 
@@ -55,6 +56,41 @@ async def cancel_live_orders(session_factory, redis, app_settings, reason: str, 
     return len(orders)
 
 
+def _pending_query(handled: set):
+    q = select(ExecutionOrder.id).where(
+        ExecutionOrder.mode == "LIVE", ExecutionOrder.provider == live_trading.LIVE_PROVIDER,
+        ExecutionOrder.status == "PENDING")
+    if handled:
+        q = q.where(ExecutionOrder.id.not_in(list(handled)))
+    return q.limit(1)
+
+
+async def wait_for_work(session_factory, stop_event: asyncio.Event, handled: set | None = None,
+                        timeout: float = POLL_SECONDS, check: float = PENDING_CHECK_SECONDS) -> None:
+    """Waits up to `timeout` seconds, returning as soon as a NEW PENDING LIVE
+    order exists (one the last loop did not already handle, e.g. a sent order
+    still awaiting confirmation) or stop is requested. One indexed query per
+    `check` seconds."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not stop_event.is_set():
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=min(check, remaining))
+            return
+        except asyncio.TimeoutError:
+            pass
+        try:
+            async with session_factory() as session:
+                if (await session.execute(_pending_query(handled or set()))).first() is not None:
+                    return
+        except Exception:  # noqa: BLE001 - fall back to the plain interval
+            await asyncio.sleep(max(0.0, deadline - loop.time()))
+            return
+
+
 def build_executor(app_settings, rpc, http_client, jupiter=None) -> tuple[SolanaLiveExecutor | None, str | None]:
     if not live_trading_permitted(app_settings):
         return None, "environment locks closed"
@@ -78,6 +114,7 @@ async def live_worker_loop(session_factory, redis, app_settings, rpc, http_clien
     last_reconcile = None
     reconciled_once = False
     while not stop_event.is_set():
+        handled: set = set()
         try:
             if executor is None or not live_trading_permitted(app_settings):
                 await _publish(redis, "disabled", reason or "environment locks closed")
@@ -93,7 +130,9 @@ async def live_worker_loop(session_factory, redis, app_settings, rpc, http_clien
                     executor.native.cu_limits = {"PUMP_BONDING_CURVE": live.compute_unit_limit_curve,
                                                  "PUMP_AMM": live.compute_unit_limit_amm}
                 now = datetime.now(timezone.utc)
-                if last_reconcile is None or (now - last_reconcile).total_seconds() >= RECONCILE_SECONDS:
+                # Reconcile first only at start-up; after that, pending orders go
+                # first and the periodic reconcile runs after them.
+                if not reconciled_once:
                     report = await live_trading.reconcile(session_factory, redis, app_settings, executor, now)
                     last_reconcile, reconciled_once = now, True
                     log.info("live.reconciled", **{k: str(v) for k, v in report.items()})
@@ -114,14 +153,23 @@ async def live_worker_loop(session_factory, redis, app_settings, rpc, http_clien
                             q = q.where(ExecutionOrder.side != "BUY")
                         ids = (await session.execute(
                             q.order_by(ExecutionOrder.side.desc(), ExecutionOrder.created_at))).scalars().all()  # SELLs first
+                    handled.update(ids)
                     for order_id in ids:
                         status = await live_trading.process_order(session_factory, redis, app_settings, executor, order_id)
                         log.info("live.order_processed", order_id=str(order_id), status=status)
+                now = datetime.now(timezone.utc)
+                if last_reconcile is not None and (now - last_reconcile).total_seconds() >= RECONCILE_SECONDS:
+                    report = await live_trading.reconcile(session_factory, redis, app_settings, executor, now)
+                    last_reconcile = now
+                    log.info("live.reconciled", **{k: str(v) for k, v in report.items()})
         except Exception as exc:  # noqa: BLE001 - the worker must keep running; the error is reported
             log.error("live.worker_failed", error=f"{type(exc).__name__}: {exc}")
             await alert_error("paper-trading", "live.worker_failed", {"error": f"{type(exc).__name__}: {exc}"})
             await _publish(redis, "error", f"{type(exc).__name__}")
-        try:
-            await asyncio.wait_for(stop_event.wait(), timeout=POLL_SECONDS)
-        except asyncio.TimeoutError:
-            pass
+        if executor is not None and live_trading_permitted(app_settings):
+            await wait_for_work(session_factory, stop_event, handled)
+        else:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=POLL_SECONDS)
+            except asyncio.TimeoutError:
+                pass

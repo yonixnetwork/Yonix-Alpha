@@ -101,6 +101,20 @@ def summary(rows: list[dict]) -> dict[str, Any]:
     return agg
 
 
+def wallet_public_key(settings) -> str | None:
+    """The live wallet's PUBLIC key (only it is used, to find our own trade
+    events and accounts); None when no wallet is configured."""
+    wallet = getattr(settings, "WALLET_PUBLIC_KEY", None)
+    if wallet:
+        return wallet
+    from yonixalpha_core.solana.wallet import load_wallet
+    try:
+        w = load_wallet(settings)
+        return w.pubkey if w else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 async def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--last", type=int, default=20)
@@ -108,14 +122,7 @@ async def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
     settings = get_settings()
-    wallet = getattr(settings, "WALLET_PUBLIC_KEY", None)
-    if not wallet:
-        from yonixalpha_core.solana.wallet import load_wallet
-        try:
-            w = load_wallet(settings)
-            wallet = w.pubkey if w else None
-        except Exception:  # noqa: BLE001 - only the public key is used, and only to find our trade event
-            wallet = None
+    wallet = wallet_public_key(settings)
     engine = make_engine(settings)
     async with make_session_factory(engine)() as s:
         q = select(ExecutionOrder).where(ExecutionOrder.mode == "LIVE").order_by(ExecutionOrder.created_at.desc())

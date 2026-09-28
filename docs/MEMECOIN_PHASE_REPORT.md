@@ -5,10 +5,151 @@ Date: 2026-09-28.
 Code status: implemented and tested locally, with CI and a real-browser
 check.
 
-**Production measurements are PENDING.** They require the read-only
-commands in `docs/DIAGNOSTICS_COMMANDS.md`, run on the server after this
-deploy. No latency, price or loss figure below is claimed until that output
-exists.
+**Production measurements:** taken on 2026-09-28 after deploying
+`a15b8e4`, with the read-only commands in `docs/DIAGNOSTICS_COMMANDS.md`.
+They cover the last 30 LIVE orders (10 confirmed, 20 guard refusals from
+before the FAdo9 fix) and 5 losing LIVE trades. They are summarized in the
+next section; the sections after it describe the code.
+
+## Production measurements (2026-09-28)
+
+### RPC capability matrix (`rpc_check --capabilities`)
+
+| Endpoint | Result | Methods | Versions returned | Classification |
+|---|---|---|---|---|
+| Helius (`SOLANA_RPC_URL`) | CONNECTED, getSlot 85 ms | all 7 probed methods SUPPORTED (13–93 ms) | version 1 (3 of 3) | OK |
+| Alchemy (dashboard) | CONNECTED, 75 ms | all 7 SUPPORTED (14–54 ms) | version 1 (2), version 0 (1) | OK |
+| Ankr (dashboard) | UNAVAILABLE | every method, **getSlot included**, answers -32601 "does not exist/is not available" | none | **PROVIDER LIMITATION or configuration**: the configured URL serves no Solana method at all. The manager routes around it. Fix the URL or disable it (System → RPC & Data Providers). |
+| Chainstack (dashboard) | AUTHENTICATION FAILED | HTTP 403 on every method | none | **PROVIDER LIMITATION** (key or plan). Replace the key or disable it. |
+
+The version fix is **verified in production**: `getTransaction` declaring
+version 1 now returns version-1 transactions from Helius and Alchemy,
+where before every endpoint failed. `tx_fixture` captured a real mainnet
+version-1 transaction (`4DRJBiQ5…`). All four running services load the
+same configuration (revision 23, SYNCED).
+
+### Latency (`trade_report`, 10 confirmed orders)
+
+| Step | Average | Median | Worst |
+|---|---|---|---|
+| decision → submit (buys, n = 5) | 1553 ms | 1505 ms | 1948 ms |
+| decision → confirm (buys, n = 5) | 5541 ms | 6407 ms | 9126 ms |
+| queue wait (order → worker pickup) | 1258 ms | 1326 ms | 2046 ms |
+| build | 27 ms | 23 ms | 42 ms |
+| guard + migration re-check | 32 ms | 26 ms | 73 ms |
+| simulation | 19 ms | 18 ms | 27 ms |
+| submission | 66 ms | 30 ms | 154 ms |
+| submit → confirm | 2702 ms | 1276 ms | 7866 ms |
+
+- **Queue wait is 82% of decision → submit.** Our pipeline from pickup to
+  submission takes about 150 ms. Cause (**APPLICATION BUG**, fixed): the
+  Telegram notification was sent **before** the order was committed, both
+  for BUYs and for every LIVE SELL (stop-losses included). On top of that
+  came the 1 s poll and a 30 s wallet reconcile that ran before the orders.
+  - Now the order is committed first and the notification is sent after.
+  - The worker picks up a new order within 0.2 s.
+  - The reconcile runs after the orders.
+  - The new figure is to be measured.
+- **Confirmation:** 7 of 10 landed in 1.1–2.4 s; 3 of 10 took 4.8–7.9 s,
+  which fits a missed first broadcast followed by the 3 s rebroadcast. These
+  orders predate slot recording, so inclusion delay cannot yet be told apart
+  from polling. Orders from now on record `slots_to_land`. No change to the
+  priority fee was made.
+
+### "Bought at a higher price" (`trade_report`, 5 confirmed buys)
+
+| Token | decision → build | build → landing | price impact | costs on top of the trade | total vs decision |
+|---|---|---|---|---|---|
+| SNAPD | +0.11% | 0.00% | +0.01% | **+70.79%** | +71.00% |
+| VSTR | 0.00% | −1.28% | 0.00% | **+51.87%** | +49.92% |
+| $WCAT | 0.00% | +0.16% | 0.00% | **+110.14%** | +110.47% |
+| DREW | 0.00% | 0.00% | +0.01% | **+33.15%** | +33.16% |
+| LOOONG | 0.00% | +0.12% | +0.01% | **+37.95%** | +38.12% |
+
+- **The market, latency, slippage, stale data and price impact are NOT the
+  cause.** Each moved the price by at most 1.3%.
+- The whole difference is **what the wallet paid on top of the trade**:
+  program fees, the network + priority fee, and SOL deposited into new
+  accounts.
+- From the recorded numbers, this extra is about **0.0016 SOL fixed per buy
+  plus about 1.25% of the trade**. On buys of 0.0015–0.005 SOL, that is
+  33–110%.
+- **Where the fixed part goes is not yet itemized.** The executor did not
+  keep the account balances of the transaction. The new `cost_report` reads
+  each transaction and lists every item.
+- One lead is not confirmed:
+  - every buy creates the token account (`createIdempotent`), and nothing
+    ever closes it after the sell, so its rent stays locked;
+  - but the derived fixed part (about 0.0016 SOL) is below a standard token
+    account's rent (0.00204 SOL), so this is not yet proven.
+- Classification: before, this showed only as "FEES" (with a misleading
+  "within the slippage limit"). It is now split into program fees, network
+  fee and new-account deposits. When a deposit dominates it is classified as
+  ACCOUNT_RENT.
+
+### Why the 5 losing LIVE trades lost (`loss_report`, 72 h)
+
+| Token | Exit | After | MAE | Explained by the costs alone | Market move | Cause |
+|---|---|---|---|---|---|---|
+| SNAPD | exit intelligence EXIT_NOW | 5 s | −41.44% | −41.45% | none | **APPLICATION BUG** |
+| $WCAT | exit intelligence EXIT_NOW | 19 s | −52.41% | −52.41% | none | **APPLICATION BUG** |
+| VSTR | exit intelligence EXIT_NOW | 47 s | −37.50% | −34.15% | about −5% | **APPLICATION BUG** (the 35% emergency needed the cost markup) |
+| LOOONG | stop-loss | 52 s | −36.95% | −27.51% | about −13% | the market fell to the stop |
+| DREW | stop-loss | 142 s | −34.19% | −24.90% | about −12% | the market fell to the stop |
+
+- **APPLICATION BUG (fixed):** a LIVE position's high, low and last price
+  started at the **cost basis** (all the wallet paid, per token) instead of
+  a market price.
+  - Exit intelligence's emergency rule "price 35% below the high since
+    entry" therefore fired as soon as the costs were above about 54% of the
+    trade.
+  - SNAPD and $WCAT were sold with the market **unchanged**. Their MAE
+    equals the cost markup to the hundredth of a percent.
+  - Now the marks start at the fill's market price (our own trade event).
+    The cost basis stays the entry price, for PnL.
+  - Positions filled before this deploy use their planned entry price as
+    the reference.
+- **The same bug made every loss read "never went up (MFE 0.00%)"**, and
+  therefore SIGNAL_FAILURE. That was an artifact. For these 5 trades the
+  real high is unknown, and it is now reported as unknown, not 0%.
+- **RISK_MODEL_FAILURE is accurate for all 5.**
+  - Each loss was 2.2–3.8× the planned maximum (0.00074–0.00083 SOL).
+  - The plan's maximum loss does not include entry costs.
+  - At the current size, **the fixed cost of one buy (about 0.0016 SOL) is
+    about twice the whole per-trade risk budget**.
+  - This is not changed in code; see "Decision needed" below.
+- LOOONG and DREW were genuine stop-losses (MARKET moved against the entry
+  by about 12–15% within 1–2 minutes).
+
+### Volatility (`loss_report`)
+
+- **1358 of 5000 assessments** in 72 h were blocked by
+  AUTO_SL_NO_VOLATILITY. Of these, **1354** had "fewer than 3 returns even
+  at 10-second resolution": tokens with too few trades to measure.
+- 0 were LOW_CONFIDENCE. Most of the 72 h window predates this deploy, so
+  re-measure after 24 h.
+
+### Guard refusals
+
+20 BUY_REFUSED_BY_TRANSACTION_GUARD (FAdo9…), all on 2026-09-27, before
+the builder fix. There have been none since.
+
+### Decision needed (not changed in code)
+
+At the current trade size, costs are 33–110% of each buy, so every LIVE
+position starts deep underwater. Three options:
+
+1. **Reclaim the deposit** by closing the empty token account after a full
+   exit. This is a new signed transaction and needs guard support.
+   - Worth it only if `cost_report` confirms the fixed part is token-account
+     rent.
+   - `cost_report` also shows how much SOL is locked in the wallet's empty
+     token accounts today.
+2. **Count entry costs in the risk plan.** A trade whose costs alone exceed
+   the per-trade risk budget would be refused. This is a tightening, and at
+   today's size it would stop most LIVE entries.
+3. **Change the trade size.** This is only the operator's decision; the
+   system does not do it.
 
 ## Execution (protected path, unchanged)
 
@@ -31,8 +172,8 @@ measurement around them:
   range is 120k–400k for the curve and 180k–600k for PumpSwap.
   Measured use was about 96k and 142k.
 
-**Latency (average, median, worst).** PENDING. Run `trade_report`; it also
-measures orders placed before this deploy, from their recorded stages.
+**Latency (average, median, worst):** measured; see "Production
+measurements" above.
 
 **Structural delays visible in code** (sizes to be measured):
 - a candidate is re-evaluated at most every 30 s, from a 15 s loop;
@@ -43,8 +184,8 @@ measures orders placed before this deploy, from their recorded stages.
   confirmation (up to 75 s);
 - exits are evaluated every 15 s.
 
-No optimization was made on these, as asked, because nothing has been
-measured yet.
+After measurement, only the order pickup delay was fixed (it was 82% of
+decision → submit). The others remain as they were.
 
 **Priority fees**
 - The total priority fee is `priority_fee_sol`, default 0.0001 SOL,
@@ -72,11 +213,9 @@ measured yet.
 - Fill parsing reads only our own transactions (v0) and refuses any other
   version.
 
-**Measured values still PENDING** (run `rpc_check --capabilities` and
-`tx_fixture --version 1`):
-- per-provider 429 and 403 frequency;
-- which versions each provider serves;
-- method support.
+**Measured values:** see "Production measurements" above. Still pending:
+per-provider 429 frequency under load. The learned-traffic section was
+empty right after the restart.
 
 ## Price execution
 
@@ -92,7 +231,8 @@ measured yet.
 - RPC_LATENCY is used only when submission itself was slow while the curve
   moved.
 
-**Results for recent trades:** PENDING (`trade_report`).
+**Results for recent trades:** see "Production measurements" above. The
+cause was costs on top of the trade price, never the market.
 
 ## Decision engine
 
@@ -116,9 +256,8 @@ measured yet.
 
   One sign alone is only reported, so a lull is not treated as a collapse.
   EXIT_SIGNAL_AT_ENTRY is unchanged.
-- **Why recent losing trades were entered:** PENDING. `loss_report` shows,
-  for every loss, the entry features, the warnings present at entry, the
-  exit check and the class.
+- **Why recent losing trades were entered:** see "Production measurements"
+  above.
 
 ## ML
 
@@ -204,15 +343,47 @@ One scenario assertion changed on purpose: a 12-second-old token with 15
 trades is now LOW_CONFIDENCE (not traded, needs approval) instead of
 NO_TRADE because volatility was unavailable.
 
+## Follow-up after the production measurements
+
+Fixed (APPLICATION BUG):
+- LIVE position marks started at the cost basis, so exit intelligence sold
+  on a phantom crash, and MFE/MAE were wrong;
+- the LIVE BUY and SELL were committed only after the Telegram call;
+- the order worker picked up orders only once per second, after the wallet
+  reconcile.
+
+Added (read-only):
+- each confirmed order's cost breakdown is now recorded, and the
+  misleading "within the slippage limit" text is gone;
+- `cost_report` itemizes past orders and the SOL held in empty token
+  accounts;
+- `loss_report` rebuilds diagnostics for old orders and shows the exit
+  intelligence reason.
+
+Tests:
+- 3 cost breakdown tests and a `cost_report` test;
+- 2 excursion tests and a loss-classification test;
+- a fill-marks test;
+- a phantom-crash test, which fails on the old code;
+- a worker wake test;
+- a commit-before-notify test, which fails on the old code.
+
 ## Remaining issues
 
-- **All production measurements** (latency, price causes, loss causes,
-  provider matrix): PENDING the diagnostics output.
-- **Version-1 transaction fixture:** it will come from real mainnet data
-  (`tx_fixture`). Until then, v1 handling is covered by request-level tests
-  only, and the parsers fail closed.
-- **Structural delays** (30 s re-evaluation, 1 s poll, serial order worker,
-  15 s exit loop) are identified but not optimized, pending measurement.
+- **Fixed cost per buy (about 0.0016 SOL):** its composition is PENDING the
+  `cost_report` output. See "Decision needed".
+- **Latency after the pickup fix:** to be measured (`trade_report`).
+- **Confirmation tail (3 of 10 above 4.8 s):** `slots_to_land` is now
+  recorded; to be measured before any priority-fee change.
+- **Version-1 transaction fixture:**
+  - v1 is served and read in production;
+  - the captured transaction is not yet in the test suite, because only its
+    first 4000 characters were printed;
+  - the parsers still fail closed.
+- **Ankr and Chainstack** remain enabled but serve nothing. Disabling them
+  is an operator setting.
+- **Structural delays** (30 s re-evaluation, serial order worker, 15 s exit
+  loop) are unchanged.
 - **Futures and other hidden backends still run** (they are only hidden in
   the UI). They can be disabled later with a compose profile.
 - **Manual BUY override of preference filters** (earlier request): still

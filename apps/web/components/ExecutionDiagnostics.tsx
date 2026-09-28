@@ -61,7 +61,7 @@ export default function ExecutionDiagnostics({ order }: { order: ExecutionOrderR
             <span title="spot right before our trade, from the program's trade event">before ours {formatDecimal(p.spot_before_trade_sol ?? null, 12)}</span>
             <span className={pctClass(c.price_impact_pct)}>{pct(c.price_impact_pct)} impact</span>
             <span title="our trade price, fees excluded">trade {formatDecimal(p.trade_price_sol ?? null, 12)}</span>
-            <span className={pctClass(c.fees_pct)}>{pct(c.fees_pct)} fees</span>
+            <span className={pctClass(c.fees_pct)} title="program fees + network fee + SOL deposited into new accounts">{pct(c.fees_pct)} costs</span>
             <span title="SOL spent incl. every fee / tokens received">all-in {formatDecimal(p.all_in_price_sol ?? null, 12)}</span>
           </div>
           <div>
@@ -69,6 +69,14 @@ export default function ExecutionDiagnostics({ order }: { order: ExecutionOrderR
             {p.classification && <> · cause <span className="pill pill-warn">{p.classification}</span></>}
             {(p.evidence ?? []).length > 0 && <span className="muted"> {p.evidence.join("; ")}</span>}
           </div>
+          {p.costs_sol && (
+            <div className="mono">
+              Costs: program fees {p.costs_sol.program_fees_lamports ?? "—"} ({pct(c.program_fees_pct)}) · network{" "}
+              {p.costs_sol.network_fee_lamports ?? "—"} ({pct(c.network_fee_pct)}) · new-account deposits{" "}
+              {p.costs_sol.net_deposits_lamports ?? "—"} ({pct(c.deposits_pct)}), of which token-account rent{" "}
+              {p.costs_sol.token_account_rent_lamports ?? "—"} · unexplained {p.costs_sol.residual_lamports ?? "—"} SOL
+            </div>
+          )}
           <div className="muted">SOL per whole token. Network fee {p.network_fee_sol ?? "—"} SOL · priority fee {p.priority_fee_sol ?? "—"} SOL.</div>
         </div>
       )}

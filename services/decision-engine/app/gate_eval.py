@@ -199,15 +199,16 @@ async def evaluate_with_gate(
                 log.info("gate.smoke_test_entry", candidate_id=str(candidate.id), mint=mint, engine=engine,
                          run=str(run.id), route=position.execution_route)
                 return a
-    opened = None
+    opened = live_opened = None
     if a.executable and a.execution_target.value == "LIVE":
         try:
             position = await live_trading.enter_live(session, redis, account, a, row.id, candidate, now, lifecycle,
                                                      inp.token.decimals if inp.token else None, provenance)
             pipeline.record_ml_sample(session, a, row.id, candidate.id, evidence.get("features") or {},
                                       *pipeline.ml_sample_args(inp.ml, ml_info))
-            await pipeline.after_entry(session, redis, settings, a, position)
-            opened = position
+            # The entry notification (Telegram) is sent after the order is
+            # committed: the order worker only sees a committed order.
+            live_opened = opened = position
             if operator is not None:
                 operator["result"] = {"status": "SUBMITTING", "target": "LIVE", "position_id": str(position.id)}
         except ValueError as exc:
@@ -301,6 +302,9 @@ async def evaluate_with_gate(
         except Exception as exc:  # noqa: BLE001 - observation data never blocks a decision
             log.warning("gate.opportunity_record_failed", mint=mint, error=f"{type(exc).__name__}: {exc}")
     await session.commit()
+    if live_opened is not None:
+        await pipeline.after_entry(session, redis, settings, a, live_opened)
+        await session.commit()
     log.info("gate.decision", candidate_id=str(candidate.id), mint=mint, engine=engine, decision=a.decision.value,
              status=a.status_label, target=a.execution_target.value,
              size=str(a.plan.position_size.value) if a.plan.position_size else None, errors=evidence.get("errors"))

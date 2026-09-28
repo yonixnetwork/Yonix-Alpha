@@ -296,6 +296,40 @@ def _trade_request(order: ExecutionOrder, wallet: str) -> tuple[TradeRequest, Gu
     return req, exp
 
 
+def market_fill_price(order: ExecutionOrder, position: PaperPosition, cost_basis: Decimal) -> tuple[Decimal, str]:
+    """The market price of a confirmed BUY: the trade price from our own
+    trade event (SOL into the curve/pool per token, before fees), else the
+    decision's planned entry price, else the cost basis."""
+    price = ((order.diagnostics or {}).get("price") or {}).get("trade_price_sol")
+    if price:
+        return Decimal(str(price)), "trade price from the program's trade event"
+    planned = (position.plan or {}).get("entry_price")
+    if planned:
+        return Decimal(str(planned)), "planned entry price (no trade event decoded)"
+    return cost_basis, "cost basis (no market price recorded)"
+
+
+def market_reference(p: PaperPosition) -> dict[str, Any]:
+    """Market entry price, high and low since entry of a position, all
+    MARKET prices. A LIVE position filled before the fill's market price was
+    recorded had its high/low seeded from the cost basis: a high equal to
+    that seed is not a market price (the planned entry price stands in for
+    it, as a lower bound: `high_measured` False), and a low equal to it is
+    unknown."""
+    plan = p.plan or {}
+    fill = plan.get("fill") or {}
+    if getattr(p, "execution_mode", "PAPER") != "LIVE" or fill.get("market_price"):
+        ref = Decimal(fill["market_price"]) if fill.get("market_price") else p.entry_price
+        return {"entry": ref, "high": p.highest_price, "low": p.lowest_price, "high_measured": True,
+                "basis": fill.get("market_price_basis") or "entry price"}
+    planned = Decimal(str(plan["entry_price"])) if plan.get("entry_price") else None
+    seed = p.entry_price
+    marked_high = p.highest_price is not None and seed is not None and p.highest_price > seed
+    low = p.lowest_price if p.lowest_price is not None and seed is not None and p.lowest_price < seed else None
+    return {"entry": planned, "high": p.highest_price if marked_high else planned, "low": low, "high_measured": marked_high,
+            "basis": "planned entry price (filled before market fill prices were kept)"}
+
+
 async def apply_outcome(session: AsyncSession, redis: Redis | None, app_settings: Any, order: ExecutionOrder,
                         outcome: ExecOutcome, now: datetime) -> None:
     """Moves the order and its position from the executor's outcome. Only a
@@ -334,9 +368,17 @@ async def apply_outcome(session: AsyncSession, redis: Redis | None, app_settings
             position.quantity = position.initial_quantity = position.remaining_quantity = qty
             position.entry_cost_quote = cost
             position.fees_paid_quote = Decimal(fill.fee_lamports) / LAMPORTS
-            position.entry_price = cost / qty
+            position.entry_price = cost / qty  # cost basis: everything the wallet paid, per token (PnL)
             position.entry_at = now
-            position.highest_price = position.lowest_price = position.last_price = position.entry_price
+            # Marks, the high since entry and the low are MARKET prices, so they
+            # start from the market price of our fill, never from the cost basis:
+            # fees and new-account rent on a small buy can be 30-110% of the
+            # trade, and a high seeded from the cost basis read as a crash.
+            market, basis = market_fill_price(order, position, cost / qty)
+            position.highest_price = position.lowest_price = position.last_price = market
+            position.plan = {**(position.plan or {}), "fill": {
+                "market_price": str(market), "market_price_basis": basis, "cost_basis_price": str(position.entry_price),
+                "costs_sol": ((order.diagnostics or {}).get("price") or {}).get("costs_sol")}}
             position.status = "open"
             if account is not None:
                 account.cash_balance -= cost
