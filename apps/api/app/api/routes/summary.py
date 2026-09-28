@@ -118,9 +118,14 @@ async def memecoin_summary(db: AsyncSession = Depends(get_db), redis: Redis = De
     conns = {c["name"]: c for c in await health_state.connections(db, redis, settings)}
     ready = await redis.get(live_trading.READY_KEY)
     rs = json.loads(ready) if ready else None
-    ml = (await db.execute(select(func.count()).select_from(ModelVersion).where(ModelVersion.is_active.is_(True)))).scalar_one()
+    ml = (await db.execute(select(func.count()).select_from(ModelVersion).where(ModelVersion.status == "active"))).scalar_one()
+    solana = {k: v for k, v in conns.items() if v.get("category") in ("solana", "infrastructure")}
     system = {
-        "rpc": {k: v["state"] for k, v in conns.items() if "rpc" in k.lower() or "solana" in k.lower()},
+        # Solana-side connections only; a module that is not configured
+        # (e.g. futures venues, now hidden) is not a problem.
+        "rpc": {k: v["state"] for k, v in solana.items()},
+        "problems": {k: {"state": v["state"], "detail": v.get("detail")} for k, v in solana.items()
+                     if v["state"] not in ("CONNECTED", health_state.NOT_CONFIGURED)},
         "data": {"stream_heartbeat_age_seconds": round(stream_age, 1) if stream_age is not None else None,
                  "state": "LIVE" if stream_age is not None and stream_age < 60 else "STALE" if stream_age is not None else "UNAVAILABLE"},
         "execution": {"state": (rs or {}).get("status", "UNKNOWN"), "reason": (rs or {}).get("reason")},

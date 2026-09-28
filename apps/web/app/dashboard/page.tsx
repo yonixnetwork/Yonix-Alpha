@@ -16,7 +16,7 @@ interface Summary {
   today: { LIVE: Today; PAPER: Today };
   market: { fresh_last_hour: number; observing: number; migrated_last_hour: number; momentum_active: number; active_opportunities: number };
   system: { data: { stream_heartbeat_age_seconds: number | null; state: string }; execution: { state: string; reason: string | null };
-    ml: { active_models: number }; connections: Record<string, string> };
+    ml: { active_models: number }; connections: Record<string, string>; problems: Record<string, { state: string; detail: string | null }> };
   positions: Pos[]; global_mode: string; kill_switch: boolean; at: string;
 }
 
@@ -57,7 +57,7 @@ export default function DashboardPage() {
   if (error) return <ErrorNotice error={error} />;
   if (!data) return <Loading />;
   const w = data.wallet;
-  const unhealthy = Object.entries(data.system.connections).filter(([, s]) => s !== "CONNECTED" && s !== "OK" && s !== "HEALTHY");
+  const unhealthy = Object.entries(data.system.problems ?? {});
   return (
     <div>
       <PageHeader title="Dashboard" icon={<LayoutDashboard size={20} aria-hidden />}
@@ -88,7 +88,9 @@ export default function DashboardPage() {
         <div className="term-card">
           <div className="term-card-title">System</div>
           <dl className="term-kv">
-            <dt>RPC / data providers</dt><dd>{unhealthy.length === 0 ? <StatePill state="CONNECTED" /> : <Link href="/dashboard/rpc">{unhealthy.length} not healthy</Link>}</dd>
+            <dt>Solana connections</dt><dd>{unhealthy.length === 0 ? <StatePill state="CONNECTED" />
+              : <Link href="/dashboard/health" title={unhealthy.map(([k, v]) => `${k}: ${v.state}${v.detail ? ` (${v.detail})` : ""}`).join("\n")}>
+                {unhealthy.map(([k, v]) => `${k} ${v.state}`).join(", ")}</Link>}</dd>
             <dt>Trade stream</dt><dd><StatePill state={data.system.data.state} /> <span className="muted">{data.system.data.stream_heartbeat_age_seconds != null ? `${data.system.data.stream_heartbeat_age_seconds}s ago` : ""}</span></dd>
             <dt>Execution worker</dt><dd><span className={data.system.execution.state === "ready" ? "pill pill-ok" : "pill pill-warn"}>{data.system.execution.state.toUpperCase()}</span></dd>
             <dt>ML</dt><dd>{data.system.ml.active_models} active model{data.system.ml.active_models === 1 ? "" : "s"}</dd>

@@ -16,7 +16,7 @@ export default function TokenExplorerPage() {
   const [q, setQ] = useState("");
   const [filter, setFilter] = useState("");
   const recent = useApi<{ items: { mint: string; symbol: string | null; name: string | null; outcome: string; decided_at: string }[] }>(
-    `/api/observations?limit=50${filter ? `&q=${encodeURIComponent(filter)}` : ""}`, undefined, { refreshMs: 15000 });
+    "/api/observations", { limit: 50, q: filter || undefined }, { refreshMs: 15000 });
   function go() {
     const m = q.trim();
     if (MINT.test(m)) router.push(`/dashboard/tokens/${m}`);

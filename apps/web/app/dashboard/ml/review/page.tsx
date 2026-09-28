@@ -147,7 +147,8 @@ export default function MLReviewPage() {
       <PageHeader title="ML Review" icon={<Gauge size={20} aria-hidden />} subtitle="Champion / challenger, promotion, drift and data quality. Nothing is promoted automatically." />
       <ErrorNotice error={review.error} />
       {review.loading && !review.data && <Loading />}
-      {review.data?.map((m) => <ModelCard key={m.model} m={m} reload={review.reload} />)}
+      {/* Product focus is Solana memecoins: the futures model group is hidden (its backend is unchanged). */}
+      {review.data?.filter((m) => !m.model.includes("futures")).map((m) => <ModelCard key={m.model} m={m} reload={review.reload} />)}
       <Section title="Predictions vs outcomes">
         {preds.data && preds.data.length === 0 ? (
           <Empty>No scored decisions yet.</Empty>

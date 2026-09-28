@@ -24,7 +24,8 @@ export default function LineChart({ points, label, height = 180, unit = "" }: { 
   const sy = (v: number) => pad + (1 - (v - min) / span) * (height - 2 * pad);
   const d = points.map((p, i) => `${i ? "L" : "M"}${sx(i).toFixed(1)},${sy(p.y).toFixed(1)}`).join(" ");
   const last = points[points.length - 1];
-  const fmt = (v: number) => v.toLocaleString(undefined, { maximumFractionDigits: 4 }) + unit;
+  // Memecoin prices are tiny (1e-8 SOL): show significant digits, never "0".
+  const fmt = (v: number) => (v !== 0 && Math.abs(v) < 0.001 ? v.toPrecision(4) : v.toLocaleString(undefined, { maximumFractionDigits: 4 })) + unit;
   return (
     <figure className="chart" aria-labelledby={id}>
       <svg viewBox={`0 0 ${w} ${height}`} preserveAspectRatio="none" role="img" aria-label={`${label}: last ${fmt(last.y)}`}>

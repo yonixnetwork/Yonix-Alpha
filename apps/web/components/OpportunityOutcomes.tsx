@@ -33,7 +33,11 @@ const COLS: [keyof Compare, string][] = [
 ];
 const HZ = ["T+5s", "T+10s", "T+30s", "T+60s", "T+5m", "T+15m", "T+30m"];
 const pctClass = (v?: string | null) => (v == null ? "muted" : Number(v) > 0 ? "pos" : Number(v) < 0 ? "neg" : "");
-const fmt = (v: string | number | null | undefined) => (v === null || v === undefined ? "—" : String(v));
+const fmt = (v: string | number | null | undefined) => {
+  if (v === null || v === undefined) return "—";
+  const n = Number(v);
+  return Number.isFinite(n) && String(v).includes(".") ? String(Number(n.toFixed(4))) : String(v);
+};
 
 function Horizons({ o }: { o: Opp }) {
   return (
@@ -51,9 +55,9 @@ function Horizons({ o }: { o: Opp }) {
  * traded vs rejected-then-up, and every losing trade's LOSS_ANALYSIS. */
 export default function OpportunityOutcomes() {
   const [days, setDays] = useState(7);
-  const cmp = useApi<Compare>(`/api/ml/opportunities/compare?days=${days}`, undefined, { refreshMs: 60000 });
-  const losses = useApi<{ items: Opp[] }>("/api/ml/opportunities?losses_only=true&limit=20", undefined, { refreshMs: 60000 });
-  const up = useApi<{ items: Opp[] }>("/api/ml/opportunities?rejected_up=true&limit=20", undefined, { refreshMs: 60000 });
+  const cmp = useApi<Compare>("/api/ml/opportunities/compare", { days }, { refreshMs: 60000 });
+  const losses = useApi<{ items: Opp[] }>("/api/ml/opportunities", { losses_only: true, limit: 20 }, { refreshMs: 60000 });
+  const up = useApi<{ items: Opp[] }>("/api/ml/opportunities", { rejected_up: true, limit: 20 }, { refreshMs: 60000 });
   return (
     <>
       <Section title="Opportunity outcomes — traded vs not traded"
