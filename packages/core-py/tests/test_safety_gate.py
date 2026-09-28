@@ -502,3 +502,71 @@ def test_own_entry_counts_in_a_young_curves_real_reserve():
     from yonixalpha_core.safety.liquidity import side_costs
     entry, exit_ = side_costs(young, size)
     assert entry + exit_ < 1000
+
+
+# --- fixed per-trade costs (live network/priority fees, unreclaimed rent) ----
+
+def _live(**kw):
+    return healthy(global_mode=GlobalMode.LIVE, strategy_mode=StrategyMode.AUTO, live_trading_permitted=True, live_ready=True, **kw)
+
+
+def test_fixed_costs_are_counted_in_the_loss_at_the_stop_for_live_trades():
+    base = decide(_live()).plan
+    fixed = base.max_loss.value * Decimal("0.05")
+    a = decide(_live(fixed_cost_quote=fixed, fixed_cost_detail={"total": str(fixed)}))
+    assert a.execution_target == ExecutionTarget.LIVE, a.reasons
+    p = a.plan
+    loss = p.position_size.value * _loss_fraction(p.stop_distance_pct, p.entry_cost_bps, p.exit_cost_bps) + fixed
+    assert loss <= p.max_loss.value * Decimal("1.000001")
+    # The risk-derived size shrinks by the fixed costs (the final size here is bound by the impact cap).
+    assert p.position_size.inputs["risk_size"] < base.position_size.inputs["risk_size"]
+    assert p.position_size.value <= base.position_size.value and p.fixed_cost_quote == fixed
+    assert p.position_size.inputs["risk_budget_after_fixed_costs"] == p.max_loss.value - fixed
+    assert p.breakeven_price > base.breakeven_price  # the fixed costs must be earned back too
+    assert p.to_dict()["fixed_cost_detail"] == {"total": str(fixed)}
+
+
+def test_fixed_costs_above_the_risk_budget_refuse_the_live_trade():
+    base = decide(_live()).plan
+    a = decide(_live(fixed_cost_quote=base.max_loss.value * Decimal("1.01")))
+    assert not a.executable and "FIXED_COSTS_EXCEED_RISK" in codes(a)
+
+
+def test_fixed_live_costs_do_not_change_paper_sizing():
+    paper = healthy(fixed_cost_quote=Decimal("100"))  # global mode PAPER: the wallet is not used
+    a = decide(paper)
+    assert a.executable and a.execution_target == ExecutionTarget.PAPER and a.plan.fixed_cost_quote is None
+    assert a.plan.position_size.value == decide().plan.position_size.value
+
+
+def test_fixed_trade_costs_follow_the_live_settings():
+    from yonixalpha_core.live_trading import LiveExecutionSettings, fixed_trade_costs
+
+    on, detail = fixed_trade_costs(LiveExecutionSettings())
+    assert on == Decimal("0.000225") and "rent_reclaim_fee" in detail  # 2 x (0.000005 + 0.0001) + 0.000015
+    off, detail = fixed_trade_costs(LiveExecutionSettings(auto_reclaim_rent=False))
+    assert off == Decimal("0.00172384") and detail["token_account_rent_not_reclaimed"] == "0.00151384"
+
+
+def test_fixed_costs_too_large_for_the_stop_are_stop_inside_costs():
+    base = decide(_live()).plan
+    a = decide(_live(fixed_cost_quote=base.max_loss.value * Decimal("0.4")))  # 13% of this size, stop 10%
+    assert not a.executable and "STOP_INSIDE_COSTS" in codes(a)
+    assert any("plus fixed costs" in f.message for f in a.findings)
+
+
+def test_fixed_costs_shrink_a_risk_bound_live_size_on_a_small_wallet():
+    small = AccountState(Decimal("0.08"), Decimal("0.03"), 0, Decimal("0"), Decimal("0"), None, Decimal("0"), False)
+    tiny = SafetySettings(min_position_size_quote=Decimal("0.001"))
+    fixed = Decimal("0.000225")  # measured live round trip with the token account closed after the exit
+    # A 10% stop: proportional costs 5.5% plus fixed 5.8% at this size leave no room before the stop.
+    tight = decide(_live(account=small, fixed_cost_quote=fixed), tiny)
+    assert not tight.executable and "STOP_INSIDE_COSTS" in codes(tight)
+    # A 16% stop (as measured on the live trades): the trade fits, smaller.
+    wide = replace(healthy().market, volatility=Decimal("0.08"))
+    base = decide(_live(account=small, market=wide), tiny).plan
+    assert base.binding_cap == "risk", base.binding_cap
+    p = decide(_live(account=small, market=wide, fixed_cost_quote=fixed), tiny).plan
+    assert p.position_size.value < base.position_size.value
+    loss = p.position_size.value * _loss_fraction(p.stop_distance_pct, p.entry_cost_bps, p.exit_cost_bps) + fixed
+    assert loss <= p.max_loss.value * Decimal("1.000001")

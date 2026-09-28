@@ -342,6 +342,11 @@ class AssessmentInput:
     # not evaluated. A LIVE target with anything but True is refused.
     live_ready: bool | None = None
     live_not_ready_reason: str | None = None
+    # Fixed cost of a LIVE round trip in the quote currency (network and
+    # priority fees, rent reclaim or unreclaimed rent), counted in the loss at
+    # the stop when the target is LIVE. None: no fixed cost modelled.
+    fixed_cost_quote: Decimal | None = None
+    fixed_cost_detail: dict | None = None
     # LONG for spot (Solana); futures strategies may request SHORT.
     side: str = "LONG"
     strategy_levels: StrategyLevels | None = None

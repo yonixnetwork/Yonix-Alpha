@@ -77,6 +77,13 @@ class FakeExecutor:
     async def lookup(self, signature, mint):
         return self.lookups.get(signature, ExecOutcome("PENDING", signature))
 
+    async def close_token_accounts(self, mints, exclude_mints, on_signed, max_priority_fee_lamports=0):
+        self.requests.append(("close", mints, set(exclude_mints), max_priority_fee_lamports))
+        out = self.outcomes.pop(0)
+        if out.signature:
+            await on_signed(out.signature)
+        return out
+
 
 def confirmed(sig: str, sol_change: int, token_change: int, fee: int = 5_000) -> ExecOutcome:
     return ExecOutcome("CONFIRMED", sig, fill=Fill(sol_change, token_change, fee, 6, 123, int(NOW.timestamp())), sent=True)
@@ -571,3 +578,90 @@ async def test_worker_wakes_for_a_new_order_but_not_for_one_it_already_handled(s
     t0 = loop.time()
     await wait_for_work(session_factory, stop, {oid}, timeout=0.4, check=0.05)
     assert loop.time() - t0 >= 0.35  # still pending after the last loop (awaiting confirmation): no busy loop
+
+
+
+RENT = 1_513_840
+
+
+async def close_by_stop_loss(session_factory, redis, ex, pid):
+    async with session_factory() as s:
+        p = await s.get(PaperPosition, pid)
+        await live_trading.manage_live_position(s, p, p.stop_loss * Decimal("0.8"), None, NOW + timedelta(seconds=20))
+        await s.commit()
+        sell_id = p.pending_order_id
+    ex.outcomes.append(confirmed("sig-sell", 60_000_000, -3_000_000_000_000))
+    assert await live_trading.process_order(session_factory, redis, LIVE_ON, ex, sell_id) == "CONFIRMED"
+
+
+async def test_full_exit_closes_the_token_account_and_its_rent_is_booked_to_the_trade(session_factory, redis_client):
+    _, _, pid, cid, ex, spent = await open_live(session_factory, redis_client)
+    await close_by_stop_loss(session_factory, redis_client, ex, pid)
+    async with session_factory() as s:
+        p = await s.get(PaperPosition, pid)
+        before = p.realized_pnl
+        rent = (await s.execute(select(ExecutionOrder).where(ExecutionOrder.side == "RENT"))).scalar_one()
+    assert (rent.status, rent.mint, rent.position_id, rent.reason) == ("PENDING", MINT, pid, "rent_reclaim_after_exit")
+
+    fee = 5_000 + 10_000
+    out = ExecOutcome("CONFIRMED", "sig-rent", fill=Fill(RENT - fee, 0, fee, None, 5, 0), sent=True,
+                      reclaim={"closing": [{"account": "acc", "mint": MINT, "program": "p", "lamports": RENT, "amount": 0}],
+                               "skipped": [], "expected_refund_lamports": RENT})
+    ex.outcomes.append(out)
+    assert await live_trading.process_order(session_factory, redis_client, LIVE_ON, ex, rent.id) == "CONFIRMED"
+    assert ex.requests[-1][:2] == ("close", {MINT})
+    async with session_factory() as s:
+        p = await s.get(PaperPosition, pid)
+        label = (await s.execute(select(MLFeatureSnapshot).where(MLFeatureSnapshot.candidate_id == cid))).scalar_one()
+    refund = Decimal(RENT - fee) / Decimal(10**9)
+    assert p.realized_pnl == before + refund and p.plan["fill"]["rent_reclaimed_sol"] == str(refund)
+    assert label.label_source == "live_execution_realized_pnl"
+
+    # A later reclaim touching the same token never credits the trade twice.
+    async with session_factory() as s:
+        again = await live_trading.request_rent_reclaim(s, NOW, None, "rent_reclaim_manual")
+        await s.commit()
+    ex.outcomes.append(out)
+    assert await live_trading.process_order(session_factory, redis_client, LIVE_ON, ex, again.id) == "CONFIRMED"
+    async with session_factory() as s:
+        assert (await s.get(PaperPosition, pid)).realized_pnl == before + refund
+
+
+async def test_no_rent_reclaim_when_the_setting_is_off(session_factory, redis_client):
+    from yonixalpha_core.db.models import PlatformSetting
+
+    async with session_factory() as s:
+        s.add(PlatformSetting(key=live_trading.SETTINGS_KEY, value={"auto_reclaim_rent": "false"}))
+        await s.commit()
+    _, _, pid, _, ex, _ = await open_live(session_factory, redis_client)
+    await close_by_stop_loss(session_factory, redis_client, ex, pid)
+    async with session_factory() as s:
+        assert (await s.execute(select(ExecutionOrder).where(ExecutionOrder.side == "RENT"))).first() is None
+
+
+async def test_manual_reclaim_never_touches_a_token_with_an_open_position(session_factory, redis_client):
+    _, _, pid, _, ex, _ = await open_live(session_factory, redis_client)
+    async with session_factory() as s:
+        order = await live_trading.request_rent_reclaim(s, NOW, None, "rent_reclaim_manual")
+        assert await live_trading.request_rent_reclaim(s, NOW, None, "rent_reclaim_manual") is None  # one at a time
+        await s.commit()
+    ex.outcomes.append(ExecOutcome("SKIPPED", error="no empty token account to close", reclaim={"closing": [], "skipped": []}))
+    assert await live_trading.process_order(session_factory, redis_client, LIVE_ON, ex, order.id) == "SKIPPED"
+    kind, mints, exclude, max_fee = ex.requests[-1]
+    assert (kind, mints) == ("close", None) and MINT in exclude and max_fee > 0
+
+
+async def test_failed_reclaim_is_reported_and_changes_no_position(session_factory, redis_client):
+    _, _, pid, _, ex, _ = await open_live(session_factory, redis_client)
+    await close_by_stop_loss(session_factory, redis_client, ex, pid)
+    async with session_factory() as s:
+        before = (await s.get(PaperPosition, pid)).realized_pnl
+        rent = (await s.execute(select(ExecutionOrder).where(ExecutionOrder.side == "RENT"))).scalar_one()
+    ex.outcomes.append(ExecOutcome("FAILED", "sig-r", error="simulation failed: {'InstructionError': [2, 'x']}",
+                                   stage="SIMULATION_FAILED"))
+    assert await live_trading.process_order(session_factory, redis_client, LIVE_ON, ex, rent.id) == "FAILED"
+    from yonixalpha_core.db.models import Notification
+    async with session_factory() as s:
+        assert (await s.get(PaperPosition, pid)).realized_pnl == before
+        titles = (await s.execute(select(Notification.title))).scalars().all()
+    assert "Rent reclaim failed" in titles

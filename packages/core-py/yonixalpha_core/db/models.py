@@ -592,9 +592,9 @@ class ExecutionOrder(Base):
 
     __tablename__ = "execution_orders"
     __table_args__ = (
-        CheckConstraint("side IN ('BUY','SELL')", name="ck_execution_orders_side"),
+        CheckConstraint("side IN ('BUY','SELL','RENT')", name="ck_execution_orders_side"),  # RENT: rent reclaim
         CheckConstraint("mode IN ('PAPER','LIVE')", name="ck_execution_orders_mode"),
-        CheckConstraint("status IN ('PENDING','SIGNED','SUBMITTED','CONFIRMED','FAILED','EXPIRED','CANCELLED')",
+        CheckConstraint("status IN ('PENDING','SIGNED','SUBMITTED','CONFIRMED','FAILED','EXPIRED','CANCELLED','SKIPPED')",
                         name="ck_execution_orders_status"),
     )
 

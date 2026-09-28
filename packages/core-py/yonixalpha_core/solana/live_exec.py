@@ -33,8 +33,9 @@ from yonixalpha_core.solana import venue as venues
 from yonixalpha_core.solana.rpc import get_transaction_params, with_priority
 from yonixalpha_core.solana.txversion import UnsupportedTransactionLayout, require_version
 from yonixalpha_core.solana.pumpportal import PumpPortalClient, PumpPortalError, TradeRequest
-from yonixalpha_core.solana.tx_builders import BuildError, JupiterBuilder, NativePumpBuilder, PumpPortalBuilder
-from yonixalpha_core.solana.txguard import GuardExpectation, inspect
+from yonixalpha_core.solana.tx_builders import BuildError, JupiterBuilder, NativePumpBuilder, PumpPortalBuilder, unsigned
+from yonixalpha_core.solana import rent_reclaim
+from yonixalpha_core.solana.txguard import GuardExpectation, inspect, inspect_close_accounts
 from yonixalpha_core.solana.wallet import LiveWallet
 
 log = get_logger("core.live_exec")
@@ -75,6 +76,7 @@ class ExecOutcome:
     seen: dict[str, Any] | None = None  # status seen before confirmation (slot, confirmationStatus)
     rpc_calls: list[dict[str, Any]] = field(default_factory=list)
     costs: dict[str, Any] | None = None  # where the wallet's SOL went (execution analysis)
+    reclaim: dict[str, Any] | None = None  # rent reclaim: accounts closed and skipped
 
     def to_dict(self) -> dict[str, Any]:
         f = self.fill
@@ -82,7 +84,7 @@ class ExecOutcome:
             "status": self.status, "signature": self.signature, "error": self.error, "sent": self.sent,
             "guard": self.guard, "logs": self.logs[-30:], "stage": self.stage, "stages": self.stages,
             "venue": self.venue, "provider": self.provider, "unsigned_tx": self.unsigned_tx,
-            "trade_event": self.trade_event, "rpc_calls": self.rpc_calls[-40:], "costs": self.costs,
+            "trade_event": self.trade_event, "rpc_calls": self.rpc_calls[-40:], "costs": self.costs, "reclaim": self.reclaim,
             "fill": None if f is None else {
                 "sol_change_lamports": f.sol_change_lamports, "token_change_raw": f.token_change_raw,
                 "fee_lamports": f.fee_lamports, "token_decimals": f.token_decimals, "slot": f.slot, "block_time": f.block_time,
@@ -268,6 +270,73 @@ class SolanaLiveExecutor:
         outcome.rpc_calls = calls
         return outcome
 
+    async def close_token_accounts(self, mints: set[str] | None, exclude_mints: set[str],
+                                   on_signed: Callable[[str], Awaitable[None]],
+                                   max_priority_fee_lamports: int = rent_reclaim.PRIORITY_FEE_LAMPORTS) -> ExecOutcome:
+        """Closes the wallet's EMPTY token accounts (those of `mints`, or all
+        when None) so their rent returns to the wallet. Read from chain →
+        build → dedicated guard → sign → simulate → send → confirm; nothing
+        is sent when there is nothing to close."""
+        stages: list[dict[str, Any]] = []
+        calls = self.rpc.calls = []
+
+        def stage(name: str, **detail: Any) -> None:
+            stages.append({"stage": name, "at": time.time(), **detail})
+
+        wallet = self.wallet.pubkey
+        try:
+            closable, skipped = await rent_reclaim.scan(self.rpc, wallet, mints, exclude_mints)
+        except Exception as exc:  # noqa: BLE001
+            stage("RPC_UNAVAILABLE", error=type(exc).__name__)
+            return ExecOutcome("FAILED", error=f"token accounts unavailable: {type(exc).__name__}", stage="RPC_UNAVAILABLE",
+                               stages=stages, rpc_calls=calls)
+        closable = closable[:rent_reclaim.MAX_ACCOUNTS_PER_TX]
+        info = {"closing": [a.to_dict() for a in closable], "skipped": skipped,
+                "expected_refund_lamports": sum(a.lamports for a in closable)}
+        stage("ACCOUNTS_SCANNED", closable=len(closable), skipped=len(skipped))
+        if not closable:
+            return ExecOutcome("SKIPPED", error="no empty token account to close", stage="ACCOUNTS_SCANNED", stages=stages,
+                               rpc_calls=calls, reclaim=info)
+        blockhash = await self.rpc.call("getLatestBlockhash", [{"commitment": "confirmed"}])
+        value = (blockhash or {}).get("value") or {}
+        if not value.get("blockhash"):
+            stage("TRANSACTION_BUILD_FAILED", error="no recent blockhash")
+            return ExecOutcome("FAILED", error="no recent blockhash", stage="TRANSACTION_BUILD_FAILED", stages=stages,
+                               rpc_calls=calls, reclaim=info)
+        msg = rent_reclaim.build(wallet, closable, value["blockhash"])
+        stage("TRANSACTION_BUILT", accounts=len(closable))
+        report = inspect_close_accounts(unsigned(msg), wallet, {a.account: a.program for a in closable},
+                                        max_priority_fee_lamports)
+        if not report.ok:
+            stage("TRANSACTION_GUARD_REJECTED", violations=report.violations)
+            return ExecOutcome("FAILED", error="transaction guard refused to sign: " + "; ".join(report.violations),
+                               guard=report.to_dict(), stage="TRANSACTION_GUARD_REJECTED", stages=stages, rpc_calls=calls,
+                               reclaim=info)
+        stage("TRANSACTION_GUARD_PASSED", programs=report.programs)
+        signed = VersionedTransaction(msg, [self.wallet.keypair])
+        signature = str(signed.signatures[0])
+        wire = base64.b64encode(bytes(signed)).decode()
+        await on_signed(signature)
+        stage("TRANSACTION_SIGNED", signature=signature)
+        try:
+            sim = await self.rpc.call("simulateTransaction", [wire, {"encoding": "base64", "sigVerify": True,
+                                                                     "commitment": "confirmed"}])
+        except Exception as exc:  # noqa: BLE001
+            stage("SIMULATION_UNAVAILABLE", error=type(exc).__name__)
+            return ExecOutcome("FAILED", signature, error=f"simulation unavailable: {type(exc).__name__}",
+                               stage="SIMULATION_UNAVAILABLE", stages=stages, rpc_calls=calls, guard=report.to_dict(),
+                               reclaim=info)
+        sim_value = (sim or {}).get("value") or {}
+        if sim_value.get("err") is not None:
+            stage("SIMULATION_FAILED", error=str(sim_value.get("err"))[:300])
+            return ExecOutcome("FAILED", signature, error=f"simulation failed: {sim_value.get('err')}",
+                               logs=list(sim_value.get("logs") or []), stage="SIMULATION_FAILED", stages=stages,
+                               rpc_calls=calls, guard=report.to_dict(), reclaim=info)
+        stage("SIMULATED", units=sim_value.get("unitsConsumed"))
+        outcome = await self._send_and_confirm(wire, signature, closable[0].mint, report.to_dict(), stage)
+        outcome.stages, outcome.rpc_calls, outcome.reclaim = stages, calls, info
+        return outcome
+
     async def _send_and_confirm(self, wire: str, signature: str, mint: str, guard: dict, stage=None) -> ExecOutcome:
         stage = stage or (lambda *a, **k: None)
         start = self._clock()
@@ -357,8 +426,10 @@ class SolanaLiveExecutor:
         return ExecOutcome("CONFIRMED", signature, fill=fill, logs=logs, trade_event=event, seen=seen, costs=costs)
 
 
-async def wallet_balances(rpc, owner: str) -> tuple[int, dict[str, dict]]:
-    """(SOL lamports, {mint: {amount, decimals, program}}) for reconciliation."""
+async def wallet_balances(rpc, owner: str, empty: list | None = None) -> tuple[int, dict[str, dict]]:
+    """(SOL lamports, {mint: {amount, decimals, program}}) for reconciliation.
+    Token accounts holding nothing are appended to `empty` when given
+    (account, mint, lamports of rent they hold)."""
     lamports = int(((await rpc.call("getBalance", [owner, {"commitment": "confirmed"}])) or {}).get("value", 0))
     tokens: dict[str, dict] = {}
     for program in ("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"):
@@ -372,4 +443,7 @@ async def wallet_balances(rpc, owner: str) -> tuple[int, dict[str, dict]]:
                 continue
             cur = tokens.setdefault(mint, {"amount": 0, "decimals": ta.get("decimals"), "program": program})
             cur["amount"] += int(ta.get("amount", "0"))
+            if empty is not None and int(ta.get("amount", "0")) == 0:
+                empty.append({"account": acc.get("pubkey"), "mint": mint,
+                              "lamports": int((acc.get("account") or {}).get("lamports") or 0)})
     return lamports, tokens

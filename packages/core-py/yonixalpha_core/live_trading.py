@@ -37,6 +37,7 @@ from yonixalpha_core.db.models import (
 )
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.safety.store import add_timeline_event, live_trading_permitted
+from yonixalpha_core.solana import rent_reclaim
 from yonixalpha_core.solana.live_exec import ExecOutcome, SolanaLiveExecutor, wallet_balances
 from yonixalpha_core.solana.pumpportal import TradeRequest
 from yonixalpha_core.solana.txguard import GuardExpectation
@@ -83,12 +84,16 @@ class LiveExecutionSettings:
     # by. Defaults are the values the working path has always used.
     compute_unit_limit_curve: int = 200_000
     compute_unit_limit_amm: int = 350_000
+    # After a full exit, close the token's now-empty account so its rent
+    # deposit (0.0015 SOL per token, measured) returns to the wallet.
+    auto_reclaim_rent: bool = True
 
     def to_dict(self) -> dict[str, str]:
-        return {k: str(v) for k, v in asdict(self).items()}
+        return {k: (str(v).lower() if isinstance(v, bool) else str(v)) for k, v in asdict(self).items()}
 
 
 TX_BUILDERS = ("native", "pumpportal")
+BOOL_SETTINGS = ("auto_reclaim_rent",)
 LIMITS = {"entry_slippage_pct": (Decimal("0.5"), Decimal("50")), "exit_slippage_pct": (Decimal("1"), Decimal("90")),
           "exit_slippage_step_pct": (Decimal("0"), Decimal("30")), "max_exit_slippage_pct": (Decimal("5"), Decimal("95")),
           "priority_fee_sol": (Decimal("0"), Decimal("0.01")), "max_priority_fee_sol": (Decimal("0"), Decimal("0.02")),
@@ -100,10 +105,37 @@ LIMITS = {"entry_slippage_pct": (Decimal("0.5"), Decimal("50")), "exit_slippage_
           "compute_unit_limit_amm": (Decimal("180000"), Decimal("600000"))}
 
 
+BASE_FEE_SOL = Decimal("0.000005")  # per signature
+# Rent deposited into the token account a buy opens (170-byte Token-2022
+# account, measured by cost_report 2026-09-28); returned only when closed.
+TOKEN_ACCOUNT_RENT_SOL = Decimal("0.00151384")
+
+
+def fixed_trade_costs(live: LiveExecutionSettings) -> tuple[Decimal, dict[str, str]]:
+    """SOL a LIVE round trip costs regardless of its size: the network +
+    priority fee of the buy and of the sell, plus either the reclaim
+    transaction's fee (token account closed after the exit) or the token
+    account's rent deposit (left locked when auto-reclaim is off)."""
+    trade_fee = BASE_FEE_SOL + live.priority_fee_sol
+    parts = {"buy_network_fee": trade_fee, "sell_network_fee": trade_fee}
+    if live.auto_reclaim_rent:
+        parts["rent_reclaim_fee"] = BASE_FEE_SOL + Decimal(rent_reclaim.PRIORITY_FEE_LAMPORTS) / LAMPORTS
+    else:
+        parts["token_account_rent_not_reclaimed"] = TOKEN_ACCOUNT_RENT_SOL
+    total = sum(parts.values(), Decimal(0))
+    return total, {k: str(v) for k, v in parts.items()} | {"total": str(total)}
+
+
 def parse_live_settings(data: dict[str, Any]) -> tuple[LiveExecutionSettings, list[str]]:
     base = LiveExecutionSettings()
     errors: list[str] = []
     for key, value in (data or {}).items():
+        if key in BOOL_SETTINGS:
+            if str(value).lower() not in ("true", "false"):
+                errors.append(f"{key}: must be true or false")
+            else:
+                setattr(base, key, str(value).lower() == "true")
+            continue
         if key == "tx_builder":
             if value not in TX_BUILDERS:
                 errors.append(f"tx_builder: must be one of {list(TX_BUILDERS)}")
@@ -334,6 +366,9 @@ async def apply_outcome(session: AsyncSession, redis: Redis | None, app_settings
                         outcome: ExecOutcome, now: datetime) -> None:
     """Moves the order and its position from the executor's outcome. Only a
     CONFIRMED outcome with the expected balance change counts as a fill."""
+    if order.side == RENT_SIDE:
+        await _apply_reclaim(session, redis, app_settings, order, outcome, now)
+        return
     order.result = outcome.to_dict()
     order.guard = outcome.guard or order.guard
     order.updated_at = now
@@ -424,6 +459,8 @@ async def apply_outcome(session: AsyncSession, redis: Redis | None, app_settings
                 await events.notify(session, redis, app_settings, "close", f"LIVE position closed: {position.symbol}",
                                     f"{order.reason}, realized {position.realized_pnl:.6f} SOL", "warning",
                                     {"position_id": str(position.id)})
+                if (await load_live_settings(session)).auto_reclaim_rent:
+                    await request_rent_reclaim(session, now, position.asset_id, "rent_reclaim_after_exit", position.id)
             await events.publish(redis, "trade.closed" if position.status == "closed" else "trade.updated",
                                  {"position_id": str(position.id), "mode": "LIVE", "reason": order.reason}, "live")
         await events.publish(redis, "balance.updated", {"account_id": str(position.account_id)}, "live")
@@ -510,6 +547,80 @@ async def _reconcile_event(session, kind: str, severity: str, order: ExecutionOr
                                     detail=detail))
 
 
+RENT_SIDE = "RENT"  # closes the wallet's empty token accounts; their rent deposit returns to the wallet
+RENT_ACTIVE = ("PENDING", "SIGNED", "SUBMITTED")
+ACTIVE_POSITION_STATES = ("pending_entry", "open", "needs_review")
+
+
+async def request_rent_reclaim(session: AsyncSession, now: datetime, mint: str | None, reason: str,
+                               position_id=None) -> ExecutionOrder | None:
+    """Queues closing the wallet's empty token account for `mint` (None: all
+    empty token accounts). One active request per scope; None when one is
+    already queued."""
+    scope = mint or "ALL"
+    active = (await session.execute(select(ExecutionOrder.id).where(
+        ExecutionOrder.mode == "LIVE", ExecutionOrder.side == RENT_SIDE, ExecutionOrder.mint == scope,
+        ExecutionOrder.status.in_(RENT_ACTIVE)))).first()
+    if active is not None:
+        return None
+    order = ExecutionOrder(
+        position_id=position_id, mode="LIVE", side=RENT_SIDE, reason=reason[:32], mint=scope, provider=LIVE_PROVIDER,
+        route="close_accounts", amount="0", amount_kind="accounts", slippage_pct=Decimal(0),
+        priority_fee_sol=Decimal(rent_reclaim.PRIORITY_FEE_LAMPORTS) / LAMPORTS,
+        limits={"mints": [mint] if mint else None, "max_priority_fee_lamports": rent_reclaim.PRIORITY_FEE_LAMPORTS},
+        status="PENDING", idempotency_key=f"rent:{scope}:{int(now.timestamp() * 1000)}")
+    session.add(order)
+    await session.flush()
+    return order
+
+
+async def _apply_reclaim(session: AsyncSession, redis: Redis | None, app_settings: Any, order: ExecutionOrder,
+                         outcome: ExecOutcome, now: datetime) -> None:
+    order.result = outcome.to_dict()
+    order.guard = outcome.guard or order.guard
+    order.updated_at = now
+    info = outcome.reclaim or {}
+    if outcome.status == "SKIPPED":
+        order.status, order.error = "SKIPPED", (outcome.error or "nothing to close")[:500]
+        return
+    if outcome.status != "CONFIRMED" or outcome.fill is None:
+        order.status = "EXPIRED" if outcome.status == "EXPIRED" else "FAILED"
+        order.error = (outcome.error or outcome.status)[:500]
+        await events.notify(session, redis, app_settings, "provider_failure", "Rent reclaim failed",
+                            f"{_failure_code(order)}: {order.error}", "warning", {"order_id": str(order.id)})
+        return
+    order.status, order.confirmed_at = "CONFIRMED", now
+    fill = outcome.fill
+    closed = info.get("closing") or []
+    per_account_fee = fill.fee_lamports // max(1, len(closed))
+    credited = []
+    linked = await session.get(PaperPosition, order.position_id) if order.position_id else None
+    for acc in closed:
+        # The deposit belongs to the latest closed live position of that
+        # token not yet credited (the linked one for an after-exit request).
+        q = select(PaperPosition).where(
+            PaperPosition.execution_mode == "LIVE", PaperPosition.asset_id == acc["mint"], PaperPosition.status == "closed")
+        if linked is not None and linked.asset_id == acc["mint"]:
+            q = q.where(PaperPosition.id == linked.id)
+        for p in (await session.execute(q.order_by(PaperPosition.exit_at.desc()))).scalars():
+            fill_info = dict((p.plan or {}).get("fill") or {})
+            if fill_info.get("rent_reclaimed_sol") is not None:
+                continue
+            refund = Decimal(int(acc["lamports"]) - per_account_fee) / LAMPORTS
+            p.proceeds_quote = (p.proceeds_quote or Decimal(0)) + refund
+            p.plan = {**(p.plan or {}), "fill": {**fill_info, "rent_reclaimed_sol": str(refund),
+                                                 "rent_reclaim_signature": outcome.signature}}
+            await paper_engine.rebook_realized(session, p, now, "token account closed: rent deposit returned",
+                                               {"refund_sol": str(refund), "signature": outcome.signature})
+            credited.append({"position_id": str(p.id), "symbol": p.symbol, "refund_sol": str(refund)})
+            break
+    order.result = {**order.result, "credited": credited}
+    got = Decimal(fill.sol_change_lamports) / LAMPORTS
+    await events.notify(session, redis, app_settings, "close", f"Rent returned: {len(closed)} token account(s) closed",
+                        f"+{got} SOL to the wallet (tx {outcome.signature})", "info", {"order_id": str(order.id)})
+    await events.publish(redis, "balance.updated", {"account_id": None}, "live")
+
+
 async def process_order(session_factory, redis: Redis | None, app_settings: Any, executor: SolanaLiveExecutor,
                         order_id, now_fn=lambda: datetime.now(timezone.utc)) -> str:
     """Runs one PENDING LIVE order end to end. Returns the final status."""
@@ -520,8 +631,15 @@ async def process_order(session_factory, redis: Redis | None, app_settings: Any,
             return "skipped"
         order.attempts += 1
         order.updated_at = now_fn()
+        rent = None
+        if order.side == RENT_SIDE:
+            busy = set((await session.execute(select(PaperPosition.asset_id).where(
+                PaperPosition.execution_mode == "LIVE", PaperPosition.status.in_(ACTIVE_POSITION_STATES)))).scalars())
+            mints = (order.limits or {}).get("mints")
+            rent = (set(mints) if mints else None, busy, int((order.limits or {}).get("max_priority_fee_lamports") or 0))
+        else:
+            req, exp = _trade_request(order, executor.wallet.pubkey)
         await session.commit()
-        req, exp = _trade_request(order, executor.wallet.pubkey)
 
     async def on_signed(signature: str) -> None:
         async with session_factory() as s:
@@ -529,7 +647,10 @@ async def process_order(session_factory, redis: Redis | None, app_settings: Any,
                 signature=signature, status="SIGNED", submitted_at=now_fn(), updated_at=now_fn()))
             await s.commit()
 
-    outcome = await executor.execute(req, exp, on_signed)
+    if rent is not None:
+        outcome = await executor.close_token_accounts(rent[0], rent[1], on_signed, rent[2])
+    else:
+        outcome = await executor.execute(req, exp, on_signed)
     async with session_factory() as session:
         order = await session.get(ExecutionOrder, order_id)
         if outcome.status == "PENDING":
@@ -555,7 +676,8 @@ async def reconcile(session_factory, redis: Redis | None, app_settings: Any, exe
     now = now or datetime.now(timezone.utc)
     rpc = executor.rpc
     report: dict[str, Any] = {"orders_resolved": 0, "mismatches": 0, "unknown_holdings": 0}
-    lamports, tokens = await wallet_balances(rpc, executor.wallet.pubkey)
+    empty: list[dict] = []
+    lamports, tokens = await wallet_balances(rpc, executor.wallet.pubkey, empty)
     sol = Decimal(lamports) / LAMPORTS
     report["sol"] = str(sol)
     if redis is not None:
@@ -566,7 +688,10 @@ async def reconcile(session_factory, redis: Redis | None, app_settings: Any, exe
         except Exception as exc:  # noqa: BLE001 - valuation is display-only; reconciliation must go on
             valuation = {"holdings": [], "error": f"valuation failed: {type(exc).__name__}"}
         await redis.set(WALLET_KEY, json.dumps({"sol": str(sol), "at": now.isoformat(), "pubkey": executor.wallet.pubkey,
-                                                "tokens": len(tokens), "valuation": valuation}), ex=3600)
+                                                "tokens": len(tokens), "valuation": valuation,
+                                                "empty_token_accounts": {"count": len(empty),
+                                                                         "rent_sol": str(Decimal(sum(e["lamports"] for e in empty))
+                                                                                         / LAMPORTS)}}), ex=3600)
     async with session_factory() as session:
         acct = await get_live_account(session)
         if acct.cash_balance != sol:

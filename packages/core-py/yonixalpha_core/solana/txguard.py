@@ -393,3 +393,59 @@ def _check_jupiter(r: GuardReport, exp: GuardExpectation, routes: list, own: set
             v.append(f"Jupiter sells {in_amount} tokens, allowed {exp.max_tokens_in}")
         if exp.min_sol_out_lamports is not None and min_out < exp.min_sol_out_lamports:
             v.append(f"worst-case output {min_out} lamports, floor {exp.min_sol_out_lamports}")
+
+
+def inspect_close_accounts(tx: VersionedTransaction, wallet: str, accounts: dict[str, str],
+                           max_priority_fee_lamports: int) -> GuardReport:
+    """The rent-reclaim transaction (solana/rent_reclaim.py): our wallet the
+    only signer and fee payer, no lookup tables, and nothing but
+    compute-budget instructions and exactly one SPL Token / Token-2022
+    CloseAccount per expected account (`accounts`: address → its token
+    program), each closing to our wallet with our wallet as the authority."""
+    r = GuardReport(ok=False, venue="CLOSE_TOKEN_ACCOUNTS")
+    msg = tx.message
+    static = [str(k) for k in msg.account_keys]
+    v = r.violations
+    if not static or static[0] != wallet:
+        v.append(f"fee payer is {static[0] if static else None}, expected our wallet")
+    if msg.header.num_required_signatures != 1:
+        v.append(f"{msg.header.num_required_signatures} signers required; only our wallet may sign")
+    if list(getattr(msg, "address_table_lookups", []) or []):
+        v.append("address lookup tables are not used by this transaction")
+    closed: list[str] = []
+    for ix in msg.instructions:
+        prog = static[ix.program_id_index] if ix.program_id_index < len(static) else None
+        data = bytes(ix.data)
+        accts = [static[i] if i < len(static) else None for i in ix.accounts]
+        r.instructions.append({"program": prog, "data": data[:8].hex(), "accounts": len(accts)})
+        r.programs.append(str(prog))
+        if prog == COMPUTE_BUDGET:
+            if data[:1] == b"\x02" and len(data) >= 5:
+                r.compute_unit_limit = struct.unpack_from("<I", data, 1)[0]
+            elif data[:1] == b"\x03" and len(data) >= 9:
+                r.compute_unit_price_micro = struct.unpack_from("<Q", data, 1)[0]
+            else:
+                v.append(f"unexpected compute-budget instruction {data[:1].hex()}")
+        elif prog in (TOKEN, TOKEN_2022):
+            if data != b"\x09" or len(accts) != 3:
+                v.append(f"token instruction {data[:1].hex()} is not a plain CloseAccount")
+                continue
+            account, destination, owner = accts
+            if accounts.get(account) != prog:
+                v.append(f"closes {account}, which is not one of the expected empty accounts of this token program")
+            if destination != wallet:
+                v.append(f"sends the lamports of {account} to {destination}, not our wallet")
+            if owner != wallet:
+                v.append(f"closes {account} with authority {owner}, not our wallet")
+            closed.append(str(account))
+        else:
+            v.append(f"program {prog} is not allowed in a rent-reclaim transaction")
+    if sorted(closed) != sorted(accounts):
+        v.append(f"closes {sorted(closed)}, expected exactly {sorted(accounts)}")
+    if r.compute_unit_price_micro is not None:
+        units = r.compute_unit_limit if r.compute_unit_limit is not None else 200_000
+        r.priority_fee_lamports = units * r.compute_unit_price_micro // 1_000_000
+    if r.priority_fee_lamports > max_priority_fee_lamports:
+        v.append(f"priority fee {r.priority_fee_lamports} lamports exceeds limit {max_priority_fee_lamports}")
+    r.ok = not v
+    return r

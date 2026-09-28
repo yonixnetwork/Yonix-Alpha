@@ -103,3 +103,39 @@ async def test_paper_execution_failure_settings(app, client, auth_headers):
     async with app.state.db_session_factory() as s:
         kinds = [a.event_type for a in (await s.execute(select(AuditLog))).scalars()]
     assert kinds.count("paper_execution.updated") == 1
+
+
+async def test_rent_reclaim_needs_auth_confirmation_and_a_ready_worker(app, client, auth_headers):
+    assert (await client.post("/api/live/reclaim-rent", json={"confirm": True})).status_code == 401
+    assert (await client.post("/api/live/reclaim-rent", headers=auth_headers, json={"confirm": False})).status_code == 422
+    r = await client.post("/api/live/reclaim-rent", headers=auth_headers, json={"confirm": True})
+    assert r.status_code == 409 and "locks" in r.json()["detail"]  # locks closed: nothing is queued
+
+    saved = app.state.settings
+    app.state.settings = saved.model_copy(update={"TRADING_ENABLED": True, "LIVE_TRADING_ENABLED": True, "PAPER_TRADING": False})
+    try:
+        redis = app.state.redis
+        await redis.set(live_trading.READY_KEY, json.dumps({"status": "ready", "min_sol_reserve": "0.05",
+                                                            "wallet_max_age_seconds": "120"}))
+        await redis.set(live_trading.WALLET_KEY, json.dumps({
+            "sol": "0.08", "at": datetime.now(timezone.utc).isoformat(),
+            "empty_token_accounts": {"count": 5, "rent_sol": "0.0075692"}}))
+        r = await client.post("/api/live/reclaim-rent", headers=auth_headers, json={"confirm": True})
+        assert r.status_code == 200 and r.json()["status"] == "PENDING"
+        assert (await client.post("/api/live/reclaim-rent", headers=auth_headers, json={"confirm": True})).status_code == 409
+        live = (await client.get("/api/live/wallets", headers=auth_headers)).json()["live"]
+        assert live["empty_token_accounts"] == {"count": 5, "rent_sol": "0.0075692"}
+        assert live["rent_reclaims"][0]["status"] == "PENDING" and live["rent_reclaims"][0]["scope"] == "ALL"
+    finally:
+        app.state.settings = saved
+    async with app.state.db_session_factory() as s:
+        order = (await s.execute(select(ExecutionOrder).where(ExecutionOrder.side == "RENT"))).scalar_one()
+        kinds = [a.event_type for a in (await s.execute(select(AuditLog))).scalars()]
+    assert order.limits["mints"] is None and "live.rent_reclaim_requested" in kinds
+
+
+async def test_auto_reclaim_setting_is_a_validated_switch(client, auth_headers):
+    assert (await client.get("/api/live/settings", headers=auth_headers)).json()["settings"]["auto_reclaim_rent"] == "true"
+    ok = await client.put("/api/live/settings", headers=auth_headers, json={"auto_reclaim_rent": "false"})
+    assert ok.status_code == 200 and ok.json()["settings"]["auto_reclaim_rent"] == "false"
+    assert (await client.put("/api/live/settings", headers=auth_headers, json={"auto_reclaim_rent": "maybe"})).status_code == 422

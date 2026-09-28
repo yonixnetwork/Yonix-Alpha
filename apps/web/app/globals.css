@@ -1127,3 +1127,4 @@ li.unread {
 .metric a { color: inherit; text-decoration: none; }
 .search-row { display: flex; gap: 8px; margin-bottom: 8px; }
 .search-row input { flex: 1; min-width: 0; }
+.rent-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin: 10px 0; }

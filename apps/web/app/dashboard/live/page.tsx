@@ -92,6 +92,7 @@ const SETTING_LABELS: Record<string, string> = {
   tx_builder: "Pump transaction builder",
   compute_unit_limit_curve: "Compute-unit limit, bonding curve (measured use ~96k)",
   compute_unit_limit_amm: "Compute-unit limit, PumpSwap (measured use ~142k)",
+  auto_reclaim_rent: "Close the token account after a full exit (returns its rent deposit)",
 };
 
 function statusPill(status: string): string {
@@ -236,6 +237,16 @@ export default function LiveExecutionPage() {
                 </select>
                 <span className="form-hint">Both are checked by the transaction guard before signing. Non-Pump tokens always use
                   Jupiter; the venue (bonding curve / PumpSwap / Jupiter) is read from chain state for every order.</span>
+              </div>
+            ) : k === "auto_reclaim_rent" ? (
+              <div className="form-row" key={k}>
+                <label htmlFor="live-auto_reclaim_rent">{SETTING_LABELS[k]}</label>
+                <select id="live-auto_reclaim_rent" value={draft[k] ?? "true"} onChange={(e) => setDraft({ ...draft, [k]: e.target.value })}>
+                  <option value="true">on: close the empty account after every full exit</option>
+                  <option value="false">off: leave token accounts open</option>
+                </select>
+                <span className="form-hint">Each buy deposits about 0.0015 SOL of rent into the token account. Closing the empty
+                  account returns it; only accounts holding zero tokens are closed, always back to this wallet.</span>
               </div>
             ) : (
               <div className="form-row" key={k}>

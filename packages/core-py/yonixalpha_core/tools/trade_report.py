@@ -125,7 +125,8 @@ async def main(argv: list[str] | None = None) -> int:
     wallet = wallet_public_key(settings)
     engine = make_engine(settings)
     async with make_session_factory(engine)() as s:
-        q = select(ExecutionOrder).where(ExecutionOrder.mode == "LIVE").order_by(ExecutionOrder.created_at.desc())
+        q = select(ExecutionOrder).where(ExecutionOrder.mode == "LIVE", ExecutionOrder.side.in_(("BUY", "SELL"))) \
+            .order_by(ExecutionOrder.created_at.desc())
         if a.side:
             q = q.where(ExecutionOrder.side == a.side)
         orders = (await s.execute(q.limit(a.last))).scalars().all()

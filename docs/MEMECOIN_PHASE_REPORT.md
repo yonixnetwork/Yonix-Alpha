@@ -143,20 +143,40 @@ same configuration (revision 23, SYNCED).
 20 BUY_REFUSED_BY_TRANSACTION_GUARD (FAdo9…), all on 2026-09-27, before
 the builder fix. There have been none since.
 
-### Decision needed (not changed in code)
+### Decisions taken (operator, 2026-09-28) and implemented
 
-At the current trade size, costs are 33–110% of each buy, so every LIVE
-position starts deep underwater. Three options:
+At the measured trade size, costs were 33–110% of each buy. The operator
+chose:
 
-1. **Reclaim the deposit** by closing the empty token account after a full
-   exit. This is a new signed transaction and needs guard support.
-   `cost_report` confirmed the fixed part is token-account rent: 0.0015 of
-   the 0.0017 SOL per buy, with 0.0076 SOL locked today.
-2. **Count entry costs in the risk plan.** A trade whose costs alone exceed
-   the per-trade risk budget would be refused. This is a tightening, and at
-   today's size it would stop most LIVE entries.
-3. **Change the trade size.** This is only the operator's decision; the
-   system does not do it.
+1. **Return the rent deposit.**
+   - **After every full exit**, the token's now-empty account is closed and
+     its rent (0.00151384 SOL) returns to the wallet. This is the setting
+     `auto_reclaim_rent`, default on.
+   - **A dashboard button** ("Return rent to wallet", with confirmation)
+     closes all empty token accounts. That covers the 5 accounts holding
+     0.0075692 SOL today.
+   - It is a separate transaction with its own guard (see
+     `EXECUTION_PATH_MAP.md` §2b). It never touches a token with an open or
+     pending position, and never an account that holds tokens.
+   - The refund is booked back to the trade it came from.
+2. **Count fixed costs in the risk plan (LIVE only).**
+   - A LIVE round trip has a fixed cost: buy and sell network + priority
+     fees, plus the reclaim fee. With auto-reclaim off, the unreclaimed
+     deposit is counted instead.
+   - With the current settings that is **0.000225 SOL** (0.00172384 SOL with
+     auto-reclaim off).
+   - Loss at the stop = size × loss fraction + fixed cost, and it must stay
+     within the maximum loss. The size is reduced to fit.
+   - Two cases refuse the trade:
+     - FIXED_COSTS_EXCEED_RISK: the fixed cost alone reaches the budget;
+     - STOP_INSIDE_COSTS: proportional plus fixed costs reach the stop
+       distance.
+   - Breakeven includes the fixed cost. Paper sizing is unchanged.
+   - **Effect on a wallet of about 0.08 SOL** (from the tests): with a 10%
+     stop, proportional costs of about 5.5% plus a fixed cost of about 5.8%
+     at that size leave no room, so the trade is refused. With a 16% stop
+     (as on the measured trades) it trades, somewhat smaller.
+3. **Trade size:** unchanged; that remains the operator's decision.
 
 ## Execution (protected path, unchanged)
 
@@ -377,9 +397,15 @@ Tests:
 
 ## Remaining issues
 
-- **Token-account rent (0.00151384 SOL per buy) is never reclaimed.**
-  Confirmed by `cost_report`. 0.0075692 SOL is locked in 5 empty accounts
-  today. See "Decision needed".
+- **Rent reclaim and cost-aware sizing are UNVERIFIED on chain.** They are
+  tested against a fake node, the guard and the database, but no reclaim
+  transaction has been sent yet. The first one is the dashboard button
+  (5 accounts, 0.0075692 SOL); `cost_report` then shows its refund.
+- **Crash between signing and confirming a reclaim:** reconciliation
+  resolves the order, but without the list of closed accounts the refund
+  is not booked back to the trades. The SOL is in the wallet either way.
+- **Dust:** an account that still holds even 1 raw token after an exit is
+  skipped (it cannot be closed). Nothing is burned.
 - **Latency after the pickup fix:** to be measured (`trade_report`).
 - **Confirmation tail (3 of 10 above 4.8 s):** `slots_to_land` is now
   recorded; to be measured before any priority-fee change.

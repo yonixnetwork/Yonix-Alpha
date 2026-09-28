@@ -47,7 +47,24 @@ paper-trading service's `RpcManager`.
 | 1 | Mark price and exit rules (stop, trailing, take-profits, exit intelligence) | `paper-trading/app/gate_manage.py` → `live_trading.manage_live_position`, main loop every `LOOP_INTERVAL_SECONDS = 15` | price source (stream curve / pool over RPC) |
 | 2 | SELL order (`min_sol_out` from the expected proceeds and the exit slippage, which widens after each failed attempt) | `live_trading.request_live_exit` | DB |
 | 3–14 | Same worker and executor as BUY steps 5–14, with the sell instructions | as above | as above |
-| 15 | Proceeds from the fill; the position closes below the dust threshold | `apply_outcome` | none |
+| 15 | Proceeds from the fill; the position closes below the dust threshold. With `auto_reclaim_rent` on (default), a RENT order is queued for that token | `apply_outcome`, `request_rent_reclaim` | none |
+
+## 2b. RENT: closing the empty token account (rent deposit back to the wallet)
+
+Every buy opens the wallet's token account for the bought token (rent
+0.00151384 SOL, measured). Closing it once it holds nothing returns the
+deposit. This is a separate transaction; the BUY and SELL paths above are
+unchanged.
+
+| # | Hop | Where | Network |
+|---|---|---|---|
+| 1 | RENT order: after a full exit (one token), or from the dashboard button (all empty accounts, with confirmation; refused unless the worker is ready) | `live_trading.request_rent_reclaim`, `POST /api/live/reclaim-rent` | DB |
+| 2 | Worker picks it up like any order; tokens with an open, pending or needs-review position are excluded | `live_trading.process_order` | DB |
+| 3 | Accounts read from chain: only ours, zero tokens, initialized, no other close authority, no withheld transfer fees; nothing to close → SKIPPED, nothing sent | `solana/rent_reclaim.scan` | `getTokenAccountsByOwner` × 2 |
+| 4 | Build: compute budget + one CloseAccount per account (at most 8), destination and authority our wallet; priority fee 0.00001 SOL | `rent_reclaim.build` | `getLatestBlockhash` |
+| 5 | Dedicated guard: only compute-budget and CloseAccount instructions, exactly the expected accounts, each closed to our wallet by our wallet, no lookup tables, priority fee bounded | `txguard.inspect_close_accounts` | none |
+| 6 | Sign → simulate → send → confirm (same code as trades) | `SolanaLiveExecutor.close_token_accounts` | as BUY 11–14 |
+| 7 | The refund (rent − its share of the network fee) is booked to the closed trade it belongs to (once): realized PnL, ML label and outcome record are re-booked; a notification reports it, a failure is reported too | `live_trading._apply_reclaim`, `paper_engine.rebook_realized` | none |
 
 ## 3. Structural delays visible in the code (to be confirmed by measurement)
 

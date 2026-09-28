@@ -228,7 +228,18 @@ async def wallets(db: AsyncSession = Depends(get_db), redis: Redis = Depends(get
             "sol_usd_source": val.get("sol_usd_source"),
             "total_estimated_sol": str(sol + Decimal(val["total_sol"])) if val.get("total_sol") is not None else None,
             "total_is_complete": val.get("unvalued_count", 1) == 0 and not val.get("more_not_shown"),
+            "empty_token_accounts": w.get("empty_token_accounts"),
         })
+    rent_orders = (await db.execute(select(ExecutionOrder).where(
+        ExecutionOrder.mode == "LIVE", ExecutionOrder.side == live_trading.RENT_SIDE)
+        .order_by(ExecutionOrder.created_at.desc()).limit(5))).scalars().all()
+    live["rent_reclaims"] = [{"id": o.id, "status": o.status, "reason": o.reason, "scope": o.mint, "signature": o.signature,
+                              "error": o.error, "created_at": o.created_at,
+                              "closed": len(((o.result or {}).get("reclaim") or {}).get("closing") or [])
+                              if o.status == "CONFIRMED" else 0,
+                              "refund_sol": str(Decimal(((o.result or {}).get("fill") or {}).get("sol_change_lamports") or 0)
+                                                / live_trading.LAMPORTS) if o.status == "CONFIRMED" else None}
+                             for o in rent_orders]
     acct = await store.get_paper_account(db, "solana")
     open_rows = (await db.execute(select(PaperPosition).where(PaperPosition.account_id == acct.id,
                                                               PaperPosition.status == "open"))).scalars().all()
@@ -244,6 +255,32 @@ async def wallets(db: AsyncSession = Depends(get_db), redis: Redis = Depends(get
              "open_position_value": str(open_value), "unrealized_pnl": str(open_value - open_cost),
              "realized_pnl": str(Decimal(realized)), "equity": str(acct.cash_balance + open_value), "since": acct.reset_at}
     return jsonable({"live": live, "paper": paper})
+
+
+class RentReclaim(BaseModel):
+    confirm: bool
+
+
+@router.post("/reclaim-rent")
+async def reclaim_rent(body: RentReclaim, request: Request, db: AsyncSession = Depends(get_db),
+                       redis: Redis = Depends(get_redis), settings: Settings = Depends(get_settings),
+                       username: str = Depends(get_current_username)) -> dict:
+    """Queues closing the wallet's EMPTY token accounts so their rent deposit
+    returns to the wallet. The order worker reads the accounts from chain,
+    closes only those holding zero tokens with no open or pending position,
+    and its guard refuses any transaction that does anything else."""
+    if body.confirm is not True:
+        raise HTTPException(422, "confirm must be true")
+    now = datetime.now(timezone.utc)
+    ready, reason = await live_trading.live_readiness(redis, settings, now)
+    if not ready:
+        raise HTTPException(409, f"live order worker not ready: {reason}")
+    order = await live_trading.request_rent_reclaim(db, now, None, "rent_reclaim_manual")
+    if order is None:
+        raise HTTPException(409, "a rent reclaim is already queued")
+    await audit(db, username, request, "live.rent_reclaim_requested", {"order_id": str(order.id)})
+    await db.commit()
+    return jsonable({"order_id": order.id, "status": order.status})
 
 
 # --- LIVE_EXECUTION_SMOKE_TEST (yonixalpha_core.live_smoke) ------------------

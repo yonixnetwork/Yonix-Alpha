@@ -82,6 +82,8 @@ class TradePlan:
     side: str = "LONG"
     breakeven_price: Decimal | None = None
     move_stop_to_breakeven_at_tp1: bool = False
+    fixed_cost_quote: Decimal | None = None  # per-trade fixed costs counted in the loss at the stop
+    fixed_cost_detail: dict | None = None
     leverage: Decimal = Decimal(1)
     findings: list[Finding] = field(default_factory=list)
 
@@ -112,6 +114,8 @@ class TradePlan:
             "side": self.side,
             "breakeven_price": str(self.breakeven_price) if self.breakeven_price is not None else None,
             "move_stop_to_breakeven_at_tp1": self.move_stop_to_breakeven_at_tp1,
+            "fixed_cost_quote": str(self.fixed_cost_quote) if self.fixed_cost_quote is not None else None,
+            "fixed_cost_detail": self.fixed_cost_detail,
             "leverage": str(self.leverage),
         }
 
@@ -222,6 +226,8 @@ def plan_trade(
     strategy_levels: StrategyLevels | None = None,
     leverage: Decimal = Decimal(1),
     targets: TargetContext | None = None,
+    fixed_cost_quote: Decimal | None = None,
+    fixed_cost_detail: dict | None = None,
 ) -> TradePlan:
     """Builds the full risk plan or explains exactly why it can't. Every
     missing input that the plan depends on is a NO_TRADE finding: per the
@@ -322,6 +328,17 @@ def plan_trade(
             {"equity": account.equity, "risk_per_trade_pct": settings.risk_per_trade_pct},
         )
     max_loss = plan.max_loss.value
+    # Fixed per-trade costs (live network/priority fees, unreclaimed rent)
+    # come out of the same budget: size * loss_fraction + fixed <= max_loss.
+    fixed = fixed_cost_quote if fixed_cost_quote is not None and fixed_cost_quote > 0 else Decimal(0)
+    plan.fixed_cost_quote, plan.fixed_cost_detail = (fixed or None), (fixed_cost_detail if fixed else None)
+    if fixed and fixed >= max_loss:
+        f.append(_block(
+            "FIXED_COSTS_EXCEED_RISK",
+            f"fixed costs of one live round trip ({fixed:.6f}) meet or exceed the maximum loss per trade ({max_loss:.6f}): "
+            "the trade would lose more than its risk budget even without any price move", RiskCategory.EXECUTION))
+        return plan
+    budget = max_loss - fixed
 
     # --- Caps (fail closed when a capped quantity can't be measured) -------
     caps: dict[str, Decimal] = {"max_position_size": settings.max_position_size_quote}
@@ -370,13 +387,14 @@ def plan_trade(
         if loss_frac <= 0:
             f.append(_block("LOSS_UNDEFINED", "loss fraction non-positive — invalid cost/stop inputs"))
             return plan
-        risk_size = max_loss / loss_frac
+        risk_size = budget / loss_frac
         new_size = min([risk_size, *caps.values()])
         if new_size == size:
             break
         size = new_size
 
-    if costs is not None and costs[0] + costs[1] >= stop_pct * BPS:
+    fixed_bps = (fixed / size * BPS) if fixed and size > 0 else Decimal(0)
+    if costs is not None and costs[0] + costs[1] + fixed_bps >= stop_pct * BPS:
         # Recorded so the decision can be audited: at which size, how the
         # cost splits, and which caps bounded the size.
         plan.caps, plan.entry_cost_bps, plan.exit_cost_bps = dict(caps), costs[0], costs[1]
@@ -385,7 +403,8 @@ def plan_trade(
                 "STOP_INSIDE_COSTS",
                 f"round-trip costs {(costs[0] + costs[1]) / 100:.2f}% meet or exceed the stop distance {stop_pct:.2%} — the trade can't be profitable before the stop "
                 f"(at size {size:.6g}: entry {costs[0] / 100:.2f}%, exit {costs[1] / 100:.2f}% incl. {slip / 100:.2f}% slippage allowance"
-                + (f" and {tfee / 100:.2f}% transfer fee" if tfee else "") + ")",
+                + (f" and {tfee / 100:.2f}% transfer fee" if tfee else "")
+                + (f", plus fixed costs {fixed:.6f} = {fixed_bps / 100:.2f}%" if fixed else "") + ")",
                 RiskCategory.EXECUTION,
             )
         )
@@ -430,11 +449,11 @@ def plan_trade(
         final_costs = _costs_at(final_size, model, quote, slip, tfee, side) or final_costs
         if final_costs is None:
             break
-        allowed = max_loss / _loss_fraction(stop_pct, final_costs[0], final_costs[1], side)
+        allowed = budget / _loss_fraction(stop_pct, final_costs[0], final_costs[1], side)
         if final_size <= allowed:
             break
         final_size = allowed
-        method += "; reduced so loss at stop (after costs) stays within max_loss"
+        method += "; reduced so loss at stop (after costs" + (" and fixed costs" if fixed else "") + ") stays within max_loss"
 
     if final_size <= 0 or final_size < settings.min_position_size_quote or final_costs is None:
         f.append(
@@ -448,6 +467,7 @@ def plan_trade(
     plan.entry_cost_bps, plan.exit_cost_bps = final_costs
     plan.position_size = PlannedValue(
         final_size, prov, method, {k: v for k, v in caps.items()} | {"risk_size": risk_size, "max_loss": max_loss}
+        | ({"fixed_costs": fixed, "risk_budget_after_fixed_costs": budget} if fixed else {})
     )
     if side == "LONG":
         plan.quantity = final_size * (1 - plan.entry_cost_bps / BPS) / entry_price
@@ -455,7 +475,7 @@ def plan_trade(
         plan.quantity = final_size / entry_price
 
     # --- Take profits -------------------------------------------------------
-    round_trip_frac = (plan.entry_cost_bps + plan.exit_cost_bps) / BPS
+    round_trip_frac = (plan.entry_cost_bps + plan.exit_cost_bps) / BPS + (fixed / final_size if fixed else Decimal(0))
     breakeven = entry_price * (1 + sign * round_trip_frac)
     plan.breakeven_price = breakeven
     plan.move_stop_to_breakeven_at_tp1 = levels.move_stop_to_breakeven_at_tp1

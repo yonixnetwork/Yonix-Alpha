@@ -499,3 +499,31 @@ async def close_position(session: AsyncSession, position: PaperPosition, now: da
                               "fees": str(position.fees_paid_quote), "mfe_price": str(position.highest_price),
                               "mae_price": str(position.lowest_price), "outcome": labels},
                              candidate_id=position.candidate_id, assessment_id=position.assessment_id, position_id=position.id)
+
+
+async def rebook_realized(session: AsyncSession, position: PaperPosition, now: datetime, reason: str,
+                          detail: dict[str, Any] | None = None) -> None:
+    """Re-books the realized PnL of a CLOSED position after a later cash flow
+    that belongs to it (a live token account's rent deposit returned when the
+    account was closed), and updates the outcome labels written at close."""
+    before = position.realized_pnl
+    position.realized_pnl = (position.proceeds_quote or Decimal(0)) - (position.entry_cost_quote or Decimal(0))
+    position.realized_pnl_pct = position.realized_pnl / position.entry_cost_quote if position.entry_cost_quote else None
+    labels = outcome_labels(position)
+    source = LABEL_SOURCE if getattr(position, "execution_mode", "PAPER") != "LIVE" else "live_execution_realized_pnl"
+    link = (MLFeatureSnapshot.candidate_id == position.candidate_id) if position.candidate_id is not None else (
+        MLFeatureSnapshot.assessment_id == position.assessment_id)
+    if position.candidate_id is not None or position.assessment_id is not None:
+        await session.execute(update(MLFeatureSnapshot).where(link, MLFeatureSnapshot.label_source == source)
+                               .values(label=1 if position.realized_pnl > 0 else 0, outcome=labels))
+    try:
+        from yonixalpha_core import opportunities
+
+        async with session.begin_nested():
+            await opportunities.on_position_closed(session, position)
+    except Exception as exc:  # noqa: BLE001 - review data never blocks booking
+        log.warning("paper.opportunity_rebook_failed", position_id=str(position.id), error=f"{type(exc).__name__}: {exc}")
+    await add_timeline_event(session, "pnl_rebooked", now,
+                             {"reason": reason, "realized_pnl_before": str(before), "realized_pnl": str(position.realized_pnl),
+                              "pnl_pct": str(position.realized_pnl_pct), **(detail or {})},
+                             candidate_id=position.candidate_id, assessment_id=position.assessment_id, position_id=position.id)

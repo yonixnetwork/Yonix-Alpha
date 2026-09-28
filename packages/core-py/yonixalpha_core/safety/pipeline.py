@@ -88,6 +88,11 @@ async def load_controls(session: AsyncSession, redis: Redis, app_settings: Any, 
 
         reserve = (await load_live_settings(session)).min_sol_reserve
         state = replace(state, available_balance=max(Decimal(0), state.available_balance - reserve))
+    fixed_cost = fixed_detail = None
+    if live and not live_venue:
+        from yonixalpha_core.live_trading import fixed_trade_costs, load_live_settings
+
+        fixed_cost, fixed_detail = fixed_trade_costs(await load_live_settings(session))
     controls = Controls(
         settings=safety,
         account=state,
@@ -97,6 +102,7 @@ async def load_controls(session: AsyncSession, redis: Redis, app_settings: Any, 
         strategy_mode=strategy_mode,
         live_trading_permitted=store.live_trading_permitted(app_settings),
         manual_approval_granted=approval,
+        fixed_cost_quote=fixed_cost, fixed_cost_detail=fixed_detail,
     )
     return controls, account, settings_meta
 

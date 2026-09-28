@@ -843,6 +843,11 @@ def _liquidity(inp: AssessmentInput, plan: TradePlan) -> dict[str, Any]:
     return out
 
 
+def _live_target(inp: AssessmentInput) -> bool:
+    """Whether an executable decision for `inp` goes to the live wallet."""
+    return inp.global_mode == GlobalMode.LIVE and inp.strategy_mode != StrategyMode.PAPER and inp.live_trading_permitted
+
+
 def assess(inp: AssessmentInput, settings: SafetySettings, versions: dict[str, Any] | None = None) -> Assessment:
     required = requirements_for(inp.engine)
     findings: list[Finding] = []
@@ -881,6 +886,8 @@ def assess(inp: AssessmentInput, settings: SafetySettings, versions: dict[str, A
         strategy_levels=inp.strategy_levels,
         leverage=settings.max_leverage,
         targets=inp.targets,
+        fixed_cost_quote=inp.fixed_cost_quote if _live_target(inp) else None,
+        fixed_cost_detail=inp.fixed_cost_detail,
     )
     findings.extend(plan.findings)
     _check_execution(inp, settings, plan, findings)
@@ -948,7 +955,7 @@ def assess(inp: AssessmentInput, settings: SafetySettings, versions: dict[str, A
 
     if not executable:
         target = ExecutionTarget.NONE
-    elif inp.global_mode == GlobalMode.LIVE and inp.strategy_mode != StrategyMode.PAPER and inp.live_trading_permitted:
+    elif _live_target(inp):
         target = ExecutionTarget.LIVE
     else:
         target = ExecutionTarget.PAPER
