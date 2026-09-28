@@ -32,6 +32,7 @@ from yonixalpha_core.db.models import Token, TokenEvent, TokenObservation, Tradi
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.safety.settings import SafetySettings
 from yonixalpha_core.solana import observation, pump_stream
+from yonixalpha_core.solana.codec import db_safe
 from yonixalpha_core.solana.flow import acceleration, in_window
 from yonixalpha_core.state_machine import CandidateState
 
@@ -112,7 +113,7 @@ async def create_candidate(
         await session.execute(
             insert(TokenEvent)
             .values(token_id=token.id, event_type="created", source=SOURCE, occurred_at=now,
-                    signature=meta["signature"], trader_address=meta.get("creator") or None, payload=meta)
+                    signature=meta["signature"], trader_address=meta.get("creator") or None, payload=db_safe(meta))
             .on_conflict_do_nothing()
         )
     candidate = TradingCandidate(
@@ -163,7 +164,7 @@ async def _store_observations(session_factory, rows: list[dict], now: datetime, 
     if not rows:
         return
     async with session_factory() as session:
-        await session.execute(insert(TokenObservation).values(rows).on_conflict_do_nothing(index_elements=["mint"]))
+        await session.execute(insert(TokenObservation).values(db_safe(rows)).on_conflict_do_nothing(index_elements=["mint"]))
         # Retention: once an hour, drop outcomes older than the window.
         if await redis.set(f"{pump_stream.PREFIX}:obs_prune", "1", nx=True, ex=3600):
             await session.execute(delete(TokenObservation).where(

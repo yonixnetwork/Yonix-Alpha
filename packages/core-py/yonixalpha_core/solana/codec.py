@@ -6,6 +6,8 @@ Solana SDK in every service image on a 2GB droplet.
 """
 
 import struct
+import unicodedata
+from typing import Any
 
 _ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 _INDEX = {c: i for i, c in enumerate(_ALPHABET)}
@@ -77,6 +79,27 @@ class BorshReader:
         if length > 10_000:
             raise ValueError(f"implausible string length {length}")
         return self._take(length).decode("utf-8", errors="replace")
+
+
+def clean_text(value: object, limit: int | None = None) -> str:
+    """Token names, symbols and URIs are whatever the creator typed, and
+    some carry NUL bytes or other control characters (padding, or on
+    purpose). PostgreSQL cannot store NUL in text or JSONB, and control
+    characters garble the dashboard and Telegram, so they are removed."""
+    text = "".join(ch for ch in str(value or "") if unicodedata.category(ch) != "Cc").strip()
+    return text[:limit] if limit is not None else text
+
+
+def db_safe(value: Any) -> Any:
+    """Strips NUL bytes from every string in a JSON-like value before it is
+    written to PostgreSQL (text and JSONB both reject U+0000)."""
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, dict):
+        return {db_safe(k): db_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [db_safe(v) for v in value]
+    return value
 
 
 # Pubkey::default(), i.e. 32 zero bytes. pump.fun uses it in `quote_mint`

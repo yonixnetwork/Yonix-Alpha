@@ -237,3 +237,23 @@ def test_exit_fill_on_curve_model_charges_fee_and_transfer_fee():
 def test_entry_without_any_venue_is_refused():
     with pytest.raises(paper_engine.FillError):
         paper_engine.entry_fill(Decimal(1), None, None, Decimal(1), None, None)
+
+
+def test_token_text_is_cleaned_of_nul_and_control_characters():
+    from yonixalpha_core.solana.codec import clean_text, db_safe
+
+    assert clean_text("spaceX链游\x00") == "spaceX链游"
+    assert clean_text("A\x00B\x07C\n", 2) == "AB"
+    assert clean_text("🚀 Moon 👨‍👩‍👧") == "🚀 Moon 👨‍👩‍👧"  # emoji joiners are not control characters
+    assert clean_text(None) == ""
+    assert db_safe({"n\x00": ["a\x00", {"b": "c\x00"}], "k": 5}) == {"n": ["a", {"b": "c"}], "k": 5}
+
+
+async def test_create_event_name_with_nul_bytes_is_cleaned_at_ingestion(redis):
+    from yonixalpha_core.solana.pumpfun import CREATE_EVENT
+    from yonixalpha_core.testing.pump import CREATOR, CURVE, i64
+
+    body = s("spaceX链游\x00\x00") + s("SPX\x00") + s("https://x/m.json\x00") + pk(MINT) + pk(CURVE) + pk(CREATOR) + pk(CREATOR)
+    await pump_stream.ingest_logs(redis, logs_of(CREATE_EVENT + body + i64(int(NOW.timestamp()))), "sig", NOW)
+    raw = await redis.hgetall(pump_stream.meta_key(MINT))
+    assert raw["name"] == "spaceX链游" and raw["symbol"] == "SPX" and raw["uri"] == "https://x/m.json"

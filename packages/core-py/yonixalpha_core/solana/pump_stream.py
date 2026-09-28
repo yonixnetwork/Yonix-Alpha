@@ -18,6 +18,7 @@ from typing import Any
 
 from redis.asyncio import Redis
 
+from yonixalpha_core.solana.codec import clean_text
 from yonixalpha_core.solana.flow import Trade
 from yonixalpha_core.solana.pumpfun import BondingCurveState, decode_log_events, is_sol_quoted, total_fee_bps
 
@@ -103,9 +104,9 @@ async def ingest_logs(redis: Redis, logs: list[str], signature: str | None, rece
         ts = _ts(f)
         if kind == "create":
             meta = {
-                "name": str(f.get("name", ""))[:128],
-                "symbol": str(f.get("symbol", ""))[:32],
-                "uri": str(f.get("uri", ""))[:512],
+                "name": clean_text(f.get("name"), 128),
+                "symbol": clean_text(f.get("symbol"), 32),
+                "uri": clean_text(f.get("uri"), 512),
                 "creator": f.get("creator") or f.get("user") or "",
                 "bonding_curve": f.get("bonding_curve", ""),
                 "token_program": f.get("token_program", ""),
@@ -176,7 +177,14 @@ async def stats(redis: Redis) -> dict[str, int]:
 
 async def load_meta(redis: Redis, mint: str) -> dict[str, str] | None:
     meta = await redis.hgetall(meta_key(mint))
-    return meta or None
+    if not meta:
+        return None
+    # Entries written before names were cleaned at ingestion may still
+    # carry NUL / control characters.
+    for k in ("name", "symbol", "uri"):
+        if k in meta:
+            meta[k] = clean_text(meta[k])
+    return meta
 
 
 @dataclass

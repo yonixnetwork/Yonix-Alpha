@@ -201,3 +201,20 @@ async def test_momentum_leaves_tokens_the_fresh_engine_is_still_watching(redis, 
     await redis.zadd(pump_stream.ACTIVE, {"WATCHED": int(NOW.timestamp()) - 10})
     counts = await run_funnel(redis, session_factory, replace(SETTINGS, fresh_max_monitoring_seconds=60), NOW)
     assert counts["momentum_considered"] == 0
+
+
+async def test_token_name_with_a_nul_byte_is_stored_not_lost(redis, session_factory):
+    """Production: a creator named a token "spaceX链游\\x00". PostgreSQL
+    refuses NUL in text/JSONB, so the whole observation batch failed
+    (funnel_failed). The name is cleaned and every outcome is stored."""
+    created = await launch(redis, "NULNAME", 12)
+    await redis.hset(pump_stream.meta_key("NULNAME"), mapping={"name": "spaceX链游\x00", "symbol": "SpaceX-World\x00"})
+    for i in range(6):
+        await trade(redis, "NULNAME", created + 1 + i // 3, f"n{i}", True, 0.2, 30 + 2 * i)
+    for i in range(4):
+        await trade(redis, "NULNAME", created + 7 + i // 2, f"n{i}", False, 0.3, 40 - 6 * i)
+    await growing_launch(redis, "GROW")
+    await run_funnel(redis, session_factory, SETTINGS, NOW)
+    rows = await observations(session_factory)
+    assert rows["NULNAME"].name == "spaceX链游" and rows["NULNAME"].symbol == "SpaceX-World"
+    assert rows["NULNAME"].outcome == "REJECT"
