@@ -97,3 +97,9 @@ def test_path_point_reports_flow_between_horizons():
     p = oa.path_point(trades, T0, base_of(trades), T0 + timedelta(seconds=5), T0 + timedelta(seconds=10), 10**15)
     assert p["buys"] == 1 and p["sells"] == 0 and p["change_pct"] > 0 and p["market_cap_sol"] > 0
     assert oa.path_point([], T0, None, T0, T0 + timedelta(seconds=5), None)["unknown"]
+
+
+def test_recovery_is_undefined_without_a_drawdown():
+    trades = run([(0, 1.0, True)] + [(10 + i * 5, 1.0, True) for i in range(5)])
+    rec = oa.recovery(trades, T0, base_of(trades), T0 + timedelta(seconds=3600))
+    assert rec["recovered"] is None and rec["time_to_recovery_seconds"] is None

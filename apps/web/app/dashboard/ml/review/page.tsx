@@ -3,6 +3,7 @@
 import { Fragment } from "react";
 import { Gauge } from "lucide-react";
 import ConfirmButton from "@/components/ConfirmDialog";
+import LedgerReview from "@/components/LedgerReview";
 import OpportunityOutcomes from "@/components/OpportunityOutcomes";
 import { Empty, ErrorNotice, Loading, PageHeader, Section, Stat } from "@/components/ui";
 import { apiPost } from "@/lib/api";
@@ -202,6 +203,7 @@ export default function MLReviewPage() {
           </>
         )}
       </Section>
+      <LedgerReview />
       <OpportunityOutcomes />
     </div>
   );

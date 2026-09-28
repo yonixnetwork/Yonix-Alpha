@@ -540,3 +540,97 @@ async def comparison(session: AsyncSession, since: datetime) -> dict[str, Any]:
         "note": "Averages over rows that have the value; a group with n < 20 is anecdotal. Observation data only — "
                 "no live threshold changes from it.",
     }
+
+
+# --- ledger v2 review ----------------------------------------------------------------------
+
+def category_filter(name: str):
+    """SQL filter for one review category (None for an unknown name)."""
+    from sqlalchemy import Numeric, and_
+
+    o = OpportunityOutcome
+    cf = o.analysis["counterfactual"]["classification"].astext
+    exit_cls = o.post_exit["classification"].astext
+    pnl = o.trade_result["pnl_sol"].astext.cast(Numeric)
+    return {
+        "observed": o.id.is_not(None),
+        "traded": o.traded.is_(True),
+        "rejected": o.traded.is_(False),
+        "missed_win": cf == "MISSED_WIN",
+        "rejection_justified_drawdown": cf == "REJECTION_JUSTIFIED_DRAWDOWN",
+        "correct_rejection": cf == "CORRECT_REJECTION",
+        "unexecutable": cf == "UNEXECUTABLE",
+        "counterfactual_unknown": and_(o.traded.is_(False), cf == "UNKNOWN"),
+        "true_positive": and_(o.traded.is_(True), pnl > 0),
+        "false_positive": and_(o.traded.is_(True), pnl <= 0),
+        "premature_exit": exit_cls == "POSSIBLY_EARLY",
+        "late_exit": exit_cls == "POSSIBLY_LATE",
+        "good_exit": exit_cls == "GOOD_EXIT",
+        "risk_correct_exit": exit_cls == "RISK_CORRECT",
+        "recovery": o.labels["recovery"].astext == "true",
+        "tracking": o.status == "TRACKING",
+    }.get(name)
+
+
+REVIEW_CATEGORIES = ("observed", "traded", "rejected", "missed_win", "rejection_justified_drawdown", "correct_rejection",
+                     "unexecutable", "counterfactual_unknown", "true_positive", "false_positive", "premature_exit",
+                     "late_exit", "good_exit", "risk_correct_exit", "recovery", "tracking")
+
+
+def _bucket_mcap(v) -> str:
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return "unknown"
+    return "<30 SOL" if x < 30 else "30-60 SOL" if x < 60 else "60-100 SOL" if x < 100 else ">=100 SOL"
+
+
+def _quantiles(values: list[float]) -> dict[str, float | None]:
+    v = sorted(values)
+    if not v:
+        return {"n": 0, "median": None, "p90": None}
+    return {"n": len(v), "median": round(v[len(v) // 2], 1), "p90": round(v[min(len(v) - 1, int(len(v) * 0.9))], 1)}
+
+
+async def review(session: AsyncSession, since: datetime) -> dict[str, Any]:
+    """ML Review: counts per category, missed wins by bucket, signal vs
+    execution quality and snipe latency. Review data only."""
+    from sqlalchemy import func
+
+    o = OpportunityOutcome
+    base = o.decided_at >= since
+    counts = {}
+    for name in REVIEW_CATEGORIES:
+        counts[name] = (await session.execute(select(func.count()).select_from(o).where(base, category_filter(name)))).scalar_one()
+    missed = (await session.execute(select(o.reasons, o.stage, o.engine, o.snapshot["market_cap_sol"].astext)
+                                    .where(base, category_filter("missed_win")))).all()
+    buckets: dict[str, dict[str, int]] = {"rejecting_rule": {}, "stage": {}, "market_cap_at_decision": {}}
+    for reasons, stage, engine, mcap in missed:
+        rule = (str((reasons or ["(none)"])[0]).split(":")[0])[:60]
+        for key, val in (("rejecting_rule", rule), ("stage", f"{stage} / {engine}"), ("market_cap_at_decision", _bucket_mcap(mcap))):
+            buckets[key][val] = buckets[key].get(val, 0) + 1
+    sve = (await session.execute(select(func.count(), func.avg(o.theoretical_return_pct), func.avg(o.executable_return_pct))
+                                 .where(base, o.executable_return_pct.is_not(None)))).one()
+    traded = (await session.execute(select(o.snapshot["age_seconds"].astext, o.snapshot["decision_eval_ms"].astext,
+                                           o.trade_result["entry_execution"]["decision_to_confirm_ms"].astext)
+                                    .where(base, o.traded.is_(True)))).all()
+
+    def nums(i: int) -> list[float]:
+        out = []
+        for r in traded:
+            try:
+                out.append(float(r[i]))
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    return {
+        "since": since.isoformat(), "counts": counts, "missed_win_buckets": buckets,
+        "signal_vs_execution": {"rows": sve[0], "theoretical_return_avg_pct": _s(sve[1]), "executable_return_avg_pct": _s(sve[2]),
+                                "horizon": oa.PRIMARY_HORIZON, "reference_size_sol": str(oa.REFERENCE_SIZE_SOL),
+                                "note": "executable = reference-size curve round trip with fees, impact, latency and fixed costs"},
+        "snipe_latency": {"creation_to_decision_s": _quantiles(nums(0)), "decision_eval_ms": _quantiles(nums(1)),
+                          "decision_to_confirm_ms": _quantiles(nums(2))},
+        "note": "Counterfactual classes use a fixed take-profit / stop rule entered at the decision (no hindsight); "
+                "a MISSED_WIN is a question for review, never a reason to loosen the rule that rejected it.",
+    }

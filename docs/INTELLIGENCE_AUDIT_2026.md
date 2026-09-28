@@ -257,3 +257,44 @@ repositories were cloned and read directly.
 - External constants are not copied as rules.
 - Shadow models never influence live decisions.
 - Position size is never increased by ML confidence.
+
+## 6. Implementation (phases 1–3)
+
+| Area | Module | Acts on trading? |
+|---|---|---|
+| Launch features (snapshots, trades-to-SOL, breadth, flow state, momentum, curve validity) | `solana/launch_features.py`, `solana/intel.py` | No: evidence + ML features |
+| Regimes (Mayhem / non-standard curve, instant bond, BOOST window, post-migration state) | `solana/intel.py`, `safety/gate.py::_check_intel` | Only via `mayhem_action` (NO_TRADE), `postmig_dumping_action` (WAIT) |
+| MANIPULATION_SCORE (independent families) | `solana/manipulation.py` | Only via `manipulation_high_action` (NO_TRADE) / `manipulation_medium_action` (WARN) |
+| Wallet intelligence (early buyers, Beta reputation, recycled wallets, dump cohorts) | `wallet_intel.py`, table `launch_buyers` | Only via `dump_cluster_high_action` (default WARN). Smart money is never a BUY trigger |
+| Ledger v2 (paths to T+60m, executable vs theoretical return, counterfactual, exit review, recovery, labels, regime tags) | `opportunity_analysis.py`, `opportunities.track` | No |
+| Multi-target SHADOW models | `services/ml/app/shadow_ml.py`, `ml/opportunity_features.py` | No: status `shadow`, never loaded by the decision engine, not promotable |
+| ML Review ledger + token intelligence UI | `LedgerReview.tsx`, `TokenIntel.tsx`, `GET /api/ml/ledger-review` | No |
+| Read-only production report | `python -m yonixalpha_core.tools.intel_report` | No |
+
+The buy/sell execution (Pump.fun / PumpSwap builders, signer, route
+resolver, transaction guard, RPC failover, live worker) was not changed.
+
+Causality rules as implemented:
+- Every intel section is computed from trades with `at <= decision time`;
+  a ledger feature whose intel `as_of` is after the decision is dropped.
+- Wallet reputation counters change only when a launch outcome resolves
+  (T+30m); `reputation_asof(t)` rebuilds them from `outcome_resolved_at < t`.
+- Labels carry `available_at`; the shadow trainer's time split purges
+  training rows whose labels were not known when the holdout starts.
+- Missing values are `None` plus a `__missing` indicator; imputation uses
+  the training median, never an assumed 0.
+
+Known limitations:
+- The stream stores second-resolution timestamps and no slot: "same block"
+  is approximated by "same second".
+- The stream keeps the last 400 trades per mint for 3 h: early buyers and
+  trades-to-SOL are only recorded when the full history from creation is
+  held; otherwise UNKNOWN.
+- Executable returns are simulated only on constant-product curves
+  (non-Mayhem, before migration) with the token's recorded fee rate; PumpSwap
+  paths are UNKNOWN. The reference trade's own footprint on later trades is
+  ignored (INFERENCE, stated in each result).
+- Wallet history covers only launches this system decided on.
+- P_MANIPULATION is not trained: no ground-truth label exists.
+- Shadow training starts at 200 completed, labelled opportunities; metrics
+  on a small holdout are anecdotal and marked so.

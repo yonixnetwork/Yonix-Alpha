@@ -247,10 +247,12 @@ def recovery(trades: list, decided_at: datetime, base: float | None, end: dateti
     trough_at, trough = min(series, key=lambda x: x[1])
     peak_before = max((p for at, p in series if at <= trough_at), default=base)
     back = next((at for at, p in series if at > trough_at and p >= base), None)
+    if trough >= base:
+        back = None  # never below the decision price: nothing to recover from
     return {"mae_pct": _pct(min(trough, base), base), "mfe_pct": _pct(max(p for _, p in series), base),
             "time_to_trough_seconds": round((trough_at - decided_at).total_seconds(), 1),
             "peak_before_trough_pct": _pct(peak_before, base),
-            "recovered": back is not None, "time_to_recovery_seconds": round((back - trough_at).total_seconds(), 1) if back else None,
+            "recovered": None if trough >= base else back is not None, "time_to_recovery_seconds": round((back - trough_at).total_seconds(), 1) if back else None,
             "flow_before_trough_60s": window_flow(trades, trough_at - timedelta(seconds=60), trough_at),
             "flow_after_trough_60s": window_flow(trades, trough_at, trough_at + timedelta(seconds=60))}
 

@@ -10,6 +10,7 @@ from yonixalpha_core.logging import configure_logging, get_logger
 from yonixalpha_core.notify import send_telegram_alert
 
 from app.gate_ml import run_cycle
+from app.shadow_ml import run_shadow_cycle
 from app.train import train_and_maybe_register
 
 log = get_logger("ml.main")
@@ -57,6 +58,16 @@ async def _training_loop(session_factory, redis, settings, stop_event: asyncio.E
         except Exception as exc:  # noqa: BLE001
             log.error("gate_ml.failed", error=str(exc))
             await _record_system_event(session_factory, "gate_ml_cycle_failed", "error", {"error": str(exc)})
+
+        # Multi-target SHADOW models on the opportunity ledger: review only,
+        # never loaded by the decision engine (app.shadow_ml).
+        try:
+            shadow = await run_shadow_cycle(session_factory)
+            log.info("shadow_ml.completed", result=shadow)
+            await _record_system_event(session_factory, "shadow_ml_cycle", "info", shadow)
+        except Exception as exc:  # noqa: BLE001
+            log.error("shadow_ml.failed", error=str(exc))
+            await _record_system_event(session_factory, "shadow_ml_cycle_failed", "error", {"error": str(exc)})
 
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=TRAIN_INTERVAL_SECONDS)

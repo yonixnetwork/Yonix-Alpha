@@ -171,7 +171,7 @@ async def samples(engine: str | None = None, labeled: bool | None = None, limit:
 
 @router.get("/opportunities")
 async def opportunities_list(traded: bool | None = None, stage: str | None = None, losses_only: bool = False,
-                             rejected_up: bool = False, mint: str | None = None,
+                             rejected_up: bool = False, mint: str | None = None, category: str | None = None,
                              limit: int = Query(DEFAULT_PAGE_LIMIT, ge=1, le=MAX_PAGE_LIMIT), offset: int = Query(0, ge=0),
                              db: AsyncSession = Depends(get_db), _: str = Depends(get_current_username)) -> dict:
     """Every recorded opportunity (traded or not) with its decision snapshot,
@@ -187,6 +187,11 @@ async def opportunities_list(traded: bool | None = None, stage: str | None = Non
         filters += [OpportunityOutcome.traded.is_(False), OpportunityOutcome.peak_pct >= opportunities.REJECTED_WINNER_PEAK_PCT]
     if mint:
         filters.append(OpportunityOutcome.mint == mint)
+    if category:
+        f = opportunities.category_filter(category)
+        if f is None:
+            raise HTTPException(422, f"unknown category; one of {', '.join(opportunities.REVIEW_CATEGORIES)}")
+        filters.append(f)
     total = (await db.execute(select(func.count()).select_from(OpportunityOutcome).where(*filters))).scalar_one()
     rows = (await db.execute(select(OpportunityOutcome).where(*filters).order_by(OpportunityOutcome.decided_at.desc())
                              .limit(limit).offset(offset))).scalars().all()
@@ -195,7 +200,29 @@ async def opportunities_list(traded: bool | None = None, stage: str | None = Non
          "traded": r.traded, "execution_mode": r.execution_mode, "position_id": r.position_id, "reasons": r.reasons,
          "decided_at": r.decided_at, "snapshot": r.snapshot, "horizons": r.horizons, "peak_pct": r.peak_pct,
          "drawdown_pct": r.drawdown_pct, "migrated_at": r.migrated_at, "trade_result": r.trade_result,
-         "loss_analysis": r.loss_analysis, "status": r.status} for r in rows]})
+         "loss_analysis": r.loss_analysis, "status": r.status, "path": r.path, "analysis": r.analysis, "labels": r.labels,
+         "regime": r.regime, "post_exit": r.post_exit, "ml_shadow": r.ml_shadow, "feature_version": r.feature_version,
+         "theoretical_return_pct": r.theoretical_return_pct, "executable_return_pct": r.executable_return_pct}
+        for r in rows]})
+
+
+@router.get("/ledger-review")
+async def ledger_review(days: int = Query(7, ge=1, le=90), db: AsyncSession = Depends(get_db),
+                        _: str = Depends(get_current_username)) -> dict:
+    """Observed / traded / rejected, counterfactual classes, exit classes,
+    recovery cases, signal vs execution quality, snipe latency, and the
+    shadow models' holdout metrics. Review data only: nothing here changes a
+    live rule or a position size."""
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    out = await opportunities.review(db, since)
+    shadow = (await db.execute(select(ModelVersion).where(ModelVersion.status == "shadow")
+                               .order_by(ModelVersion.name))).scalars().all()
+    out["shadow_models"] = [{"name": m.name, "version": m.version, "target": (m.metrics or {}).get("target"),
+                             "kind": (m.metrics or {}).get("kind"), "trained_at": m.trained_at,
+                             "train_rows": (m.metrics or {}).get("train_rows"), "split": (m.metrics or {}).get("split"),
+                             "holdout": (m.metrics or {}).get("holdout")} for m in shadow]
+    out["categories"] = list(opportunities.REVIEW_CATEGORIES)
+    return jsonable(out)
 
 
 @router.get("/opportunities/compare")

@@ -11,6 +11,7 @@ from yonixalpha_core.db.models import (
     MLFeatureSnapshot,
     ModelVersion,
     Notification,
+    OpportunityOutcome,
     PaperPosition,
     RiskAssessment,
     SystemEvent,
@@ -306,6 +307,30 @@ async def test_ml_review_promote_retire(app, client, auth_headers):
     assert "ml.promoted" in kinds and "ml.champion_retired" in kinds
     for url in ("/api/ml/predictions", "/api/ml/data-quality", "/api/ml/samples?labeled=true"):
         assert (await client.get(url, headers=auth_headers)).status_code == 200, url
+
+
+async def test_ledger_review_and_shadow_models_are_review_only(app, client, auth_headers):
+    now = datetime.now(timezone.utc)
+    async with app.state.db_session_factory() as s:
+        shadow = ModelVersion(name="shadow_p_upside_50", version=1, status="shadow", feature_names=["x"],
+                              training_sample_count=300, metrics={"target": "P_UPSIDE_50", "kind": "binary",
+                                                                  "holdout": {"roc_auc": 0.61, "pr_auc": 0.4}},
+                              artifact=b"not loaded by the API")
+        s.add(shadow)
+        s.add(OpportunityOutcome(key="lr1", mint="LR1", engine="solana_fresh", stage="GATE", decision="REJECT", traded=False,
+                                 reasons=["MANIPULATION_HIGH: x"], decided_at=now - timedelta(hours=2), snapshot={}, horizons={},
+                                 status="COMPLETE", analysis={"counterfactual": {"classification": "MISSED_WIN"}},
+                                 path={"T+5m": {"change_pct": 40.0}}, ml_shadow={"scores": {"P_UPSIDE_50": {"value": 0.3}}}))
+        await s.commit()
+        shadow_id = str(shadow.id)
+    r = (await client.get("/api/ml/ledger-review?days=1", headers=auth_headers)).json()
+    assert r["counts"]["missed_win"] == 1 and r["missed_win_buckets"]["rejecting_rule"] == {"MANIPULATION_HIGH": 1}
+    assert r["shadow_models"][0]["target"] == "P_UPSIDE_50" and r["shadow_models"][0]["holdout"]["roc_auc"] == 0.61
+    items = (await client.get("/api/ml/opportunities?category=missed_win", headers=auth_headers)).json()["items"]
+    assert items[0]["path"]["T+5m"]["change_pct"] == 40.0 and items[0]["ml_shadow"]["scores"]["P_UPSIDE_50"]["value"] == 0.3
+    assert (await client.get("/api/ml/opportunities?category=bogus", headers=auth_headers)).status_code == 422
+    # A shadow model can never be promoted into the decision path.
+    assert (await client.post(f"/api/ml/models/{shadow_id}/promote", headers=auth_headers, json={})).status_code == 409
 
 
 async def test_no_endpoint_leaks_secrets(app, client, auth_headers):

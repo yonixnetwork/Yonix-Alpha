@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
+import TokenIntel from "@/components/TokenIntel";
 import TokenTerminal from "@/components/TokenTerminal";
 import { Empty, ErrorNotice, Loading, Money, Section, Stat } from "@/components/ui";
 import { formatDate, formatDecimal, formatState, gateDecisionPillClass } from "@/lib/format";
@@ -22,6 +23,7 @@ export default function TokenDetailPage() {
   return (
     <div>
       <TokenTerminal mint={mint} />
+      <TokenIntel mint={mint} liveIntel={data?.latest_evidence?.intel ?? null} />
       <details className="term-more">
         <summary>Registry, creator and stream details</summary>
         <div className="stat-grid">

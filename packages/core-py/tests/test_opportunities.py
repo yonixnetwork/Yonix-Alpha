@@ -249,3 +249,35 @@ def test_legacy_cost_seeded_high_is_not_a_signal_failure():
     la = opp.classify_loss(snapshot, result, {"price": {"components_pct": {"fees_pct": "70.79"}}}, Decimal("0.0008"))
     assert "SIGNAL_FAILURE" not in la["flags"] and la["classification"] == "RISK_MODEL_FAILURE"
     assert any("entry costs were +70.79%" in e for e in la["evidence"])
+
+
+async def test_ledger_review_counts_categories_buckets_and_latency(db):
+    def row(key, **kw):
+        base = dict(key=key, mint=key, engine="solana_fresh", stage="GATE", decision="REJECT", traded=False, reasons=["LOW_LIQUIDITY: x"],
+                    decided_at=T0, snapshot={"market_cap_sol": "45", "age_seconds": 40, "decision_eval_ms": 800},
+                    horizons={}, status="COMPLETE")
+        base.update(kw)
+        return OpportunityOutcome(**base)
+
+    db.add_all([
+        row("a", analysis={"counterfactual": {"classification": "MISSED_WIN"}}, labels={"recovery": True},
+            theoretical_return_pct=Decimal("40"), executable_return_pct=Decimal("31")),
+        row("b", analysis={"counterfactual": {"classification": "CORRECT_REJECTION"}}, labels={"recovery": False}),
+        row("c", analysis={"counterfactual": {"classification": "UNEXECUTABLE"}}),
+        row("d", traded=True, decision="EXECUTE", trade_result={"pnl_sol": "-0.01", "entry_execution": {"decision_to_confirm_ms": 1500}},
+            post_exit={"classification": "POSSIBLY_EARLY"}),
+        row("e", traded=True, decision="EXECUTE", trade_result={"pnl_sol": "0.02", "entry_execution": {"decision_to_confirm_ms": 900}},
+            post_exit={"classification": "GOOD_EXIT"}),
+        row("old", decided_at=T0 - timedelta(days=30), analysis={"counterfactual": {"classification": "MISSED_WIN"}}),
+    ])
+    await db.commit()
+    r = await opp.review(db, T0 - timedelta(days=1))
+    c = r["counts"]
+    assert c["observed"] == 5 and c["traded"] == 2 and c["rejected"] == 3 and c["missed_win"] == 1
+    assert c["correct_rejection"] == 1 and c["unexecutable"] == 1 and c["false_positive"] == 1 and c["true_positive"] == 1
+    assert c["premature_exit"] == 1 and c["good_exit"] == 1 and c["recovery"] == 1
+    assert r["missed_win_buckets"]["rejecting_rule"] == {"LOW_LIQUIDITY": 1}
+    assert r["missed_win_buckets"]["market_cap_at_decision"] == {"30-60 SOL": 1}
+    assert r["signal_vs_execution"]["rows"] == 1 and r["signal_vs_execution"]["executable_return_avg_pct"].startswith("31")
+    assert r["snipe_latency"]["decision_to_confirm_ms"]["n"] == 2 and r["snipe_latency"]["creation_to_decision_s"]["median"] == 40.0
+    assert opp.category_filter("nonsense") is None

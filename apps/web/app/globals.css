@@ -1128,3 +1128,8 @@ li.unread {
 .search-row { display: flex; gap: 8px; margin-bottom: 8px; }
 .search-row input { flex: 1; min-width: 0; }
 .rent-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin: 10px 0; }
+
+/* Ledger review category chips (buttons) */
+button.chip { cursor: pointer; color: inherit; padding: 4px 12px; }
+button.chip.chip-active { border-color: var(--accent, #3b82f6); background: color-mix(in srgb, var(--accent, #3b82f6) 14%, var(--surface)); }
+button.chip b { font-variant-numeric: tabular-nums; }

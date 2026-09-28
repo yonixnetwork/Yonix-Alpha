@@ -31,7 +31,7 @@ const COLS: [keyof Compare, string][] = [
   ["winning_trades", "Winning trades"], ["losing_trades", "Losing trades"], ["traded", "All traded"],
   ["rejected", "Rejected"], ["rejected_later_up", "Rejected, later up"],
 ];
-const HZ = ["T+5s", "T+10s", "T+30s", "T+60s", "T+5m", "T+15m", "T+30m"];
+const HZ = ["T+5s", "T+10s", "T+30s", "T+60s", "T+5m", "T+15m", "T+30m", "T+60m"];
 const pctClass = (v?: string | null) => (v == null ? "muted" : Number(v) > 0 ? "pos" : Number(v) < 0 ? "neg" : "");
 const fmt = (v: string | number | null | undefined) => {
   if (v === null || v === undefined) return "—";
