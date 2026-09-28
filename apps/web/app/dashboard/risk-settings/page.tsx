@@ -26,6 +26,11 @@ const SECTIONS: { title: string; match: (k: string) => boolean; also?: string[];
     also: ["max_entry_impact_bps", "max_exit_impact_bps"],
     note: "Migrated tokens only. Usable liquidity is the pool's SOL side (what a seller can withdraw) in USD. Below the minimum: NO_TRADE. Bonding-curve tokens are never judged by this rule. The price-impact limits apply to every venue.",
   },
+  {
+    title: "Launch intelligence, manipulation & regimes",
+    match: (k) => /^(intel_|mayhem_|manipulation_|instant_bond|boost_|postmig_|wallet_|dump_cluster|cf_)/.test(k),
+    note: "Features are recorded for every decision; only the *_action settings act on them. Mayhem tokens: curve pricing and sizing do not hold. Manipulation HIGH needs several independent families, never one indicator. Research and limits: docs/INTELLIGENCE_AUDIT_2026.md.",
+  },
   { title: "Token name filters", match: (k) => /name_length|duplicate_names|ascii_names/.test(k),
     note: "Word blacklists (substring / exact / regex) are on the Rules page." },
   { title: "Fresh-token observation", match: (k) => /^fresh_|max_active_candidates|^momentum_/.test(k) },
@@ -61,6 +66,15 @@ const HELP: Record<string, string> = {
   min_name_length: "Reject names shorter than this. 0 = off.",
   skip_duplicate_names: "Reject a launch reusing a name launched in the last 24 h.",
   ascii_names_only: "Reject names/symbols with non-ASCII characters.",
+  mayhem_action: "Mayhem Mode or non-standard curve: curve math is invalid there. WARN, REQUIRE_MANUAL_APPROVAL, WAIT or NO_TRADE.",
+  manipulation_high_action: "Action at manipulation level HIGH (several independent families).",
+  manipulation_medium_action: "Action at manipulation level MEDIUM (two families).",
+  manipulation_high_families: "Independent families needed for HIGH (at least 2).",
+  postmig_dumping_action: "Action while the post-migration state is DUMPING.",
+  instant_bond_seconds: "Create → migrate faster than this is an instant (bundled) bond.",
+  boost_window_seconds: "Seconds after migration in which pump.fun BOOST buybacks run.",
+  intel_snapshot_seconds: "Launch snapshots are recorded up to this age (T0/5/10/20/30/60 s …).",
+  intel_meaningful_buy_sol: "Buys at least this size count as meaningful (trade-efficiency and breadth features).",
 };
 
 function toInput(v: Value): string {

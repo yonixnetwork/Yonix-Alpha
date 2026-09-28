@@ -158,6 +158,31 @@ class SafetySettings:
     skip_duplicate_names: bool = True  # a later launch reusing an earlier launch's name/symbol (24 h)
     ascii_names_only: bool = False
 
+    # Intelligence (docs/INTELLIGENCE_AUDIT_2026.md). Features are recorded
+    # for every decision; only the *_action settings act on them.
+    intel_snapshot_seconds: int = 60  # launch snapshots at T0/5/10/20/30/60 s (and 120/300/600 if longer)
+    intel_meaningful_buy_sol: Decimal = Decimal("0.05")
+    intel_buyer_breadth_target: int = 20  # unique buyers per minute that count as full breadth
+    # Mayhem Mode tokens (and any curve where the constant product does not
+    # hold): curve pricing, impact and sizing are invalid for them.
+    mayhem_action: str = "NO_TRADE"
+    # Manipulation score: HIGH needs this many independent families.
+    manipulation_window_seconds: int = 120
+    manipulation_high_families: int = 3
+    manipulation_round_trip_share: Decimal = Decimal("0.40")
+    manipulation_sync_sell_wallets: int = 3
+    manipulation_regular_size_cv: Decimal = Decimal("0.05")
+    manipulation_dust_share: Decimal = Decimal("0.40")
+    manipulation_linear_r2: Decimal = Decimal("0.97")
+    manipulation_collapse_pct: Decimal = Decimal("0.30")
+    manipulation_high_action: str = "NO_TRADE"
+    manipulation_medium_action: str = "WARN"
+    # Migration: create → migrate faster than this is an instant bond (a
+    # bundle); BOOST: post-migration buybacks in the first seconds.
+    instant_bond_seconds: int = 5
+    boost_window_seconds: int = 300
+    postmig_dumping_action: str = "WAIT"
+
     # ML
     min_ml_confidence: float | None = None
 
@@ -195,14 +220,23 @@ HARD_LIMITS: dict[str, tuple[str, Any]] = {
     "min_creator_tokens_created": ("min", 0),
     "max_creator_tokens_created": ("min", 0),
     "min_name_length": ("max", 32),
+    # One indicator is never enough for a HIGH manipulation level.
+    "manipulation_high_families": ("min", 2),
+    "intel_snapshot_seconds": ("max", 600),
+    "manipulation_window_seconds": ("max", 900),
 }
 
 CREATOR_ACTIONS = ("WARN", "REDUCE_SIZE", "REQUIRE_MANUAL_APPROVAL", "REJECT")
+INTEL_ACTIONS = ("WARN", "REQUIRE_MANUAL_APPROVAL", "WAIT", "NO_TRADE")
 # Fields with a fixed set of values (the dashboard renders a select).
 ENUM_FIELDS: dict[str, tuple[str, ...]] = {
     "creator_below_threshold_action": CREATOR_ACTIONS,
     "creator_history_unknown_action": CREATOR_ACTIONS,
     "max_risk_level_for_auto": ("LOW", "MODERATE", "HIGH"),
+    "mayhem_action": INTEL_ACTIONS,
+    "manipulation_high_action": INTEL_ACTIONS,
+    "manipulation_medium_action": INTEL_ACTIONS,
+    "postmig_dumping_action": INTEL_ACTIONS,
 }
 
 _TUPLE_FIELDS = {"tp_r_multiples", "tp_exit_fractions"}
@@ -316,6 +350,15 @@ def validate(settings: SafetySettings) -> list[str]:
         errors.append("migrated_max_entry_slippage_bps and migrated_max_exit_slippage_bps must be positive")
     if settings.min_name_length < 0:
         errors.append("min_name_length must not be negative")
+    for name in ("mayhem_action", "manipulation_high_action", "manipulation_medium_action", "postmig_dumping_action"):
+        if getattr(settings, name) not in INTEL_ACTIONS:
+            errors.append(f"{name} must be one of {', '.join(INTEL_ACTIONS)}")
+    for name in ("manipulation_round_trip_share", "manipulation_regular_size_cv", "manipulation_dust_share",
+                 "manipulation_linear_r2", "manipulation_collapse_pct"):
+        if not (0 < getattr(settings, name) <= 1):
+            errors.append(f"{name} must be in (0, 1]")
+    if settings.intel_snapshot_seconds < 5 or settings.manipulation_window_seconds < 10:
+        errors.append("intel_snapshot_seconds must be at least 5 and manipulation_window_seconds at least 10")
     return errors
 
 

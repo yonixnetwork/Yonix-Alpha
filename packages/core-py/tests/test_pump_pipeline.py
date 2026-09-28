@@ -257,3 +257,17 @@ async def test_create_event_name_with_nul_bytes_is_cleaned_at_ingestion(redis):
     await pump_stream.ingest_logs(redis, logs_of(CREATE_EVENT + body + i64(int(NOW.timestamp()))), "sig", NOW)
     raw = await redis.hgetall(pump_stream.meta_key(MINT))
     assert raw["name"] == "spaceX链游" and raw["symbol"] == "SPX" and raw["uri"] == "https://x/m.json"
+
+
+async def test_assembled_launch_carries_causal_intelligence_without_changing_the_decision(redis):
+    curve = await seed_healthy_launch(redis, NOW)
+    inp, ev = await assemble_fresh(Sources(redis, FakeRpc(curve)), MINT, NOW, controls())
+    intel = ev["intel"]
+    assert intel is inp.intel and intel["stage"] == "FRESH" and intel["feature_version"].startswith("launch-")
+    assert intel["regime"]["mayhem"] is False and intel["regime"]["curve_math"]["valid"] is True
+    assert intel["regime"]["data_regime"] == "post_boost"
+    assert intel["snapshots"] and intel["snapshots"][0]["offset_seconds"] == 0
+    assert intel["manipulation"]["level"] in ("NONE", "LOW", "UNKNOWN") and intel["flow_state"]["state"]
+    assert intel["buyer_breadth"]["score"] is None or 0 <= intel["buyer_breadth"]["score"] <= 1
+    a = assess(inp, default_settings_for("solana_fresh"))
+    assert a.decision == FinalDecision.EXECUTE, a.reasons  # the healthy launch still executes

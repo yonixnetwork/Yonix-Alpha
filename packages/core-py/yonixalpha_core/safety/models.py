@@ -374,3 +374,7 @@ class AssessmentInput:
     # Multi-window deterioration of the pre-entry flow (solana.entry_quality.
     # deterioration): {"strong", "indicators", "evidence", "metrics"}.
     entry_quality: dict | None = None
+    # Launch / pool intelligence (solana.intel): regime flags (Mayhem,
+    # curve-math validity, instant bond, BOOST window), manipulation score,
+    # flow state, snapshots. None when not evaluated.
+    intel: dict | None = None

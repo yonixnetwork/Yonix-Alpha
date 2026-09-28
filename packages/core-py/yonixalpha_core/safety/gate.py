@@ -575,6 +575,57 @@ def _check_creator_history(inp: AssessmentInput, s: SafetySettings, out: list[Fi
                             "observed — historical selling indicator", FinalDecision.EXECUTE))
 
 
+_INTEL_ACTION = {
+    "WARN": (FinalDecision.EXECUTE, RiskLevel.MODERATE),
+    "REQUIRE_MANUAL_APPROVAL": (FinalDecision.REQUIRE_MANUAL_APPROVAL, RiskLevel.HIGH),
+    "WAIT": (FinalDecision.WAIT, RiskLevel.HIGH),
+    "NO_TRADE": (FinalDecision.NO_TRADE, RiskLevel.HIGH),
+}
+
+
+def _check_intel(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) -> None:
+    """Regime and manipulation (solana.intel). Only the configured actions
+    act; everything else in the intelligence record is evidence."""
+    intel = inp.intel
+    if not intel:
+        return
+    regime = intel.get("regime") or {}
+    cm = regime.get("curve_math") or {}
+    if regime.get("mayhem") or cm.get("valid") is False:
+        decision, level = _INTEL_ACTION[s.mayhem_action]
+        why = ("Mayhem Mode token" if regime.get("mayhem") else "bonding curve does not follow the standard constant product")
+        out.append(_finding(RiskCategory.EXECUTION, "MAYHEM_OR_NONSTANDARD_CURVE", level,
+                            f"{why}: curve price, impact and position sizing are computed with constant-product math that "
+                            f"does not hold here ({cm.get('reason')}); Mayhem flow also contains an automated agent's trades · "
+                            f"Action: {s.mayhem_action}", decision, decision == FinalDecision.NO_TRADE))
+    elif regime.get("mayhem") is None and intel.get("stage") in ("FRESH", "MOMENTUM"):
+        out.append(_finding(RiskCategory.DATA, "MAYHEM_FLAG_UNKNOWN", RiskLevel.MODERATE,
+                            "Mayhem flag unknown (no create event or curve account read): curve math unverified",
+                            FinalDecision.EXECUTE))
+    m = intel.get("manipulation") or {}
+    if m.get("level") in ("HIGH", "MEDIUM"):
+        action = s.manipulation_high_action if m["level"] == "HIGH" else s.manipulation_medium_action
+        decision, level = _INTEL_ACTION[action]
+        fams = "; ".join(f"{k}: {v}" for k, v in (m.get("families") or {}).items())
+        out.append(_finding(RiskCategory.TRADING, f"MANIPULATION_{m['level']}", level,
+                            f"manipulation score {m['level']} ({m.get('count')} independent families): {fams[:400]} · "
+                            f"Action: {action} — patterns, not proof", decision))
+    if regime.get("instant_bond"):
+        out.append(_finding(RiskCategory.MARKET, "INSTANT_BOND", RiskLevel.MODERATE,
+                            f"created and migrated within {s.instant_bond_seconds}s: a bundled bond nobody else could buy; "
+                            "post-migration behaviour is its own regime", FinalDecision.EXECUTE))
+    if regime.get("boost_window"):
+        out.append(_finding(RiskCategory.MARKET, "BOOST_WINDOW", RiskLevel.MODERATE,
+                            f"{regime.get('seconds_since_migration')}s after migration: part of the buying in the first "
+                            f"{s.boost_window_seconds}s is pump.fun BOOST buybacks, not organic demand", FinalDecision.EXECUTE))
+    pm = intel.get("post_migration") or {}
+    if pm.get("state") == "DUMPING":
+        decision, level = _INTEL_ACTION[s.postmig_dumping_action]
+        out.append(_finding(RiskCategory.MARKET, "POST_MIGRATION_DUMPING", level,
+                            f"post-migration state DUMPING ({'; '.join(pm.get('evidence') or [])}) · "
+                            f"Action: {s.postmig_dumping_action}", decision))
+
+
 def _check_names(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) -> None:
     name = inp.token_name
     if name is None:
@@ -863,6 +914,7 @@ def assess(inp: AssessmentInput, settings: SafetySettings, versions: dict[str, A
     _check_holders(inp, settings, findings)
     _check_flow(inp, settings, findings)
     _check_creator_history(inp, settings, findings)
+    _check_intel(inp, settings, findings)
     _check_observation(inp, findings)
     _check_entry_exit(inp, findings)
     _check_entry_quality(inp, findings)

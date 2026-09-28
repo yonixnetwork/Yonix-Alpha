@@ -41,6 +41,7 @@ from yonixalpha_core.solana.flow import (
     trade_flow,
 )
 from yonixalpha_core.exit_intel import ExitConfig, solana_exit_decision
+from yonixalpha_core.solana import intel
 from yonixalpha_core.solana import creator_history, funding, sol_price
 from yonixalpha_core.solana.market_data import DexScreenerClient, JupiterClient
 from yonixalpha_core.solana.pumpfun import BondingCurveState, decode_bonding_curve
@@ -371,6 +372,15 @@ async def assemble_fresh(src: Sources, mint: str, now: datetime, c: Controls,
     if decimals is not None:
         inp.entry_quality = deterioration(trades, now, DETERIORATION_WINDOW_SECONDS, decimals)
         ev["entry_quality"] = inp.entry_quality
+    try:
+        started = await src.redis.get(pump_stream.STREAM_STARTED)
+        inp.intel = intel.curve_intel(
+            trades, now, c.settings, meta=meta, curve=curve, curve_from_chain=curve_obs == now, decimals=decimals,
+            supply_raw=token.supply_raw if token else None, stream_started_ts=int(started) if started else None,
+            funding=ev.get("funding"), duplicate_of=inp.duplicate_of, engine=engine)
+    except Exception as exc:  # noqa: BLE001 - intelligence is evidence; its failure is recorded, never guessed
+        ev["errors"].append(f"intel: {type(exc).__name__}: {str(exc)[:160]}")
+    ev["intel"] = inp.intel
 
     if token is not None and curve_addr:
         inp.holders, err = await _timed(ev, "holders_rpc", fetch_holders(src.rpc, mint, token.supply_raw, {curve_addr}, creator, now))
@@ -519,6 +529,14 @@ async def assemble_migrated(src: Sources, mint: str, now: datetime, c: Controls)
     if pool_state is not None and decimals is not None:
         inp.targets = TargetContext(resistance=recent_high_above(trades, now, RESISTANCE_WINDOW_SECONDS, decimals, pool_state.price),
                                     resistance_source="PumpSwap pool trades, last 30 min")
+    try:
+        mig_curve = await pump_stream.load_curve(src.redis, mint)
+        inp.intel = intel.pool_intel(trades, curve_trades, now, c.settings, meta=meta,
+                                     migrated_at=mig_curve.migrated_at if mig_curve else None, decimals=decimals,
+                                     funding=ev.get("funding"), duplicate_of=inp.duplicate_of)
+    except Exception as exc:  # noqa: BLE001
+        ev["errors"].append(f"intel: {type(exc).__name__}: {str(exc)[:160]}")
+    ev["intel"] = inp.intel
     _apply_controls(inp, c, meta.get("name"), meta.get("symbol"), meta.get("uri"), "MIGRATED")
     ev["features"] = {k: (str(v) if v is not None else None) for k, v in rule_features(inp).items()}
     return inp, ev

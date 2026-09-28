@@ -570,3 +570,47 @@ def test_fixed_costs_shrink_a_risk_bound_live_size_on_a_small_wallet():
     assert p.position_size.value < base.position_size.value
     loss = p.position_size.value * _loss_fraction(p.stop_distance_pct, p.entry_cost_bps, p.exit_cost_bps) + fixed
     assert loss <= p.max_loss.value * Decimal("1.000001")
+
+
+# --- intelligence regime and manipulation (solana.intel) ------------------------------
+
+def _intel(**kw):
+    base = {"stage": "FRESH", "regime": {"mayhem": False, "curve_math": {"valid": True, "reason": "ok"}},
+            "manipulation": {"level": "NONE", "families": {}, "count": 0}}
+    for k, v in kw.items():
+        base[k] = {**base.get(k, {}), **v} if isinstance(v, dict) and isinstance(base.get(k), dict) else v
+    return base
+
+
+def test_mayhem_tokens_are_not_traded_by_default_because_curve_math_does_not_hold():
+    a = decide(healthy(intel=_intel(regime={"mayhem": True, "curve_math": {"valid": False, "reason": "Mayhem"}})))
+    assert not a.executable and "MAYHEM_OR_NONSTANDARD_CURVE" in codes(a)
+    manual = decide(healthy(intel=_intel(regime={"mayhem": True, "curve_math": {"valid": False}})),
+                    SafetySettings(mayhem_action="REQUIRE_MANUAL_APPROVAL"))
+    assert manual.decision == FinalDecision.REQUIRE_MANUAL_APPROVAL
+    broken = decide(healthy(intel=_intel(regime={"curve_math": {"valid": False, "reason": "k not held"}})))
+    assert "MAYHEM_OR_NONSTANDARD_CURVE" in codes(broken) and not broken.executable
+
+
+def test_manipulation_acts_only_at_the_configured_levels():
+    high = decide(healthy(intel=_intel(manipulation={"level": "HIGH", "count": 3, "families": {"a": "x", "b": "y", "c": "z"}})))
+    assert not high.executable and "MANIPULATION_HIGH" in codes(high)
+    med = decide(healthy(intel=_intel(manipulation={"level": "MEDIUM", "count": 2, "families": {"a": "x", "b": "y"}})))
+    assert med.executable and "MANIPULATION_MEDIUM" in codes(med)  # WARN by default: reported, not blocking
+    low = decide(healthy(intel=_intel(manipulation={"level": "LOW", "count": 1, "families": {"a": "x"}})))
+    assert low.executable and not any(c.startswith("MANIPULATION_") for c in codes(low))
+
+
+def test_post_migration_dump_waits_and_boost_and_instant_bond_are_reported():
+    a = decide(healthy(intel=_intel(stage="MIGRATED", post_migration={"state": "DUMPING", "evidence": ["sellers dominate"]},
+                                    regime={"instant_bond": True, "boost_window": True, "seconds_since_migration": 40})))
+    assert a.decision == FinalDecision.WAIT and {"POST_MIGRATION_DUMPING", "INSTANT_BOND", "BOOST_WINDOW"} <= codes(a)
+    ok = decide(healthy(intel=_intel(stage="MIGRATED", post_migration={"state": "RECOVERING"})))
+    assert ok.executable  # RECOVERING is a description of the path, never a buy by itself — nor a block
+
+
+def test_intel_settings_are_validated():
+    from yonixalpha_core.safety.settings import clamp, validate
+    assert any("mayhem_action" in e for e in validate(SafetySettings(mayhem_action="YOLO")))
+    clamped, _ = clamp(SafetySettings(manipulation_high_families=1))
+    assert clamped.manipulation_high_families == 2  # one indicator is never HIGH
