@@ -189,9 +189,11 @@ async def test_pipeline_ladder_and_final_blockers(db):
     assert by["S"]["stage"] == "RISK_APPROVED" and by["S"]["final_blocker"]["code"] == "SIZE_BELOW_MINIMUM"
     assert by["S"]["final_blocker"]["groups"] == ["sizing_account"]
     assert by["E"]["stage"] == "POSITION_OPEN" and by["E"]["final_blocker"] is None and by["E"]["execution_route"] == "pump"
-    assert by["L"]["stage"] == "EXECUTION_APPROVED" and by["L"]["final_blocker"]["code"] == "BUY_SIMULATION_FAILED"
+    # Signed (the signature is stored before simulation), then simulation failed: it stops at SIGNED.
+    assert by["L"]["stage"] == "TRANSACTION_SIGNED" and by["L"]["final_blocker"]["code"] == "BUY_SIMULATION_FAILED"
     s = pl["stages"]
     assert s["PROMOTE"] == 5 and s["BUY_SIGNAL"] == 4 and s["RISK_APPROVED"] == 3 and s["EXECUTION_APPROVED"] == 2
+    assert s["TRANSACTION_BUILT"] == 2 and s["TRANSACTION_SIGNED"] == 2
     assert s["BUY_SUBMITTED"] == 1 and s["POSITION_OPEN"] == 1
     assert pl["blocked_by"]["exit_signal_at_entry"] == 1 and pl["blocked_by"]["sizing_account"] == 1
 

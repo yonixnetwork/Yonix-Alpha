@@ -31,9 +31,10 @@ type Pipeline = {
 };
 
 const STAGE_LABEL: Record<string, string> = {
-  OBSERVED: "Observed", ANALYSIS_POSITIVE: "Analysis positive", PROMOTE: "Promoted (to the gate)", BUY_SIGNAL: "BUY signal",
-  RISK_APPROVED: "Risk approved", EXECUTION_APPROVED: "Execution approved", BUY_SUBMITTED: "Buy submitted",
-  BUY_CONFIRMED: "Buy confirmed", POSITION_OPEN: "Position opened", SELL_SUBMITTED: "Sell submitted",
+  DISCOVERED: "Discovered (stream launches)", OBSERVED: "Observed", ANALYSIS_POSITIVE: "Signal (observation positive)",
+  PROMOTE: "Promoted (to the gate)", BUY_SIGNAL: "BUY signal", RISK_APPROVED: "Risk approved", EXECUTION_APPROVED: "Execution approved",
+  TRANSACTION_BUILT: "Transaction built", TRANSACTION_SIGNED: "Signed", BUY_SUBMITTED: "Submitted",
+  BUY_CONFIRMED: "Confirmed", POSITION_OPEN: "Position open", SELL_SUBMITTED: "Sell submitted",
   SELL_CONFIRMED: "Sell confirmed", POSITION_CLOSED: "Position closed",
 };
 const GROUP_LABEL: Record<string, string> = {
@@ -44,7 +45,7 @@ const GROUP_LABEL: Record<string, string> = {
 
 function stagePill(stage: string): string {
   if (["POSITION_OPEN", "SELL_SUBMITTED", "SELL_CONFIRMED", "POSITION_CLOSED", "BUY_CONFIRMED"].includes(stage)) return "pill pill-ok";
-  if (["EXECUTION_APPROVED", "BUY_SUBMITTED", "RISK_APPROVED"].includes(stage)) return "pill pill-warn";
+  if (["EXECUTION_APPROVED", "TRANSACTION_BUILT", "TRANSACTION_SIGNED", "BUY_SUBMITTED", "RISK_APPROVED"].includes(stage)) return "pill pill-warn";
   return "pill pill-off";
 }
 
@@ -55,7 +56,7 @@ function PipelineView({ pl }: { pl: Pipeline }) {
       <table className="data-table">
         <thead><tr><th>Stage</th><th>Tokens</th></tr></thead>
         <tbody>{Object.entries(pl.stages).map(([s, n]) => (
-          <tr key={s}><td>{STAGE_LABEL[s] ?? s}</td><td>{n}</td></tr>))}</tbody>
+          <tr key={s}><td>{STAGE_LABEL[s] ?? s}</td><td>{n ?? <span className="muted" title="the stream keeps 2 h of launches">beyond stream retention</span>}</td></tr>))}</tbody>
       </table>
       <div className="status-label">BUY signal but not executable — blocked by</div>
       <div className="stat-grid">

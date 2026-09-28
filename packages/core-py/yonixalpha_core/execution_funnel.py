@@ -56,8 +56,12 @@ _SIGNAL_OK = ("NOT EXISTS (SELECT 1 FROM jsonb_array_elements(ra.assessment->'fi
 #   BUY_SUBMITTED       LIVE: order signed and sent; PAPER: simulated entry attempted
 #   BUY_CONFIRMED       LIVE: confirmed on chain with the balance change; PAPER: simulated fill
 #   POSITION_OPEN / SELL_SUBMITTED / SELL_CONFIRMED / POSITION_CLOSED
-LADDER = ("OBSERVED", "ANALYSIS_POSITIVE", "PROMOTE", "BUY_SIGNAL", "RISK_APPROVED", "EXECUTION_APPROVED",
-          "BUY_SUBMITTED", "BUY_CONFIRMED", "POSITION_OPEN", "SELL_SUBMITTED", "SELL_CONFIRMED", "POSITION_CLOSED")
+# DISCOVERED → OBSERVED → SIGNAL (observation positive) → PROMOTE → BUY
+# signal → RISK APPROVED → EXECUTION APPROVED → TRANSACTION BUILT → SIGNED
+# → SUBMITTED → CONFIRMED → POSITION OPEN → exit stages.
+LADDER = ("DISCOVERED", "OBSERVED", "ANALYSIS_POSITIVE", "PROMOTE", "BUY_SIGNAL", "RISK_APPROVED", "EXECUTION_APPROVED",
+          "TRANSACTION_BUILT", "TRANSACTION_SIGNED", "BUY_SUBMITTED", "BUY_CONFIRMED", "POSITION_OPEN",
+          "SELL_SUBMITTED", "SELL_CONFIRMED", "POSITION_CLOSED")
 BLOCKING_ACTIONS = ("REJECT", "NO_TRADE", "WAIT", "REQUIRE_MANUAL_APPROVAL")
 # Execution-side: whether THIS trade can be carried out now (size, costs,
 # account limits, routes, mode). Everything else is risk-side.
@@ -99,13 +103,18 @@ def _stage_of(tok: dict[str, Any]) -> str:
     stage = "OBSERVED"
     for name, reached in (("ANALYSIS_POSITIVE", tok.get("analysis_positive")), ("PROMOTE", tok.get("candidate_id")),
                           ("BUY_SIGNAL", tok.get("any_signal")), ("RISK_APPROVED", tok.get("any_risk_ok")),
-                          ("EXECUTION_APPROVED", tok.get("any_executable")), ("BUY_SUBMITTED", tok.get("buy_submitted")),
+                          ("EXECUTION_APPROVED", tok.get("any_executable")), ("TRANSACTION_BUILT", tok.get("tx_built")),
+                          ("TRANSACTION_SIGNED", tok.get("tx_signed")), ("BUY_SUBMITTED", tok.get("buy_submitted")),
                           ("BUY_CONFIRMED", tok.get("buy_confirmed")), ("POSITION_OPEN", tok.get("position_opened")),
                           ("SELL_SUBMITTED", tok.get("sell_submitted")), ("SELL_CONFIRMED", tok.get("sell_confirmed")),
                           ("POSITION_CLOSED", tok.get("position_closed"))):
         if reached:
             stage = name
     return stage
+
+
+def _stage_names(order: dict[str, Any]) -> list[str]:
+    return [st.get("stage") for st in ((order.get("result") or {}).get("stages") or [])]
 
 
 def _execution_trail(order: dict[str, Any]) -> dict[str, Any] | None:
@@ -144,7 +153,7 @@ def _final_blocker(tok: dict[str, Any]) -> dict[str, Any] | None:
 
 
 async def pipeline(session: AsyncSession, since: datetime, engines: tuple[str, ...] = SOLANA_ENGINES,
-                   token_limit: int = 150, mint: str | None = None) -> dict[str, Any]:
+                   token_limit: int = 150, mint: str | None = None, discovered: int | None = None) -> dict[str, Any]:
     """The status ladder for every candidate handed to the gate in the window
     (plus observation counts): how many tokens reached each stage, which
     blocker groups stopped the ones with a BUY signal, and each token's
@@ -220,6 +229,9 @@ async def pipeline(session: AsyncSession, since: datetime, engines: tuple[str, .
             "execution_mode": (pos[0]["execution_mode"] if pos else None),
             "execution_route": (pos[0]["execution_route"] if pos else None),
             "execution_provider": (pos[0]["execution_provider"] if pos else None),
+            # A paper fill is simulated: it passes every execution stage by construction.
+            "tx_signed": bool(paper) or any("TRANSACTION_SIGNED" in _stage_names(o) or o["signature"] for o in buys),
+            "tx_built": bool(paper) or any("TRANSACTION_BUILT" in _stage_names(o) or o["signature"] for o in buys),
             "buy_submitted": bool(paper) or any(o["submitted_at"] for o in buys),
             "buy_confirmed": bool(paper) or any(o["status"] == "CONFIRMED" for o in buys),
             "position_opened": bool(paper) or bool(live_filled),
@@ -244,6 +256,9 @@ async def pipeline(session: AsyncSession, since: datetime, engines: tuple[str, .
 
     counts = {s: 0 for s in LADDER}
     counts["OBSERVED"] = _num(obs["observed"]) + sum(1 for c in cands if c["engine"] != "discovery")
+    # Launches seen by the stream (Redis keeps 2 h of them); None when the
+    # window reaches further back than that.
+    counts["DISCOVERED"] = discovered if discovered is not None else None
     counts["ANALYSIS_POSITIVE"] = _num(obs["positive"]) + sum(1 for c in cands if c["engine"] != "discovery")
     for tok in tokens:
         reached = LADDER.index(tok["stage"])
@@ -404,7 +419,14 @@ async def funnel(session: AsyncSession, since: datetime, redis=None, app_setting
         GROUP BY event_type, left(coalesce(detail->>'reason', detail->>'error', ''), 160) ORDER BY n DESC LIMIT 15""",
                                             ev=list(EXECUTION_FAILURE_EVENTS), **p)
 
-    out["pipeline"] = await pipeline(session, since, engines)
+    discovered = None
+    if redis is not None:
+        from yonixalpha_core.solana import pump_stream
+
+        oldest = await redis.zrange(pump_stream.RECENT, 0, 0, withscores=True)
+        if oldest and float(oldest[0][1]) <= since.timestamp():
+            discovered = int(await redis.zcount(pump_stream.RECENT, since.timestamp(), "+inf"))
+    out["pipeline"] = await pipeline(session, since, engines, discovered=discovered)
 
     modes = {"global": (await store.load_global_mode(session)).value,
              "strategies": {e: (await store.load_strategy_mode(session, e)).value for e in engines}}

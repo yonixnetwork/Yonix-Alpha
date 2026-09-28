@@ -2,6 +2,8 @@
 registry row, live stream state (curve, recent trades), candidates across
 engines, every safety-gate decision, and paper positions."""
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Path
 from redis.asyncio import Redis
 from sqlalchemy import select
@@ -11,6 +13,7 @@ from app.api.deps import get_current_username, get_db, get_redis
 from app.api.util import jsonable
 from yonixalpha_core.db.models import PaperPosition, RiskAssessment, Token, TokenEvent, TradingCandidate
 from yonixalpha_core.solana import pump_stream
+from yonixalpha_core.token_market import market_view as token_market_view
 
 router = APIRouter(prefix="/tokens", tags=["tokens"])
 
@@ -55,3 +58,34 @@ async def token_details(mint: str = MINT, db: AsyncSession = Depends(get_db), re
         "events": [{"type": e.event_type, "source": e.source, "at": e.occurred_at, "trader": e.trader_address,
                     "sol": e.sol_amount, "is_buy": e.is_buy} for e in events_],
     })
+
+
+@router.get("/{mint}/market")
+async def token_market(mint: str = MINT, db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
+                       _: str = Depends(get_current_username)) -> dict:
+    """Token terminal: header (price, market cap, liquidity, migration state,
+    age, risk), 1m/5m flow windows, price/liquidity/volume series, the live
+    activity feed from real trade events, the latest decision, external
+    links and the open position (for SELL)."""
+    meta = await pump_stream.load_meta(redis, mint)
+    curve = await pump_stream.load_curve(redis, mint)
+    trades = await pump_stream.load_trades(redis, mint)
+    a = (await db.execute(select(RiskAssessment).where(RiskAssessment.asset_id == mint)
+                          .order_by(RiskAssessment.evaluated_at.desc()).limit(1))).scalar_one_or_none()
+    if meta is None and curve is None and not trades and a is None:
+        raise HTTPException(404, "mint not seen by this platform")
+    mig = await redis.zscore(pump_stream.MIGRATED, mint)
+    now = datetime.now(timezone.utc)
+    view = token_market_view(mint, meta, curve, trades, now, a.assessment if a else None,
+                             datetime.fromtimestamp(float(mig), tz=timezone.utc) if mig else None)
+    if a is not None and view.get("decision"):
+        view["decision"]["assessment_id"] = str(a.id)
+    pos = (await db.execute(select(PaperPosition).where(PaperPosition.asset_id == mint,
+                                                        PaperPosition.status.in_(("open", "pending_entry")))
+                            .order_by(PaperPosition.created_at.desc()).limit(1))).scalar_one_or_none()
+    view["position"] = None if pos is None else {
+        "id": str(pos.id), "status": pos.status, "mode": pos.execution_mode, "route": pos.execution_route,
+        "entry_price": str(pos.entry_price), "last_price": str(pos.last_price) if pos.last_price is not None else None,
+        "remaining_quantity": str(pos.remaining_quantity) if pos.remaining_quantity is not None else None,
+        "entry_cost_sol": str(pos.entry_cost_quote) if pos.entry_cost_quote is not None else None}
+    return jsonable(view)

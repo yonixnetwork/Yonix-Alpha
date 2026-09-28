@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Activity, ArrowRightLeft, Bell, Bot, Brain, CandlestickChart, ClipboardCheck, Coins, Eye, FlaskConical, Filter, Gauge, Grid3x3, Layers, LayoutDashboard, ListChecks, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Radio, Rocket, Scale, Send, Server, Settings, ShieldAlert, SlidersHorizontal, Network, Sparkles, TrendingUp, Wallet, WalletCards, Waves, Workflow, type LucideIcon } from "lucide-react";
+import { ArrowRightLeft, Bell, Brain, ClipboardCheck, Eye, FlaskConical, Filter, Gauge, LayoutDashboard, ListChecks, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Radio, Rocket, Search, Send, Server, Settings, ShieldAlert, SlidersHorizontal, Network, Sparkles, Wallet, WalletCards, Workflow, type LucideIcon } from "lucide-react";
 import NotificationsBell from "@/components/NotificationsBell";
 import RuntimeApply from "@/components/RuntimeApply";
 import { modeClass, stateClass } from "@/components/ui";
@@ -14,46 +14,30 @@ import { useApi } from "@/lib/useApi";
 
 type NavItem = { href: string; label: string; icon: LucideIcon };
 
+// Product focus: Solana memecoin trading. Futures, forex, Gold/BTC and the
+// other strategy pages are hidden from navigation (not deleted: their routes
+// and backends still exist and can be re-enabled by adding them back here).
 const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   { title: "", items: [{ href: "/dashboard", label: "Dashboard", icon: LayoutDashboard }] },
   {
-    title: "Solana",
+    title: "Market",
     items: [
       { href: "/dashboard/solana/fresh", label: "Fresh Tokens", icon: Sparkles },
-      { href: "/dashboard/solana/observing", label: "Fresh Observation", icon: Eye },
-      { href: "/dashboard/solana/migrated", label: "Migrated Tokens", icon: ArrowRightLeft },
+      { href: "/dashboard/solana/observing", label: "Observation", icon: Eye },
+      { href: "/dashboard/solana/migrated", label: "Migrated", icon: ArrowRightLeft },
       { href: "/dashboard/solana/momentum", label: "Momentum", icon: Rocket },
-    ],
-  },
-  {
-    title: "Futures",
-    items: [
-      { href: "/dashboard/venues/binance", label: "Binance Futures", icon: CandlestickChart },
-      { href: "/dashboard/venues/bybit", label: "Bybit", icon: TrendingUp },
-      { href: "/dashboard/venues/hyperliquid", label: "Hyperliquid", icon: Waves },
-    ],
-  },
-  {
-    title: "Strategies",
-    items: [
-      { href: "/dashboard/strategies", label: "All Strategies", icon: Layers },
-      { href: "/dashboard/strategies/meta_muse", label: "Meta Muse", icon: Activity },
-      { href: "/dashboard/strategies/confluence_matrix", label: "Confluence Matrix", icon: ListChecks },
-      { href: "/dashboard/strategies/hyperliquid_grid", label: "Hyperliquid Grid", icon: Grid3x3 },
-      { href: "/dashboard/strategies/gold_btc_trend", label: "Gold vs BTC Trend", icon: TrendingUp },
-      { href: "/dashboard/strategies/gold_vs_btc", label: "Gold vs BTC Ratio", icon: Scale },
+      { href: "/dashboard/tokens", label: "Token Explorer", icon: Search },
     ],
   },
   {
     title: "Trading",
     items: [
+      { href: "/dashboard/positions", label: "Open Positions", icon: Wallet },
+      { href: "/dashboard/trades", label: "Trades", icon: ListChecks },
       { href: "/dashboard/decisions", label: "Decisions", icon: ClipboardCheck },
-      { href: "/dashboard/paper", label: "Paper Trading", icon: Wallet },
-      { href: "/dashboard/live", label: "Live Execution", icon: Send },
-      { href: "/dashboard/wallets", label: "Wallets (Live / Paper)", icon: WalletCards },
-      { href: "/dashboard/smoke-test", label: "Live Smoke Test", icon: FlaskConical },
       { href: "/dashboard/funnel", label: "Execution Funnel", icon: Workflow },
-      { href: "/dashboard/candidates", label: "Candidates", icon: Coins },
+      { href: "/dashboard/live", label: "Live Execution", icon: Send },
+      { href: "/dashboard/wallets", label: "Wallets", icon: WalletCards },
     ],
   },
   {
@@ -66,20 +50,20 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   {
     title: "Risk",
     items: [
-      { href: "/dashboard/risk-settings", label: "Risk Settings", icon: ShieldAlert },
-      { href: "/dashboard/rules", label: "Word Filters & Rules", icon: Filter },
+      { href: "/dashboard/risk-settings", label: "Risk", icon: ShieldAlert },
+      { href: "/dashboard/rules", label: "Filters", icon: Filter },
       { href: "/dashboard/risk", label: "Kill Switch", icon: Radio },
     ],
   },
   {
     title: "System",
     items: [
+      { href: "/dashboard/rpc", label: "RPC / Data Providers", icon: Network },
+      { href: "/dashboard/settings", label: "Settings", icon: Settings },
       { href: "/dashboard/health", label: "System Health", icon: Server },
       { href: "/dashboard/config", label: "Configuration Health", icon: SlidersHorizontal },
-      { href: "/dashboard/rpc", label: "RPC & Data Providers", icon: Network },
-      { href: "/dashboard/bots", label: "External Bots", icon: Bot },
       { href: "/dashboard/notifications", label: "Notifications", icon: Bell },
-      { href: "/dashboard/settings", label: "Settings", icon: Settings },
+      { href: "/dashboard/smoke-test", label: "Live Smoke Test", icon: FlaskConical },
     ],
   },
 ];
@@ -87,7 +71,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
 const COLLAPSE_KEY = "yonixalpha_nav_collapsed";
 
 function isActive(pathname: string, href: string): boolean {
-  if (href === "/dashboard" || href === "/dashboard/strategies" || href === "/dashboard/ml") return pathname === href;
+  if (href === "/dashboard" || href === "/dashboard/ml" || href === "/dashboard/tokens") return pathname === href;
   return pathname === href || pathname.startsWith(href + "/");
 }
 
@@ -111,7 +95,7 @@ function TopbarSummary() {
     <>
       <div className="balances" aria-label="Paper balances">
         {data.accounts
-          .filter((a) => a.open_positions > 0 || a.name === "solana" || a.name === "binance_futures")
+          .filter((a) => a.name === "solana" || a.name === "live_solana")
           .map((a) => {
             const pnl = Number(a.realized_pnl_today);
             return (
@@ -127,7 +111,7 @@ function TopbarSummary() {
             );
           })}
       </div>
-      <Link href="/dashboard/paper" className="pill pill-off" title="Open paper positions">
+      <Link href="/dashboard/positions" className="pill pill-off" title="Open positions">
         {data.open_positions} open
       </Link>
       <span className={modeClass(data.global_mode)} title="Global execution mode">

@@ -2,8 +2,8 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { Coins } from "lucide-react";
-import { Empty, ErrorNotice, Loading, Money, PageHeader, Section, Stat } from "@/components/ui";
+import TokenTerminal from "@/components/TokenTerminal";
+import { Empty, ErrorNotice, Loading, Money, Section, Stat } from "@/components/ui";
 import { formatDate, formatDecimal, formatState, gateDecisionPillClass } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
 
@@ -21,17 +21,20 @@ export default function TokenDetailPage() {
   const trades: any[] = data.stream?.recent_trades ?? [];
   return (
     <div>
-      <PageHeader title={t.symbol || meta.symbol || "Token"} icon={<Coins size={20} aria-hidden />} subtitle={<span className="mono">{mint}</span>} />
-      <div className="stat-grid">
-        <Stat label="Name">{t.name || meta.name || "—"}</Stat>
-        <Stat label="Creator">
-          <span className="mono">{t.creator || meta.creator || "—"}</span>
-        </Stat>
-        <Stat label="First seen">{formatDate(t.first_seen_at ?? null)}</Stat>
-        <Stat label="Curve complete">{curve ? (curve.complete ? "yes (migrated)" : "no") : "—"}</Stat>
-        <Stat label="Real SOL in curve">{curve?.rsol !== undefined && curve?.rsol !== null ? formatDecimal(String(curve.rsol / 1e9), 4) : "—"}</Stat>
-        <Stat label="Stream trades held">{trades.length}</Stat>
-      </div>
+      <TokenTerminal mint={mint} />
+      <details className="term-more">
+        <summary>Registry, creator and stream details</summary>
+        <div className="stat-grid">
+          <Stat label="Name">{t.name || meta.name || "—"}</Stat>
+          <Stat label="Creator">
+            <span className="mono">{t.creator || meta.creator || "—"}</span>
+          </Stat>
+          <Stat label="First seen">{formatDate(t.first_seen_at ?? null)}</Stat>
+          <Stat label="Curve complete">{curve ? (curve.complete ? "yes (migrated)" : "no") : "—"}</Stat>
+          <Stat label="Real SOL in curve">{curve?.rsol !== undefined && curve?.rsol !== null ? formatDecimal(String(curve.rsol / 1e9), 4) : "—"}</Stat>
+          <Stat label="Stream trades held">{trades.length}</Stat>
+        </div>
+      </details>
       <Section title="Safety-gate decisions">
         {data.assessments.length === 0 ? (
           <Empty>Not assessed.</Empty>
@@ -100,45 +103,11 @@ export default function TokenDetailPage() {
           </ul>
         )}
       </Section>
-      <Section title="Recent stream trades">
-        {trades.length === 0 ? (
-          <Empty>No trades held in the live stream window.</Empty>
-        ) : (
-          <div className="table-wrap">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Time</th>
-                  <th>Side</th>
-                  <th>Wallet</th>
-                  <th>SOL</th>
-                </tr>
-              </thead>
-              <tbody>
-                {trades
-                  .slice(-30)
-                  .reverse()
-                  .map((tr: any, i: number) => (
-                    <tr key={i}>
-                      <td className="muted">{formatDate(tr.at)}</td>
-                      <td>
-                        <span className={tr.is_buy ? "pill pill-ok" : "pill pill-danger"}>{tr.is_buy ? "BUY" : "SELL"}</span>
-                      </td>
-                      <td className="mono">
-                        {String(tr.trader).slice(0, 4)}…{String(tr.trader).slice(-4)}
-                      </td>
-                      <td>{(tr.sol_lamports / 1e9).toFixed(4)}</td>
-                    </tr>
-                  ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Section>
       {data.latest_evidence && (
-        <Section title="Latest evidence">
+        <details className="term-more">
+          <summary>Latest evidence (raw)</summary>
           <pre className="json">{JSON.stringify(data.latest_evidence, null, 2)}</pre>
-        </Section>
+        </details>
       )}
     </div>
   );
