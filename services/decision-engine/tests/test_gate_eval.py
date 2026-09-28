@@ -95,7 +95,10 @@ async def test_waiting_candidate_times_out(db_session, redis_client):
     a = await evaluate_with_gate(db_session, redis_client, ENV, src, cand, NOW)
     assert a.decision.value == "NO_TRADE" and cand.state == CandidateState.ANALYZING.value
     await redis_client.delete(f"yx:gate:pace:{cand.id}")
-    await evaluate_with_gate(db_session, redis_client, ENV, src, cand, NOW + timedelta(minutes=31))
+    # The transition stamps the wall clock, not NOW: measure 31 minutes from
+    # the recorded analysis start so a slow test run can't shorten the wait.
+    started = datetime.fromisoformat(next(e["at"] for e in cand.state_history if e["state"] == CandidateState.ANALYZING.value))
+    await evaluate_with_gate(db_session, redis_client, ENV, src, cand, started + timedelta(minutes=31))
     assert cand.state == CandidateState.REJECTED.value
 
 
