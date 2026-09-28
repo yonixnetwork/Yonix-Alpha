@@ -8,6 +8,7 @@ WAIT finding. The assembler never decides anything itself.
 """
 
 import base64
+import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -237,6 +238,17 @@ async def _creator_and_name(src: Sources, inp: AssessmentInput, c: Controls, met
             inp.duplicate_of = await pump_stream.duplicate_of(src.redis, mint, inp.token_name)
 
 
+async def _timed(ev: dict[str, Any], name: str, awaitable):
+    """Awaits and records how long it took in ev["timings_ms"] (the
+    decision's data-assembly latency, per source)."""
+    t0 = time.monotonic()
+    try:
+        return await awaitable
+    finally:
+        timings = ev.setdefault("timings_ms", {})
+        timings[name] = timings.get(name, 0) + int((time.monotonic() - t0) * 1000)
+
+
 def _base_input(engine: str, strategy: str, mint: str, symbol: str, now: datetime, c: Controls) -> AssessmentInput:
     return AssessmentInput(
         engine=engine, strategy_name=strategy, asset_id=mint, symbol=symbol, now=now,
@@ -264,7 +276,7 @@ async def assemble_fresh(src: Sources, mint: str, now: datetime, c: Controls,
     strategy = "fresh_launch_flow" if engine == "solana_fresh" else "solana_momentum"
     inp = _base_input(engine, strategy, mint, symbol, now, c)
 
-    token, err = await fetch_mint(src.rpc, mint, now)
+    token, err = await _timed(ev, "mint_rpc", fetch_mint(src.rpc, mint, now))
     if err:
         ev["errors"].append(err)
     inp.token = token
@@ -273,7 +285,7 @@ async def assemble_fresh(src: Sources, mint: str, now: datetime, c: Controls,
     curve: BondingCurveState | None = None
     curve_obs: datetime | None = None
     if curve_addr:
-        curve, err = await fetch_curve(src.rpc, curve_addr)
+        curve, err = await _timed(ev, "curve_rpc", fetch_curve(src.rpc, curve_addr))
         if err:
             ev["errors"].append(err)
         else:
@@ -343,14 +355,14 @@ async def assemble_fresh(src: Sources, mint: str, now: datetime, c: Controls,
     inp.flow.sync_buy_cluster = synchronized_buy_cluster(trades, now, FLOW_WINDOW_SECONDS)
     inp.flow.round_trip_share = round_trip_volume_share(trades, now, FLOW_WINDOW_SECONDS)
     inp.flow.creator_launches_24h = await pump_stream.creator_launches(src.redis, creator, now)
-    await _wallet_analysis(src, inp, trades, creator, now, decimals, c, ev)
-    await _creator_and_name(src, inp, c, meta, mint, curve_addr, now, ev)
+    await _timed(ev, "wallet_analysis", _wallet_analysis(src, inp, trades, creator, now, decimals, c, ev))
+    await _timed(ev, "creator_and_name", _creator_and_name(src, inp, c, meta, mint, curve_addr, now, ev))
     inp.entry_exit_check = entry_exit_check(trades, now, creator, inp.market.liquidity_quote if inp.market else None,
                                             c.settings)
     ev["entry_exit_check"] = inp.entry_exit_check
 
     if token is not None and curve_addr:
-        inp.holders, err = await fetch_holders(src.rpc, mint, token.supply_raw, {curve_addr}, creator, now)
+        inp.holders, err = await _timed(ev, "holders_rpc", fetch_holders(src.rpc, mint, token.supply_raw, {curve_addr}, creator, now))
         if err:
             ev["errors"].append(err)
 
@@ -389,7 +401,7 @@ async def assemble_migrated(src: Sources, mint: str, now: datetime, c: Controls)
     ev: dict[str, Any] = {"errors": [], "source": "PUMPFUN", "lifecycle": "MIGRATED", "creator": creator}
     inp = _base_input("solana_migration", "post_migration_flow", mint, symbol, now, c)
 
-    token, err = await fetch_mint(src.rpc, mint, now)
+    token, err = await _timed(ev, "mint_rpc", fetch_mint(src.rpc, mint, now))
     if err:
         ev["errors"].append(err)
     inp.token = token
@@ -402,9 +414,9 @@ async def assemble_migrated(src: Sources, mint: str, now: datetime, c: Controls)
     pool_state = None
     if decimals is not None:
         try:
-            pool_trades = await pumpswap.recent_pool_trades(src.rpc, src.redis, pool_addr)
+            pool_trades = await _timed(ev, "pool_trades_rpc", pumpswap.recent_pool_trades(src.rpc, src.redis, pool_addr))
             fee_bps = pool_trades[-1].fee_bps if pool_trades else None
-            pool_state = await pumpswap.fetch_pool(src.rpc, mint, now, fee_bps, decimals)
+            pool_state = await _timed(ev, "pool_state_rpc", pumpswap.fetch_pool(src.rpc, mint, now, fee_bps, decimals))
             trades = [pumpswap.as_flow_trade(t) for t in pool_trades]
             ev["pool"].update(verified=True, base_reserve_raw=pool_state.base_reserve_raw,
                               quote_reserve_lamports=pool_state.quote_reserve_lamports, fee_bps=fee_bps,
@@ -449,7 +461,7 @@ async def assemble_migrated(src: Sources, mint: str, now: datetime, c: Controls)
         inp.flow.sync_buy_cluster = synchronized_buy_cluster(trades, now, FLOW_WINDOW_SECONDS)
         inp.flow.round_trip_share = round_trip_volume_share(trades, now, FLOW_WINDOW_SECONDS)
         inp.flow.creator_launches_24h = await pump_stream.creator_launches(src.redis, creator, now)
-        await _wallet_analysis(src, inp, trades, creator, now, decimals, c, ev)
+        await _timed(ev, "wallet_analysis", _wallet_analysis(src, inp, trades, creator, now, decimals, c, ev))
         # Same pool flow exit intelligence reads for a PumpSwap position.
         inp.entry_exit_check = entry_exit_check(trades, now, creator, pool_state.liquidity_sol, c.settings)
         ev["entry_exit_check"] = inp.entry_exit_check
@@ -460,23 +472,23 @@ async def assemble_migrated(src: Sources, mint: str, now: datetime, c: Controls)
         inp.market = MarketInfo(observation=Observation("pump_stream", now), price=None, volatility=None,
                                 liquidity_quote=None, age_seconds=None, curve_complete=True, migrated=False)
 
-    await _creator_and_name(src, inp, c, meta, mint, meta.get("bonding_curve") or None, now, ev)
+    await _timed(ev, "creator_and_name", _creator_and_name(src, inp, c, meta, mint, meta.get("bonding_curve") or None, now, ev))
     if pool_state is not None and c.settings.migrated_liquidity_check:
-        inp.sol_usd, inp.sol_usd_source, errs = await sol_price.sol_usd(src.redis, src.jupiter, src.dexscreener, mint, now)
+        inp.sol_usd, inp.sol_usd_source, errs = await _timed(ev, "sol_usd", sol_price.sol_usd(src.redis, src.jupiter, src.dexscreener, mint, now))
         ev["sol_usd"] = {"price": str(inp.sol_usd) if inp.sol_usd is not None else None, "source": inp.sol_usd_source}
         ev["errors"].extend(errs)
 
     if src.jupiter is not None and token is not None and pool_state is not None:
-        quote, qev = await src.jupiter.execution_quote(
+        quote, qev = await _timed(ev, "jupiter_quote", src.jupiter.execution_quote(
             mint, c.settings.max_position_size_quote, Decimal("0.01"), c.settings.max_slippage_bps
-        )
+        ))
         ev["jupiter_cross_check"] = qev
         if quote is not None and (quote.buy_route_available is False or quote.sell_route_available is False):
             # An aggregator that can't route the pool is a warning sign; use its (failing) quote so the gate blocks.
             inp.quote = quote
 
     if token is not None and pool_state is not None:
-        inp.holders, err = await fetch_holders(src.rpc, mint, token.supply_raw, {pool_addr}, creator, now)
+        inp.holders, err = await _timed(ev, "holders_rpc", fetch_holders(src.rpc, mint, token.supply_raw, {pool_addr}, creator, now))
         if err:
             ev["errors"].append(err)
 

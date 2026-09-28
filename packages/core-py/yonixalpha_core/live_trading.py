@@ -31,7 +31,7 @@ from redis.asyncio import Redis
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yonixalpha_core import events, paper_engine
+from yonixalpha_core import events, execution_analysis, paper_engine
 from yonixalpha_core.db.models import (
     ExecutionOrder, PaperAccount, PaperPosition, PlatformSetting, ReconciliationEvent, TradeTimelineEvent, TradingCandidate,
 )
@@ -217,6 +217,7 @@ async def enter_live(session: AsyncSession, redis: Redis | None, account: PaperA
                 "max_fee_transfer_lamports": int(size * LAMPORTS * live.max_platform_fee_bps / 10_000),
                 "max_priority_fee_lamports": int(live.max_priority_fee_sol * LAMPORTS)},
         status="PENDING", idempotency_key=f"entry:{assessment_id}",
+        diagnostics={"decision": provenance.get("decision")} if provenance.get("decision") else None,
     )
     session.add(order)
     await session.flush()
@@ -254,6 +255,9 @@ async def request_live_exit(session: AsyncSession, position: PaperPosition, quan
                 + 10_000,
                 "max_priority_fee_lamports": int(live.max_priority_fee_sol * LAMPORTS), "decimals": decimals},
         status="PENDING", idempotency_key=f"exit:{position.id}:{reason}:{seq}:{int(now.timestamp())}",
+        diagnostics={"decision": {"decision_at": now.isoformat(), "approval_at": now.isoformat(), "exit_reason": reason,
+                                  "price_sol": str(expected_sol_out / quantity) if expected_sol_out and quantity else None,
+                                  "expected_sol_out": str(expected_sol_out) if expected_sol_out is not None else None}},
     )
     session.add(order)
     await session.flush()
@@ -290,6 +294,13 @@ async def apply_outcome(session: AsyncSession, redis: Redis | None, app_settings
     order.guard = outcome.guard or order.guard
     order.updated_at = now
     position = await session.get(PaperPosition, order.position_id) if order.position_id else None
+    if outcome.status == "CONFIRMED" and outcome.fill is not None:
+        order.status = "CONFIRMED"  # the analysis reads the final status; set again below
+    try:
+        cand = await session.get(TradingCandidate, position.candidate_id) if position is not None and position.candidate_id else None
+        order.diagnostics = execution_analysis.analyze(order, position, cand)
+    except Exception as exc:  # noqa: BLE001 - diagnostics must never block applying a fill
+        order.diagnostics = {**(order.diagnostics or {}), "analysis_error": f"{type(exc).__name__}: {exc}"[:300]}
     account = await session.get(PaperAccount, position.account_id) if position is not None else None
     fill = outcome.fill
 

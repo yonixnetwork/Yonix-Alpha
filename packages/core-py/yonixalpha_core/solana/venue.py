@@ -52,6 +52,7 @@ class Venue:
     pool: AmmPoolInfo | None = None
     pool_base_reserve: int | None = None
     pool_quote_reserve: int | None = None  # effective: vault + virtual quote reserves
+    pool_virtual_quote: int | None = None
     jupiter_quote: dict[str, Any] | None = None
     checks: list[str] = field(default_factory=list)  # what was verified, for the funnel
 
@@ -68,7 +69,7 @@ class Venue:
                             "mayhem": self.curve.is_mayhem_mode, "cashback": self.curve.is_cashback_coin}
         if self.pool is not None:
             out["pool"] = {"address": self.pool.pool, "base_reserve": self.pool_base_reserve,
-                           "quote_reserve": self.pool_quote_reserve}
+                           "quote_reserve": self.pool_quote_reserve, "virtual_quote": self.pool_virtual_quote}
         if self.jupiter_quote is not None:
             q = self.jupiter_quote
             out["jupiter"] = {"outAmount": q.get("outAmount"), "priceImpactPct": q.get("priceImpactPct"),
@@ -156,6 +157,7 @@ async def resolve(rpc, mint: str, *, side: str = "buy", amount_raw: int | None =
                              is_mayhem_mode=acct.is_mayhem_mode, is_cashback_coin=acct.is_cashback_coin,
                              account_size=len(raw))
         v.pool_base_reserve, v.pool_quote_reserve = base, quote
+        v.pool_virtual_quote = acct.virtual_quote_reserves
         v.reason = "canonical PumpSwap pool" + (" (bonding curve complete)" if curve is not None else "")
         v.checks.append(f"pool {pool_addr}: base {base}, quote {quote}")
         return v

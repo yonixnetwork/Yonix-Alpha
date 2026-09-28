@@ -10,7 +10,7 @@ from app.api.deps import get_current_username, get_db, get_redis
 from app.api.util import audit, jsonable
 from app.schemas.common import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, Page
 from app.schemas.paper import PaperPositionOut
-from yonixalpha_core import events, paper_execution
+from yonixalpha_core import execution_analysis, events, paper_execution
 from yonixalpha_core.db.models import (
     ExecutionOrder, PaperAccount, PaperOrder, PaperPosition, PlatformSetting, RiskAssessment, TradeTimelineEvent,
 )
@@ -46,6 +46,16 @@ async def list_positions(
     return Page(items=[PaperPositionOut.model_validate(p) for p in positions], total=total, limit=limit, offset=offset)
 
 
+def _diagnostics(o: ExecutionOrder) -> dict:
+    """Stored execution diagnostics; for orders placed before they existed,
+    the timing is computed from the recorded stages (nothing estimated)."""
+    diag = dict(o.diagnostics or {})
+    if "timing" not in diag and o.result:
+        diag["timing"] = execution_analysis.timing(o.created_at, o.result, diag.get("decision"))
+        diag["timing_reconstructed"] = True
+    return diag
+
+
 @router.get("/positions/{position_id}")
 async def get_position(position_id: UUID, db: AsyncSession = Depends(get_db), _: str = Depends(get_current_username)) -> dict:
     """Trade details: the position, the decision that opened it, every
@@ -76,7 +86,8 @@ async def get_position(position_id: UUID, db: AsyncSession = Depends(get_db), _:
         "orders": [{"id": o.id, "side": o.side, "reason": o.reason, "status": o.status, "route": o.route, "provider": o.provider,
                     "amount": o.amount, "amount_kind": o.amount_kind, "slippage_pct": o.slippage_pct, "signature": o.signature,
                     "error": o.error, "fill": (o.result or {}).get("fill"), "created_at": o.created_at,
-                    "confirmed_at": o.confirmed_at} for o in orders],
+                    "confirmed_at": o.confirmed_at, "stage": (o.result or {}).get("stage"),
+                    "diagnostics": _diagnostics(o)} for o in orders],
     })
 
 

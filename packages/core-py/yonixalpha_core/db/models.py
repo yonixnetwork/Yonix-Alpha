@@ -619,6 +619,9 @@ class ExecutionOrder(Base):
     error: Mapped[str | None] = mapped_column(String(500), nullable=True)
     guard: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Decision context at the BUY/SELL decision, stage timings and the
+    # price-execution analysis (yonixalpha_core.execution_analysis).
+    diagnostics: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -226,4 +226,28 @@ export interface ExecutionOrderRow {
   mint?: string;
   attempts?: number;
   position_id?: string | null;
+  stage?: string | null;
+  diagnostics?: ExecutionDiagnostics | null;
+}
+
+export interface ExecutionTiming {
+  timestamps?: Record<string, string | null>;
+  decision_eval_ms?: number | null; queue_wait_ms?: number | null; quote_latency_ms?: number | null; build_ms?: number | null;
+  guard_and_recheck_ms?: number | null; simulation_ms?: number | null; submission_latency_ms?: number | null;
+  submit_to_seen_ms?: number | null; submit_to_confirm_ms?: number | null; decision_to_submit_ms?: number | null;
+  decision_to_confirm_ms?: number | null; rpc_latency_ms?: number | null; rpc_latency_before_submit_ms?: number | null;
+  rpc_calls_before_submit?: number | null; slots_to_land?: number | null; discovery_to_decision_ms?: number | null;
+  approval_to_order_ms?: number | null;
+}
+
+export interface ExecutionDiagnostics {
+  decision?: Record<string, any> | null;
+  timing?: ExecutionTiming;
+  timing_reconstructed?: boolean;
+  price?: {
+    classification: string | null; evidence: string[]; components_pct: Record<string, string | null>;
+    decision_price_sol?: string | null; spot_at_build_sol?: string | null; expected_price_sol?: string | null;
+    spot_before_trade_sol?: string | null; trade_price_sol?: string | null; all_in_price_sol?: string | null;
+    network_fee_sol?: string | null; priority_fee_sol?: string | null;
+  };
 }

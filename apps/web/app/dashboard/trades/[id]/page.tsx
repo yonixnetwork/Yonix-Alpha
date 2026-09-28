@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { Crosshair } from "lucide-react";
+import ExecutionDiagnostics from "@/components/ExecutionDiagnostics";
 import { ErrorNotice, Loading, Money, PageHeader, Section, Stat } from "@/components/ui";
 import type { TradeDetail } from "@/lib/cc";
 import { formatDate, formatDecimal, formatPct, gateDecisionPillClass } from "@/lib/format";
@@ -141,6 +142,11 @@ export default function TradeDetailPage() {
               ))}
             </tbody>
           </table>
+        </Section>
+      )}
+      {(data.orders ?? []).some((o) => o.diagnostics) && (
+        <Section title="Execution latency & price">
+          {(data.orders ?? []).map((o) => <ExecutionDiagnostics key={o.id} order={o} />)}
         </Section>
       )}
       <Section title="Timeline">

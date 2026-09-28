@@ -100,7 +100,8 @@ async def test_1_fresh_token_without_a_dex_pool_trades_on_the_bonding_curve(toke
     assert out.status == "CONFIRMED", (out.error, out.stages)
     assert out.venue["venue"] == "PUMP_BONDING_CURVE" and out.provider == "native_pump"
     assert stage_names(out) == ["VENUE_RESOLVED", "TRANSACTION_BUILT", "TRANSACTION_GUARD_PASSED", "TRANSACTION_SIGNED",
-                                "SIMULATED", "TRANSACTION_SUBMITTED", "TRANSACTION_CONFIRMED", "FILL_VERIFIED"]
+                                "SIMULATED", "TRANSACTION_SUBMITTED", "TRANSACTION_SEEN", "TRANSACTION_CONFIRMED",
+                                "FILL_VERIFIED"]
     tx = sent_tx(chain)
     assert p.PUMP in programs(tx) and p.PUMP_AMM not in programs(tx)
     buy = [ix for ix in tx.message.instructions if str(tx.message.account_keys[ix.program_id_index]) == p.PUMP][0]
@@ -108,6 +109,11 @@ async def test_1_fresh_token_without_a_dex_pool_trades_on_the_bonding_curve(toke
     amount, max_cost = struct.unpack_from("<QQ", bytes(buy.data), 8)
     assert max_cost <= 110_000_000 and amount > 0
     assert persisted == [out.signature] and out.guard["fee_transfers_lamports"] == 0
+    # Latency trace: every RPC call the executor made is timed, in order.
+    methods = [c["method"] for c in out.rpc_calls]
+    assert methods[:2] == ["getMultipleAccounts", "getAccountInfo"] and "sendTransaction" in methods
+    before_send = methods[:methods.index("sendTransaction")]
+    assert before_send.count("getLatestBlockhash") == 1 and "simulateTransaction" in before_send
 
 
 # --- Test 2: migrates between build and signing -----------------------------

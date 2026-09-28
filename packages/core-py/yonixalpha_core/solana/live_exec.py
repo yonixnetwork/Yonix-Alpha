@@ -27,6 +27,7 @@ from typing import Any, Awaitable, Callable
 
 from solders.transaction import VersionedTransaction
 
+from yonixalpha_core.execution_analysis import own_trade_event
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.solana import venue as venues
 from yonixalpha_core.solana.rpc import get_transaction_params, with_priority
@@ -70,6 +71,9 @@ class ExecOutcome:
     venue: dict[str, Any] | None = None
     provider: str | None = None
     unsigned_tx: str | None = None  # base64, kept only when the guard refused it (for diagnosis; unsigned)
+    trade_event: dict[str, Any] | None = None  # our decoded Pump/PumpSwap trade event (execution analysis)
+    seen: dict[str, Any] | None = None  # status seen before confirmation (slot, confirmationStatus)
+    rpc_calls: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         f = self.fill
@@ -77,6 +81,7 @@ class ExecOutcome:
             "status": self.status, "signature": self.signature, "error": self.error, "sent": self.sent,
             "guard": self.guard, "logs": self.logs[-30:], "stage": self.stage, "stages": self.stages,
             "venue": self.venue, "provider": self.provider, "unsigned_tx": self.unsigned_tx,
+            "trade_event": self.trade_event, "rpc_calls": self.rpc_calls[-40:],
             "fill": None if f is None else {
                 "sol_change_lamports": f.sol_change_lamports, "token_change_raw": f.token_change_raw,
                 "fee_lamports": f.fee_lamports, "token_decimals": f.token_decimals, "slot": f.slot, "block_time": f.block_time,
@@ -119,12 +124,37 @@ def parse_fill(tx: dict, wallet: str, mint: str) -> Fill:
                 token_decimals=d2 if d2 is not None else d1, slot=tx.get("slot"), block_time=tx.get("blockTime"))
 
 
+class _RpcRecorder:
+    """Times every RPC call the executor makes (method, endpoint, ms), for
+    the execution latency trace. Behaviour is unchanged."""
+
+    def __init__(self, inner: Any):
+        self._inner = inner
+        self.calls: list[dict[str, Any]] = []
+
+    async def call(self, method: str, params: list | None = None) -> Any:
+        started, t0 = time.time(), time.monotonic()
+        ok = False
+        try:
+            result = await self._inner.call(method, params)
+            ok = True
+            return result
+        finally:
+            if len(self.calls) >= 200:  # lookups between orders (reconciliation) never grow it unbounded
+                del self.calls[:100]
+            self.calls.append({"method": method, "at": round(started, 3), "ms": int((time.monotonic() - t0) * 1000),
+                               "ok": ok, "endpoint": getattr(self._inner, "active_label", None)})
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
 class SolanaLiveExecutor:
     def __init__(self, rpc, pumpportal: PumpPortalClient | None, wallet: LiveWallet,
                  confirm_timeout: float = CONFIRM_TIMEOUT_SECONDS, sleep=asyncio.sleep, clock=time.monotonic,
                  jupiter=None, builder: str = "native"):
         # Trade execution is critical traffic: never shed behind background work.
-        self.rpc, self.pp, self.wallet = with_priority(rpc, "critical"), pumpportal, wallet
+        self.rpc, self.pp, self.wallet = _RpcRecorder(with_priority(rpc, "critical")), pumpportal, wallet
         self.confirm_timeout, self._sleep, self._clock = confirm_timeout, sleep, clock
         self.jupiter = jupiter
         self.builder = builder  # "native" | "pumpportal" (Pump venues only); set per order from live settings
@@ -157,13 +187,14 @@ class SolanaLiveExecutor:
     async def execute(self, req: TradeRequest, exp: GuardExpectation,
                       on_signed: Callable[[str], Awaitable[None]]) -> ExecOutcome:
         stages: list[dict[str, Any]] = []
+        calls = self.rpc.calls = []
 
         def stage(name: str, **detail: Any) -> None:
             stages.append({"stage": name, "at": time.time(), **detail})
 
         def fail(stage_name: str, error: str, **kw: Any) -> ExecOutcome:
             stage(stage_name, error=error)
-            return ExecOutcome("FAILED", error=error, stage=stage_name, stages=stages, **kw)
+            return ExecOutcome("FAILED", error=error, stage=stage_name, stages=stages, rpc_calls=calls, **kw)
 
         if req.public_key != self.wallet.pubkey or exp.wallet != self.wallet.pubkey:
             return fail("REQUEST_REJECTED", "request is not for the configured wallet")
@@ -193,7 +224,7 @@ class SolanaLiveExecutor:
             if not report.ok:
                 stage("TRANSACTION_GUARD_REJECTED", violations=report.violations)
                 return ExecOutcome("FAILED", error="transaction guard refused to sign: " + "; ".join(report.violations),
-                                   guard=report.to_dict(), stage="TRANSACTION_GUARD_REJECTED", stages=stages,
+                                   guard=report.to_dict(), stage="TRANSACTION_GUARD_REJECTED", stages=stages, rpc_calls=calls,
                                    venue=venue.summary(), provider=built.provider,
                                    unsigned_tx=base64.b64encode(bytes(built.tx)).decode())
             stage("TRANSACTION_GUARD_PASSED", programs=report.programs)
@@ -214,7 +245,8 @@ class SolanaLiveExecutor:
         wire = base64.b64encode(bytes(signed)).decode()
         await on_signed(signature)
         stage("TRANSACTION_SIGNED", signature=signature)
-        common = {"guard": report.to_dict(), "stages": stages, "venue": venue.summary(), "provider": built.provider}
+        common = {"guard": report.to_dict(), "stages": stages, "venue": venue.summary(), "provider": built.provider,
+                  "rpc_calls": calls}
 
         try:
             sim = await self.rpc.call("simulateTransaction", [wire, {"encoding": "base64", "sigVerify": True,
@@ -232,6 +264,7 @@ class SolanaLiveExecutor:
 
         outcome = await self._send_and_confirm(wire, signature, req.mint, report.to_dict(), stage)
         outcome.stages, outcome.venue, outcome.provider = stages, venue.summary(), built.provider
+        outcome.rpc_calls = calls
         return outcome
 
     async def _send_and_confirm(self, wire: str, signature: str, mint: str, guard: dict, stage=None) -> ExecOutcome:
@@ -239,6 +272,7 @@ class SolanaLiveExecutor:
         start = self._clock()
         last_send = None
         sent = False
+        seen_recorded = False
         while self._clock() - start < self.confirm_timeout:
             if last_send is None or self._clock() - last_send >= REBROADCAST_SECONDS:
                 # Re-sending the SAME signed transaction is idempotent: one
@@ -254,6 +288,9 @@ class SolanaLiveExecutor:
                     log.warning("live.send_failed", signature=signature, error=type(exc).__name__)
                 last_send = self._clock()
             outcome = await self.lookup(signature, mint)
+            if outcome.seen is not None and not seen_recorded:
+                seen_recorded = True
+                stage("TRANSACTION_SEEN", **outcome.seen)
             if outcome.status != "PENDING":
                 outcome.guard, outcome.sent = guard, sent
                 self._record_final(outcome, stage)
@@ -291,8 +328,9 @@ class SolanaLiveExecutor:
             return ExecOutcome("PENDING", signature)
         if status.get("err") is not None:
             return ExecOutcome("FAILED", signature, error=f"transaction failed on chain: {status.get('err')}")
+        seen = {"slot": status.get("slot"), "status": status.get("confirmationStatus")}
         if status.get("confirmationStatus") not in ("confirmed", "finalized"):
-            return ExecOutcome("PENDING", signature)
+            return ExecOutcome("PENDING", signature, seen=seen)
         try:
             tx = await self.rpc.call("getTransaction", get_transaction_params(signature))
         except Exception as exc:  # noqa: BLE001
@@ -306,7 +344,12 @@ class SolanaLiveExecutor:
             fill = parse_fill(tx, self.wallet.pubkey, mint)
         except (KeyError, ValueError, IndexError, UnsupportedTransactionLayout) as exc:
             return ExecOutcome("FAILED", signature, error=f"confirmed but fill unreadable: {exc}")
-        return ExecOutcome("CONFIRMED", signature, fill=fill, logs=list((tx.get("meta") or {}).get("logMessages") or []))
+        logs = list((tx.get("meta") or {}).get("logMessages") or [])
+        try:
+            event = own_trade_event(logs, self.wallet.pubkey, mint)
+        except Exception:  # noqa: BLE001 - diagnostics only; the fill above is what counts
+            event = None
+        return ExecOutcome("CONFIRMED", signature, fill=fill, logs=logs, trade_event=event, seen=seen)
 
 
 async def wallet_balances(rpc, owner: str) -> tuple[int, dict[str, dict]]:

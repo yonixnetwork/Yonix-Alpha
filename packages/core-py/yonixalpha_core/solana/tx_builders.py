@@ -165,6 +165,8 @@ class NativePumpBuilder:
                                     Hash.from_string(value["blockhash"]))
         # Native transactions pay no platform fee: nothing may leave the wallet as one.
         exp.max_fee_transfer_lamports = 0
+        detail["blockhash_slot"] = ((blockhash or {}).get("context") or {}).get("slot")  # diagnostics only
+        detail["compute_unit_limit"] = CU_LIMIT[venue.kind]
         return BuiltTx(unsigned(msg), self.name, None, detail, value.get("lastValidBlockHeight"))
 
 

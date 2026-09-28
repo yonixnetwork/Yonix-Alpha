@@ -21,12 +21,13 @@ position and BUY order for the paper-trading service's order worker; the
 position only fills when the transaction confirms on chain.
 """
 
+import time
 from datetime import datetime
 
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yonixalpha_core import live_smoke, live_trading, paper_engine, paper_execution
+from yonixalpha_core import execution_analysis, live_smoke, live_trading, paper_engine, paper_execution
 from yonixalpha_core.ml.gate_features import FEATURE_VERSION
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import TradingCandidate
@@ -87,6 +88,7 @@ async def evaluate_with_gate(
     strategy signal; the outcome is written to operator["result"]."""
     engine = ENGINE_OF[candidate.engine]
     mint = candidate.detail["mint"]
+    eval_started = time.time()
 
     # Per-candidate pacing: each evaluation costs several RPC/HTTP calls.
     # A manual request is evaluated when it is made.
@@ -166,7 +168,17 @@ async def evaluate_with_gate(
 
     codes = {f.code for f in a.findings if f.action == a.decision}
     pool = ((evidence.get("pool") or {}).get("address")) if lifecycle == "MIGRATED" else None
-    provenance = {"source": "PUMPFUN", "lifecycle": lifecycle, "pool": pool, "strategy": a.strategy,
+    requested_at = None
+    if operator is not None and operator.get("requested_at"):
+        try:
+            requested_at = datetime.fromisoformat(operator["requested_at"]).timestamp()
+        except ValueError:
+            requested_at = None
+    decision_ctx = execution_analysis.decision_context(inp, evidence, a, eval_started, time.time(), lifecycle, requested_at)
+    meta = await pump_stream.load_meta(redis, mint) or {}
+    decision_ctx["token_created_at"] = int(meta["created_at"]) if meta.get("created_at") else None
+    decision_ctx["discovered_at"] = candidate.created_at.isoformat() if candidate.created_at else None
+    provenance = {"source": "PUMPFUN", "lifecycle": lifecycle, "pool": pool, "strategy": a.strategy, "decision": decision_ctx,
                   "model_version": a.versions.get("ml_model"), "feature_version": FEATURE_VERSION,
                   "venue": {"pool": pool, "creator": evidence.get("creator") or None,
                             "real_liquidity_at_entry": str(inp.market.liquidity_quote) if inp.market else None,
