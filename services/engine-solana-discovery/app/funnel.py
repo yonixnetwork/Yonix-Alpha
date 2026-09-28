@@ -27,11 +27,11 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yonixalpha_core import events, opportunities
+from yonixalpha_core import events, opportunities, wallet_intel
 from yonixalpha_core.db.models import Token, TokenEvent, TokenObservation, TradingCandidate
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.safety.settings import SafetySettings
-from yonixalpha_core.solana import observation, pump_stream
+from yonixalpha_core.solana import intel, launch_features, observation, pump_stream
 from yonixalpha_core.solana.codec import db_safe
 from yonixalpha_core.solana.flow import acceleration, in_window
 from yonixalpha_core.state_machine import CandidateState
@@ -160,7 +160,32 @@ async def _finalize(redis: Redis, rows: list[dict], mint: str, meta: dict[str, s
                  "decided_at": now})
 
 
-async def _store_observations(session_factory, rows: list[dict], now: datetime, redis: Redis) -> None:
+async def _ledger_intel(redis: Redis, mint: str, now: datetime, settings: SafetySettings) -> dict[str, Any] | None:
+    """The same causal launch intelligence the gate records (solana.intel +
+    wallet_intel), for an opportunity the observation window passed on.
+    Evidence only; a failure is recorded in place of it."""
+    try:
+        meta = await pump_stream.load_meta(redis, mint) or {}
+        trades = [t for t in await pump_stream.load_trades(redis, mint) if t.at <= now]
+        started = await redis.get(pump_stream.STREAM_STARTED)
+        started_ts = int(started) if started else None
+        created_ts = int(meta["created_at"]) if meta.get("created_at") else None
+        complete = launch_features.coverage(trades, created_ts, started_ts)["complete"] is True
+        wallets = await wallet_intel.assess(
+            redis, trades, now, wallet_intel.config(settings), complete_history=complete, mint=mint,
+            created_at=datetime.fromtimestamp(created_ts, tz=timezone.utc) if created_ts else None)
+        rec = intel.curve_intel(trades, now, settings, meta=meta, curve=None, curve_from_chain=False, decimals=6,
+                                supply_raw=int(opportunities.PUMP_SUPPLY_RAW), stream_started_ts=started_ts, funding=None,
+                                duplicate_of=None, dump_cluster=wallets.get("dump_cluster"),
+                                recycled_wallets=set(wallets.get("recycled_wallets") or []))
+        rec["wallets"] = wallets
+        return rec
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"{type(exc).__name__}: {str(exc)[:160]}"}
+
+
+async def _store_observations(session_factory, rows: list[dict], now: datetime, redis: Redis,
+                              settings: SafetySettings | None = None) -> None:
     if not rows:
         return
     async with session_factory() as session:
@@ -169,10 +194,13 @@ async def _store_observations(session_factory, rows: list[dict], now: datetime, 
         # what the token did afterwards is tracked for review and learning.
         for r in rows:
             if r["outcome"] in ("REJECT", "NO_TRADE"):
+                snap = opportunities.observation_snapshot(r.get("report") or {})
+                if settings is not None:
+                    snap["intel"] = json.loads(json.dumps(await _ledger_intel(redis, r["mint"], now, settings), default=str))
                 await opportunities.record(
                     session, key=f"obs:{r['mint']}", mint=r["mint"], symbol=db_safe(r.get("symbol")), engine="solana_fresh",
                     stage="OBSERVATION", decision=r["outcome"], traded=False, reasons=db_safe(r.get("reasons") or []),
-                    decided_at=r["decided_at"], snapshot=db_safe(opportunities.observation_snapshot(r.get("report") or {})))
+                    decided_at=r["decided_at"], snapshot=db_safe(snap))
         # Retention: once an hour, drop outcomes older than the window.
         if await redis.set(f"{pump_stream.PREFIX}:obs_prune", "1", nx=True, ex=3600):
             await session.execute(delete(TokenObservation).where(
@@ -254,7 +282,7 @@ async def observe_fresh(redis: Redis, session_factory, settings: SafetySettings,
             pipe.zadd(pump_stream.OBS_LIVE, {mint: created})
             pipe.set(pump_stream.obs_report_key(mint), json.dumps(report.to_dict(), default=str), ex=OBS_REPORT_TTL)
     await pipe.execute()
-    await _store_observations(session_factory, rows, now, redis)
+    await _store_observations(session_factory, rows, now, redis, settings)
     return active
 
 

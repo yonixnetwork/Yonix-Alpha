@@ -61,6 +61,7 @@ async def test_rejected_token_horizons_peak_drawdown_and_migration(db, redis):
     await put_trades(redis, mint, [(-5, base), (3, base), (8, int(base * 1.1)), (25, int(base * 1.5)), (50, int(base * 0.9)),
                                    (200, int(base * 2)), (800, int(base * 1.2)), (1700, int(base * 0.8))])
     await redis.zadd(pump_stream.MIGRATED, {mint: (T0 + timedelta(seconds=1000)).timestamp()})
+    await redis.hset(pump_stream.curve_key(mint), mapping={"vsol": base, "vtok": VT, "updated_at": int(T0.timestamp()), "fee_bps": 125})
     snap = {"price_raw": str(Decimal(base) / Decimal(VT)), "market_cap_sol": "30"}
     await opp.record(db, key="obs:x", mint=mint, symbol="REJ", engine="solana_fresh", stage="OBSERVATION", decision="REJECT",
                      traded=False, reasons=["price 52% below its observed peak"], decided_at=T0, snapshot=snap)
@@ -75,7 +76,18 @@ async def test_rejected_token_horizons_peak_drawdown_and_migration(db, redis):
     await db.refresh(row)
     assert row.horizons["T+5m"]["change_pct"] == "100.00" and row.horizons["T+30m"]["change_pct"] == "-20.00"
     assert row.peak_pct == Decimal("100.00") and row.drawdown_pct == Decimal("-20.00")
-    assert row.migrated_at == T0 + timedelta(seconds=1000) and row.status == "COMPLETE"
+    # Tracking runs to T+60m now; peak / drawdown keep their 30-minute meaning.
+    assert row.migrated_at == T0 + timedelta(seconds=1000) and row.status == "TRACKING" and "T+60m" not in row.horizons
+    await opp.track(db, redis, T0 + timedelta(seconds=3700))
+    await db.refresh(row)
+    assert row.status == "COMPLETE" and row.peak_pct == Decimal("100.00") and row.horizons["T+60m"]["change_pct"] == "-20.00"
+    assert row.path["T+30s"]["buys"] == 1 and row.path["T+5m"]["peak_so_far_pct"] == 100.0
+    assert row.regime["data_regime"] == "post_boost" and row.regime["strategy"] == "solana_fresh"
+    # These synthetic trades do not follow a constant product: executable returns are UNKNOWN, never guessed.
+    assert "curve math" in row.path["T+5m"]["executable"]["unknown"] and row.executable_return_pct is None
+    cf = row.analysis["counterfactual"]
+    assert cf["rule_exit"] == "TP" and cf["classification"] == "UNKNOWN" and cf["rejecting_rule"].startswith("price 52%")
+    assert row.labels["upside_100"] is True and row.labels["upside_200"] is False and row.labels["migrate_60m"] is True
 
 
 async def test_horizons_without_stream_data_say_why(db, redis):

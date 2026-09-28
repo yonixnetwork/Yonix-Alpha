@@ -968,8 +968,52 @@ class OpportunityOutcome(Base):
     loss_analysis: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="TRACKING", index=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Ledger v2 (0019): the path to T+60m, theoretical vs executable return,
+    # counterfactual / exit analysis, multi-target labels, regime tags and
+    # shadow model scores (never read by the gate).
+    path: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    analysis: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    labels: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    regime: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    post_exit: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    ml_shadow: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    theoretical_return_pct: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
+    executable_return_pct: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
+    feature_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class LaunchBuyer(Base):
+    """One early buyer of a launch the system decided on (yonixalpha_core.
+    wallet_intel): what it bought, whether it sold in its first minutes, and
+    the launch outcome once resolved. Reputation reads only rows whose
+    outcome_resolved_at is before the decision it informs."""
+
+    __tablename__ = "launch_buyers"
+    __table_args__ = (
+        UniqueConstraint("mint", "wallet", name="uq_launch_buyers_mint_wallet"),
+        CheckConstraint("outcome IS NULL OR outcome IN ('WIN','FLAT','LOSS')", name="ck_launch_buyers_outcome"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    mint: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    wallet: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    launch_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    first_buy_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    sol_in: Mapped[Decimal] = mapped_column(Numeric(20, 9), nullable=False)
+    tokens_in: Mapped[Decimal] = mapped_column(Numeric(30, 0), nullable=False)
+    sold_share_early: Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
+    sold_early: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    early_window_closed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    outcome: Mapped[str | None] = mapped_column(String(8), nullable=True)  # WIN | FLAT | LOSS
+    outcome_peak_pct: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
+    outcome_drawdown_pct: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
+    outcome_migrated: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    outcome_resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class RpcProvider(Base):

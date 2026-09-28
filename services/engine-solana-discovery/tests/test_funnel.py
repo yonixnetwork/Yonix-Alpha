@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
-from yonixalpha_core.db.models import TokenObservation, TradingCandidate
+from yonixalpha_core.db.models import OpportunityOutcome, TokenObservation, TradingCandidate
 from yonixalpha_core.safety.settings import default_settings_for
 from yonixalpha_core.solana import pump_stream
 
@@ -102,6 +102,12 @@ async def test_dumping_launch_is_rejected_with_the_reason_recorded(redis, sessio
     assert counts["rejected"] == 1 and counts["promoted"] == 0
     row = (await observations(session_factory))["DUMP"]
     assert row.outcome == "REJECT" and "below its observed peak" in row.reasons[-1] and row.trend == "DETERIORATING"
+    # The ledger row carries the same causal launch intelligence the gate records.
+    async with session_factory() as session:
+        opp = (await session.execute(select(OpportunityOutcome).where(OpportunityOutcome.mint == "DUMP"))).scalar_one()
+    intel = opp.snapshot["intel"]
+    assert intel["stage"] == "FRESH" and intel["regime"]["mayhem"] is None and "manipulation" in intel  # no create flag: unknown
+    assert intel["wallets"]["dump_cluster"]["level"] == "UNKNOWN"  # no resolved history: never assumed clean
 
 
 async def test_gate_budget_keeps_qualified_tokens_monitored_not_dropped(redis, session_factory):

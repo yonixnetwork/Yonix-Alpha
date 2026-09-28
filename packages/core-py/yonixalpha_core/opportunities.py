@@ -23,6 +23,7 @@ through the existing dataset → training → validation → challenger → shad
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -31,12 +32,16 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from yonixalpha_core import opportunity_analysis as oa
 from yonixalpha_core.db.models import ExecutionOrder, OpportunityOutcome, TokenObservation
+from yonixalpha_core.solana import launch_features as lf
 from yonixalpha_core.solana import pump_stream
 
 HORIZONS: tuple[tuple[str, int], ...] = (("T+5s", 5), ("T+10s", 10), ("T+30s", 30), ("T+60s", 60),
-                                         ("T+5m", 300), ("T+15m", 900), ("T+30m", 1800))
-TRACK_SECONDS = 1800
+                                         ("T+5m", 300), ("T+15m", 900), ("T+30m", 1800), ("T+60m", 3600))
+PEAK_WINDOW_SECONDS = 1800  # peak_pct / drawdown_pct keep their 30-minute meaning
+TRACK_SECONDS = 3600
+POST_EXIT_GIVE_UP_SECONDS = 2 * 3600  # the stream keeps trades 3 h: later is unmeasurable
 LAMPORTS = Decimal(1_000_000_000)
 PUMP_SUPPLY_RAW = Decimal(10**15)  # 1,000,000,000 tokens × 10^6
 REJECTED_WINNER_PEAK_PCT = Decimal("30")  # "a rejected token that later performed well"
@@ -102,6 +107,9 @@ def gate_snapshot(inp: Any, evidence: dict[str, Any], a: Any, decision_ctx: dict
         "price_age_seconds": (decision_ctx or {}).get("price_age_seconds"),
         "decision_eval_ms": (decision_ctx or {}).get("decision_eval_ms"),
         "operator_request": bool(getattr(inp, "operator_request", False)),
+        # Launch / pool intelligence at the decision (solana.intel): causal
+        # features for ML and review, with their own feature_version.
+        "intel": json.loads(json.dumps(evidence.get("intel"), default=str)) if evidence.get("intel") else None,
     }
 
 
@@ -129,7 +137,7 @@ async def record(session: AsyncSession, *, key: str, mint: str, symbol: str | No
         key=key[:160], mint=mint, symbol=(symbol or None) and symbol[:64], engine=engine, stage=stage, decision=decision[:32],
         traded=traded, execution_mode=execution_mode, candidate_id=candidate_id, assessment_id=assessment_id,
         position_id=position_id, reasons=[str(r)[:300] for r in reasons][:12], decided_at=decided_at, snapshot=snapshot,
-        horizons={}, status="TRACKING",
+        horizons={}, status="TRACKING", feature_version=((snapshot.get("intel") or {}).get("feature_version")),
     ).on_conflict_do_nothing(index_elements=["key"]))
 
 
@@ -159,22 +167,41 @@ def price_at(trades: list, at: datetime):
 
 
 async def track(session: AsyncSession, redis, now: datetime, limit: int = 300) -> int:
-    """Fills due horizons, the running peak/drawdown and migration time of
-    rows still TRACKING. Returns how many rows changed."""
+    """Fills due horizons (with their path point), the 30-minute peak /
+    drawdown, migration time, regime tags and the launch's early buyers of
+    rows still TRACKING; at T+30m resolves the buyers' launch outcome; at
+    T+60m (and 60 min after a traded row's exit) writes the analysis.
+    Returns how many rows changed."""
+    from yonixalpha_core import wallet_intel
+    from yonixalpha_core.safety.store import GLOBAL_SCOPE, load_settings
+
     rows = (await session.execute(select(OpportunityOutcome).where(OpportunityOutcome.status == "TRACKING")
                                   .order_by(OpportunityOutcome.decided_at).limit(limit))).scalars().all()
+    if not rows:
+        return 0
+    settings, _ = await load_settings(session, GLOBAL_SCOPE)
+    wcfg = wallet_intel.config(settings)
+    started = await redis.get(pump_stream.STREAM_STARTED)
+    started_ts = int(started) if started else None
+    recorded = await _recorded_mints(session, {r.mint for r in rows})
     changed = 0
     for row in rows:
         start = row.decided_at
         end = start + timedelta(seconds=TRACK_SECONDS)
         trades = sorted(await pump_stream.load_trades(redis, row.mint), key=lambda t: t.at)
+        # Token metadata is only needed until the regime and early buyers are recorded.
+        meta = (await pump_stream.load_meta(redis, row.mint) or {}) if row.regime is None or row.mint not in recorded else {}
         base = Decimal(row.snapshot["price_raw"]) if (row.snapshot or {}).get("price_raw") else price_at(trades, start)[0]
         hz = dict(row.horizons or {})
         before = dict(hz)
+        path = dict(row.path or {})
+        supply = int(Decimal(row.snapshot["supply_raw"])) if (row.snapshot or {}).get("supply_raw") else None
+        prev_at = start
         for name, sec in HORIZONS:
-            if name in hz or now < start + timedelta(seconds=sec):
-                continue
             t = start + timedelta(seconds=sec)
+            if name in hz or now < t:
+                prev_at = t
+                continue
             price, at = price_at(trades, t)
             if price is None:
                 reason = ("no stream trades for this token (PumpSwap tokens and expired history are not in the stream)"
@@ -183,8 +210,12 @@ async def track(session: AsyncSession, redis, now: datetime, limit: int = 300) -
             else:
                 hz[name] = {"price_raw": str(price), "change_pct": _s(_pct(price, base)),
                             "price_at": at.isoformat(), "source": "pump_stream trades"}
+            if trades:
+                path[name] = oa.path_point(trades, start, float(base) if base is not None else None, prev_at, t, supply)
+            prev_at = t
         if base is not None:
-            window = [p for p in (_price_raw(x) for x in trades if start < x.at <= min(now, end)) if p is not None]
+            window = [p for p in (_price_raw(x) for x in trades
+                                  if start < x.at <= min(now, start + timedelta(seconds=PEAK_WINDOW_SECONDS))) if p is not None]
             if window:
                 peak, trough = _pct(max(window), base), _pct(min(window), base)
                 if peak is not None and (row.peak_pct is None or peak > row.peak_pct):
@@ -200,15 +231,134 @@ async def track(session: AsyncSession, redis, now: datetime, limit: int = 300) -
                 if start < when <= end:
                     row.migrated_at = when
                     changed += 1
+        if row.regime is None:
+            row.regime = await _regime(redis, row, meta)
+            changed += 1
         if hz != before:
             row.horizons = hz
+            row.path = path
             changed += 1
-        if now >= end + timedelta(seconds=60) and all(n in hz for n, _ in HORIZONS):
+        changed += await _wallets(session, redis, row, trades, meta, started_ts, recorded, now, wcfg)
+        if now >= end + timedelta(seconds=60) and all(n in hz for n, _ in HORIZONS) \
+                and _finalize(row, trades, await _fee_bps(redis, row.mint), now):
             row.status, row.completed_at = "COMPLETE", now
             changed += 1
         row.updated_at = now
     await session.commit()
     return changed
+
+
+async def _recorded_mints(session: AsyncSession, mints: set[str]) -> set[str]:
+    from yonixalpha_core.db.models import LaunchBuyer
+
+    if not mints:
+        return set()
+    return set((await session.execute(select(LaunchBuyer.mint).where(LaunchBuyer.mint.in_(mints)).distinct())).scalars())
+
+
+async def _fee_bps(redis, mint: str) -> int | None:
+    curve = await pump_stream.load_curve(redis, mint)
+    return curve.fee_bps if curve is not None else None
+
+
+async def _regime(redis, row: OpportunityOutcome, meta: dict) -> dict[str, Any]:
+    """Regime tags at the decision time (counts before it only)."""
+    t = row.decided_at.timestamp()
+    launches = await redis.zcount(pump_stream.RECENT, t - 3600, t)
+    migrations = await redis.zcount(pump_stream.MIGRATED, t - 3600, t)
+    intel = (row.snapshot or {}).get("intel") or {}
+    mayhem = meta.get("is_mayhem_mode")
+    return {"data_regime": lf.data_regime(row.decided_at), "stage": intel.get("stage") or row.stage,
+            "mayhem": None if mayhem in (None, "") else str(mayhem) in ("1", "true", "True"),
+            "launches_last_hour_seen": launches, "migrations_last_hour_seen": migrations,
+            "fee_bps": await _fee_bps(redis, row.mint),
+            "strategy": row.engine, "feature_version": intel.get("feature_version"), "analysis_version": oa.ANALYSIS_VERSION,
+            "model": {"ml_score": (row.snapshot or {}).get("ml_score")},
+            "note": "launch / migration counts are what this system's stream saw in the hour before the decision"}
+
+
+async def _wallets(session: AsyncSession, redis, row: OpportunityOutcome, trades: list, meta: dict, started_ts: int | None,
+                   recorded: set[str], now: datetime, cfg) -> int:
+    """Early buyers of the launch (once), their early sells while the window
+    is open, and at T+30m the launch outcome. Failures are kept out of the
+    ledger's own transaction."""
+    from yonixalpha_core import wallet_intel
+
+    changed = 0
+    try:
+        async with session.begin_nested():
+            if row.mint not in recorded and trades:
+                created = int(meta["created_at"]) if meta.get("created_at") else None
+                if await wallet_intel.record_launch(session, redis, row.mint, trades, created, started_ts, now, cfg):
+                    recorded.add(row.mint)
+                    changed += 1
+            elif row.mint in recorded:
+                await wallet_intel.update_early(session, row.mint, trades, now, cfg)
+            analysis = dict(row.analysis or {})
+            if "wallet_outcome" not in analysis and now >= row.decided_at + timedelta(seconds=PEAK_WINDOW_SECONDS + 60):
+                res = await wallet_intel.resolve(session, redis, row.mint, row.peak_pct, row.drawdown_pct,
+                                                 row.migrated_at is not None, now, cfg) if row.mint in recorded else None
+                analysis["wallet_outcome"] = res or {"outcome": None, "note": "no early buyers recorded or already resolved"}
+                row.analysis = analysis
+                changed += 1
+    except Exception as exc:  # noqa: BLE001 - wallet intelligence never blocks the ledger
+        analysis = dict(row.analysis or {})
+        analysis["wallet_error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
+        row.analysis = analysis
+    return changed
+
+
+def _finalize(row: OpportunityOutcome, trades: list, curve_fee_bps: int | None, now: datetime) -> bool:
+    """Writes returns, recovery, labels and the counterfactual (untraded) or
+    exit analysis (traded). False while a traded row still waits for its
+    exit + 60 min."""
+    start, end = row.decided_at, row.decided_at + timedelta(seconds=TRACK_SECONDS)
+    result = row.trade_result or {}
+    exit_at = datetime.fromisoformat(result["exit_at"]) if result.get("exit_at") else None
+    if row.traded and now < start + timedelta(seconds=POST_EXIT_GIVE_UP_SECONDS):
+        if not result or (exit_at is not None and now < exit_at + timedelta(seconds=3600 + 60)):
+            return False
+    base = float(Decimal(row.snapshot["price_raw"])) if (row.snapshot or {}).get("price_raw") else None
+    if base is None:
+        p, _ = price_at(trades, start)
+        base = float(p) if p is not None else None
+    fee = (row.regime or {}).get("fee_bps") or curve_fee_bps
+    mayhem = (row.regime or {}).get("mayhem")
+    latency = timedelta(seconds=oa.REFERENCE_LATENCY_SECONDS)
+    path = {k: dict(v) for k, v in (row.path or {}).items()}  # new objects, so the JSONB change is detected
+    for name, sec in HORIZONS:
+        if name in path:
+            path[name]["executable"] = oa.round_trip(trades, start + latency, start + timedelta(seconds=sec), fee_bps=fee,
+                                                     mayhem=mayhem, migrated_at=row.migrated_at)
+    row.path = path
+    primary = (path.get(oa.PRIMARY_HORIZON) or {}).get("executable") or {}
+    if "executable_return_pct" in primary:
+        row.executable_return_pct = Decimal(str(primary["executable_return_pct"]))
+    if primary.get("theoretical_return_pct") is not None:
+        row.theoretical_return_pct = Decimal(str(primary["theoretical_return_pct"]))
+    rec = oa.recovery(trades, start, base, end)
+    analysis = dict(row.analysis or {})
+    analysis.update({"version": oa.ANALYSIS_VERSION, "recovery": rec,
+                     "signal_vs_execution": {"theoretical_return_pct": primary.get("theoretical_return_pct"),
+                                             "executable_return_pct": primary.get("executable_return_pct"),
+                                             "unknown": primary.get("unknown")}})
+    if row.traded:
+        row.post_exit = oa.exit_analysis(trades, exit_at, now, pnl_pct=_f(result.get("pnl_pct")),
+                                         mfe_pct=_f(result.get("mfe_pct")), exit_reason=result.get("exit_reason"))
+    else:
+        analysis["counterfactual"] = oa.counterfactual(trades, start, base, end, fee_bps=fee, mayhem=mayhem,
+                                                       migrated_at=row.migrated_at, reasons=row.reasons)
+    row.analysis = analysis
+    row.labels = oa.labels(trades, start, base, end, migrated_at=row.migrated_at,
+                           executable_primary=primary.get("executable_return_pct"), rec=rec)
+    return True
+
+
+def _f(v) -> float | None:
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 # --- trade results and loss analysis -------------------------------------------------------
@@ -310,6 +460,7 @@ async def on_position_closed(session: AsyncSession, position: Any) -> None:
         "market_cap_entry_sol": mcap(position.entry_price), "market_cap_exit_sol": mcap(position.exit_price),
         **excursions(position),
         "exit_reason": position.exit_reason, "hold_seconds": hold, "execution_mode": position.execution_mode,
+        "exit_at": position.exit_at.isoformat() if position.exit_at else None,
         "entry_execution": {"decision_to_confirm_ms": (diag.get("timing") or {}).get("decision_to_confirm_ms"),
                             "price_classification": (diag.get("price") or {}).get("classification"),
                             "total_vs_decision_pct": ((diag.get("price") or {}).get("components_pct") or {}).get("total_vs_decision_pct")},

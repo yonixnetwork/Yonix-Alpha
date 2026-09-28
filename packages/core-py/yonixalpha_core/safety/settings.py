@@ -182,6 +182,22 @@ class SafetySettings:
     instant_bond_seconds: int = 5
     boost_window_seconds: int = 300
     postmig_dumping_action: str = "WAIT"
+    # Wallet intelligence (yonixalpha_core.wallet_intel): features, never a
+    # BUY trigger. Reputation is Beta-shrunk toward the base rate and judged
+    # on its lower bound; outcomes count only once resolved.
+    wallet_early_buyers: int = 20  # first N distinct buyers recorded per launch
+    wallet_early_sell_seconds: int = 120  # "sold early": within this long of its first buy
+    wallet_sold_early_share: Decimal = Decimal("0.50")  # of the tokens it bought
+    wallet_win_peak_pct: Decimal = Decimal("50")  # launch outcome WIN: rose this much within 30 min of the decision
+    wallet_loss_drawdown_pct: Decimal = Decimal("50")  # LOSS: no WIN and fell this much
+    wallet_prior_strength: Decimal = Decimal("10")  # pseudo-launches of base rate in the prior
+    wallet_min_launches: int = 5  # resolved launches before a wallet can be "proven"
+    wallet_history_days: int = 30
+    wallet_recycled_launches: int = 5  # early buyer of this many other launches in 24 h = recycled
+    dump_cluster_min_shared: int = 3  # dumped together in this many failed launches = linked
+    dump_cluster_medium_wallets: int = 2
+    dump_cluster_high_wallets: int = 4
+    dump_cluster_high_action: str = "WARN"
 
     # ML
     min_ml_confidence: float | None = None
@@ -224,6 +240,11 @@ HARD_LIMITS: dict[str, tuple[str, Any]] = {
     "manipulation_high_families": ("min", 2),
     "intel_snapshot_seconds": ("max", 600),
     "manipulation_window_seconds": ("max", 900),
+    "wallet_early_buyers": ("max", 50),
+    # A reputation needs a prior and a few resolved launches.
+    "wallet_prior_strength": ("min", Decimal("2")),
+    "wallet_min_launches": ("min", 3),
+    "dump_cluster_min_shared": ("min", 2),
 }
 
 CREATOR_ACTIONS = ("WARN", "REDUCE_SIZE", "REQUIRE_MANUAL_APPROVAL", "REJECT")
@@ -237,6 +258,7 @@ ENUM_FIELDS: dict[str, tuple[str, ...]] = {
     "manipulation_high_action": INTEL_ACTIONS,
     "manipulation_medium_action": INTEL_ACTIONS,
     "postmig_dumping_action": INTEL_ACTIONS,
+    "dump_cluster_high_action": INTEL_ACTIONS,
 }
 
 _TUPLE_FIELDS = {"tp_r_multiples", "tp_exit_fractions"}
@@ -350,7 +372,8 @@ def validate(settings: SafetySettings) -> list[str]:
         errors.append("migrated_max_entry_slippage_bps and migrated_max_exit_slippage_bps must be positive")
     if settings.min_name_length < 0:
         errors.append("min_name_length must not be negative")
-    for name in ("mayhem_action", "manipulation_high_action", "manipulation_medium_action", "postmig_dumping_action"):
+    for name in ("mayhem_action", "manipulation_high_action", "manipulation_medium_action", "postmig_dumping_action",
+                 "dump_cluster_high_action"):
         if getattr(settings, name) not in INTEL_ACTIONS:
             errors.append(f"{name} must be one of {', '.join(INTEL_ACTIONS)}")
     for name in ("manipulation_round_trip_share", "manipulation_regular_size_cv", "manipulation_dust_share",
@@ -359,6 +382,14 @@ def validate(settings: SafetySettings) -> list[str]:
             errors.append(f"{name} must be in (0, 1]")
     if settings.intel_snapshot_seconds < 5 or settings.manipulation_window_seconds < 10:
         errors.append("intel_snapshot_seconds must be at least 5 and manipulation_window_seconds at least 10")
+    if settings.wallet_early_buyers < 2 or settings.wallet_early_sell_seconds < 10 or settings.wallet_history_days < 1:
+        errors.append("wallet_early_buyers must be at least 2, wallet_early_sell_seconds at least 10, wallet_history_days at least 1")
+    if not (0 < settings.wallet_sold_early_share <= 1):
+        errors.append("wallet_sold_early_share must be in (0, 1]")
+    if settings.wallet_win_peak_pct <= 0 or not (0 < settings.wallet_loss_drawdown_pct <= 100):
+        errors.append("wallet_win_peak_pct must be positive and wallet_loss_drawdown_pct in (0, 100]")
+    if not (2 <= settings.dump_cluster_medium_wallets <= settings.dump_cluster_high_wallets):
+        errors.append("dump_cluster_medium_wallets must be at least 2 and not above dump_cluster_high_wallets")
     return errors
 
 

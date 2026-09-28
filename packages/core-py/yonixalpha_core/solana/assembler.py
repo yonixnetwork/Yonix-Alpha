@@ -41,7 +41,9 @@ from yonixalpha_core.solana.flow import (
     trade_flow,
 )
 from yonixalpha_core.exit_intel import ExitConfig, solana_exit_decision
+from yonixalpha_core import wallet_intel
 from yonixalpha_core.solana import intel
+from yonixalpha_core.solana import launch_features as lf
 from yonixalpha_core.solana import creator_history, funding, sol_price
 from yonixalpha_core.solana.market_data import DexScreenerClient, JupiterClient
 from yonixalpha_core.solana.pumpfun import BondingCurveState, decode_bonding_curve
@@ -244,6 +246,22 @@ async def _creator_and_name(src: Sources, inp: AssessmentInput, c: Controls, met
             inp.duplicate_of = await pump_stream.duplicate_of(src.redis, mint, inp.token_name)
 
 
+async def _wallet_intel(src: Sources, trades, now: datetime, c: Controls, meta: dict[str, str], started_ts: int | None,
+                        mint: str, ev: dict[str, Any]) -> dict[str, Any] | None:
+    """Early-buyer reputation, recycled wallets and dump cohorts (features;
+    the gate acts only on dump_cluster_high_action). None when it failed."""
+    try:
+        created_ts = int(meta["created_at"]) if meta.get("created_at") else None
+        held = [t for t in trades if t.at <= now]
+        complete = lf.coverage(held, created_ts, started_ts)["complete"] is True
+        created = datetime.fromtimestamp(created_ts, tz=timezone.utc) if created_ts else None
+        return await wallet_intel.assess(src.redis, held, now, wallet_intel.config(c.settings), complete_history=complete,
+                                         created_at=created, mint=mint)
+    except Exception as exc:  # noqa: BLE001 - recorded, never guessed
+        ev["errors"].append(f"wallet_intel: {type(exc).__name__}: {str(exc)[:160]}")
+        return None
+
+
 async def _timed(ev: dict[str, Any], name: str, awaitable):
     """Awaits and records how long it took in ev["timings_ms"] (the
     decision's data-assembly latency, per source)."""
@@ -374,10 +392,15 @@ async def assemble_fresh(src: Sources, mint: str, now: datetime, c: Controls,
         ev["entry_quality"] = inp.entry_quality
     try:
         started = await src.redis.get(pump_stream.STREAM_STARTED)
+        started_ts = int(started) if started else None
+        wallets = await _timed(ev, "wallet_intel", _wallet_intel(src, trades, now, c, meta, started_ts, mint, ev))
         inp.intel = intel.curve_intel(
             trades, now, c.settings, meta=meta, curve=curve, curve_from_chain=curve_obs == now, decimals=decimals,
-            supply_raw=token.supply_raw if token else None, stream_started_ts=int(started) if started else None,
-            funding=ev.get("funding"), duplicate_of=inp.duplicate_of, engine=engine)
+            supply_raw=token.supply_raw if token else None, stream_started_ts=started_ts,
+            funding=ev.get("funding"), duplicate_of=inp.duplicate_of, engine=engine,
+            dump_cluster=(wallets or {}).get("dump_cluster"),
+            recycled_wallets=set((wallets or {}).get("recycled_wallets") or []))
+        inp.intel["wallets"] = wallets
     except Exception as exc:  # noqa: BLE001 - intelligence is evidence; its failure is recorded, never guessed
         ev["errors"].append(f"intel: {type(exc).__name__}: {str(exc)[:160]}")
     ev["intel"] = inp.intel
@@ -531,9 +554,15 @@ async def assemble_migrated(src: Sources, mint: str, now: datetime, c: Controls)
                                     resistance_source="PumpSwap pool trades, last 30 min")
     try:
         mig_curve = await pump_stream.load_curve(src.redis, mint)
+        started = await src.redis.get(pump_stream.STREAM_STARTED)
+        # The launch's early buyers come from its bonding-curve history.
+        wallets = await _timed(ev, "wallet_intel", _wallet_intel(src, curve_trades, now, c, meta,
+                                                                 int(started) if started else None, mint, ev))
         inp.intel = intel.pool_intel(trades, curve_trades, now, c.settings, meta=meta,
                                      migrated_at=mig_curve.migrated_at if mig_curve else None, decimals=decimals,
-                                     funding=ev.get("funding"), duplicate_of=inp.duplicate_of)
+                                     funding=ev.get("funding"), duplicate_of=inp.duplicate_of,
+                                     dump_cluster=(wallets or {}).get("dump_cluster"))
+        inp.intel["wallets"] = wallets
     except Exception as exc:  # noqa: BLE001
         ev["errors"].append(f"intel: {type(exc).__name__}: {str(exc)[:160]}")
     ev["intel"] = inp.intel
