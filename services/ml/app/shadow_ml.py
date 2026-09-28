@@ -253,5 +253,11 @@ async def run_shadow_cycle(session_factory) -> dict[str, Any]:
     async with session_factory() as session:
         scored = await score_recent(session)
         await session.commit()
-    return {"training": {k: (v.get("status") if isinstance(v, dict) else v) for k, v in trained.items()
-                         if k not in ("not_trained",)}, "scored": scored}
+    def brief(v: Any) -> Any:
+        if not isinstance(v, dict):
+            return v
+        if "status" in v:  # a target: its status and, when skipped, why
+            return f"{v['status']}: {v['reason']}" if v.get("reason") else v["status"]
+        return v  # the split summary (train / holdout / purged / holdout_start)
+
+    return {"training": {k: brief(v) for k, v in trained.items() if k != "not_trained"}, "scored": scored}

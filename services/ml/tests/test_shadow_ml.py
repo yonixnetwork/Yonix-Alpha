@@ -85,3 +85,18 @@ async def test_too_few_rows_is_reported_not_trained(db_session):
     await _ledger(db_session, n=50)
     out = await shadow_ml.train_all(db_session)
     assert out["status"].startswith("skipped") and out["samples"] == 50
+
+
+async def test_cycle_summary_says_why_a_target_was_skipped(db_session):
+    rng = random.Random(3)
+    rows = [_row(i, rng) for i in range(220)]
+    for r in rows:  # only ~40 minutes of history: labels of most training rows are not known yet
+        r.decided_at = T0 + timedelta(seconds=11 * rows.index(r))
+        r.labels = {**r.labels, "available_at": (r.decided_at + timedelta(minutes=60)).isoformat()}
+    db_session.add_all(rows)
+    await db_session.commit()
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    out = await shadow_ml.run_shadow_cycle(async_sessionmaker(db_session.bind, expire_on_commit=False))
+    t = out["training"]
+    assert t["P_UPSIDE_50"].startswith("skipped: ") and "positives in training" in t["P_UPSIDE_50"]
+    assert t["split"]["purged"] > 0 and t["samples"] == 220

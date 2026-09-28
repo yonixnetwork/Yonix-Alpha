@@ -103,12 +103,18 @@ async def collect(session, redis, since: datetime) -> dict[str, Any]:
 async def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--hours", type=int, default=24)
+    ap.add_argument("--since", help="ISO time (UTC), e.g. 2026-09-28T21:10; overrides --hours "
+                                    "(use the deploy time to see only rows recorded under the current code)")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
     settings = get_settings()
     engine = make_engine(settings)
     redis = make_redis(settings)
-    since = datetime.now(timezone.utc) - timedelta(hours=a.hours)
+    if a.since:
+        since = datetime.fromisoformat(a.since)
+        since = since if since.tzinfo else since.replace(tzinfo=timezone.utc)
+    else:
+        since = datetime.now(timezone.utc) - timedelta(hours=a.hours)
     async with make_session_factory(engine)() as s:
         report = await collect(s, redis, since)
     await engine.dispose()
