@@ -43,6 +43,20 @@ QUERIES: dict[str, str] = {
                WHERE decided_at >= :since AND snapshot ? 'intel' GROUP BY 1 ORDER BY 2 DESC""",
     "dump_cluster_levels": """SELECT snapshot->'intel'->'wallets'->'dump_cluster'->>'level', count(*) FROM opportunity_outcomes
                WHERE decided_at >= :since AND snapshot ? 'intel' GROUP BY 1 ORDER BY 2 DESC""",
+    "manipulation_families": """SELECT k, count(*) FROM opportunity_outcomes,
+               jsonb_object_keys(snapshot->'intel'->'manipulation'->'families') k
+               WHERE decided_at >= :since AND jsonb_typeof(snapshot->'intel'->'manipulation'->'families') = 'object'
+               GROUP BY 1 ORDER BY 2 DESC""",
+    # Does the signal predict anything? 30-minute outcome by level at the
+    # decision (rows old enough for their 30-minute peak / drawdown).
+    "outcome_by_manipulation (n | % up 50+ | % down 50+)": """SELECT snapshot->'intel'->'manipulation'->>'level', count(*),
+               round(100.0 * avg((peak_pct >= 50)::int), 1), round(100.0 * avg((drawdown_pct <= -50)::int), 1)
+               FROM opportunity_outcomes WHERE decided_at >= :since AND decided_at <= now() - interval '31 minutes'
+               AND snapshot->'intel' ? 'manipulation' GROUP BY 1 ORDER BY 1""",
+    "outcome_by_dump_cluster (n | % up 50+ | % down 50+)": """SELECT snapshot->'intel'->'wallets'->'dump_cluster'->>'level', count(*),
+               round(100.0 * avg((peak_pct >= 50)::int), 1), round(100.0 * avg((drawdown_pct <= -50)::int), 1)
+               FROM opportunity_outcomes WHERE decided_at >= :since AND decided_at <= now() - interval '31 minutes'
+               AND snapshot->'intel' ? 'wallets' GROUP BY 1 ORDER BY 1""",
     "launch_buyers": """SELECT count(*) AS rows, count(DISTINCT mint) AS launches, count(DISTINCT wallet) AS wallets,
                count(*) FILTER (WHERE outcome_resolved_at IS NOT NULL) AS resolved,
                count(*) FILTER (WHERE sold_early) AS sold_early, count(*) FILTER (WHERE sold_early IS NULL AND early_window_closed) AS sold_early_unknown
@@ -69,7 +83,8 @@ async def collect(session, redis, since: datetime) -> dict[str, Any]:
             await session.rollback()
             out[name] = f"query failed: {type(exc).__name__}: {str(exc)[:160]}"
     try:
-        out["wallet_base_counters"] = await redis.hgetall(wallet_intel.BASE)
+        out["wallet_base_counters"] = {**await redis.hgetall(wallet_intel.BASE),
+                                       "rebuilt_at": await redis.get(wallet_intel.BUILT)}
     except Exception as exc:  # noqa: BLE001
         out["wallet_base_counters"] = f"redis failed: {type(exc).__name__}"
     return out

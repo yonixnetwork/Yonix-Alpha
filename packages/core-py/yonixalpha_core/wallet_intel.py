@@ -12,7 +12,8 @@ decision they inform), all features rather than rules:
   recycled      wallets that were an early buyer of many other launches in
                 the last 24 h (sniper / bundle wallets that buy everything).
   dump_cluster  cohorts of wallets that repeatedly sold early TOGETHER in
-                launches that then failed (union-find over shared dumps).
+                launches that then collapsed (LOSS; union-find over shared
+                dumps).
                 UNKNOWN when none of the buyers has resolved history; a
                 pattern with evidence, never an accusation.
 
@@ -48,9 +49,15 @@ from yonixalpha_core.solana import launch_features as lf
 from yonixalpha_core.solana.flow import Trade
 
 LAMPORTS = Decimal(1_000_000_000)
-REP = "yx:wi:rep:"
-BASE = "yx:wi:base"
-MATES = "yx:wi:mates:"
+# v2 keys: a "dump" is an early sell into a launch that then collapsed
+# (LOSS). v1 counted every early sell into a non-WIN launch, which on
+# pump.fun (most early buyers flip within minutes, most launches are not
+# wins) marked ordinary sniper bots as dumpers. v2 counters are rebuilt from
+# launch_buyers (rebuild_counters) the first time they are missing.
+REP = "yx:wi2:rep:"
+BASE = "yx:wi2:base"
+MATES = "yx:wi2:mates:"
+BUILT = "yx:wi2:built"
 SEEN = "yx:wi:seen:"
 SEEN_RETENTION = 2 * 86400
 MIN_BASE_OBSERVATIONS = 100  # below this the base rate itself is unknown
@@ -173,7 +180,7 @@ def dump_cluster(stats: dict[str, dict[str, int]], groups: list[set[str]], cfg: 
     serial = sorted(w for w in with_history if stats[w].get("dumps", 0) >= cfg.serial_dumper_launches
                     and stats[w]["dumps"] / stats[w]["n"] >= cfg.serial_dumper_rate)
     largest = len(groups[0]) if groups else 0
-    evidence = [f"cohort of {len(g)} wallets that sold early together in >= {cfg.cohort_min_shared} earlier failed launches"
+    evidence = [f"cohort of {len(g)} wallets that sold early together in >= {cfg.cohort_min_shared} earlier collapsed (LOSS) launches"
                 for g in groups[:3]]
     if serial:
         evidence.append(f"{len(serial)} early buyers sold early in >= {cfg.serial_dumper_rate:.0%} of their resolved launches")
@@ -335,25 +342,63 @@ async def resolve(session: AsyncSession, redis, mint: str, peak_pct, drawdown_pc
     await session.execute(update(LaunchBuyer).where(LaunchBuyer.mint == mint, LaunchBuyer.outcome_resolved_at.is_(None))
                           .values(outcome=outcome, outcome_peak_pct=peak_pct, outcome_drawdown_pct=drawdown_pct,
                                   outcome_migrated=migrated, outcome_resolved_at=now))
-    ttl = cfg.history_days * 86400
-    dumpers = [r.wallet for r in rows if r.sold_early and outcome != WIN]
     pipe = redis.pipeline()
-    for r in rows:
-        pipe.hincrby(REP + r.wallet, "n", 1)
-        pipe.hincrby(REP + r.wallet, {WIN: "wins", LOSS: "losses", FLAT: "flats"}[outcome], 1)
-        if r.wallet in dumpers:
-            pipe.hincrby(REP + r.wallet, "dumps", 1)
-        pipe.expire(REP + r.wallet, ttl)
-    pipe.hincrby(BASE, "n", len(rows))
+    dumpers = _count(pipe, [(r.wallet, r.sold_early) for r in rows], outcome, cfg.history_days * 86400)
+    await pipe.execute()
+    return {"outcome": outcome, "buyers": len(rows), "dumpers": len(dumpers)}
+
+
+def is_dump(sold_early: bool | None, outcome: str | None) -> bool:
+    """Sold early into a launch that then collapsed. Selling early into a
+    launch that merely went flat is ordinary flipping, not dumping."""
+    return bool(sold_early) and outcome == LOSS
+
+
+def _count(pipe, buyers: list[tuple[str, bool | None]], outcome: str, ttl: int) -> list[str]:
+    """Adds one resolved launch to the counters; returns its dumpers."""
+    dumpers = [w for w, sold in buyers if is_dump(sold, outcome)]
+    for w, _ in buyers:
+        pipe.hincrby(REP + w, "n", 1)
+        pipe.hincrby(REP + w, {WIN: "wins", LOSS: "losses", FLAT: "flats"}[outcome], 1)
+        if w in dumpers:
+            pipe.hincrby(REP + w, "dumps", 1)
+        pipe.expire(REP + w, ttl)
+    pipe.hincrby(BASE, "n", len(buyers))
     if outcome == WIN:
-        pipe.hincrby(BASE, "wins", len(rows))
+        pipe.hincrby(BASE, "wins", len(buyers))
     for a in dumpers:
         for b in dumpers:
             if a != b:
                 pipe.zincrby(MATES + a, 1, b)
         pipe.expire(MATES + a, ttl)
+    return dumpers
+
+
+async def rebuild_counters(session: AsyncSession, redis, now: datetime, cfg: WalletConfig) -> int | None:
+    """Rebuilds the counters from launch_buyers (outcomes resolved within the
+    history window, all before `now`) when they are missing. Runs once; the
+    lock keeps two loops from counting twice. Returns launches counted, or
+    None when nothing had to be done."""
+    if await redis.exists(BUILT) or not await redis.set(BUILT + ":lock", "1", nx=True, ex=600):
+        return None
+    rows = (await session.execute(select(LaunchBuyer.mint, LaunchBuyer.wallet, LaunchBuyer.sold_early, LaunchBuyer.outcome)
+                                  .where(LaunchBuyer.outcome_resolved_at.is_not(None), LaunchBuyer.outcome.is_not(None),
+                                         LaunchBuyer.outcome_resolved_at >= now - timedelta(days=cfg.history_days))
+                                  .order_by(LaunchBuyer.mint))).all()
+    launches: dict[str, tuple[str, list[tuple[str, bool | None]]]] = {}
+    for mint, wallet, sold, outcome in rows:
+        launches.setdefault(mint, (outcome, []))[1].append((wallet, sold))
+    ttl = cfg.history_days * 86400
+    pipe = redis.pipeline()
+    for i, (outcome, buyers) in enumerate(launches.values()):
+        _count(pipe, buyers, outcome, ttl)
+        if i % 200 == 199:
+            await pipe.execute()
+            pipe = redis.pipeline()
+    pipe.set(BUILT, now.isoformat())
     await pipe.execute()
-    return {"outcome": outcome, "buyers": len(rows), "dumpers": len(dumpers)}
+    await redis.delete(BUILT + ":lock")
+    return len(launches)
 
 
 async def reputation_asof(session: AsyncSession, wallets: list[str], t: datetime, history_days: int = 30) -> dict[str, dict[str, int]]:
@@ -369,5 +414,5 @@ async def reputation_asof(session: AsyncSession, wallets: list[str], t: datetime
         s = out.setdefault(wallet, {"n": 0, "wins": 0, "dumps": 0})
         s["n"] += 1
         s["wins"] += outcome == WIN
-        s["dumps"] += bool(sold) and outcome != WIN
+        s["dumps"] += is_dump(sold, outcome)
     return out

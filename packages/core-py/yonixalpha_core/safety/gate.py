@@ -622,7 +622,7 @@ def _check_intel(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) ->
     if dc.get("level") == "HIGH":
         decision, level = _INTEL_ACTION[s.dump_cluster_high_action]
         out.append(_finding(RiskCategory.TRADING, "DUMP_CLUSTER_HIGH", level,
-                            f"early buyers include a cohort that repeatedly sold early together in earlier failed launches "
+                            f"early buyers include a cohort that repeatedly sold early together in earlier collapsed (LOSS) launches "
                             f"({'; '.join(dc.get('evidence') or [])[:300]}) · Action: {s.dump_cluster_high_action} — "
                             "a pattern from this system's history, not an accusation", decision))
     pm = intel.get("post_migration") or {}

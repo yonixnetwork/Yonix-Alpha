@@ -174,3 +174,37 @@ def test_wallet_settings_validate():
     assert validate(SafetySettings()) == []
     assert validate(replace(SafetySettings(), dump_cluster_medium_wallets=5, dump_cluster_high_wallets=4))
     assert validate(replace(SafetySettings(), dump_cluster_high_action="BUY"))
+
+
+async def _history(db, redis, peak, drawdown):
+    cohort = ["d1", "d2", "d3", "d4"]
+    for n in range(3):
+        start = T0 + timedelta(minutes=10 * n)
+        trades = launch_with(cohort + [f"o{n}{i}" for i in range(3)], set(cohort), start)
+        await wi.record_launch(db, redis, f"Old{n}", trades, int(start.timestamp()), None, start + timedelta(seconds=300), CFG)
+    await db.commit()
+    for n in range(3):
+        await wi.resolve(db, redis, f"Old{n}", Decimal(peak), Decimal(drawdown), False, T0 + timedelta(minutes=40), CFG)
+    await db.commit()
+    return launch_with(cohort + ["fresh1"], set(), T0 + timedelta(hours=1))
+
+
+async def test_selling_early_into_a_flat_launch_is_flipping_not_dumping(db, redis):
+    new = await _history(db, redis, "10", "-20")  # FLAT: neither a win nor a collapse
+    r = await wi.assess(redis, new, T0 + timedelta(hours=1, seconds=20), CFG, complete_history=True,
+                        created_at=T0 + timedelta(hours=1), mint="New")
+    assert r["dump_cluster"]["level"] == "LOW" and r["dump_cluster"]["largest_cohort"] == 0
+    assert (await wi.reputation_asof(db, ["d1"], T0 + timedelta(hours=1)))["d1"]["dumps"] == 0
+
+
+async def test_counters_are_rebuilt_once_from_the_table(db, redis):
+    new = await _history(db, redis, "5", "-70")  # LOSS: a real dump cohort
+    now = T0 + timedelta(hours=1, seconds=20)
+    before = await wi.assess(redis, new, now, CFG, complete_history=True, created_at=T0 + timedelta(hours=1), mint="New")
+    for k in await redis.keys("yx:wi2:*"):  # counters lost (or written under the old definition)
+        await redis.delete(k)
+    assert await wi.rebuild_counters(db, redis, now, CFG) == 3
+    assert await wi.rebuild_counters(db, redis, now, CFG) is None  # once only: never double-counted
+    after = await wi.assess(redis, new, now, CFG, complete_history=True, created_at=T0 + timedelta(hours=1), mint="New")
+    assert after["dump_cluster"] == before["dump_cluster"] and after["dump_cluster"]["level"] == "HIGH"
+    assert await redis.hgetall(wi.BASE) == {"n": "21"}

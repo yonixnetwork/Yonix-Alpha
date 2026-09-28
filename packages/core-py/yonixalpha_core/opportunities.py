@@ -182,6 +182,12 @@ async def track(session: AsyncSession, redis, now: datetime, limit: int = 300) -
         return 0
     settings, _ = await load_settings(session, GLOBAL_SCOPE)
     wcfg = wallet_intel.config(settings)
+    try:
+        await wallet_intel.rebuild_counters(session, redis, now, wcfg)
+    except Exception as exc:  # noqa: BLE001 - the ledger keeps running; the next pass retries after the lock expires
+        from yonixalpha_core.logging import get_logger
+        get_logger("opportunities").warning("wallet_intel.rebuild_failed", error=f"{type(exc).__name__}: {exc}")
+        await session.rollback()
     started = await redis.get(pump_stream.STREAM_STARTED)
     started_ts = int(started) if started else None
     recorded = await _recorded_mints(session, {r.mint for r in rows})

@@ -80,7 +80,7 @@ const HELP: Record<string, string> = {
   wallet_min_launches: "Resolved launches before a wallet can count as proven. Proven is a feature, never a BUY trigger.",
   wallet_history_days: "How long a wallet's resolved history is kept.",
   wallet_recycled_launches: "An early buyer of this many other launches in 24 h is a recycled (sniper/bundle) wallet.",
-  dump_cluster_min_shared: "Two wallets are linked after dumping together in this many failed launches.",
+  dump_cluster_min_shared: "Two wallets are linked after selling early together in this many launches that then collapsed (fell by wallet_loss_drawdown_pct).",
   dump_cluster_medium_wallets: "Linked cohort size for dump cluster MEDIUM.",
   dump_cluster_high_wallets: "Linked cohort size for dump cluster HIGH.",
   dump_cluster_high_action: "Action at dump cluster HIGH. Default WARN: a pattern from this system's history, not proof.",
