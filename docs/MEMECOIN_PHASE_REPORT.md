@@ -397,10 +397,11 @@ Tests:
 
 ## Remaining issues
 
-- **Rent reclaim and cost-aware sizing are UNVERIFIED on chain.** They are
-  tested against a fake node, the guard and the database, but no reclaim
-  transaction has been sent yet. The first one is the dashboard button
-  (5 accounts, 0.0075692 SOL); `cost_report` then shows its refund.
+- **Rent reclaim: verified on chain (2026-09-28).** The operator reclaimed
+  the 5 empty accounts from the dashboard and the SOL returned to the
+  wallet. The automatic close after a full exit has not run on chain yet;
+  the next live exit is its first real run. Cost-aware sizing is UNVERIFIED
+  on chain until the next live entry.
 - **Crash between signing and confirming a reclaim:** reconciliation
   resolves the order, but without the list of closed accounts the refund
   is not booked back to the trades. The SOL is in the wallet either way.
