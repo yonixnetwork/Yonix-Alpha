@@ -231,7 +231,8 @@ async def assess(redis, trades: list[Trade], now: datetime, cfg: WalletConfig, *
         smart = {"status": "UNKNOWN", "reason": f"{base.get('n', 0)} resolved buyer-launches so far "
                                                   f"(base rate needs {MIN_BASE_OBSERVATIONS})"}
     else:
-        p = base["wins"] / base["n"]
+        # "wins" only exists once a WIN has resolved: none yet means a 0 base rate so far.
+        p = base.get("wins", 0) / base["n"]
         proven, capital, arrivals = [], 0, []
         with_history = 0
         for b in buyers:

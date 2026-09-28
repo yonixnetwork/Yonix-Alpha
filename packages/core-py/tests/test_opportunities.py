@@ -72,6 +72,8 @@ async def test_rejected_token_horizons_peak_drawdown_and_migration(db, redis):
     assert hz["T+5s"]["change_pct"] == "0.00" and hz["T+10s"]["change_pct"] == "10.00"
     assert hz["T+30s"]["change_pct"] == "50.00" and hz["T+60s"]["change_pct"] == "-10.00"
     assert "T+5m" not in hz and row.status == "TRACKING"
+    # Nothing is due until T+5m: the row is not re-read.
+    assert await opp.track(db, redis, T0 + timedelta(seconds=90)) == 0
     await opp.track(db, redis, T0 + timedelta(seconds=1900))
     await db.refresh(row)
     assert row.horizons["T+5m"]["change_pct"] == "100.00" and row.horizons["T+30m"]["change_pct"] == "-20.00"

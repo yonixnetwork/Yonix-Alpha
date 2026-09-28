@@ -109,7 +109,8 @@ def gate_snapshot(inp: Any, evidence: dict[str, Any], a: Any, decision_ctx: dict
         "operator_request": bool(getattr(inp, "operator_request", False)),
         # Launch / pool intelligence at the decision (solana.intel): causal
         # features for ML and review, with their own feature_version.
-        "intel": json.loads(json.dumps(evidence.get("intel"), default=str)) if evidence.get("intel") else None,
+        "intel": json.loads(json.dumps(evidence.get("intel") or getattr(inp, "intel", None), default=str))
+        if evidence.get("intel") or getattr(inp, "intel", None) else None,
     }
 
 
@@ -175,7 +176,7 @@ async def track(session: AsyncSession, redis, now: datetime, limit: int = 300) -
     from yonixalpha_core import wallet_intel
     from yonixalpha_core.safety.store import GLOBAL_SCOPE, load_settings
 
-    rows = (await session.execute(select(OpportunityOutcome).where(OpportunityOutcome.status == "TRACKING")
+    rows = (await session.execute(select(OpportunityOutcome).where(OpportunityOutcome.status == "TRACKING", _due(now))
                                   .order_by(OpportunityOutcome.decided_at).limit(limit))).scalars().all()
     if not rows:
         return 0
@@ -246,6 +247,23 @@ async def track(session: AsyncSession, redis, now: datetime, limit: int = 300) -
         row.updated_at = now
     await session.commit()
     return changed
+
+
+def _due(now: datetime):
+    """Rows with something to do now: new (regime and early buyers not yet
+    recorded), a horizon that has come due, the T+30m wallet resolution, the
+    T+60m analysis, or a traded row waiting for its exit. Everything else is
+    skipped, so the ~500 rows a 60-minute window holds are not all re-read
+    every pass (peak / drawdown are recomputed from the stored trades when a
+    horizon fills, so nothing is lost between passes)."""
+    from sqlalchemy import and_, not_, or_
+
+    o = OpportunityOutcome
+    conds = [o.regime.is_(None), o.traded.is_(True), o.decided_at <= now - timedelta(seconds=TRACK_SECONDS + 60),
+             and_(o.decided_at <= now - timedelta(seconds=PEAK_WINDOW_SECONDS + 60),
+                  or_(o.analysis.is_(None), not_(o.analysis.has_key("wallet_outcome"))))]
+    conds += [and_(not_(o.horizons.has_key(name)), o.decided_at <= now - timedelta(seconds=sec)) for name, sec in HORIZONS]
+    return or_(*conds)
 
 
 async def _recorded_mints(session: AsyncSession, mints: set[str]) -> set[str]:

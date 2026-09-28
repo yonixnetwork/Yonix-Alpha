@@ -140,6 +140,15 @@ async def test_smart_money_needs_a_base_rate_and_a_lower_bound_above_it(db, redi
     assert none["smart_money"]["status"] == "UNKNOWN" and none["dump_cluster"]["level"] == "UNKNOWN"
 
 
+async def test_base_rate_without_any_win_yet_is_zero_not_an_error(db, redis):
+    await redis.hset(wi.BASE, mapping={"n": 150})  # 150 resolved, no WIN yet: "wins" does not exist
+    await redis.hset(wi.REP + "x", mapping={"n": 6, "losses": 6})
+    r = await wi.assess(redis, launch_with(["x", "y"], set()), T0 + timedelta(seconds=10), CFG,
+                        complete_history=True, created_at=T0, mint="M")
+    assert r["smart_money"]["status"] == "MEASURED" and r["smart_money"]["base_rate"] == 0.0
+    assert r["smart_money"]["proven_wallets"] == 0
+
+
 async def test_recycled_wallets_count_other_launches_in_the_last_day(db, redis):
     for n in range(5):
         await redis.zadd(wi.SEEN + "bot", {f"L{n}": (T0 - timedelta(hours=n + 1)).timestamp()})

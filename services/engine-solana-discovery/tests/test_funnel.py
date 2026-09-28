@@ -224,3 +224,16 @@ async def test_token_name_with_a_nul_byte_is_stored_not_lost(redis, session_fact
     rows = await observations(session_factory)
     assert rows["NULNAME"].name == "spaceX链游" and rows["NULNAME"].symbol == "SpaceX-World"
     assert rows["NULNAME"].outcome == "REJECT"
+
+
+async def test_wallet_intel_failure_keeps_the_launch_features(redis, session_factory, monkeypatch):
+    from app import funnel
+
+    async def broken(*a, **k):
+        raise KeyError("wins")
+
+    monkeypatch.setattr(funnel.wallet_intel, "assess", broken)
+    created = await launch(redis, "WFAIL", 12)
+    await trade(redis, "WFAIL", created + 1, "a", True, 0.2, 31)
+    rec = await funnel._ledger_intel(redis, "WFAIL", NOW, SETTINGS)
+    assert rec["stage"] == "FRESH" and "manipulation" in rec and rec["wallets"]["error"] == "KeyError: 'wins'"

@@ -171,9 +171,12 @@ async def _ledger_intel(redis: Redis, mint: str, now: datetime, settings: Safety
         started_ts = int(started) if started else None
         created_ts = int(meta["created_at"]) if meta.get("created_at") else None
         complete = launch_features.coverage(trades, created_ts, started_ts)["complete"] is True
-        wallets = await wallet_intel.assess(
-            redis, trades, now, wallet_intel.config(settings), complete_history=complete, mint=mint,
-            created_at=datetime.fromtimestamp(created_ts, tz=timezone.utc) if created_ts else None)
+        try:
+            wallets = await wallet_intel.assess(
+                redis, trades, now, wallet_intel.config(settings), complete_history=complete, mint=mint,
+                created_at=datetime.fromtimestamp(created_ts, tz=timezone.utc) if created_ts else None)
+        except Exception as exc:  # noqa: BLE001 - wallet history failing must not drop the launch features
+            wallets = {"error": f"{type(exc).__name__}: {str(exc)[:160]}"}
         rec = intel.curve_intel(trades, now, settings, meta=meta, curve=None, curve_from_chain=False, decimals=6,
                                 supply_raw=int(opportunities.PUMP_SUPPLY_RAW), stream_started_ts=started_ts, funding=None,
                                 duplicate_of=None, dump_cluster=wallets.get("dump_cluster"),
