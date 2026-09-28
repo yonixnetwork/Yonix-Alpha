@@ -937,6 +937,41 @@ class LiveSmokeTest(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class OpportunityOutcome(Base):
+    """Every opportunity the system decided on, traded or not, with the state
+    it was decided on and what the market did afterwards (yonixalpha_core.
+    opportunities). Observation data for learning and review only: nothing
+    here is read by the gate, and no live rule changes from it."""
+
+    __tablename__ = "opportunity_outcomes"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    key: Mapped[str] = mapped_column(String(160), nullable=False, unique=True)
+    mint: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    symbol: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    engine: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    stage: Mapped[str] = mapped_column(String(16), nullable=False)  # OBSERVATION | GATE
+    decision: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    traded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    execution_mode: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    candidate_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    assessment_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    position_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    reasons: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    horizons: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    peak_pct: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
+    drawdown_pct: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
+    migrated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    trade_result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    loss_analysis: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="TRACKING", index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
 class RpcProvider(Base):
     """A Solana RPC / WebSocket provider added from the dashboard
     (yonixalpha_core.solana.rpc_registry). URLs usually embed the API key,

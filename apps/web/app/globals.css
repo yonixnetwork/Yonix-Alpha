@@ -1086,3 +1086,5 @@ li.unread {
   .latency-row { grid-template-columns: 1fr 70px; }
   .latency-track { display: none; }
 }
+
+.hz { display: inline-flex; flex-wrap: wrap; gap: 8px; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }

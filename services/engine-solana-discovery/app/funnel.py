@@ -27,7 +27,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yonixalpha_core import events
+from yonixalpha_core import events, opportunities
 from yonixalpha_core.db.models import Token, TokenEvent, TokenObservation, TradingCandidate
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.safety.settings import SafetySettings
@@ -165,6 +165,14 @@ async def _store_observations(session_factory, rows: list[dict], now: datetime, 
         return
     async with session_factory() as session:
         await session.execute(insert(TokenObservation).values(db_safe(rows)).on_conflict_do_nothing(index_elements=["mint"]))
+        # Every non-promoted outcome is an opportunity the system passed on:
+        # what the token did afterwards is tracked for review and learning.
+        for r in rows:
+            if r["outcome"] in ("REJECT", "NO_TRADE"):
+                await opportunities.record(
+                    session, key=f"obs:{r['mint']}", mint=r["mint"], symbol=db_safe(r.get("symbol")), engine="solana_fresh",
+                    stage="OBSERVATION", decision=r["outcome"], traded=False, reasons=db_safe(r.get("reasons") or []),
+                    decided_at=r["decided_at"], snapshot=db_safe(opportunities.observation_snapshot(r.get("report") or {})))
         # Retention: once an hour, drop outcomes older than the window.
         if await redis.set(f"{pump_stream.PREFIX}:obs_prune", "1", nx=True, ex=3600):
             await session.execute(delete(TokenObservation).where(

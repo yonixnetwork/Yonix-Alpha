@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -10,8 +11,8 @@ from app.api.deps import get_current_username, get_db, get_redis
 from app.api.util import jsonable, user_id
 from app.schemas.common import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, Page
 from app.schemas.ml import MLStatsOut, ModelVersionOut
-from yonixalpha_core import events
-from yonixalpha_core.db.models import DataQualityEvent, MLFeatureSnapshot, ModelVersion
+from yonixalpha_core import events, opportunities
+from yonixalpha_core.db.models import DataQualityEvent, MLFeatureSnapshot, ModelVersion, OpportunityOutcome
 from yonixalpha_core.ml import registry
 from yonixalpha_core.ml.gate_features import DRIFT_FLAG_PREFIX, ENGINES_FOR_MODEL, FEATURE_VERSION, FEATURES_FOR_MODEL
 
@@ -166,3 +167,41 @@ async def samples(engine: str | None = None, labeled: bool | None = None, limit:
     return jsonable({"total": total, "items": [{"id": f.id, "engine": f.engine, "symbol": f.symbol, "features": f.features,
                                                 "label": f.label, "outcome": f.outcome, "quality": f.quality_status,
                                                 "score": f.ml_score, "at": f.created_at} for f in rows]})
+
+
+@router.get("/opportunities")
+async def opportunities_list(traded: bool | None = None, stage: str | None = None, losses_only: bool = False,
+                             rejected_up: bool = False, mint: str | None = None,
+                             limit: int = Query(DEFAULT_PAGE_LIMIT, ge=1, le=MAX_PAGE_LIMIT), offset: int = Query(0, ge=0),
+                             db: AsyncSession = Depends(get_db), _: str = Depends(get_current_username)) -> dict:
+    """Every recorded opportunity (traded or not) with its decision snapshot,
+    forward horizons, trade result and loss analysis."""
+    filters = []
+    if traded is not None:
+        filters.append(OpportunityOutcome.traded.is_(traded))
+    if stage:
+        filters.append(OpportunityOutcome.stage == stage)
+    if losses_only:
+        filters.append(OpportunityOutcome.loss_analysis.is_not(None))
+    if rejected_up:
+        filters += [OpportunityOutcome.traded.is_(False), OpportunityOutcome.peak_pct >= opportunities.REJECTED_WINNER_PEAK_PCT]
+    if mint:
+        filters.append(OpportunityOutcome.mint == mint)
+    total = (await db.execute(select(func.count()).select_from(OpportunityOutcome).where(*filters))).scalar_one()
+    rows = (await db.execute(select(OpportunityOutcome).where(*filters).order_by(OpportunityOutcome.decided_at.desc())
+                             .limit(limit).offset(offset))).scalars().all()
+    return jsonable({"total": total, "items": [
+        {"id": r.id, "mint": r.mint, "symbol": r.symbol, "engine": r.engine, "stage": r.stage, "decision": r.decision,
+         "traded": r.traded, "execution_mode": r.execution_mode, "position_id": r.position_id, "reasons": r.reasons,
+         "decided_at": r.decided_at, "snapshot": r.snapshot, "horizons": r.horizons, "peak_pct": r.peak_pct,
+         "drawdown_pct": r.drawdown_pct, "migrated_at": r.migrated_at, "trade_result": r.trade_result,
+         "loss_analysis": r.loss_analysis, "status": r.status} for r in rows]})
+
+
+@router.get("/opportunities/compare")
+async def opportunities_compare(days: int = Query(7, ge=1, le=90), db: AsyncSession = Depends(get_db),
+                                _: str = Depends(get_current_username)) -> dict:
+    """Winning vs losing trades and traded vs rejected-then-up opportunities:
+    averages of the decision-time features. Review data only."""
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    return jsonable(await opportunities.comparison(db, since))

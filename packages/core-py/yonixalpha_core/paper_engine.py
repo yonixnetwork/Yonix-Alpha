@@ -28,12 +28,15 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yonixalpha_core.db.models import MLFeatureSnapshot, PaperAccount, PaperPosition, TradingCandidate
+from yonixalpha_core.logging import get_logger
 from yonixalpha_core.safety.gate import Assessment
 from yonixalpha_core.safety.liquidity import BPS, ConstantProductModel, close_fill, open_fill
 from yonixalpha_core.safety.models import ExecutionQuote
 from yonixalpha_core.safety.planning import ratchet_trailing_stop
 from yonixalpha_core.safety.store import add_timeline_event, marked_value, venue_kind  # noqa: F401 - re-exported
 from yonixalpha_core.state_machine import CandidateState, apply_transition
+
+log = get_logger("core.paper_engine")
 
 PAPER_SIMULATOR_VERSION = "2.0.0"
 LABEL_SOURCE = "paper_engine_realized_pnl"
@@ -465,6 +468,13 @@ async def close_position(session: AsyncSession, position: PaperPosition, now: da
     position.realized_pnl_pct = position.realized_pnl / position.entry_cost_quote if position.entry_cost_quote else None
     labels = outcome_labels(position)
     source = LABEL_SOURCE if getattr(position, "execution_mode", "PAPER") != "LIVE" else "live_execution_realized_pnl"
+    try:
+        from yonixalpha_core import opportunities
+
+        async with session.begin_nested():
+            await opportunities.on_position_closed(session, position)
+    except Exception as exc:  # noqa: BLE001 - review data never blocks closing a position
+        log.warning("paper.opportunity_result_failed", position_id=str(position.id), error=f"{type(exc).__name__}: {exc}")
     if position.candidate_id is not None:
         await session.execute(
             update(MLFeatureSnapshot)

@@ -23,11 +23,12 @@ position only fills when the transaction confirms on chain.
 
 import time
 from datetime import datetime
+from decimal import Decimal
 
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yonixalpha_core import execution_analysis, live_smoke, live_trading, paper_engine, paper_execution
+from yonixalpha_core import execution_analysis, live_smoke, live_trading, opportunities, paper_engine, paper_execution
 from yonixalpha_core.ml.gate_features import FEATURE_VERSION
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import TradingCandidate
@@ -36,6 +37,7 @@ from yonixalpha_core.safety import pipeline, store
 from yonixalpha_core.safety.gate import CURVE_ENGINES, Assessment, assess
 from yonixalpha_core.safety.models import FinalDecision, GlobalMode, StrategyMode
 from yonixalpha_core.solana import pump_stream, pumpswap
+from yonixalpha_core.solana.codec import db_safe
 from yonixalpha_core.solana.assembler import Sources, assemble_fresh, assemble_migrated
 from yonixalpha_core.state_machine import CandidateState, apply_transition
 
@@ -197,6 +199,7 @@ async def evaluate_with_gate(
                 log.info("gate.smoke_test_entry", candidate_id=str(candidate.id), mint=mint, engine=engine,
                          run=str(run.id), route=position.execution_route)
                 return a
+    opened = None
     if a.executable and a.execution_target.value == "LIVE":
         try:
             position = await live_trading.enter_live(session, redis, account, a, row.id, candidate, now, lifecycle,
@@ -204,6 +207,7 @@ async def evaluate_with_gate(
             pipeline.record_ml_sample(session, a, row.id, candidate.id, evidence.get("features") or {},
                                       *pipeline.ml_sample_args(inp.ml, ml_info))
             await pipeline.after_entry(session, redis, settings, a, position)
+            opened = position
             if operator is not None:
                 operator["result"] = {"status": "SUBMITTING", "target": "LIVE", "position_id": str(position.id)}
         except ValueError as exc:
@@ -244,6 +248,7 @@ async def evaluate_with_gate(
             position.pool, position.strategy = pool, a.strategy
             position.model_version, position.feature_version = provenance["model_version"], FEATURE_VERSION
             await pipeline.after_entry(session, redis, settings, a, position)
+            opened = position
             if operator is not None:
                 operator["result"] = {"status": "PAPER_POSITION_OPEN", "target": "PAPER", "position_id": str(position.id)}
         except paper_engine.FillError as exc:
@@ -278,6 +283,23 @@ async def evaluate_with_gate(
     if operator is not None:
         operator["result"].update({"assessment_id": str(row.id), "decision": a.decision.value, "target": a.execution_target.value,
                                    "size": str(a.plan.position_size.value) if a.plan.position_size else None})
+    if opened is not None or candidate.state == CandidateState.REJECTED.value:
+        # The episode ended (entered, rejected or expired): record the state it
+        # was decided on; what the token did afterwards is tracked from here.
+        try:
+            snap = opportunities.gate_snapshot(inp, evidence, a, decision_ctx)
+            snap["market_cap_discovery_sol"] = await opportunities.discovery_market_cap(
+                session, mint, Decimal(inp.token.supply_raw) if inp.token and inp.token.supply_raw else None)
+            last = (candidate.state_history or [{}])[-1]
+            decision = ("EXECUTE" if opened is not None else
+                        "EXPIRED" if str(last.get("reason", "")).startswith("not executable within") else a.decision.value)
+            await opportunities.record(
+                session, key=f"gate:{candidate.id}", mint=mint, symbol=a.symbol, engine=engine, stage="GATE", decision=decision,
+                traded=opened is not None, reasons=list(a.reasons), decided_at=now, snapshot=db_safe(snap),
+                candidate_id=candidate.id, assessment_id=row.id, position_id=opened.id if opened is not None else None,
+                execution_mode=opened.execution_mode if opened is not None else None)
+        except Exception as exc:  # noqa: BLE001 - observation data never blocks a decision
+            log.warning("gate.opportunity_record_failed", mint=mint, error=f"{type(exc).__name__}: {exc}")
     await session.commit()
     log.info("gate.decision", candidate_id=str(candidate.id), mint=mint, engine=engine, decision=a.decision.value,
              status=a.status_label, target=a.execution_target.value,

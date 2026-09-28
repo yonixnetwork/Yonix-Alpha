@@ -94,7 +94,10 @@ async def test_good_fresh_token_with_no_dex_pool_is_observed_entered_and_exited_
     async with session_factory() as s:
         c = await s.get(TradingCandidate, cand.id)
         early = await gate_eval.evaluate_with_gate(s, redis_client, PAPER_ENV, Sources(redis_client, FakeRpc(curve)), c, NOW)
-    assert early.decision.value == "NO_TRADE" and any("volatility" in r for r in early.reasons), early.reasons
+    # 15 trades in 10 s: volatility is measurable only trade-to-trade, so it is
+    # LOW_CONFIDENCE — never auto-traded (approval required), never invented.
+    assert not early.executable and early.decision.value in ("NO_TRADE", "WAIT", "REQUIRE_MANUAL_APPROVAL"), early.reasons
+    assert "VOLATILITY_LOW_CONFIDENCE" in {f.code for f in early.findings}, [f.code for f in early.findings]
     assert "INSUFFICIENT_LIQUIDITY" not in {f.code for f in early.findings}
     c = await one(session_factory, TradingCandidate, TradingCandidate.id == cand.id)
     assert c.state == CandidateState.ANALYZING.value
