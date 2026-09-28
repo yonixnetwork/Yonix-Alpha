@@ -1,9 +1,18 @@
 # Live execution audit (Pump.fun / PumpSwap / Jupiter / RPC)
 
-Status on 2026-09-27: **implemented and tested offline. Live execution on
-mainnet is UNVERIFIED.** It stays unverified until the dry run in section 8
-has been run on the server against real mints. Nothing in this change
-enables live trading, switches modes or relaxes a safety check.
+Status on 2026-09-28:
+
+| Path | Status |
+|---|---|
+| BUY on a Pump bonding curve (Token-2022 mint) | **PASSED mainnet simulation** (section 9): venue, native build, guard and the real Pump program all accepted it |
+| BUY on a PumpSwap pool (Token-2022 base) | **PASSED mainnet simulation** (section 9) |
+| Sign → send → confirm → fill parsing with the new builder | **UNVERIFIED** until the first real LIVE buy records `FILL_VERIFIED` |
+| SELL (curve and PumpSwap) | **UNVERIFIED** on mainnet: SDK parity tests only; a sell simulation needs a wallet that holds the token |
+| Legacy SPL-Token mints | SDK parity tests only (both dry-run mints were Token-2022) |
+| Jupiter route | **UNVERIFIED** on mainnet; no discovery source produces non-Pump candidates yet |
+
+Nothing in this change enables live trading, switches modes or relaxes a
+safety check.
 
 ## 1. Three production errors, three separate problems
 
@@ -220,3 +229,35 @@ needed before this path can be called verified.
 endpoint URL, key and plan in the RPC dashboard, or disable that provider.
 The dashboard shows it as AUTHENTICATION FAILED so that it is no longer
 mistaken for a rate limit.
+
+## 9. Mainnet dry-run evidence (2026-09-28, deploy 29cffd9)
+
+`exec_dryrun --sol 0.01` on the server. Nothing was signed or sent. The
+amounts below come from the trade events the on-chain programs emitted
+during simulation.
+
+**Fresh token `Hnmk3URiwnVcdS1dFyT9GtYgeBhLoX1pkT2ZtdQcACRK`**
+- Venue: `PUMP_BONDING_CURVE`, Token-2022, slot 451285266.
+- Instructions: 2 × ComputeBudget, ATA create (idempotent), Pump `buy`
+  with 18 accounts.
+- Guard: PASSED. Simulation: OK, 96,127 CU.
+- Event: 336,936,220,022 raw tokens for 9,803,920 lamports.
+  - Protocol fee: 95 bps, 93,138 lamports.
+  - Creator fee: 30 bps, 29,412 lamports.
+  - Total: 9,926,470 lamports, against a cap (`max_sol_cost`) of
+    11,000,000.
+
+**Migrated token `GaS7zNVp6VpCjKP4eaLs6UvXnWgNczuLLRaDZrD6pump`**
+- Venue: `PUMP_AMM`, canonical pool `hmgBYjeX…a96`, Token-2022 base, slot
+  451285287.
+- Instructions: 2 × ComputeBudget, WSOL ATA, transfer, sync_native, base
+  ATA, PumpSwap `buy` with 26 accounts, close WSOL.
+- Guard: PASSED. Simulation: OK, 141,716 CU.
+- Event: 19,173,627,212 raw tokens out. The user paid 9,990,129 lamports
+  in total, against a cap (`max_quote_in`) of 11,000,000.
+  - LP fee: 20 bps.
+  - Protocol fee: 5 bps.
+
+The builder assumes a fee plus a 1% margin (200 / 130 bps; the curve was
+charged 125 bps). As a result it asks for slightly fewer tokens than the
+full size could buy, and the spend stays under the size.
