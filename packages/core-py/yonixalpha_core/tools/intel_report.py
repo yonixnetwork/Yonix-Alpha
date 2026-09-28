@@ -67,6 +67,24 @@ QUERIES: dict[str, str] = {
                round(100.0 * avg((peak_pct >= 50)::int), 1), round(100.0 * avg((drawdown_pct <= -50)::int), 1)
                FROM opportunity_outcomes WHERE decided_at >= :since AND decided_at <= now() - interval '31 minutes'
                AND snapshot->'intel' ? 'wallets' GROUP BY 1 ORDER BY 1""",
+    # What a trade would have got: the counterfactual TP (+30%) / stop (-25%)
+    # rule entered at the decision, and the executable return at T+5m.
+    "rule_by_manipulation (n | % TP first | % stop first | % missed win | avg exec T+5m %)": """
+               SELECT snapshot->'intel'->'manipulation'->>'level', count(*),
+               round(100.0 * avg((analysis->'counterfactual'->>'rule_exit' = 'TP')::int), 1),
+               round(100.0 * avg((analysis->'counterfactual'->>'rule_exit' = 'STOP')::int), 1),
+               round(100.0 * avg((analysis->'counterfactual'->>'classification' = 'MISSED_WIN')::int), 1),
+               round(avg(executable_return_pct), 2)
+               FROM opportunity_outcomes WHERE decided_at >= :since AND analysis ? 'counterfactual'
+               AND snapshot->'intel' ? 'manipulation' GROUP BY 1 ORDER BY 1""",
+    "rule_by_dump_cluster (n | % TP first | % stop first | % missed win | avg exec T+5m %)": """
+               SELECT snapshot->'intel'->'wallets'->'dump_cluster'->>'level', count(*),
+               round(100.0 * avg((analysis->'counterfactual'->>'rule_exit' = 'TP')::int), 1),
+               round(100.0 * avg((analysis->'counterfactual'->>'rule_exit' = 'STOP')::int), 1),
+               round(100.0 * avg((analysis->'counterfactual'->>'classification' = 'MISSED_WIN')::int), 1),
+               round(avg(executable_return_pct), 2)
+               FROM opportunity_outcomes WHERE decided_at >= :since AND analysis ? 'counterfactual'
+               AND snapshot->'intel' ? 'wallets' GROUP BY 1 ORDER BY 1""",
     "launch_buyers": """SELECT count(*) AS rows, count(DISTINCT mint) AS launches, count(DISTINCT wallet) AS wallets,
                count(*) FILTER (WHERE outcome_resolved_at IS NOT NULL) AS resolved,
                count(*) FILTER (WHERE sold_early) AS sold_early, count(*) FILTER (WHERE sold_early IS NULL AND early_window_closed) AS sold_early_unknown
