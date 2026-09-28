@@ -74,14 +74,23 @@ same configuration (revision 23, SYNCED).
 - From the recorded numbers, this extra is about **0.0016 SOL fixed per buy
   plus about 1.25% of the trade**. On buys of 0.0015–0.005 SOL, that is
   33–110%.
-- **Where the fixed part goes is not yet itemized.** The executor did not
-  keep the account balances of the transaction. The new `cost_report` reads
-  each transaction and lists every item.
-- One lead is not confirmed:
-  - every buy creates the token account (`createIdempotent`), and nothing
-    ever closes it after the sell, so its rent stays locked;
-  - but the derived fixed part (about 0.0016 SOL) is below a standard token
-    account's rent (0.00204 SOL), so this is not yet proven.
+- **Itemized by `cost_report` (2026-09-28, every transaction fully
+  explained, residual 0):**
+
+  | Per buy | SOL | Kind |
+  |---|---|---|
+  | token account for the bought token (170 bytes) | 0.00151384 | **rent deposit**, returned only when the account is closed |
+  | network fee (base 0.000005 + priority 0.0001) | 0.000105 | cost |
+  | program fees (protocol + creator) | 1.25% of the trade | cost |
+  | first buy only (SNAPD): one program account (137 bytes, Pump's per-user volume account) | 0.0013462 | one-time deposit |
+
+- **Sells** pay 1.25% program fees plus the 0.000105 network fee and
+  create nothing. **Nothing closes the token account after the sell**, so
+  its rent stays locked. Today 5 empty token accounts hold **0.0075692
+  SOL** (about 9% of the wallet).
+- The token-account rent is **90% of the fixed cost per buy**. Real round
+  trip costs, excluding the refundable deposit: about 2.5% of the size plus
+  0.00021 SOL.
 - Classification: before, this showed only as "FEES" (with a misleading
   "within the slippage limit"). It is now split into program fees, network
   fee and new-account deposits. When a deposit dominates it is classified as
@@ -141,10 +150,8 @@ position starts deep underwater. Three options:
 
 1. **Reclaim the deposit** by closing the empty token account after a full
    exit. This is a new signed transaction and needs guard support.
-   - Worth it only if `cost_report` confirms the fixed part is token-account
-     rent.
-   - `cost_report` also shows how much SOL is locked in the wallet's empty
-     token accounts today.
+   `cost_report` confirmed the fixed part is token-account rent: 0.0015 of
+   the 0.0017 SOL per buy, with 0.0076 SOL locked today.
 2. **Count entry costs in the risk plan.** A trade whose costs alone exceed
    the per-trade risk budget would be refused. This is a tightening, and at
    today's size it would stop most LIVE entries.
@@ -370,8 +377,9 @@ Tests:
 
 ## Remaining issues
 
-- **Fixed cost per buy (about 0.0016 SOL):** its composition is PENDING the
-  `cost_report` output. See "Decision needed".
+- **Token-account rent (0.00151384 SOL per buy) is never reclaimed.**
+  Confirmed by `cost_report`. 0.0075692 SOL is locked in 5 empty accounts
+  today. See "Decision needed".
 - **Latency after the pickup fix:** to be measured (`trade_report`).
 - **Confirmation tail (3 of 10 above 4.8 s):** `slots_to_land` is now
   recorded; to be measured before any priority-fee change.
