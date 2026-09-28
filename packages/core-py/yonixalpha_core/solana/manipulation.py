@@ -1,7 +1,8 @@
 """MANIPULATION_SCORE: independent families of evidence that a token's
 activity is manufactured rather than organic.
 
-Each family is one kind of evidence (wash trading, synchronized buying,
+Each family is one kind of evidence (wash trading: repeated in-and-out by
+the same wallet, not a single flip; synchronized buying,
 synchronized selling, bot-regular trade sizes, dust volume, a straight-line
 price, creator-linked funding, a known dump cohort, a copycat name, a
 single-second collapse). A family either fires, with its evidence, or not.
@@ -24,7 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from yonixalpha_core.solana.flow import Trade, round_trip_volume_share, synchronized_buy_cluster
+from yonixalpha_core.solana.flow import Trade, synchronized_buy_cluster
 
 LAMPORTS = 1_000_000_000
 
@@ -65,6 +66,23 @@ def _r2_rising(points: list[tuple[float, float]]) -> float | None:
     return (sxy * sxy) / (sxx * syy)
 
 
+def repeated_round_trip_share(window: list[Trade]) -> float | None:
+    """Share of window volume from wallets that went in AND out at least
+    twice (>= 2 buys and >= 2 sells). One buy then one sell is a flip, which
+    nearly every pump.fun sniper does within minutes (measured in production
+    2026-09-28: a single in-and-out fired on ~85% of launches); wash trading
+    is a wallet trading back and forth to manufacture volume."""
+    total = sum(t.sol_lamports for t in window)
+    if total == 0:
+        return None
+    buys: dict[str, int] = defaultdict(int)
+    sells: dict[str, int] = defaultdict(int)
+    for t in window:
+        (buys if t.is_buy else sells)[t.trader] += 1
+    washers = {w for w in buys if buys[w] >= 2 and sells.get(w, 0) >= 2}
+    return sum(t.sol_lamports for t in window if t.trader in washers) / total
+
+
 def score(trades: list[Trade], t: datetime, cfg: ManipulationConfig | None = None, *,
           funding: dict | None = None, dump_cluster: dict | None = None, duplicate_of: str | None = None) -> dict[str, Any]:
     """Manipulation families at `t` (trades up to `t` only).
@@ -79,9 +97,10 @@ def score(trades: list[Trade], t: datetime, cfg: ManipulationConfig | None = Non
     if len(window) < cfg.min_trades:
         unknown.append(f"{len(window)} trades in {cfg.window_seconds}s (flow families need {cfg.min_trades})")
     else:
-        rts = round_trip_volume_share(window, t, cfg.window_seconds)
-        if rts is not None and float(rts) >= cfg.round_trip_share:
-            families["wash_trading"] = f"{float(rts):.0%} of volume from wallets that bought and sold in {cfg.window_seconds}s"
+        rts = repeated_round_trip_share(window)
+        if rts is not None and rts >= cfg.round_trip_share:
+            families["wash_trading"] = (f"{rts:.0%} of volume from wallets that bought and sold at least twice each "
+                                        f"in {cfg.window_seconds}s")
         sync = synchronized_buy_cluster(window, t, cfg.window_seconds)
         if sync >= cfg.sync_buy_wallets:
             families["synchronized_buys"] = f"{sync} wallets bought near-identical amounts in the same second"

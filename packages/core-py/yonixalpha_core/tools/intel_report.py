@@ -53,6 +53,16 @@ QUERIES: dict[str, str] = {
                round(100.0 * avg((peak_pct >= 50)::int), 1), round(100.0 * avg((drawdown_pct <= -50)::int), 1)
                FROM opportunity_outcomes WHERE decided_at >= :since AND decided_at <= now() - interval '31 minutes'
                AND snapshot->'intel' ? 'manipulation' GROUP BY 1 ORDER BY 1""",
+    "outcome_by_family (n | % up 50+ | % down 50+)": """SELECT k, count(*), round(100.0 * avg((peak_pct >= 50)::int), 1),
+               round(100.0 * avg((drawdown_pct <= -50)::int), 1)
+               FROM opportunity_outcomes, jsonb_object_keys(snapshot->'intel'->'manipulation'->'families') k
+               WHERE decided_at >= :since AND decided_at <= now() - interval '31 minutes'
+               AND jsonb_typeof(snapshot->'intel'->'manipulation'->'families') = 'object' GROUP BY 1
+               UNION ALL SELECT '(all measured launches)', count(*), round(100.0 * avg((peak_pct >= 50)::int), 1),
+               round(100.0 * avg((drawdown_pct <= -50)::int), 1) FROM opportunity_outcomes
+               WHERE decided_at >= :since AND decided_at <= now() - interval '31 minutes'
+               AND snapshot->'intel'->'manipulation'->>'level' IN ('NONE', 'LOW', 'MEDIUM', 'HIGH')
+               ORDER BY 2 DESC""",
     "outcome_by_dump_cluster (n | % up 50+ | % down 50+)": """SELECT snapshot->'intel'->'wallets'->'dump_cluster'->>'level', count(*),
                round(100.0 * avg((peak_pct >= 50)::int), 1), round(100.0 * avg((drawdown_pct <= -50)::int), 1)
                FROM opportunity_outcomes WHERE decided_at >= :since AND decided_at <= now() - interval '31 minutes'

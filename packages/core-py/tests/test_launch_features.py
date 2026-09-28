@@ -166,6 +166,8 @@ def test_several_independent_families_are_high_with_evidence():
         trades.append(c.trade(f"w{i % 4}", T0 + timedelta(seconds=i * 2), 0.1, True))
     for i in range(3):
         trades.append(c.trade(f"w{i}", T0 + timedelta(seconds=41), 0.05, False))
+    for i in range(3):  # and back out a second time: repeated in-and-out
+        trades.append(c.trade(f"w{i}", T0 + timedelta(seconds=43 + i), 0.05, False))
     r = mp.score(trades, T0 + timedelta(seconds=45), duplicate_of="EARLIERmint")
     assert r["level"] == "HIGH", r
     assert {"wash_trading", "regular_trade_sizes", "synchronized_sells", "copycat_name"} <= set(r["families"])
@@ -178,3 +180,15 @@ def test_too_few_trades_is_unknown_and_funding_needs_checked_wallets():
     assert "creator_linked_funding" not in r["families"]
     r = mp.score(organic(4), T0 + timedelta(seconds=10), funding={"checked": 5, "creator_linked": 2, "largest_group": 0})
     assert r["level"] == "LOW" and "creator_linked_funding" in r["families"]
+
+
+def test_a_single_flip_per_wallet_is_not_wash_trading():
+    c = Curve()
+    ins = [c.trade(f"s{i}", T0 + timedelta(seconds=i), 0.3 + i * 0.01, True) for i in range(12)]
+    outs = [c.trade(f"s{i}", T0 + timedelta(seconds=20 + i), 0.2, False) for i in range(12)]  # every buyer flips once
+    assert mp.repeated_round_trip_share(ins + outs) == 0
+    r = mp.score(ins + outs, T0 + timedelta(seconds=40))
+    assert "wash_trading" not in r["families"]
+    again = [c.trade(f"s{i}", T0 + timedelta(seconds=35 + i), 0.3, True) for i in range(4)]
+    out2 = [c.trade(f"s{i}", T0 + timedelta(seconds=39 + i), 0.2, False) for i in range(4)]
+    assert mp.repeated_round_trip_share(ins + outs + again + out2) > 0.3
