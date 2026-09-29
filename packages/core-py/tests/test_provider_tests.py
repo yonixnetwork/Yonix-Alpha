@@ -88,3 +88,29 @@ async def test_the_whole_test_is_bounded_by_the_timeout(monkeypatch):
         return httpx.Response(200, json={"result": 1})
     r = await run("solana_rpc", settings(), slow)
     assert r["status"] == pt.TIMEOUT
+
+
+async def test_evm_rpc_checks_chain_id_and_redacts_keys():
+    def node(chain_id):
+        def handler(req):
+            import json as _j
+            m = _j.loads(req.content)["method"]
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": hex(chain_id if m == "eth_chainId" else 777)})
+        return handler
+
+    s = settings(BSC_RPC_URLS="https://bsc.test/SECRETKEY123", ROBINHOOD_RPC_URLS=None)
+    r = await run("bsc_rpc", s, node(56))
+    assert r["status"] == pt.CONNECTED and "block 777" in r["detail"] and "SECRETKEY123" not in str(r)
+    r = await run("bsc_rpc", s, node(97))  # a testnet URL is a configuration error, not a working RPC
+    assert r["status"] == pt.INVALID and "expected 56" in r["detail"]
+    r = await run("robinhood_rpc", s, node(4663))  # nothing configured: the public endpoint is tested and said so
+    assert r["status"] == pt.CONNECTED and "none configured" in r["detail"]
+    r = await run("bsc_rpc", s, lambda req: httpx.Response(429))
+    assert r["status"] == pt.UNAVAILABLE and "RATE LIMITED" in r["detail"]
+
+
+async def test_honeypot_is_is_reported_as_enrichment():
+    r = await run("honeypot_is", settings(), lambda req: httpx.Response(200, json={"honeypotResult": {"isHoneypot": False}}))
+    assert r["status"] == pt.CONNECTED and "enrichment only" in r["detail"]
+    r = await run("honeypot_is", settings(), lambda req: httpx.Response(503))
+    assert r["status"] == pt.UNAVAILABLE

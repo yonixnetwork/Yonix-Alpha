@@ -113,3 +113,25 @@ def test_trade_stats_and_categories():
     assert categorize(row, st, now, S) == TokenCategory.MIGRATED
     assert categorize(SimpleNamespace(migrated_at=None, created_at=now - timedelta(hours=5), extra={}),
                       trade_stats([], now, 300), now, S) == TokenCategory.OTHER
+
+
+def test_evm_wallet_never_exposes_the_key_and_checks_it_matches():
+    from eth_account import Account
+
+    from yonixalpha_core.chains.evm import wallet
+
+    key = "0x" + "11" * 32
+    addr = Account.from_key(key).address
+    s = SimpleNamespace(EVM_WALLET_ADDRESS=None, EVM_WALLET_PRIVATE_KEY=None)
+    assert wallet.account(s)["status"] == "NOT_CONFIGURED"
+    s = SimpleNamespace(EVM_WALLET_ADDRESS=addr.lower(), EVM_WALLET_PRIVATE_KEY=None)
+    assert wallet.account(s) | {} == {"configured": True, "address": addr, "key_configured": False, "status": "WATCH_ONLY",
+                                      "detail": "address only (no signing key: none is needed for paper)"}
+    s = SimpleNamespace(EVM_WALLET_ADDRESS=addr, EVM_WALLET_PRIVATE_KEY=key)
+    r = wallet.account(s)
+    assert r["status"] == "OK" and "11" * 32 not in str(r)
+    s = SimpleNamespace(EVM_WALLET_ADDRESS="0x" + "22" * 20, EVM_WALLET_PRIVATE_KEY=key)
+    assert wallet.account(s)["status"] == "MISMATCH"
+    s = SimpleNamespace(EVM_WALLET_ADDRESS=None, EVM_WALLET_PRIVATE_KEY="not-a-key")
+    r = wallet.account(s)
+    assert r["status"] == "INVALID" and "not-a-key" not in str(r)

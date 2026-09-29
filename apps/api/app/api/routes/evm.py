@@ -10,10 +10,13 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_username, get_db, get_redis
+from app.api.deps import get_current_username, get_db, get_redis, get_settings
 from app.api.util import audit, jsonable
 from yonixalpha_core import events
 from yonixalpha_core.chains.evm import settings as evm_settings
+from yonixalpha_core.chains.evm import wallet as evm_wallet
+from yonixalpha_core.chains.evm.rpc import make_rpc
+from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import EvmToken, EvmTrade, PaperAccount, PaperPosition, PlatformSetting
 
 router = APIRouter(prefix="/evm", tags=["evm"])
@@ -125,3 +128,25 @@ async def put_settings(body: dict, request: Request, db: AsyncSession = Depends(
     await db.commit()
     await events.publish(redis, "settings.updated", {"key": evm_settings.KEY}, "api")
     return {"settings": value}
+
+
+@router.get("/wallet")
+async def wallet(settings: Settings = Depends(get_settings), db: AsyncSession = Depends(get_db),
+                 _: str = Depends(get_current_username)) -> dict:
+    """The EVM half of the trading wallet: public address, whether a key is
+    configured (never the key), native balances read from each chain now,
+    and the EVM paper accounts, never mixed with LIVE."""
+    acct = evm_wallet.account(settings)
+    balances = {}
+    if acct.get("address"):
+        rpcs = {c: make_rpc(c, settings) for c in ("bsc", "robinhood")}
+        try:
+            balances = await evm_wallet.native_balances(acct["address"], rpcs)
+        finally:
+            for r in rpcs.values():
+                await r.aclose()
+    papers = (await db.execute(select(PaperAccount).where(PaperAccount.name.like("evm_%")))).scalars().all()
+    return jsonable({"live": {**acct, "balances": balances, "currency": {"bsc": "BNB", "robinhood": "ETH"},
+                              "execution": "EVM LIVE execution is not implemented; the address is watch-only"},
+                     "paper": [{"name": a.name, "currency": a.quote_currency, "cash": a.cash_balance,
+                                "starting": a.starting_balance} for a in papers]})

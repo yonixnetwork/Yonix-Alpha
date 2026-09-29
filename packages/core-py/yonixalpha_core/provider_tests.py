@@ -51,11 +51,13 @@ def _secrets(settings: Any) -> list[str | None]:
     names = ["HELIUS_API_KEY", "SOLANA_RPC_URL", "SOLANA_WS_URL", "SOLANA_RPC_BACKUP_URL", "SOLANA_RPC_BACKUP_URL_2",
              "SOLANA_RPC_BACKUP_URL_3", "SOLANA_WS_BACKUP_URL", "JUPITER_API_KEY", "PUMPPORTAL_API_KEY", "BINANCE_API_KEY", "BINANCE_API_SECRET", "BYBIT_API_KEY",
              "BYBIT_API_SECRET", "HYPERLIQUID_API_WALLET_PRIVATE_KEY", "MT5_BRIDGE_TOKEN", "TELEGRAM_BOT_TOKEN",
-             "WALLET_PRIVATE_KEY"]
+             "WALLET_PRIVATE_KEY", "EVM_WALLET_PRIVATE_KEY"]
     out = []
     for n in names:
         v = getattr(settings, n, None)
         out.append(v.get_secret_value() if hasattr(v, "get_secret_value") else v)
+    for n in ("BSC_RPC_URLS", "ROBINHOOD_RPC_URLS"):  # comma-separated URL lists, each may embed a key
+        out += [u.strip() for u in (getattr(settings, n, None) or "").split(",") if u.strip()]
     return out
 
 
@@ -247,7 +249,44 @@ async def test_provider(name: str, settings: Any, client: httpx.AsyncClient) -> 
         chat = "chat id set" if getattr(settings, "TELEGRAM_CHAT_ID", None) else "TELEGRAM_CHAT_ID not set"
         return f"bot @{body['result'].get('username')} ({chat}; no message sent)"
 
+    def evm_rpc(chain: str) -> Callable[[], Awaitable[str]]:
+        async def test() -> str:
+            from yonixalpha_core.chains.base import Chain
+            from yonixalpha_core.chains.registry import CHAINS
+
+            spec = CHAINS[Chain(chain)]
+            configured = [u.strip() for u in (getattr(settings, f"{chain.upper()}_RPC_URLS", None) or "").split(",") if u.strip()]
+            urls = configured or list(spec.public_rpc)
+            results, ok = [], 0
+            for url in urls:
+                try:
+                    cid = int(await _json_rpc(client, url, "eth_chainId"), 16)
+                    if cid != spec.evm_chain_id:
+                        raise _Result(INVALID, f"{redact_url(url)} answers for chain {cid}, expected {spec.evm_chain_id}")
+                    head = int(await _json_rpc(client, url, "eth_blockNumber"), 16)
+                    results.append(f"{redact_url(url)} block {head}")
+                    ok += 1
+                except _Result as exc:
+                    if exc.status == INVALID:
+                        raise
+                    results.append(f"{redact_url(url)} {exc.status}")
+            if not ok:
+                raise _Result(UNAVAILABLE, "; ".join(results))
+            where = f"{len(configured)} configured" if configured else "none configured: tested the public endpoint(s)"
+            return f"chain {spec.evm_chain_id} ({where}): " + "; ".join(results)
+        return test
+
+    async def honeypot_is() -> str:
+        from yonixalpha_core.chains.evm.safety import honeypot_is as hp
+        from yonixalpha_core.chains.registry import BSC_WBNB
+
+        r = await hp(BSC_WBNB, client)
+        if not r.get("available"):
+            raise _Result(UNAVAILABLE, f"Honeypot.is did not answer: {r.get('detail')}")
+        return "answered (WBNB probe); enrichment only, never the sole safety check"
+
     tests: dict[str, Callable[[], Awaitable[str]]] = {
+        "bsc_rpc": evm_rpc("bsc"), "robinhood_rpc": evm_rpc("robinhood"), "honeypot_is": honeypot_is,
         "solana_rpc": solana_rpc, "solana_rpc_backup": solana_rpc_backup,
         "solana_rpc_backup_2": backup_n("SOLANA_RPC_BACKUP_URL_2"), "solana_rpc_backup_3": backup_n("SOLANA_RPC_BACKUP_URL_3"),
         "solana_ws": solana_ws, "helius": helius,
@@ -261,5 +300,5 @@ async def test_provider(name: str, settings: Any, client: httpx.AsyncClient) -> 
     return await _run(name, settings, fn)
 
 
-PROVIDERS = ["solana_rpc", "solana_rpc_backup", "solana_rpc_backup_2", "solana_rpc_backup_3", "solana_ws", "helius", "jupiter", "pumpportal", "binance", "bybit",
+PROVIDERS = ["bsc_rpc", "robinhood_rpc", "honeypot_is", "solana_rpc", "solana_rpc_backup", "solana_rpc_backup_2", "solana_rpc_backup_3", "solana_ws", "helius", "jupiter", "pumpportal", "binance", "bybit",
              "hyperliquid", "mt5", "telegram"]

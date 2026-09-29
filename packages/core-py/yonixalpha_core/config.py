@@ -63,6 +63,12 @@ class Settings(BaseSettings):
     # only ever shown as scheme://host.
     BSC_RPC_URLS: Optional[str] = None
     ROBINHOOD_RPC_URLS: Optional[str] = None
+    # One EVM account for both BSC and Robinhood Chain. The address alone is
+    # enough (watch-only: balances); the private key is optional, server-only,
+    # never logged or returned, and only checked against the address — EVM
+    # LIVE execution is not implemented.
+    EVM_WALLET_ADDRESS: Optional[str] = None
+    EVM_WALLET_PRIVATE_KEY: Optional[SecretStr] = None
     JUPITER_API_KEY: Optional[str] = None
 
     # Live Solana execution (only used when every live lock is open).

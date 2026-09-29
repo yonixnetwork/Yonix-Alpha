@@ -501,3 +501,17 @@ async def test_copy_targets_profiles_and_events(app, client, auth_headers):
         from sqlalchemy import select
         kinds = set((await s.execute(select(AuditLog.event_type))).scalars())
     assert {"copy_target.create", "copy_target.update", "copy_target.delete"} <= kinds
+
+
+async def test_evm_wallet_endpoint_is_watch_only_and_keyless(app, client, auth_headers):
+    r = (await client.get("/api/evm/wallet", headers=auth_headers)).json()
+    assert r["live"]["status"] == "NOT_CONFIGURED" and r["live"]["balances"] == {}
+    assert "not implemented" in r["live"]["execution"]
+    ov = (await client.get("/api/settings/overview", headers=auth_headers)).json()
+    groups = {g["key"]: g for g in ov["groups"]}
+    assert groups["evm_wallet"]["secrets"] == {"EVM_WALLET_PRIVATE_KEY": "not configured"}
+    assert groups["bsc"]["tests"] == ["bsc_rpc"] and groups["robinhood"]["tests"] == ["robinhood_rpc"]
+    from yonixalpha_core import env_updates
+    assert "server only" in env_updates.validate("EVM_WALLET_PRIVATE_KEY", "0x" + "1" * 64)  # never editable from the dashboard
+    assert env_updates.validate("BSC_RPC_URLS", "https://a.example/k,https://b.example") is None
+    assert "https" in env_updates.validate("BSC_RPC_URLS", "https://a.example,http://b.example")

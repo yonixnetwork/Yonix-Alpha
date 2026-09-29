@@ -39,6 +39,9 @@ LAST_RESULT_TTL = 7 * 86400
 
 # (group, provider test name or None, secrets, non-secret values shown as-is, URL values shown as scheme://host)
 PROVIDERS = {
+    "bsc": ("BSC (BNB Smart Chain)", ["bsc_rpc"], [], [], ["BSC_RPC_URLS"]),
+    "robinhood": ("Robinhood Chain", ["robinhood_rpc"], [], [], ["ROBINHOOD_RPC_URLS"]),
+    "honeypot": ("Honeypot.is (BSC safety enrichment)", ["honeypot_is"], [], [], []),
     "solana": ("Solana", ["solana_rpc", "solana_ws", "solana_rpc_backup", "solana_rpc_backup_2", "solana_rpc_backup_3"],
                ["HELIUS_API_KEY"], [],
                ["SOLANA_RPC_URL", "SOLANA_WS_URL", "SOLANA_RPC_BACKUP_URL", "SOLANA_RPC_BACKUP_URL_2", "SOLANA_RPC_BACKUP_URL_3",
@@ -46,7 +49,8 @@ PROVIDERS = {
     "helius": ("Helius", ["helius"], ["HELIUS_API_KEY"], [], []),
     "pumpportal": ("Pump.fun / PumpPortal", ["pumpportal"], ["PUMPPORTAL_API_KEY"], [], []),
     "jupiter": ("Jupiter", ["jupiter"], ["JUPITER_API_KEY"], [], []),
-    "wallet": ("Wallet", [], ["WALLET_PRIVATE_KEY"], ["WALLET_PUBLIC_KEY"], []),
+    "wallet": ("Wallet (Solana)", [], ["WALLET_PRIVATE_KEY"], ["WALLET_PUBLIC_KEY"], []),
+    "evm_wallet": ("Wallet (EVM: BSC + Robinhood Chain)", [], ["EVM_WALLET_PRIVATE_KEY"], ["EVM_WALLET_ADDRESS"], []),
     "binance": ("Binance", ["binance"], ["BINANCE_API_KEY", "BINANCE_API_SECRET"], ["BINANCE_TESTNET"], []),
     "bybit": ("Bybit", ["bybit"], ["BYBIT_API_KEY", "BYBIT_API_SECRET"], ["BYBIT_TESTNET"], []),
     "hyperliquid": ("Hyperliquid", ["hyperliquid"], ["HYPERLIQUID_API_WALLET_PRIVATE_KEY"],
@@ -97,7 +101,8 @@ async def overview(settings: Settings = Depends(get_settings), redis: Redis = De
             "key": key, "title": title, "tests": tests,
             "secrets": {n: ("configured" if _value(settings, n) else "not configured") for n in secrets},
             "values": {n: _value(settings, n) for n in plain},
-            "endpoints": {n: redact_url(_value(settings, n)) or None for n in urls},
+            "endpoints": {n: ", ".join(redact_url(u.strip()) for u in str(_value(settings, n)).split(",") if u.strip())
+                          if _value(settings, n) else None for n in urls},
             "last_test": last,
         })
     return {"groups": groups, "sections": SECTIONS, "results": provider_tests.RESULTS,
