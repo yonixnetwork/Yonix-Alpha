@@ -24,6 +24,11 @@ dependencies = [
     "solders==0.29.0",
     # Encrypts dashboard-managed provider URLs (they embed API keys) at rest.
     "cryptography==50.0.1",
+    # EVM chains (BSC, Robinhood Chain): ABI encoding / log decoding and
+    # server-side transaction signing. eth-account <0.14 stays compatible with
+    # hyperliquid-python-sdk until the legacy futures code is removed.
+    "eth-abi==5.2.0",
+    "eth-account==0.13.7",
 ]
 
 [project.optional-dependencies]

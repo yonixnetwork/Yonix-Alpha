@@ -147,6 +147,9 @@ class Quote:
     source: str = ""
     error: str | None = None
     at: datetime | None = None
+    # False when computed off-chain from reserves (the contract's formula
+    # applied locally) rather than returned by the contract / a simulation.
+    exact: bool = True
 
 
 @dataclass

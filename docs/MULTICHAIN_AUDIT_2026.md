@@ -81,3 +81,48 @@ Not trusted as sources: star counts, Telegram claims, single wallets, marketing 
   - LIVE also requires a verified buy AND sell on the real chain, explicitly authorized by the operator.
 - **The existing Solana engine is not re-routed through the new abstractions** until they are proven equivalent. The adapters wrap it.
 - **An API that is unavailable is never read as "safe"**; missing data is UNKNOWN and blocks automatic entries.
+
+## 5. Phase 2 — EVM core and launchpad adapters (IMPLEMENTED, NOT VERIFIED on chain)
+
+Code: `packages/core-py/yonixalpha_core/chains/evm/`. Nothing in it signs or sends a transaction.
+
+| Module | What it does |
+|---|---|
+| `rpc.py` | JSON-RPC client with ordered failover. Checks `eth_chainId` per endpoint before use (a wrong-chain URL is disabled). HTTP 429 honours Retry-After, else a doubling backoff (2–120 s). A method an endpoint does not serve moves to the next endpoint. A revert is returned to the caller, never retried elsewhere. `eth_getLogs` halves a range the node refuses. URLs are shown only as scheme://host. Configured by `BSC_RPC_URLS` / `ROBINHOOD_RPC_URLS`, with the public RPCs as the last fallback. |
+| `abi.py` | Selectors, call encoding, event topics, log decoding (eth_abi). |
+| `dex.py`, `v3pools.py` | ERC-20 reads; Uniswap V3 QuoterV2 quotes, pool Swap → trade; PancakeSwap V2 `getAmountsOut`. |
+| `fourmeme.py` | TokenCreate / TokenPurchase / TokenSale / LiquidityAdded from TokenManager2. Quotes via Helper3 `tryBuy` / `trySell`; PancakeSwap V2 after liquidity is added; BEP-20-quoted tokens are refused. TaxToken `feeRate()`. |
+| `flap.py` | Portal events; `getTokenV8Safe` state (status, taxes, extension, progress); `quoteExactInput` simulated. Non-BNB quote tokens and non-tradable statuses are refused. |
+| `pons.py` | V2: factory `TokenLaunched` announces each curve, and only announced curves' CurveBuy / CurveSell are accepted. The buy quote simulates `curve.buy` via `eth_call` with a balance state override. If the node lacks overrides, it uses the source formula with `exact=False`. The sell quote uses the source formula on live reserves (`exact=False`). Graduated (Uniswap V4) tokens are observe-only. V1 and NOXA: V3 pool from `TokenLaunched`. |
+| `odyssey.py` | Curve (bonding + legacy factories): the budget is solved locally, then confirmed with the contract's exact-out `quoteBuy`. `quoteSell` is used as-is. `PoolMigrated` switches the token to its V3 pool. Instant: V3 pool from `InstantTokenCreated`. Reflection: observe only. |
+| `launchpad.py` | One `eth_getLogs` pass per range. Logs are accepted only from the launchpad's own or announced contracts; a look-alike from another contract is counted as `rejected_foreign`. Decode failures are counted, never dropped. |
+
+**Tests:** `packages/core-py/tests/test_evm_chains.py` runs against a fake JSON-RPC node and covers:
+- the ABI constants (ERC-20 Transfer, Uniswap V3 Swap);
+- failover (429, wrong chain, unsupported method) and revert handling;
+- every adapter's decoding and quotes;
+- the foreign-contract rejection;
+- the verification tool.
+
+These prove the logic, **not** that the deployed contracts behave as their published ABIs and sources say.
+
+**On-chain verification (run on the server, read-only):**
+
+```
+$C run --rm decision-engine python -m yonixalpha_core.tools.launchpad_verify --hours 6 --dry-run   # look first
+$C run --rm decision-engine python -m yonixalpha_core.tools.launchpad_verify --hours 6             # record evidence
+```
+
+It records ACTIVE, DISCOVERY, EVENTS, QUOTE, LIQUIDITY and MIGRATION_DETECTION rows only when the check actually ran. An unavailable RPC records nothing.
+
+It never records the following:
+- **SAFETY:** needs the EVM safety checks of Phase 3.
+- **BUY, SELL and TX_MONITORING:** need a real, authorized transaction.
+
+So after it runs, a launchpad can at best be *missing SAFETY for paper*. No EVM launchpad can reach PAPER ONLY or LIVE in Phase 2.
+
+**Known uncertainties (resolved only by the on-chain run):**
+- The Flap `price` scale.
+- Whether Four.meme `trySell.funds` is net of the fee (the docs say it is what the seller receives).
+- Whether the deployed Pons V2 curve applies the factory's anti-snipe tax (the published curve source does not). This is why the buy quote is a simulation.
+- Which Pons V1 factory is current.

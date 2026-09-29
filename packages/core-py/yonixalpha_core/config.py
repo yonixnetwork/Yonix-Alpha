@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     # (provider URLs). Derived from JWT_SECRET when unset.
     CONFIG_ENCRYPTION_KEY: Optional[str] = None
     HELIUS_API_KEY: Optional[str] = None
+
+    # EVM chains (multi-chain phase): comma-separated RPC URLs tried in order
+    # before the chain's public endpoints. URLs may embed API keys; they are
+    # only ever shown as scheme://host.
+    BSC_RPC_URLS: Optional[str] = None
+    ROBINHOOD_RPC_URLS: Optional[str] = None
     JUPITER_API_KEY: Optional[str] = None
 
     # Live Solana execution (only used when every live lock is open).

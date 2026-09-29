@@ -28,6 +28,10 @@ ROBINHOOD_UNISWAP_V3 = {"factory": "0x1f7d7550B1b028f7571E69A784071F0205FD2EfA",
                         "quoter_v2": "0x33e885eD0Ec9bF04EcfB19341582aADCb4c8A9E7",
                         "swap_router02": "0xCaf681a66D020601342297493863E78C959E5cb2"}
 BSC_WBNB = "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"
+# PancakeSwap V2 (docs.pancakeswap.finance): quotes for Four.meme tokens after
+# their liquidity is added to PancakeSwap.
+BSC_PANCAKE_V2 = {"router": "0x10ED43C718714eb63d5aA57B78B54704E256024E",
+                  "factory": "0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73"}
 
 _FOUR = ("github.com/four-meme-community/four-meme-ai (skills/four-meme-integration, 2026-03-30)",)
 _FLAP = ("github.com/CoolBB97/flap_sniper (built on docs.flap.sh, 2026-09-29)",)

@@ -1,0 +1,278 @@
+"""EVM JSON-RPC client with ordered failover (BSC, Robinhood Chain).
+
+- Every endpoint's eth_chainId is checked once before it is used; an
+  endpoint that answers for another chain is disabled (WRONG_CHAIN) and never
+  used, so a mistyped URL can never quote or trade on the wrong network.
+- HTTP 429 cools the endpoint down for Retry-After seconds when sent, else
+  for a doubling backoff (2 s .. 120 s); network errors and 5xx for 5 s.
+  The next endpoint is tried at once.
+- A JSON-RPC error (e.g. "execution reverted") is an answer, not an
+  endpoint failure: it is raised as EvmRpcError to the caller unchanged.
+- URLs embed API keys, so they only ever appear as scheme://host
+  (yonixalpha_core.redact) in health output, errors and logs.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+from dataclasses import dataclass, field
+from typing import Any
+
+import httpx
+
+from yonixalpha_core.redact import redact_text, redact_url
+
+
+class EvmRpcError(RuntimeError):
+    """The node answered with a JSON-RPC error (revert, bad params, ...)."""
+
+    def __init__(self, message: str, code: int | None = None, data: Any = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.data = data
+
+
+class EvmRpcUnavailableError(RuntimeError):
+    """No endpoint could answer (all failing, cooling down or wrong chain)."""
+
+
+# A JSON-RPC error that means "this endpoint does not serve the method" (not
+# "the request failed"): the next endpoint is tried and the method is
+# skipped on this endpoint from then on.
+CAPABILITY_ERRORS = ("method not found", "not supported", "is not available", "not available on", "disabled",
+                     "not whitelisted", "unsupported method", "method not allowed")
+RANGE_ERRORS = ("range", "too many", "limit exceeded", "exceed", "response size", "10000 results", "block range")
+
+
+def _retry_after(r: httpx.Response) -> float | None:
+    v = r.headers.get("retry-after")
+    try:
+        return max(0.0, float(v)) if v is not None else None
+    except ValueError:
+        return None
+
+
+@dataclass
+class _Endpoint:
+    url: str
+    state: str = "UNCHECKED"  # UNCHECKED | OK | COOLDOWN | WRONG_CHAIN | FAILING
+    cooldown_until: float = 0.0
+    backoff: float = 0.0
+    last_error: str | None = None
+    ok: int = 0
+    errors: int = 0
+    rate_limited: int = 0
+    latency_ms: float | None = None
+    chain_id: int | None = None
+    extra: dict = field(default_factory=dict)
+    unsupported: set = field(default_factory=set)  # methods this endpoint refused to serve
+
+    def usable(self, now: float, method: str = "") -> bool:
+        return self.state != "WRONG_CHAIN" and now >= self.cooldown_until and method not in self.unsupported
+
+
+def _capability_error(exc: EvmRpcError, method: str) -> bool:
+    """Only "method not found" counts for eth_call / eth_estimateGas: their
+    revert reasons are contract text ("trading disabled") and must reach the
+    caller as a revert, never be mistaken for an endpoint limitation."""
+    if exc.code == -32601:
+        return True
+    msg = str(exc).lower()
+    if method in ("eth_call", "eth_estimateGas") or exc.code == 3 or "revert" in msg:
+        return False
+    return any(k in msg for k in CAPABILITY_ERRORS)
+
+
+class EvmRpc:
+    def __init__(self, chain: str, chain_id: int, urls: list[str] | tuple[str, ...], *,
+                 client: httpx.AsyncClient | None = None, timeout: float = 10.0) -> None:
+        if not urls:
+            raise ValueError(f"{chain}: no RPC URLs")
+        self.chain = chain
+        self.chain_id = chain_id
+        self.endpoints = [_Endpoint(u) for u in dict.fromkeys(u.strip() for u in urls if u and u.strip())]
+        self._client = client or httpx.AsyncClient(timeout=timeout)
+        self._own_client = client is None
+        self._id = 0
+
+    async def aclose(self) -> None:
+        if self._own_client:
+            await self._client.aclose()
+
+    def _redact(self, text: str) -> str:
+        return redact_text(text, [e.url for e in self.endpoints])
+
+    async def _post(self, ep: _Endpoint, method: str, params: list) -> Any:
+        self._id += 1
+        t0 = time.monotonic()
+        r = await self._client.post(ep.url, json={"jsonrpc": "2.0", "id": self._id, "method": method, "params": params})
+        ep.latency_ms = round((time.monotonic() - t0) * 1000, 1)
+        if r.status_code == 429:
+            raise _RateLimited(_retry_after(r))
+        r.raise_for_status()
+        body = r.json()
+        if isinstance(body, dict) and body.get("error"):
+            err = body["error"]
+            raise EvmRpcError(str(err.get("message", err))[:300], err.get("code"), err.get("data"))
+        if not isinstance(body, dict) or "result" not in body:
+            raise httpx.HTTPError(f"malformed JSON-RPC response for {method}")
+        return body["result"]
+
+    async def _ensure_chain(self, ep: _Endpoint) -> None:
+        if ep.chain_id is not None:
+            return
+        got = int(await self._post(ep, "eth_chainId", []), 16)
+        ep.chain_id = got
+        if got != self.chain_id:
+            ep.state = "WRONG_CHAIN"
+            ep.last_error = f"eth_chainId {got}, expected {self.chain_id}"
+            raise _WrongChain(ep.last_error)
+        ep.state = "OK"
+
+    async def call(self, method: str, params: list | None = None) -> Any:
+        params = params or []
+        causes: list[str] = []
+        now = time.monotonic()
+        order = [e for e in self.endpoints if e.usable(now, method)]
+        if not order and any(method in e.unsupported for e in self.endpoints if e.state != "WRONG_CHAIN"):
+            raise EvmRpcUnavailableError(f"{self.chain} RPC: no configured endpoint serves {method}")
+        if not order:
+            waits = [e.cooldown_until - now for e in self.endpoints if e.state != "WRONG_CHAIN"]
+            detail = f"all cooling down for {min(waits):.0f}s more" if waits else "every endpoint answers for the wrong chain"
+            raise EvmRpcUnavailableError(f"{self.chain} RPC unavailable: {detail}")
+        for ep in order:
+            try:
+                await self._ensure_chain(ep)
+                result = await self._post(ep, method, params)
+                ep.ok += 1
+                ep.backoff = 0.0
+                ep.state = "OK"
+                ep.last_error = None
+                return result
+            except EvmRpcError as exc:
+                ep.ok += 1  # the endpoint works
+                if not _capability_error(exc, method):
+                    raise  # the request itself failed (e.g. reverted): same answer anywhere
+                ep.unsupported.add(method)
+                causes.append(f"{redact_url(ep.url)}: {method} not served ({self._redact(str(exc))[:80]})")
+            except _WrongChain as exc:
+                causes.append(f"{redact_url(ep.url)}: {exc}")
+            except _RateLimited as exc:
+                ep.rate_limited += 1
+                ep.backoff = min(120.0, max(2.0, ep.backoff * 2))
+                wait = exc.retry_after if exc.retry_after is not None else ep.backoff
+                ep.cooldown_until = time.monotonic() + wait
+                ep.state, ep.last_error = "COOLDOWN", "HTTP 429"
+                causes.append(f"{redact_url(ep.url)}: HTTP 429")
+            except (httpx.HTTPError, ValueError, json.JSONDecodeError) as exc:
+                ep.errors += 1
+                ep.cooldown_until = time.monotonic() + 5.0
+                ep.state = "FAILING"
+                ep.last_error = self._redact(f"{type(exc).__name__}: {exc}")[:200]
+                causes.append(f"{redact_url(ep.url)}: {ep.last_error}")
+        raise EvmRpcUnavailableError(f"{self.chain} RPC {method} failed on every endpoint: " + "; ".join(causes))
+
+    # --- typed helpers ---------------------------------------------------------------------------
+
+    async def block_number(self) -> int:
+        return int(await self.call("eth_blockNumber"), 16)
+
+    async def get_block(self, number: int | str = "latest") -> dict[str, Any]:
+        tag = hex(number) if isinstance(number, int) else number
+        return await self.call("eth_getBlockByNumber", [tag, False])
+
+    async def get_code(self, address: str) -> str:
+        return await self.call("eth_getCode", [address, "latest"])
+
+    async def get_balance(self, address: str) -> int:
+        return int(await self.call("eth_getBalance", [address, "latest"]), 16)
+
+    async def get_receipt(self, tx_hash: str) -> dict[str, Any] | None:
+        return await self.call("eth_getTransactionReceipt", [tx_hash])
+
+    async def eth_call(self, to: str, data: str, *, from_: str | None = None, value: int | None = None,
+                       block: str = "latest", state_override: dict | None = None) -> str:
+        tx: dict[str, Any] = {"to": to, "data": data}
+        if from_:
+            tx["from"] = from_
+        if value:
+            tx["value"] = hex(value)
+        params: list[Any] = [tx, block]
+        if state_override:
+            params.append(state_override)
+        return await self.call("eth_call", params)
+
+    async def get_logs(self, addresses: list[str] | str | None, topics: list, from_block: int, to_block: int,
+                       *, max_span: int = 2000) -> list[dict[str, Any]]:
+        """eth_getLogs over [from_block, to_block] in chunks of at most
+        `max_span` blocks; a chunk the node refuses as too large is halved
+        until it is accepted (down to one block)."""
+        out: list[dict[str, Any]] = []
+        start = from_block
+        span = max(1, max_span)
+        while start <= to_block:
+            end = min(to_block, start + span - 1)
+            try:
+                flt: dict[str, Any] = {"topics": topics, "fromBlock": hex(start), "toBlock": hex(end)}
+                if addresses is not None:  # None: any emitter (the caller validates it)
+                    flt["address"] = addresses
+                logs = await self.call("eth_getLogs", [flt])
+            except EvmRpcError as exc:
+                if span > 1 and any(k in str(exc).lower() for k in RANGE_ERRORS):
+                    span = max(1, span // 2)
+                    continue
+                raise
+            out.extend(logs or [])
+            start = end + 1
+        return out
+
+    def health(self) -> dict[str, Any]:
+        now = time.monotonic()
+        return {"chain": self.chain, "chain_id": self.chain_id, "endpoints": [
+            {"url": redact_url(e.url), "state": e.state if e.state != "COOLDOWN" or now < e.cooldown_until else "OK",
+             "cooldown_s": round(max(0.0, e.cooldown_until - now), 1), "last_error": e.last_error,
+             "ok": e.ok, "errors": e.errors, "rate_limited": e.rate_limited, "latency_ms": e.latency_ms,
+             "chain_id_seen": e.chain_id, "unsupported_methods": sorted(e.unsupported)} for e in self.endpoints]}
+
+    async def publish_health(self, redis) -> None:
+        if redis is not None:
+            await redis.set(f"yx:evm:rpc:{self.chain}", json.dumps({**self.health(), "at": time.time()}), ex=600)
+
+
+class _RateLimited(Exception):
+    def __init__(self, retry_after: float | None) -> None:
+        super().__init__("HTTP 429")
+        self.retry_after = retry_after
+
+
+class _WrongChain(Exception):
+    pass
+
+
+def make_rpc(chain: str, settings: Any = None, *, client: httpx.AsyncClient | None = None) -> EvmRpc:
+    """RPC for `chain` ("bsc" | "robinhood"): the configured URLs
+    (BSC_RPC_URLS / ROBINHOOD_RPC_URLS, comma-separated) first, then the
+    chain's public endpoints as the last fallback."""
+    from yonixalpha_core.chains.base import Chain
+    from yonixalpha_core.chains.registry import CHAINS
+
+    spec = CHAINS[Chain(chain)]
+    if spec.evm_chain_id is None:
+        raise ValueError(f"{chain} is not an EVM chain")
+    configured = getattr(settings, f"{chain.upper()}_RPC_URLS", None) if settings is not None else None
+    urls = [u for u in (configured or "").split(",") if u.strip()] + list(spec.public_rpc)
+    return EvmRpc(chain, spec.evm_chain_id, urls, client=client)
+
+
+async def gather_limited(coros: list, limit: int = 4) -> list:
+    """Runs coroutines with at most `limit` in flight (public RPCs rate-limit
+    bursts); exceptions are returned, not raised."""
+    sem = asyncio.Semaphore(limit)
+
+    async def one(c):
+        async with sem:
+            return await c
+
+    return await asyncio.gather(*(one(c) for c in coros), return_exceptions=True)
