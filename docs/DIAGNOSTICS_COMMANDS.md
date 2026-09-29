@@ -24,5 +24,7 @@ C="docker compose --env-file .env -f infra/docker/docker-compose.yml -f infra/do
 | Build + guard + simulate (no signing) | `$C run --rm paper-trading python -m yonixalpha_core.tools.exec_dryrun <MINT> --sol 0.01` | That the working buy path still builds and simulates on the real chain. |
 | Runtime config revision | `$C run --rm decision-engine python -m yonixalpha_core.tools.rpc_check` (section "LOADED BY THE RUNNING SERVICES") | The database configuration revision, and the revision each service runs (SYNCED / behind). |
 | Stream heartbeat | `$C exec -T redis sh -c 'redis-cli -a "$REDIS_PASSWORD" --no-auth-warning GET yx:pump:hb'` | When the Pump.fun stream last delivered an event. |
+| Position-loop cadence | `$C exec -T redis sh -c 'redis-cli -a "$REDIS_PASSWORD" --no-auth-warning GET yx:pm:last_pass'` | Last pass of the open-position loop: `at` (should be within a few seconds of now), `pass_ms`, positions managed / closed / unpriced. |
+| SOL/USD rate | `$C exec -T redis sh -c 'redis-cli -a "$REDIS_PASSWORD" --no-auth-warning GET yx:sol_usd'` | The rate the dashboard converts market caps with (empty = "USD unavailable"). |
 
 To keep the output for sending, add `> report.txt 2>&1`.
