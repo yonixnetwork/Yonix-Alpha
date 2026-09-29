@@ -28,7 +28,7 @@ const SECTIONS: { title: string; match: (k: string) => boolean; also?: string[];
   },
   {
     title: "Launch intelligence, manipulation & regimes",
-    match: (k) => /^(intel_|mayhem_|manipulation_|instant_bond|boost_|postmig_|wallet_|dump_cluster|cf_)/.test(k),
+    match: (k) => /^(intel_|mayhem_|manipulation_|manufactured_pump_|organic_|instant_bond|boost_|postmig_|wallet_|dump_cluster|cf_)/.test(k),
     note: "Features are recorded for every decision; only the *_action settings act on them. Mayhem tokens: curve pricing and sizing do not hold. Manipulation HIGH needs several independent families, never one indicator. Research and limits: docs/INTELLIGENCE_AUDIT_2026.md.",
   },
   { title: "Token name filters", match: (k) => /name_length|duplicate_names|ascii_names/.test(k),

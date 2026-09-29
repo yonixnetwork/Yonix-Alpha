@@ -108,6 +108,10 @@ async def test_dumping_launch_is_rejected_with_the_reason_recorded(redis, sessio
     intel = opp.snapshot["intel"]
     assert intel["stage"] == "FRESH" and intel["regime"]["mayhem"] is None and "manipulation" in intel  # no create flag: unknown
     assert intel["wallets"]["dump_cluster"]["level"] == "UNKNOWN"  # no resolved history: never assumed clean
+    rel = intel["relationships"]  # rejected tokens get the relationship analysis too (cache only, no RPC)
+    assert rel["status"] == "MEASURED" and rel["buyers"]["raw_unique_buyers"] >= rel["buyers"]["effective_unique_buyers"]
+    assert rel["demand"]["organic_demand_ratio"] is None and rel["wallets"] == []  # nothing attributed: never assumed organic
+    assert intel["manufactured_pump"]["detector_version"] and intel["observation"]["coverage_status"]
 
 
 async def test_gate_budget_keeps_qualified_tokens_monitored_not_dropped(redis, session_factory):

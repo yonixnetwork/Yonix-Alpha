@@ -399,8 +399,10 @@ async def assemble_fresh(src: Sources, mint: str, now: datetime, c: Controls,
             supply_raw=token.supply_raw if token else None, stream_started_ts=started_ts,
             funding=ev.get("funding"), duplicate_of=inp.duplicate_of, engine=engine,
             dump_cluster=(wallets or {}).get("dump_cluster"),
-            recycled_wallets=set((wallets or {}).get("recycled_wallets") or []))
+            recycled_wallets=set((wallets or {}).get("recycled_wallets") or []), stream_heartbeat=hb)
         inp.intel["wallets"] = wallets
+        await _timed(ev, "relationships", intel.add_relationships(inp.intel, src.redis, trades, now, c.settings,
+                                                                  creator=creator, mint=mint, wallets=wallets))
     except Exception as exc:  # noqa: BLE001 - intelligence is evidence; its failure is recorded, never guessed
         ev["errors"].append(f"intel: {type(exc).__name__}: {str(exc)[:160]}")
     ev["intel"] = inp.intel
@@ -563,6 +565,9 @@ async def assemble_migrated(src: Sources, mint: str, now: datetime, c: Controls)
                                      funding=ev.get("funding"), duplicate_of=inp.duplicate_of,
                                      dump_cluster=(wallets or {}).get("dump_cluster"))
         inp.intel["wallets"] = wallets
+        await _timed(ev, "relationships", intel.add_relationships(inp.intel, src.redis, trades, now, c.settings,
+                                                                  creator=meta.get("creator") or None, mint=mint,
+                                                                  wallets=wallets))
     except Exception as exc:  # noqa: BLE001
         ev["errors"].append(f"intel: {type(exc).__name__}: {str(exc)[:160]}")
     ev["intel"] = inp.intel

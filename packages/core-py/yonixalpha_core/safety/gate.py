@@ -626,6 +626,14 @@ def _check_intel(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) ->
                             f"early buyers include a cohort that repeatedly sold early together in earlier collapsed (LOSS) launches "
                             f"({'; '.join(dc.get('evidence') or [])[:300]}) · Action: {s.dump_cluster_high_action} — "
                             "a pattern from this system's history, not an accusation", decision))
+    mp = intel.get("manufactured_pump") or {}
+    if mp.get("risk") == "HIGH":
+        decision, level = _INTEL_ACTION[s.manufactured_pump_action]
+        out.append(_finding(RiskCategory.TRADING, "MANUFACTURED_PUMP_RISK_HIGH", level,
+                            f"manufactured-pump pattern over the last {mp.get('pattern_duration_seconds')}s "
+                            f"({'; '.join(mp.get('evidence') or [])[:300]}; detector {mp.get('detector_version')}) · "
+                            f"Action: {s.manufactured_pump_action} — a documented pattern associated with elevated "
+                            "manipulation risk, not a prediction", decision))
     pm = intel.get("post_migration") or {}
     if pm.get("state") == "DUMPING":
         decision, level = _INTEL_ACTION[s.postmig_dumping_action]

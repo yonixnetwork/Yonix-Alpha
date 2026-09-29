@@ -180,8 +180,11 @@ async def _ledger_intel(redis: Redis, mint: str, now: datetime, settings: Safety
         rec = intel.curve_intel(trades, now, settings, meta=meta, curve=None, curve_from_chain=False, decimals=6,
                                 supply_raw=int(opportunities.PUMP_SUPPLY_RAW), stream_started_ts=started_ts, funding=None,
                                 duplicate_of=None, dump_cluster=wallets.get("dump_cluster"),
-                                recycled_wallets=set(wallets.get("recycled_wallets") or []))
+                                recycled_wallets=set(wallets.get("recycled_wallets") or []),
+                                stream_heartbeat=await pump_stream.heartbeat(redis))
         rec["wallets"] = wallets
+        await intel.add_relationships(rec, redis, trades, now, settings, creator=meta.get("creator") or None, mint=mint,
+                                      wallets=wallets, keep_wallets=0)
         return rec
     except Exception as exc:  # noqa: BLE001
         return {"error": f"{type(exc).__name__}: {str(exc)[:160]}"}

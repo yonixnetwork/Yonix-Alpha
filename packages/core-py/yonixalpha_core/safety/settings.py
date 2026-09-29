@@ -213,6 +213,20 @@ class SafetySettings:
     dump_cluster_medium_wallets: int = 2
     dump_cluster_high_wallets: int = 4
     dump_cluster_high_action: str = "WARN"
+    # Wallet relationships / organic demand (solana.wallet_graph): the
+    # organic-demand ratio is reported as one number only when at least this
+    # share of volume is attributed (else as lower / upper bounds).
+    organic_min_attribution_share: Decimal = Decimal("0.5")
+    # Manufactured-pump detector (solana.manufactured_pump). Starting values,
+    # to be calibrated on this system's outcomes; stored with every result.
+    manufactured_pump_candle_seconds: int = 10
+    manufactured_pump_min_candles: int = 6
+    manufactured_pump_min_positive_share: Decimal = Decimal("0.65")
+    manufactured_pump_max_return_cv: Decimal = Decimal("1.5")
+    manufactured_pump_max_buy_ratio_std: Decimal = Decimal("0.15")
+    manufactured_pump_min_log_r2: Decimal = Decimal("0.85")
+    manufactured_pump_min_window_return: Decimal = Decimal("0.25")
+    manufactured_pump_action: str = "WARN"  # when the detector's risk is HIGH
 
     # ML
     min_ml_confidence: float | None = None
@@ -254,6 +268,8 @@ HARD_LIMITS: dict[str, tuple[str, Any]] = {
     # One indicator is never enough for a HIGH manipulation level.
     "manipulation_high_families": ("min", 2),
     "intel_snapshot_seconds": ("max", 600),
+    "manufactured_pump_candle_seconds": ("min", 2),
+    "manufactured_pump_min_candles": ("min", 3),
     "manipulation_window_seconds": ("max", 900),
     "wallet_early_buyers": ("max", 50),
     # A reputation needs a prior and a few resolved launches.
@@ -274,6 +290,7 @@ ENUM_FIELDS: dict[str, tuple[str, ...]] = {
     "manipulation_medium_action": INTEL_ACTIONS,
     "postmig_dumping_action": INTEL_ACTIONS,
     "dump_cluster_high_action": INTEL_ACTIONS,
+    "manufactured_pump_action": INTEL_ACTIONS,
 }
 
 _TUPLE_FIELDS = {"tp_r_multiples", "tp_exit_fractions"}
@@ -392,13 +409,19 @@ def validate(settings: SafetySettings) -> list[str]:
     if settings.min_name_length < 0:
         errors.append("min_name_length must not be negative")
     for name in ("mayhem_action", "manipulation_high_action", "manipulation_medium_action", "postmig_dumping_action",
-                 "dump_cluster_high_action"):
+                 "dump_cluster_high_action", "manufactured_pump_action"):
         if getattr(settings, name) not in INTEL_ACTIONS:
             errors.append(f"{name} must be one of {', '.join(INTEL_ACTIONS)}")
     for name in ("manipulation_round_trip_share", "manipulation_regular_size_cv", "manipulation_dust_share",
                  "manipulation_linear_r2", "manipulation_collapse_pct"):
         if not (0 < getattr(settings, name) <= 1):
             errors.append(f"{name} must be in (0, 1]")
+    for name in ("organic_min_attribution_share", "manufactured_pump_min_positive_share",
+                 "manufactured_pump_max_buy_ratio_std", "manufactured_pump_min_log_r2"):
+        if not (0 < getattr(settings, name) <= 1):
+            errors.append(f"{name} must be in (0, 1]")
+    if settings.manufactured_pump_max_return_cv <= 0 or settings.manufactured_pump_min_window_return <= 0:
+        errors.append("manufactured_pump_max_return_cv and manufactured_pump_min_window_return must be positive")
     if settings.intel_snapshot_seconds < 5 or settings.manipulation_window_seconds < 10:
         errors.append("intel_snapshot_seconds must be at least 5 and manipulation_window_seconds at least 10")
     if settings.wallet_early_buyers < 2 or settings.wallet_early_sell_seconds < 10 or settings.wallet_history_days < 1:

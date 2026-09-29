@@ -76,3 +76,22 @@ async def test_unavailable_funding_check_is_reported_not_assumed_clean(redis):
     assert ev["funding"]["checked"] == 0 and len(ev["funding"]["errors"]) == FRESH.funding_check_wallets
     assert inp.flow.creator_linked_buyers is None
     assert "FUNDING_UNCHECKED" in codes(a)
+
+
+async def test_funding_cluster_reaches_the_relationship_graph_and_effective_buyers(redis):
+    from yonixalpha_core.solana import funding as funding_mod, wallet_graph as wg
+    _, ev, _ = await run(redis, strategy_mode=StrategyMode.MANUAL, funders={wallet(i): HUB for i in (0, 2, 4)})
+    rel = ev["intel"]["relationships"]
+    assert rel["status"] == "MEASURED" and rel["graph_version"] == wg.GRAPH_VERSION
+    hub = next(c for c in rel["clusters"] if c["cluster_id"] == wg._cid("fund", HUB))
+    assert hub["classification"] in (wg.FUNDING_RELATED, wg.COORDINATED) and hub["size"] == 3
+    b = rel["buyers"]
+    assert b["coordinated_buyers"] == 3 and b["effective_unique_buyers"] <= b["raw_unique_buyers"] - 2
+    assert await redis.zcard(funding_mod.CHILDREN + HUB) == 3  # edges persisted for the next tokens
+    assert "relationships" in ev["timings_ms"]
+
+
+async def test_exchange_like_funder_leaves_buyers_independent_in_the_graph(redis):
+    _, ev, _ = await run(redis, funders={wallet(i): HUB for i in (0, 2, 4)}, busy={HUB})
+    rel = ev["intel"]["relationships"]
+    assert rel["buyers"]["coordinated_buyers"] == 0 and rel["cluster_count"] == 0
