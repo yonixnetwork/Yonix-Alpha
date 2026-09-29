@@ -98,6 +98,21 @@ services:
         condition: service_healthy
     networks: [yonixalpha]
 
+  # BSC + Robinhood Chain launchpads: discovery, safety, paper entries and
+  # position management (read-only on chain; nothing is signed or sent).
+  data-evm:
+    build:
+      context: ../..
+      dockerfile: services/data-evm/Dockerfile
+    env_file:
+      - ../../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    networks: [yonixalpha]
+
   data-binance:
     build:
       context: ../..

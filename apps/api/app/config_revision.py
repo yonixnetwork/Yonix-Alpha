@@ -34,6 +34,9 @@ CONFIG_ROUTES = [
     (re.compile(r"^/api/notifications/prefs$"), "notification_prefs"),
     (re.compile(r"^/api/risk/kill-switch/(engage|disengage)$"), "kill_switch"),
     (re.compile(r"^/api/rpc/providers(/env/[^/]+|/[^/]+)?$"), "rpc_providers"),  # not .../test
+    (re.compile(r"^/api/evm/settings$"), "evm_trading"),
+    # Trading switches and launchpad modes (not the close-positions / emergency-exit actions).
+    (re.compile(r"^/api/controls/(?!close-positions$|emergency-exit$)(?P<control>.+)$"), "trading_controls"),
 ]
 
 

@@ -15,6 +15,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import INET, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -518,6 +519,10 @@ class PaperPosition(Base):
         # it keeps 0 if the buy fails or confirms without tokens.
         CheckConstraint("quantity > 0 OR status IN ('pending_entry', 'failed', 'needs_review')",
                         name="ck_paper_positions_quantity_positive"),
+        # At most one open EVM position per (engine, token): a restart or two
+        # concurrent passes can never open the same EVM trade twice.
+        Index("uq_paper_positions_evm_open", "engine", "asset_id", unique=True,
+              postgresql_where=text("status = 'open' AND engine LIKE 'evm_%'")),
     )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
@@ -1104,3 +1109,71 @@ class LaunchpadCheck(Base):
     evidence: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     source: Mapped[str] = mapped_column(String(48), nullable=False)
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class EvmToken(Base):
+    """A token launched on an EVM launchpad (BSC, Robinhood Chain), as the
+    data-evm service discovered it: identity, venue (curve / pool), category,
+    last on-chain state, last safety report and rolling trade stats."""
+
+    __tablename__ = "evm_tokens"
+
+    chain: Mapped[str] = mapped_column(String(16), primary_key=True)
+    token: Mapped[str] = mapped_column(String(42), primary_key=True)
+    launchpad: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    creator: Mapped[str | None] = mapped_column(String(42), nullable=True, index=True)
+    name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    symbol: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    created_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_tx: Mapped[str | None] = mapped_column(String(66), nullable=True)
+    quote_token: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    venue: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)  # curve / pool / factory
+    category: Mapped[str] = mapped_column(String(16), nullable=False, default="FRESH", index=True)
+    stage: Mapped[str] = mapped_column(String(16), nullable=False, default="CURVE")
+    migrated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    migration: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    state: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    state_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    safety_verdict: Mapped[str | None] = mapped_column(String(8), nullable=True)  # PASS|WARN|FAIL|UNKNOWN
+    safety: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    safety_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    stats: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    last_trade_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    extra: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class EvmTrade(Base):
+    """One decoded launchpad / pool trade. event_id = chain:tx_hash:log_index,
+    so a re-scanned block never stores a trade twice."""
+
+    __tablename__ = "evm_trades"
+    __table_args__ = (Index("ix_evm_trades_token_at", "chain", "token", "at"),
+                      Index("ix_evm_trades_trader_at", "trader", "at"))
+
+    event_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    chain: Mapped[str] = mapped_column(String(16), nullable=False)
+    launchpad: Mapped[str] = mapped_column(String(32), nullable=False)
+    token: Mapped[str] = mapped_column(String(42), nullable=False)
+    trader: Mapped[str] = mapped_column(String(42), nullable=False)
+    is_buy: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    token_amount: Mapped[Decimal] = mapped_column(Numeric(78, 0), nullable=False)
+    quote_amount: Mapped[Decimal] = mapped_column(Numeric(78, 0), nullable=False)
+    fee: Mapped[Decimal | None] = mapped_column(Numeric(78, 0), nullable=True)
+    block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    tx_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    extra: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+
+class EvmCursor(Base):
+    """Last block fully processed per (chain, launchpad). Written in the same
+    transaction as the trades of that range, so a restart resumes exactly."""
+
+    __tablename__ = "evm_cursors"
+
+    chain: Mapped[str] = mapped_column(String(16), primary_key=True)
+    launchpad: Mapped[str] = mapped_column(String(32), primary_key=True)
+    last_block: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

@@ -90,3 +90,24 @@ async def test_outcome_is_tracked_for_opportunities_not_taken(session_factory, r
     new, old = rows["k-new"].outcome, rows["k-old"].outcome
     assert Decimal(new["change_pct"]) < 0 and new["price_at_decision"] and not new["graduated"]
     assert old == {"superseded_by": str(rows["k-new"].id)}
+
+
+async def test_evm_positions_are_left_to_data_evm(session_factory, redis_client):
+    """BSC / Robinhood paper positions are priced by services/data-evm; the
+    Solana manager must neither price them nor report them unpriced."""
+    from datetime import datetime, timezone
+    from decimal import Decimal
+
+    from yonixalpha_core.db.models import PaperPosition
+
+    from app.gate_manage import manage_gate_positions
+
+    now = datetime.now(timezone.utc)
+    async with session_factory() as session:
+        session.add(PaperPosition(symbol="MOON", provider="paper", side="LONG", entry_price=Decimal("0.000001"),
+                                  quantity=Decimal("20000"), stop_loss=Decimal("0.0000009"), take_profit=[], entry_at=now,
+                                  status="open", engine="evm_bsc", asset_id="0x1111111111111111111111111111111111111111",
+                                  plan={"venue": {"kind": "spot", "chain": "bsc", "launchpad": "fourmeme"}}))
+        await session.commit()
+    counts = await manage_gate_positions(session_factory, redis_client, None, now)
+    assert counts["managed"] == 0 and counts["unpriced"] == 0 and not counts.get("failed")

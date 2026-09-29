@@ -253,6 +253,8 @@ async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterC
         ids = (await session.execute(
             select(PaperPosition.id).where(
                 PaperPosition.status == "open", PaperPosition.engine.is_not(None),
+                # EVM (BSC / Robinhood Chain) positions are managed by services/data-evm.
+                PaperPosition.engine.not_like("evm\\_%"),
                 # LIVE futures/FX positions are managed by services/execution-futures.
                 or_(PaperPosition.execution_provider.is_(None),
                     PaperPosition.execution_provider.not_in(FUTURES_PROVIDERS)))

@@ -126,3 +126,70 @@ So after it runs, a launchpad can at best be *missing SAFETY for paper*. No EVM 
 - Whether Four.meme `trySell.funds` is net of the fee (the docs say it is what the seller receives).
 - Whether the deployed Pons V2 curve applies the factory's anti-snipe tax (the published curve source does not). This is why the buy quote is a simulation.
 - Which Pons V1 factory is current.
+
+## 6. Phase 3 — EVM discovery, safety and paper trading (IMPLEMENTED, NOT VERIFIED on chain)
+
+New service `services/data-evm` runs one loop per chain (BSC, Robinhood Chain). It is read-only on chain.
+
+**Each loop, per step:**
+1. **Discovery** (every ~3 s):
+   - `eth_getLogs` from the persisted cursor (`evm_cursors`) up to `head − confirmations`.
+   - Launches go to `evm_tokens` and trades go to `evm_trades`. The trade key is `chain:tx:log_index` with ON CONFLICT DO NOTHING.
+   - The cursor advances in the same transaction, so a restart or re-scan never duplicates an event.
+   - Curves and pools a launchpad announced are restored into the adapters at start.
+2. **Stats and category.**
+   - Stats are computed from the trades' own amounts (not from unverified launchpad price fields), over 5 minutes: buys, sells, distinct buyers, volumes, buy share, price change, realized volatility (the Solana `realized_volatility`).
+   - **MIGRATED:** migrated in the last 60 min.
+   - **FRESH:** launch observed, younger than 30 min, still on its curve.
+   - **MOMENTUM:** ≥ 10 buys, ≥ 6 buyers, buy share ≥ 55 %.
+   - **OTHER:** anything else.
+   - A token whose launch was not observed is never FRESH.
+3. **Safety** (`chains/evm/safety.py`). The verdict is PASS / WARN / FAIL / UNKNOWN. UNKNOWN is never read as safe, and entries need PASS.
+   - **Round trip:** a buy quote of the position size, then a sell quote of exactly the tokens it returns. A sell quote is required; being buyable is not enough.
+   - Round-trip loss limit.
+   - Launchpad taxes, status, extensions and the Pons V2 near-graduation block.
+   - Token code; EIP-1967 proxy slots (upgradeable token = FAIL); `owner()`.
+   - **Restricted movement:** Odyssey `limitsActive` / `maxWallet`, and Pons V1 launch restrictions.
+   - **Honeypot.is (optional, BSC):** a flag fails the token; a clean result never passes it.
+4. **Paper entry** (`chains/evm/paper.py`). Every blocker is recorded on the token (`extra.entry_decision`):
+   - kill switch;
+   - trading controls;
+   - launchpad status must be PAPER ONLY or LIVE, i.e. evidence;
+   - category and trade signal;
+   - a safety PASS less than 5 min old;
+   - liquidity;
+   - per-chain limits (open positions, exposure, daily loss, 24 h re-entry cooldown).
+
+   Sizing uses the shared `plan_trade`:
+   - percentages come from the shared risk settings;
+   - amounts come from `evm_trading` in BNB / ETH, never SOL;
+   - the executable round trip is the exit cost.
+
+   A partial unique index (`uq_paper_positions_evm_open`) makes a second open position on the same token impossible.
+5. **Management.**
+   - Each position is marked at the executable sell quote of its remaining tokens, net of fees and taxes, through the shared `paper_engine.apply_step` (stop, take-profits, breakeven, trailing).
+   - After a migration the adapter quotes the DEX: same position row, and a `venue_switched` event is recorded.
+   - An unquotable position stays open as UNPRICED; it is never marked at an invented price.
+   - The Solana position loop skips `evm_*` engines.
+6. **Evidence** (every 30 min). The service records what it observed on the real chain as `launchpad_checks` (source `data-evm`):
+   - ACTIVE;
+   - DISCOVERY: PASS only, because a quiet window is not a failure and a 24 h expiry handles inactivity;
+   - EVENTS; QUOTE; LIQUIDITY; SAFETY: ran to a verdict; MIGRATION_DETECTION: confirmed by `detect_migration`.
+
+   It never records BUY, SELL or TX_MONITORING. So a BSC or Robinhood Chain launchpad reaches PAPER ONLY only from real-chain evidence, and LIVE stays impossible: there is no EVM execution.
+
+**Other additions:**
+- **API:** `/api/evm/tokens`, `/api/evm/tokens/{chain}/{token}`, `/api/evm/positions`, `/api/evm/settings` (GET / PUT). The PUT is validated and audited, and bumps the config revision. Trading-control writes now bump it too.
+- **UI:** Dashboard → BSC / Robinhood.
+- **Migration:** 0022 (additive).
+
+**Tests (fake node + real Postgres / Redis):**
+- discovery idempotent across a re-scan;
+- safety PASS;
+- entry refused while the launchpad is unverified, opened once evidence exists, never duplicated;
+- stop-loss exit at the executable quote;
+- kill switch and chain switch block entries;
+- restart restores announced curves;
+- the Solana manager ignores EVM positions.
+
+**NOT VERIFIED:** any of this against the real chains (no RPC egress from the build environment).

@@ -186,6 +186,9 @@ class EvmRpc:
     async def get_code(self, address: str) -> str:
         return await self.call("eth_getCode", [address, "latest"])
 
+    async def get_storage_at(self, address: str, slot: str) -> str:
+        return await self.call("eth_getStorageAt", [address, slot, "latest"])
+
     async def get_balance(self, address: str) -> int:
         return int(await self.call("eth_getBalance", [address, "latest"]), 16)
 

@@ -48,6 +48,7 @@ SERVICES: dict[str, str] = {
     "engine-solana-migration": "RPC endpoints",
     "paper-trading": "position management, paper/live execution settings, RPC endpoints",
     "data-solana": "RPC endpoints",
+    "data-evm": "EVM trading settings, trading controls and launchpad modes (read every pass)",
     "execution-futures": "futures live settings and strategy modes",
 }
 # Legacy containers (compose profile "legacy"), not started by the default

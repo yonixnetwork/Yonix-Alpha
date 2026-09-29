@@ -408,3 +408,42 @@ async def test_launchpads_status_is_evidence_based_and_controls_are_audited(app,
     assert cp.status_code == 200 and cp.json()["exit_requested"] == 0
     detail = (await client.get("/api/chains/robinhood", headers=auth_headers)).json()
     assert detail["evm_chain_id"] == 4663 and any(x["key"] == "pons_v2" for x in detail["launchpads"])
+
+
+async def test_evm_tokens_positions_and_settings(app, client, auth_headers):
+    from datetime import datetime, timezone
+    from decimal import Decimal
+
+    from yonixalpha_core.db.models import AuditLog, EvmToken, EvmTrade
+
+    now = datetime.now(timezone.utc)
+    tok = "0x1111111111111111111111111111111111111111"
+    async with app.state.db_session_factory() as s:
+        s.add(EvmToken(chain="bsc", token=tok, launchpad="fourmeme", name="Moon", symbol="MOON", created_at=now,
+                       category="FRESH", stage="CURVE", venue={}, stats={"buys": 5}, last_trade_at=now,
+                       extra={"launch_seen": True, "entry_decision": {"decision": "NO_TRADE",
+                                                                      "blockers": [{"code": "LAUNCHPAD_NOT_VERIFIED"}]}},
+                       safety_verdict="PASS"))
+        s.add(EvmTrade(event_id=f"bsc:0xab:{1}", chain="bsc", launchpad="fourmeme", token=tok, trader="0x" + "2" * 40,
+                       is_buy=True, token_amount=Decimal(10 ** 21), quote_amount=Decimal(10 ** 16), at=now))
+        await s.commit()
+    r = (await client.get("/api/evm/tokens?chain=bsc", headers=auth_headers)).json()
+    assert r["categories"] == {"FRESH": 1} and r["tokens"][0]["entry_decision"]["decision"] == "NO_TRADE"
+    d = (await client.get(f"/api/evm/tokens/bsc/{tok.upper().replace('0X', '0x')}", headers=auth_headers)).json()
+    assert d["token"]["symbol"] == "MOON" and d["trades"][0]["side"] == "BUY" and d["trades"][0]["quote_amount"] == "0.01"
+    assert (await client.get("/api/evm/tokens/bsc/0xdead", headers=auth_headers)).status_code == 404
+    assert (await client.get("/api/evm/positions", headers=auth_headers)).json()["positions"] == []
+
+    g = (await client.get("/api/evm/settings", headers=auth_headers)).json()
+    assert g["settings"]["bsc"]["position_size"] == "0.02" and g["settings"]["robinhood"]["position_size"] == "0.005"
+    bad = await client.put("/api/evm/settings", json={"bsc": {"position_size": "5"}}, headers=auth_headers)
+    assert bad.status_code == 422
+    ok = await client.put("/api/evm/settings", json={"bsc": {"position_size": "0.03"}, "fresh_min_buys": 7},
+                          headers=auth_headers)
+    assert ok.status_code == 200 and ok.headers.get("x-config-revision")
+    s2 = (await client.get("/api/evm/settings", headers=auth_headers)).json()["settings"]
+    assert s2["bsc"]["position_size"] == "0.03" and s2["bsc"]["max_total_exposure"] == "0.1" and s2["fresh_min_buys"] == 7
+    async with app.state.db_session_factory() as s:
+        from sqlalchemy import select
+        assert (await s.execute(select(AuditLog).where(AuditLog.event_type == "evm_settings.update"))).scalars().first()
+    assert (await client.get("/api/evm/tokens", headers={})).status_code == 401

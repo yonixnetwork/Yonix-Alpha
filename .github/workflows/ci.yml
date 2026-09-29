@@ -19,6 +19,7 @@ jobs:
           - packages/core-py
           - apps/api
           - services/data-solana
+          - services/data-evm
           - services/data-binance
           - services/engine-solana-discovery
           - services/engine-solana-momentum

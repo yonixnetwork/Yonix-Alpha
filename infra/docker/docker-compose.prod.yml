@@ -27,6 +27,9 @@ services:
   data-solana:
     restart: unless-stopped
 
+  data-evm:
+    restart: unless-stopped
+
   data-binance:
     restart: unless-stopped
 
