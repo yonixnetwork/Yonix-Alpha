@@ -606,7 +606,8 @@ def _check_intel(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) ->
     if m.get("level") in ("HIGH", "MEDIUM"):
         action = s.manipulation_high_action if m["level"] == "HIGH" else s.manipulation_medium_action
         decision, level = _INTEL_ACTION[action]
-        fams = "; ".join(f"{k}: {v}" for k, v in (m.get("families") or {}).items())
+        counted = m.get("counted")
+        fams = "; ".join(f"{k}: {v}" for k, v in (m.get("families") or {}).items() if counted is None or k in counted)
         out.append(_finding(RiskCategory.TRADING, f"MANIPULATION_{m['level']}", level,
                             f"manipulation score {m['level']} ({m.get('count')} independent families): {fams[:400]} · "
                             f"Action: {action} — patterns, not proof", decision))

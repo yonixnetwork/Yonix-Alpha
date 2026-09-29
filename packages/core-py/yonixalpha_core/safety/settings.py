@@ -175,6 +175,14 @@ class SafetySettings:
     manipulation_dust_share: Decimal = Decimal("0.40")
     manipulation_linear_r2: Decimal = Decimal("0.97")
     manipulation_collapse_pct: Decimal = Decimal("0.30")
+    # Whether a family counts toward the level (it is always reported as
+    # evidence). Production 2026-09-28/29 (6544 launches): launches where
+    # these fired collapsed LESS often than average (docs/
+    # INTELLIGENCE_AUDIT_2026.md §7). Default: counted (behaviour unchanged).
+    manipulation_count_synchronized_sells: bool = True
+    manipulation_count_synchronized_buys: bool = True
+    manipulation_count_single_second_collapse: bool = True
+    manipulation_count_dust_volume: bool = True
     manipulation_high_action: str = "NO_TRADE"
     manipulation_medium_action: str = "WARN"
     # Migration: create → migrate faster than this is an instant bond (a

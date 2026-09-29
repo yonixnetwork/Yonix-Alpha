@@ -45,6 +45,9 @@ class ManipulationConfig:
     linear_min_trades: int = 15
     collapse_pct: float = 0.30  # price fall within one second, with 2+ sellers
     high_families: int = 3
+    # Families reported as evidence but not counted toward the level
+    # (dashboard switches manipulation_count_*; all counted by default).
+    not_counted: frozenset = frozenset()
 
 
 def _price(t: Trade) -> float:
@@ -151,10 +154,12 @@ def score(trades: list[Trade], t: datetime, cfg: ManipulationConfig | None = Non
     if duplicate_of:
         families["copycat_name"] = f"reuses the name of the earlier launch {duplicate_of}"
 
-    n = len(families)
-    if n == 0 and len(window) < cfg.min_trades:
+    counted = [f for f in families if f not in cfg.not_counted]
+    n = len(counted)
+    if not families and len(window) < cfg.min_trades:
         level = "UNKNOWN"
     else:
         level = "HIGH" if n >= cfg.high_families else "MEDIUM" if n == 2 else "LOW" if n == 1 else "NONE"
-    return {"level": level, "families": families, "count": n, "unknown": unknown, "trades_in_window": len(window),
-            "as_of": t.isoformat()}
+    return {"level": level, "families": families, "count": n, "counted": counted,
+            "not_counted": sorted(f for f in families if f in cfg.not_counted), "unknown": unknown,
+            "trades_in_window": len(window), "as_of": t.isoformat()}

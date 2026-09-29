@@ -98,6 +98,11 @@ QUERIES: dict[str, str] = {
     "shadow_models": """SELECT name, version, trained_at, metrics->'holdout'->>'roc_auc', metrics->'holdout'->>'pr_auc',
                metrics->'holdout'->>'n', metrics->'holdout'->>'positives' FROM model_versions WHERE status = 'shadow' ORDER BY name""",
     "shadow_scored_rows": "SELECT count(*) FROM opportunity_outcomes WHERE decided_at >= :since AND ml_shadow IS NOT NULL",
+    # Why P_MIGRATE has no positives: do tracked launches ever migrate, and
+    # does the stream record migrations at all?
+    "migrations (ledger rows migrated within 60m | fresh rows | max migrations/hour seen at a decision)": """
+               SELECT count(*) FILTER (WHERE migrated_at IS NOT NULL), count(*) FILTER (WHERE engine = 'solana_fresh'),
+               max((regime->>'migrations_last_hour_seen')::int) FROM opportunity_outcomes WHERE decided_at >= :since""",
 }
 
 
@@ -115,6 +120,14 @@ async def collect(session, redis, since: datetime) -> dict[str, Any]:
                                        "rebuilt_at": await redis.get(wallet_intel.BUILT)}
     except Exception as exc:  # noqa: BLE001
         out["wallet_base_counters"] = f"redis failed: {type(exc).__name__}"
+    try:
+        from yonixalpha_core.solana import pump_stream
+
+        out["stream_migrations_recorded (since | total kept 24 h)"] = [[
+            str(await redis.zcount(pump_stream.MIGRATED, since.timestamp(), "+inf")),
+            str(await redis.zcard(pump_stream.MIGRATED))]]
+    except Exception as exc:  # noqa: BLE001
+        out["stream_migrations_recorded (since | total kept 24 h)"] = f"redis failed: {type(exc).__name__}"
     return out
 
 

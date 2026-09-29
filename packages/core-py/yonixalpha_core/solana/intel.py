@@ -34,7 +34,12 @@ def manipulation_config(s: Any) -> manipulation.ManipulationConfig:
         sync_buy_wallets=max(2, int(s.max_sync_buy_cluster) - 1), sync_sell_wallets=int(s.manipulation_sync_sell_wallets),
         regular_size_cv=float(s.manipulation_regular_size_cv), dust_share=float(s.manipulation_dust_share),
         linear_r2=float(s.manipulation_linear_r2), collapse_pct=float(s.manipulation_collapse_pct),
-        high_families=int(s.manipulation_high_families))
+        high_families=int(s.manipulation_high_families),
+        not_counted=frozenset(f for f, on in (
+            ("synchronized_sells", s.manipulation_count_synchronized_sells),
+            ("synchronized_buys", s.manipulation_count_synchronized_buys),
+            ("single_second_collapse", s.manipulation_count_single_second_collapse),
+            ("dust_volume", s.manipulation_count_dust_volume)) if not on))
 
 
 def curve_intel(trades: list[Trade], now: datetime, s: Any, *, meta: dict | None, curve: Any | None, curve_from_chain: bool,

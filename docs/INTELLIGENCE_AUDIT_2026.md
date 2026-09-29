@@ -298,3 +298,35 @@ Known limitations:
 - P_MANIPULATION is not trained: no ground-truth label exists.
 - Shadow training starts at 200 completed, labelled opportunities; metrics
   on a small holdout are anecdotal and marked so.
+
+## 7. Production evidence (2026-09-28 21:15 → 2026-09-29 ~06:00 UTC)
+
+Measured by `tools/intel_report.py --since 2026-09-28T21:15` on 14,173
+decisions, after the definition fixes (a dump = early sell into a LOSS
+launch; wash trading = >= 2 buys AND >= 2 sells by one wallet). "Rule" is
+the counterfactual: enter at the decision + 2 s, take profit +30% / stop
+-25%, whichever the stream hits first (no hindsight).
+
+| Manipulation level | n (rule) | TP first | Stop first | Avg executable T+5m |
+|---|---|---|---|---|
+| NONE | 575 | 19.3% | 15.8% | -7.45% |
+| LOW | 2111 | 23.2% | 34.2% | -12.22% |
+| MEDIUM | 2708 | 29.0% | 45.9% | -14.26% |
+| HIGH | 751 | 23.7% | 45.8% | -16.13% |
+
+| Dump cluster | n (rule) | TP first | Stop first | Avg executable T+5m |
+|---|---|---|---|---|
+| LOW | 6875 | 14.0% | 16.3% | -6.79% |
+| MEDIUM | 2648 | 28.7% | 44.0% | -15.00% |
+| HIGH | 1012 | 29.0% | 48.9% | -12.36% |
+
+Per family, share of launches that fell 50%+ within 30 min (all measured
+launches: 38.2%): wash_trading 66.6%, dump_cohort 48.0%,
+single_second_collapse 33.5%, synchronized_buys 27.1%, dust_volume 22.1%,
+synchronized_sells 15.9%. Only wash_trading and dump_cohort mark launches
+that collapse more than average; the other four raise the level without
+that evidence. Switches `manipulation_count_*` let the operator stop them
+counting (they stay visible as evidence); defaults are unchanged.
+
+Limits: one night of data, one market regime; busier launches move more in
+both directions; the rule is one reference strategy, not the live exit logic.

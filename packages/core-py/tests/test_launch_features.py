@@ -157,6 +157,20 @@ def test_one_indicator_is_never_high_manipulation():
     rest = [c.trade(f"o{i}", T0 + timedelta(seconds=6 + i * 3), 0.1 + i * 0.05, True) for i in range(10)]
     r = mp.score(sync + rest, T0 + timedelta(seconds=40))
     assert r["level"] == "LOW" and list(r["families"]) == ["synchronized_buys"]
+    # A family switched off is still reported as evidence but no longer raises the level.
+    off = mp.score(sync + rest, T0 + timedelta(seconds=40), mp.ManipulationConfig(not_counted=frozenset({"synchronized_buys"})))
+    assert off["level"] == "NONE" and "synchronized_buys" in off["families"] and off["not_counted"] == ["synchronized_buys"]
+
+
+def test_family_switches_reach_the_manipulation_config():
+    from dataclasses import replace
+
+    from yonixalpha_core.safety.settings import SafetySettings
+    from yonixalpha_core.solana import intel
+
+    assert intel.manipulation_config(SafetySettings()).not_counted == frozenset()  # default: all counted
+    s = replace(SafetySettings(), manipulation_count_synchronized_sells=False, manipulation_count_dust_volume=False)
+    assert intel.manipulation_config(s).not_counted == {"synchronized_sells", "dust_volume"}
 
 
 def test_several_independent_families_are_high_with_evidence():
