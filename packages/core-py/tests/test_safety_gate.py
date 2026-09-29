@@ -637,9 +637,9 @@ def test_intel_settings_are_validated():
 def test_manufactured_pump_high_applies_its_configured_action_default_warn():
     mp = {"risk": "HIGH", "pattern_duration_seconds": 180, "evidence": ["log_price_r2: 0.97"], "detector_version": "mp-1"}
     warn = decide(healthy(intel=_intel(manufactured_pump=mp)))
-    f = next(f for f in warn.findings if f.code == "MANUFACTURED_PUMP_RISK_HIGH")
+    f = next(f for f in warn.findings if f.code == "MANUFACTURED_PUMP_PATTERN")
     assert f.action == FinalDecision.EXECUTE and "not a prediction" in f.message and warn.executable
     blocked = decide(healthy(intel=_intel(manufactured_pump=mp)), replace(SafetySettings(), manufactured_pump_action="NO_TRADE"))
-    assert not blocked.executable and "MANUFACTURED_PUMP_RISK_HIGH" in codes(blocked)
+    assert not blocked.executable and "MANUFACTURED_PUMP_PATTERN" in codes(blocked)
     low = decide(healthy(intel=_intel(manufactured_pump={**mp, "risk": "ELEVATED"})))
-    assert "MANUFACTURED_PUMP_RISK_HIGH" not in codes(low)
+    assert "MANUFACTURED_PUMP_PATTERN" not in codes(low)

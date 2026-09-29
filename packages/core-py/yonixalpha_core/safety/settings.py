@@ -227,6 +227,20 @@ class SafetySettings:
     manufactured_pump_min_log_r2: Decimal = Decimal("0.85")
     manufactured_pump_min_window_return: Decimal = Decimal("0.25")
     manufactured_pump_action: str = "WARN"  # when the detector's risk is HIGH
+    # Scanner intelligence (wallet relationships, organic demand, deployer
+    # history). Every one is a feature; only these actions act, WARN by
+    # default (a finding, never a block) until outcomes show they help.
+    min_effective_buyers: int = 5  # effective (independent) buyers below this: LOW_EFFECTIVE_BUYERS; 0 = off
+    low_effective_buyers_action: str = "WARN"
+    min_organic_demand_ratio: Decimal = Decimal("0.2")  # only when the ratio is measured; 0 = off
+    low_organic_demand_action: str = "WARN"
+    coordination_high_wallets: int = 4  # largest funding-related / coordinated cluster; 0 = off
+    coordination_high_action: str = "WARN"
+    max_creator_related_volume_ratio: Decimal = Decimal("0.3")  # creator + creator-linked share of volume; 0 = off
+    creator_concentration_action: str = "WARN"
+    deployer_max_risk_score: Decimal = Decimal("0.8")  # shrunk loss rate of earlier launches (>= 3 resolved); 0 = off
+    deployer_history_action: str = "WARN"
+    smart_money_concentration_action: str = "WARN"  # proven wallets present only as related / creator-related
 
     # ML
     min_ml_confidence: float | None = None
@@ -291,6 +305,12 @@ ENUM_FIELDS: dict[str, tuple[str, ...]] = {
     "postmig_dumping_action": INTEL_ACTIONS,
     "dump_cluster_high_action": INTEL_ACTIONS,
     "manufactured_pump_action": INTEL_ACTIONS,
+    "low_effective_buyers_action": INTEL_ACTIONS,
+    "low_organic_demand_action": INTEL_ACTIONS,
+    "coordination_high_action": INTEL_ACTIONS,
+    "creator_concentration_action": INTEL_ACTIONS,
+    "deployer_history_action": INTEL_ACTIONS,
+    "smart_money_concentration_action": INTEL_ACTIONS,
 }
 
 _TUPLE_FIELDS = {"tp_r_multiples", "tp_exit_fractions"}
@@ -409,7 +429,9 @@ def validate(settings: SafetySettings) -> list[str]:
     if settings.min_name_length < 0:
         errors.append("min_name_length must not be negative")
     for name in ("mayhem_action", "manipulation_high_action", "manipulation_medium_action", "postmig_dumping_action",
-                 "dump_cluster_high_action", "manufactured_pump_action"):
+                 "dump_cluster_high_action", "manufactured_pump_action", "low_effective_buyers_action",
+                 "low_organic_demand_action", "coordination_high_action", "creator_concentration_action",
+                 "deployer_history_action", "smart_money_concentration_action"):
         if getattr(settings, name) not in INTEL_ACTIONS:
             errors.append(f"{name} must be one of {', '.join(INTEL_ACTIONS)}")
     for name in ("manipulation_round_trip_share", "manipulation_regular_size_cv", "manipulation_dust_share",
@@ -420,6 +442,11 @@ def validate(settings: SafetySettings) -> list[str]:
                  "manufactured_pump_max_buy_ratio_std", "manufactured_pump_min_log_r2"):
         if not (0 < getattr(settings, name) <= 1):
             errors.append(f"{name} must be in (0, 1]")
+    for name in ("min_organic_demand_ratio", "max_creator_related_volume_ratio", "deployer_max_risk_score"):
+        if not (0 <= getattr(settings, name) <= 1):
+            errors.append(f"{name} must be in [0, 1] (0 = off)")
+    if settings.min_effective_buyers < 0 or settings.coordination_high_wallets < 0:
+        errors.append("min_effective_buyers and coordination_high_wallets must not be negative (0 = off)")
     if settings.manufactured_pump_max_return_cv <= 0 or settings.manufactured_pump_min_window_return <= 0:
         errors.append("manufactured_pump_max_return_cv and manufactured_pump_min_window_return must be positive")
     if settings.intel_snapshot_seconds < 5 or settings.manipulation_window_seconds < 10:

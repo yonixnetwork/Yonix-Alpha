@@ -62,6 +62,7 @@ async def test_rejected_token_horizons_peak_drawdown_and_migration(db, redis):
                                    (200, int(base * 2)), (800, int(base * 1.2)), (1700, int(base * 0.8))])
     await redis.zadd(pump_stream.MIGRATED, {mint: (T0 + timedelta(seconds=1000)).timestamp()})
     await redis.hset(pump_stream.curve_key(mint), mapping={"vsol": base, "vtok": VT, "updated_at": int(T0.timestamp()), "fee_bps": 125})
+    await redis.hset(pump_stream.meta_key(mint), mapping={"creator": "Dev1", "created_at": int((T0 - timedelta(seconds=10)).timestamp())})
     snap = {"price_raw": str(Decimal(base) / Decimal(VT)), "market_cap_sol": "30"}
     await opp.record(db, key="obs:x", mint=mint, symbol="REJ", engine="solana_fresh", stage="OBSERVATION", decision="REJECT",
                      traded=False, reasons=["price 52% below its observed peak"], decided_at=T0, snapshot=snap)
@@ -86,6 +87,10 @@ async def test_rejected_token_horizons_peak_drawdown_and_migration(db, redis):
     assert row.status == "COMPLETE" and row.peak_pct == Decimal("100.00") and row.horizons["T+60m"]["change_pct"] == "-20.00"
     assert row.path["T+30s"]["buys"] == 1 and row.path["T+5m"]["peak_so_far_pct"] == 100.0
     assert row.regime["data_regime"] == "post_boost" and row.regime["strategy"] == "solana_fresh"
+    # The launch reached the deployer history: noted when first tracked, resolved when the row completed.
+    dl = await db.get(models.DeployerLaunch, mint)
+    assert dl.creator == "Dev1" and dl.resolved_at == T0 + timedelta(seconds=3700) and dl.outcome == "WIN"
+    assert dl.migrated is True and dl.time_to_migration_seconds == 1010 and dl.peak_mc_sol == Decimal("60.0000")
     # These synthetic trades do not follow a constant product: executable returns are UNKNOWN, never guessed.
     assert "curve math" in row.path["T+5m"]["executable"]["unknown"] and row.executable_return_pct is None
     cf = row.analysis["counterfactual"]

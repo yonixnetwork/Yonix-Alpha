@@ -629,7 +629,7 @@ def _check_intel(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) ->
     mp = intel.get("manufactured_pump") or {}
     if mp.get("risk") == "HIGH":
         decision, level = _INTEL_ACTION[s.manufactured_pump_action]
-        out.append(_finding(RiskCategory.TRADING, "MANUFACTURED_PUMP_RISK_HIGH", level,
+        out.append(_finding(RiskCategory.TRADING, "MANUFACTURED_PUMP_PATTERN", level,
                             f"manufactured-pump pattern over the last {mp.get('pattern_duration_seconds')}s "
                             f"({'; '.join(mp.get('evidence') or [])[:300]}; detector {mp.get('detector_version')}) · "
                             f"Action: {s.manufactured_pump_action} — a documented pattern associated with elevated "
@@ -640,6 +640,55 @@ def _check_intel(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) ->
         out.append(_finding(RiskCategory.MARKET, "POST_MIGRATION_DUMPING", level,
                             f"post-migration state DUMPING ({'; '.join(pm.get('evidence') or [])}) · "
                             f"Action: {s.postmig_dumping_action}", decision))
+
+
+def _check_scanner_intel(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) -> None:
+    """Wallet relationships, organic demand and deployer history
+    (solana.wallet_graph, deployer_intel). Each check needs measured
+    evidence; missing evidence never fires a check and is never read as
+    clean. The configured actions decide what a finding does (WARN by
+    default)."""
+    intel = inp.intel or {}
+    rel = intel.get("relationships") or {}
+
+    def add(code: str, action: str, msg: str, category=RiskCategory.TRADING) -> None:
+        decision, level = _INTEL_ACTION[action]
+        out.append(_finding(category, code, level, f"{msg} · Action: {action}", decision))
+
+    if rel.get("status") == "MEASURED":
+        b, d, c = rel.get("buyers") or {}, rel.get("demand") or {}, rel.get("creator") or {}
+        eff = b.get("effective_unique_buyers")
+        if s.min_effective_buyers and eff is not None and eff < s.min_effective_buyers:
+            add("LOW_EFFECTIVE_BUYERS", s.low_effective_buyers_action,
+                f"{eff} effective independent buyers (min {s.min_effective_buyers}): {b.get('explanation')}")
+        ratio = d.get("organic_demand_ratio")
+        if s.min_organic_demand_ratio and ratio is not None and ratio < float(s.min_organic_demand_ratio):
+            add("LOW_ORGANIC_DEMAND", s.low_organic_demand_action,
+                f"organic-demand ratio {ratio:.0%} (min {float(s.min_organic_demand_ratio):.0%}): "
+                f"{d.get('known_related_volume_sol')} of {d.get('total_volume_sol')} SOL from known related wallets")
+        largest = rel.get("largest_dependent_cluster") or 0
+        if s.coordination_high_wallets and largest >= s.coordination_high_wallets:
+            top = next((x for x in rel.get("clusters") or [] if x.get("size") == largest), {})
+            add("HIGH_COORDINATION", s.coordination_high_action,
+                f"{top.get('classification')} cluster {top.get('cluster_id')} of {largest} wallets "
+                f"({'; '.join(top.get('evidence') or [])[:250]}) — evidence of dependence, not proof of manipulation")
+        crv = c.get("creator_related_volume_ratio")
+        if s.max_creator_related_volume_ratio and crv is not None and crv > float(s.max_creator_related_volume_ratio):
+            add("CREATOR_CONCENTRATION", s.creator_concentration_action,
+                f"creator and creator-linked wallets are {crv:.0%} of volume (max {float(s.max_creator_related_volume_ratio):.0%})")
+        sm = rel.get("smart_money") or {}
+        if sm.get("context") in ("MULTIPLE_RELATED", "CREATOR_RELATED"):
+            add("HIGH_SMART_MONEY_CONCENTRATION", s.smart_money_concentration_action,
+                f"historically proven wallets are present only as related wallets ({sm['context']}: "
+                f"{sm.get('smart_money_clustered')} clustered, {sm.get('smart_money_creator_related')} creator-related, "
+                f"{sm.get('smart_money_independent')} independent)")
+    dep = intel.get("deployer") or {}
+    if dep.get("status") == "MEASURED" and s.deployer_max_risk_score and \
+            (dep.get("deployer_risk_score") or 0) >= float(s.deployer_max_risk_score):
+        add("POOR_DEPLOYER_HISTORY", s.deployer_history_action,
+            f"deployer risk score {dep['deployer_risk_score']} (loss rate of {dep.get('resolved_launches')} earlier resolved "
+            f"launches, shrunk toward the base rate; max {float(s.deployer_max_risk_score)}); bond rate "
+            f"{dep.get('deployer_bond_rate')}; history cutoff {dep.get('deployer_history_cutoff')}", RiskCategory.TOKEN)
 
 
 def _check_names(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) -> None:
@@ -931,6 +980,7 @@ def assess(inp: AssessmentInput, settings: SafetySettings, versions: dict[str, A
     _check_flow(inp, settings, findings)
     _check_creator_history(inp, settings, findings)
     _check_intel(inp, settings, findings)
+    _check_scanner_intel(inp, settings, findings)
     _check_observation(inp, findings)
     _check_entry_exit(inp, findings)
     _check_entry_quality(inp, findings)

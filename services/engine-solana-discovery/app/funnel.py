@@ -27,7 +27,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yonixalpha_core import events, opportunities, wallet_intel
+from yonixalpha_core import deployer_intel, events, opportunities, wallet_intel
 from yonixalpha_core.db.models import Token, TokenEvent, TokenObservation, TradingCandidate
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.safety.settings import SafetySettings
@@ -160,7 +160,7 @@ async def _finalize(redis: Redis, rows: list[dict], mint: str, meta: dict[str, s
                  "decided_at": now})
 
 
-async def _ledger_intel(redis: Redis, mint: str, now: datetime, settings: SafetySettings) -> dict[str, Any] | None:
+async def _ledger_intel(redis: Redis, mint: str, now: datetime, settings: SafetySettings, session=None) -> dict[str, Any] | None:
     """The same causal launch intelligence the gate records (solana.intel +
     wallet_intel), for an opportunity the observation window passed on.
     Evidence only; a failure is recorded in place of it."""
@@ -185,6 +185,13 @@ async def _ledger_intel(redis: Redis, mint: str, now: datetime, settings: Safety
         rec["wallets"] = wallets
         await intel.add_relationships(rec, redis, trades, now, settings, creator=meta.get("creator") or None, mint=mint,
                                       wallets=wallets, keep_wallets=0)
+        if session is not None:
+            try:
+                async with session.begin_nested():
+                    rec["deployer"] = await deployer_intel.features_asof(session, meta.get("creator") or None, now,
+                                                                         exclude_mint=mint)
+            except Exception as exc:  # noqa: BLE001 - evidence only
+                rec["deployer"] = {"status": "UNAVAILABLE", "error": f"{type(exc).__name__}: {str(exc)[:160]}"}
         return rec
     except Exception as exc:  # noqa: BLE001
         return {"error": f"{type(exc).__name__}: {str(exc)[:160]}"}
@@ -202,7 +209,7 @@ async def _store_observations(session_factory, rows: list[dict], now: datetime, 
             if r["outcome"] in ("REJECT", "NO_TRADE"):
                 snap = opportunities.observation_snapshot(r.get("report") or {})
                 if settings is not None:
-                    snap["intel"] = json.loads(json.dumps(await _ledger_intel(redis, r["mint"], now, settings), default=str))
+                    snap["intel"] = json.loads(json.dumps(await _ledger_intel(redis, r["mint"], now, settings, session), default=str))
                 await opportunities.record(
                     session, key=f"obs:{r['mint']}", mint=r["mint"], symbol=db_safe(r.get("symbol")), engine="solana_fresh",
                     stage="OBSERVATION", decision=r["outcome"], traded=False, reasons=db_safe(r.get("reasons") or []),

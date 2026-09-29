@@ -28,7 +28,7 @@ from decimal import Decimal
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yonixalpha_core import execution_analysis, live_smoke, live_trading, opportunities, paper_engine, paper_execution
+from yonixalpha_core import deployer_intel, execution_analysis, live_smoke, live_trading, opportunities, paper_engine, paper_execution
 from yonixalpha_core.ml.gate_features import FEATURE_VERSION
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import TradingCandidate
@@ -141,6 +141,14 @@ async def evaluate_with_gate(
         inp, evidence = await assemble_fresh(sources, mint, now, controls, engine=engine)
     inp.live_ready, inp.live_not_ready_reason = live_ready, live_reason
     inp.operator_request = operator is not None
+    if inp.intel is not None:
+        # Deployer history as of now (launches resolved before this decision only).
+        try:
+            async with session.begin_nested():  # a failed read must not touch the evaluation's own transaction
+                inp.intel["deployer"] = await deployer_intel.features_asof(session, inp.creator, now, exclude_mint=mint)
+        except Exception as exc:  # noqa: BLE001 - evidence; its failure is recorded, never guessed
+            inp.intel["deployer"] = {"status": "UNAVAILABLE", "error": f"{type(exc).__name__}: {str(exc)[:160]}",
+                                     "feature_version": deployer_intel.FEATURE_VERSION}
     # Target evidence: resistance comes from the assembler; strategy history from closed trades.
     if inp.targets is not None:
         inp.targets.historical_mfe, inp.targets.samples = await pipeline.historical_excursion(session, engine)

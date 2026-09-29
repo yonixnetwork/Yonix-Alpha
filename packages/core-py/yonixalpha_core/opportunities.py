@@ -241,6 +241,7 @@ async def track(session: AsyncSession, redis, now: datetime, limit: int = 300) -
         if row.regime is None:
             row.regime = await _regime(redis, row, meta)
             changed += 1
+            await _deployer(session, redis, row, meta, trades, now, wcfg, resolve=False)
         if hz != before:
             row.horizons = hz
             row.path = path
@@ -250,6 +251,7 @@ async def track(session: AsyncSession, redis, now: datetime, limit: int = 300) -
                 and _finalize(row, trades, await _fee_bps(redis, row.mint), now):
             row.status, row.completed_at = "COMPLETE", now
             changed += 1
+            await _deployer(session, redis, row, meta, trades, now, wcfg, resolve=True)
         row.updated_at = now
     await session.commit()
     return changed
@@ -299,6 +301,31 @@ async def _regime(redis, row: OpportunityOutcome, meta: dict) -> dict[str, Any]:
             "strategy": row.engine, "feature_version": intel.get("feature_version"), "analysis_version": oa.ANALYSIS_VERSION,
             "model": {"ml_score": (row.snapshot or {}).get("ml_score")},
             "note": "launch / migration counts are what this system's stream saw in the hour before the decision"}
+
+
+async def _deployer(session: AsyncSession, redis, row: OpportunityOutcome, meta: dict, trades: list, now: datetime, wcfg,
+                    *, resolve: bool) -> None:
+    """Deployer history (deployer_intel): the launch is noted when first
+    tracked and its outcome written when the row completes. Isolated from
+    the ledger's own transaction; a failure is recorded on the row."""
+    from yonixalpha_core import deployer_intel, wallet_intel
+
+    try:
+        async with session.begin_nested():
+            meta = meta or await pump_stream.load_meta(redis, row.mint) or {}
+            if not resolve:
+                await deployer_intel.note_launch(session, row.mint, meta, now)
+                return
+            mc = (row.snapshot or {}).get("market_cap_sol")
+            peak_mc = (Decimal(str(mc)) * (1 + row.peak_pct / 100)).quantize(Decimal("0.0001")) \
+                if mc not in (None, "") and row.peak_pct is not None else None
+            await deployer_intel.resolve(session, row.mint, meta, trades,
+                                         outcome=wallet_intel.launch_outcome(row.peak_pct, row.drawdown_pct, wcfg),
+                                         migrated_at=row.migrated_at, peak_mc_sol=peak_mc, now=now)
+    except Exception as exc:  # noqa: BLE001 - deployer history never blocks the ledger
+        analysis = dict(row.analysis or {})
+        analysis["deployer_error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
+        row.analysis = analysis
 
 
 async def _wallets(session: AsyncSession, redis, row: OpportunityOutcome, trades: list, meta: dict, started_ts: int | None,

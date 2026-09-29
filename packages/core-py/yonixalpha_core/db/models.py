@@ -8,6 +8,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     LargeBinary,
     Numeric,
@@ -1042,3 +1043,32 @@ class RpcProvider(Base):
     created_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class DeployerLaunch(Base):
+    """One launch this system observed, by creator (yonixalpha_core.
+    deployer_intel). Outcome columns are filled when the launch resolves
+    (resolved_at); deployer features at time T read only launches created
+    before T whose outcome resolved at or before T."""
+
+    __tablename__ = "deployer_launches"
+    __table_args__ = (
+        CheckConstraint("outcome IS NULL OR outcome IN ('WIN','FLAT','LOSS')", name="ck_deployer_launches_outcome"),
+        Index("ix_deployer_launches_creator_created", "creator", "launch_created_at"),
+    )
+
+    mint: Mapped[str] = mapped_column(String(64), primary_key=True)
+    creator: Mapped[str] = mapped_column(String(64), nullable=False)
+    launch_created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    migrated: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    time_to_migration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    peak_mc_sol: Mapped[Decimal | None] = mapped_column(Numeric(20, 4), nullable=True)
+    outcome: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    creator_sold_early: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    creator_sell_share: Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
+    volume_sol_60m: Mapped[Decimal | None] = mapped_column(Numeric(20, 4), nullable=True)
+    unique_buyers_60m: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tracked_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

@@ -17,7 +17,7 @@ const SECTIONS: { title: string; match: (k: string) => boolean; also?: string[];
   { title: "Account & sizing", match: (k) => /risk_per_trade|position_size|open_positions|daily_loss|exposure|cooldown/.test(k) },
   {
     title: "Creator risk",
-    match: (k) => /creator/.test(k),
+    match: (k) => /creator/.test(k) && !/creator_related_volume|creator_concentration/.test(k),
     note: "Creator history counts the pump.fun tokens the launch creator's wallet has created, on chain. Fewer than the minimum is not proof of anything — choose the action. If the count cannot be established it is UNKNOWN, never guessed.",
   },
   {
@@ -25,6 +25,11 @@ const SECTIONS: { title: string; match: (k: string) => boolean; also?: string[];
     match: (k) => /^migrated_|min_migrated/.test(k),
     also: ["max_entry_impact_bps", "max_exit_impact_bps"],
     note: "Migrated tokens only. Usable liquidity is the pool's SOL side (what a seller can withdraw) in USD. Below the minimum: NO_TRADE. Bonding-curve tokens are never judged by this rule. The price-impact limits apply to every venue.",
+  },
+  {
+    title: "Wallet relationships, organic demand & deployer history",
+    match: (k) => /effective_buyers|organic_|coordination_|creator_related_volume|creator_concentration|deployer_|smart_money_/.test(k),
+    note: "Effective buyers count a funding-related or coordinated wallet cluster as one buyer; the organic-demand ratio counts only volume from wallets checked as independent (unattributed volume is never assumed organic). Deployer history uses only launches resolved before each decision. All are features whose value ML must validate; the *_action settings decide what a finding does (WARN never blocks).",
   },
   {
     title: "Launch intelligence, manipulation & regimes",
