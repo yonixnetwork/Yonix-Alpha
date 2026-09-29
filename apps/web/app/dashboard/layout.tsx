@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { ArrowRightLeft, Bell, Boxes, Copy, Fingerprint, Layers, Brain, ClipboardCheck, Eye, FlaskConical, Filter, Gauge, LayoutDashboard, ListChecks, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Radio, Rocket, Search, Send, Server, Settings, ShieldAlert, SlidersHorizontal, Network, Sparkles, Wallet, WalletCards, Workflow, type LucideIcon } from "lucide-react";
+import { ArrowRightLeft, Bell, Boxes, Copy, Fingerprint, FlaskRound, Layers, Link2, Brain, ClipboardCheck, Eye, FlaskConical, Filter, Gauge, LayoutDashboard, ListChecks, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Radio, Rocket, Search, Send, Server, Settings, ShieldAlert, SlidersHorizontal, Network, Sparkles, Wallet, WalletCards, Workflow, type LucideIcon } from "lucide-react";
 import NotificationsBell from "@/components/NotificationsBell";
 import RuntimeApply from "@/components/RuntimeApply";
 import { modeClass, stateClass } from "@/components/ui";
@@ -14,11 +14,18 @@ import { useApi } from "@/lib/useApi";
 
 type NavItem = { href: string; label: string; icon: LucideIcon };
 
-// Product focus: Solana memecoin trading. Futures, forex, Gold/BTC and the
-// other strategy pages are hidden from navigation (not deleted: their routes
-// and backends still exist and can be re-enabled by adding them back here).
+// YONIXALPHA: Solana, BSC and Robinhood Chain memecoin trading. Legacy
+// futures / forex / grid pages are not part of this navigation.
 const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   { title: "", items: [{ href: "/dashboard", label: "Dashboard", icon: LayoutDashboard }] },
+  {
+    title: "Chains",
+    items: [
+      { href: "/dashboard/chains/solana", label: "Solana", icon: Link2 },
+      { href: "/dashboard/chains/bsc", label: "BSC", icon: Link2 },
+      { href: "/dashboard/chains/robinhood", label: "Robinhood Chain", icon: Link2 },
+    ],
+  },
   {
     title: "Market",
     items: [
@@ -26,9 +33,14 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
       { href: "/dashboard/solana/observing", label: "Observation", icon: Eye },
       { href: "/dashboard/solana/migrated", label: "Migrated", icon: ArrowRightLeft },
       { href: "/dashboard/solana/momentum", label: "Momentum", icon: Rocket },
+      { href: "/dashboard/evm", label: "EVM Markets", icon: Boxes },
       { href: "/dashboard/tokens", label: "Token Explorer", icon: Search },
       { href: "/dashboard/launchpads", label: "Launchpads", icon: Layers },
-      { href: "/dashboard/evm", label: "BSC / Robinhood", icon: Boxes },
+    ],
+  },
+  {
+    title: "Wallet intelligence",
+    items: [
       { href: "/dashboard/copy", label: "Copy Trading", icon: Copy },
       { href: "/dashboard/smart-wallets", label: "Smart Wallets", icon: Fingerprint },
     ],
@@ -36,8 +48,9 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   {
     title: "Trading",
     items: [
-      { href: "/dashboard/positions", label: "Open Positions", icon: Wallet },
-      { href: "/dashboard/trades", label: "Trades", icon: ListChecks },
+      { href: "/dashboard/paper", label: "Paper Trading", icon: FlaskRound },
+      { href: "/dashboard/positions", label: "Positions", icon: Wallet },
+      { href: "/dashboard/trades", label: "Trade History", icon: ListChecks },
       { href: "/dashboard/decisions", label: "Decisions", icon: ClipboardCheck },
       { href: "/dashboard/funnel", label: "Execution Funnel", icon: Workflow },
       { href: "/dashboard/live", label: "Live Execution", icon: Send },
@@ -62,9 +75,9 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   {
     title: "System",
     items: [
-      { href: "/dashboard/rpc", label: "RPC / Data Providers", icon: Network },
-      { href: "/dashboard/settings", label: "Settings", icon: Settings },
       { href: "/dashboard/health", label: "System Health", icon: Server },
+      { href: "/dashboard/settings", label: "Settings", icon: Settings },
+      { href: "/dashboard/rpc", label: "RPC / Data Providers", icon: Network },
       { href: "/dashboard/config", label: "Configuration Health", icon: SlidersHorizontal },
       { href: "/dashboard/notifications", label: "Notifications", icon: Bell },
       { href: "/dashboard/smoke-test", label: "Live Smoke Test", icon: FlaskConical },
@@ -189,7 +202,7 @@ function Shell({ children }: { children: React.ReactNode }) {
             {collapsed ? <PanelLeftOpen size={16} aria-hidden /> : <PanelLeftClose size={16} aria-hidden />}
           </button>
           <Link href="/dashboard" className="brand">
-            YonixAlpha
+            YONIXALPHA
           </Link>
           {/* Real global mode is shown by TopbarSummary; this shows whether the
               running services applied the latest dashboard settings. */}

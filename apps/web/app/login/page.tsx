@@ -34,7 +34,7 @@ export default function LoginPage() {
     <div className="login-wrap">
       <form className="card login-card" onSubmit={handleSubmit}>
         <div className="brand" style={{ marginBottom: 20, fontSize: 18 }}>
-          YonixAlpha
+          YONIXALPHA
         </div>
         {error && <div className="error">{error}</div>}
         <div className="field">
