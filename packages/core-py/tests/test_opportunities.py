@@ -91,6 +91,9 @@ async def test_rejected_token_horizons_peak_drawdown_and_migration(db, redis):
     dl = await db.get(models.DeployerLaunch, mint)
     assert dl.creator == "Dev1" and dl.resolved_at == T0 + timedelta(seconds=3700) and dl.outcome == "WIN"
     assert dl.migrated is True and dl.time_to_migration_seconds == 1010 and dl.peak_mc_sol == Decimal("60.0000")
+    fu = row.analysis["relationship_followup"]  # what the demand structure did after the decision (review only)
+    assert fu["new_buyers_after_decision"] == 7 and fu["independent_buyers_arrived"] is True
+    assert fu["creator_sold_after_decision"] is False and fu["cluster_exit_share"] is None and "never a decision-time" in fu["note"]
     # These synthetic trades do not follow a constant product: executable returns are UNKNOWN, never guessed.
     assert "curve math" in row.path["T+5m"]["executable"]["unknown"] and row.executable_return_pct is None
     cf = row.analysis["counterfactual"]

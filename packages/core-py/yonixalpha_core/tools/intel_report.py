@@ -21,7 +21,9 @@ from yonixalpha_core.db.base import make_engine, make_session_factory
 from yonixalpha_core.db.redis import make_redis
 
 INTEL_CODES = ("MAYHEM_OR_NONSTANDARD_CURVE", "MAYHEM_FLAG_UNKNOWN", "MANIPULATION_HIGH", "MANIPULATION_MEDIUM", "INSTANT_BOND",
-               "BOOST_WINDOW", "POST_MIGRATION_DUMPING", "DUMP_CLUSTER_HIGH")
+               "BOOST_WINDOW", "POST_MIGRATION_DUMPING", "DUMP_CLUSTER_HIGH", "MANUFACTURED_PUMP_PATTERN",
+               "LOW_EFFECTIVE_BUYERS", "LOW_ORGANIC_DEMAND", "HIGH_COORDINATION", "CREATOR_CONCENTRATION",
+               "HIGH_SMART_MONEY_CONCENTRATION", "POOR_DEPLOYER_HISTORY")
 
 QUERIES: dict[str, str] = {
     "ledger_status": "SELECT status, count(*) FROM opportunity_outcomes WHERE decided_at >= :since GROUP BY 1 ORDER BY 1",
@@ -103,6 +105,36 @@ QUERIES: dict[str, str] = {
     "migrations (ledger rows migrated within 60m | fresh rows | max migrations/hour seen at a decision)": """
                SELECT count(*) FILTER (WHERE migrated_at IS NOT NULL), count(*) FILTER (WHERE engine = 'solana_fresh'),
                max((regime->>'migrations_last_hour_seen')::int) FROM opportunity_outcomes WHERE decided_at >= :since""",
+    # --- scanner intelligence (wallet graph, organic demand, deployer, manufactured pump)
+    "scanner: relationships status | demand status | rows": """SELECT snapshot->'intel'->'relationships'->>'status',
+               snapshot->'intel'->'relationships'->'demand'->>'status', count(*) FROM opportunity_outcomes
+               WHERE decided_at >= :since GROUP BY 1, 2 ORDER BY 3 DESC""",
+    "scanner: avg raw buyers | avg effective buyers | avg funding-known share | rows with a dependent cluster | rows": """
+               SELECT round(avg((r->'buyers'->>'raw_unique_buyers')::float)::numeric, 2),
+               round(avg((r->'buyers'->>'effective_unique_buyers')::float)::numeric, 2),
+               round(avg((r->'coverage'->>'funding_known_share')::float)::numeric, 3),
+               count(*) FILTER (WHERE (r->>'largest_dependent_cluster')::int >= 2), count(*)
+               FROM (SELECT snapshot->'intel'->'relationships' r FROM opportunity_outcomes WHERE decided_at >= :since) q
+               WHERE r->>'status' = 'MEASURED'""",
+    "scanner: manufactured-pump risk | rows | fast dump % | rug % | upside_100 % (completed)": """
+               SELECT snapshot->'intel'->'manufactured_pump'->>'risk', count(*),
+               round(100.0 * avg((labels->>'fast_dump')::boolean::int), 1), round(100.0 * avg((labels->>'rug_60m')::boolean::int), 1),
+               round(100.0 * avg((labels->>'upside_100')::boolean::int), 1) FROM opportunity_outcomes
+               WHERE decided_at >= :since AND status = 'COMPLETE' GROUP BY 1 ORDER BY 2 DESC""",
+    "scanner: deployer status | rows | avg risk score (measured)": """SELECT snapshot->'intel'->'deployer'->>'status', count(*),
+               round(avg((snapshot->'intel'->'deployer'->>'deployer_risk_score')::float)::numeric, 3) FROM opportunity_outcomes
+               WHERE decided_at >= :since GROUP BY 1 ORDER BY 2 DESC""",
+    "deployer_launches: noted | resolved | distinct creators | creators with >= 3 resolved": """
+               SELECT count(*), count(resolved_at), count(DISTINCT creator),
+               (SELECT count(*) FROM (SELECT creator FROM deployer_launches WHERE resolved_at IS NOT NULL
+                GROUP BY creator HAVING count(*) >= 3) c) FROM deployer_launches WHERE first_seen_at >= :since""",
+    "follow-up after rejection: rows | independent buyers arrived % | organic demand rose % | cluster exited % | creator sold %": """
+               SELECT count(*), round(100.0 * avg((f->>'independent_buyers_arrived')::boolean::int), 1),
+               round(100.0 * avg((f->>'organic_demand_increased')::boolean::int), 1),
+               round(100.0 * avg((f->>'cluster_exited')::boolean::int), 1),
+               round(100.0 * avg((f->>'creator_sold_after_decision')::boolean::int), 1)
+               FROM (SELECT analysis->'relationship_followup' f FROM opportunity_outcomes
+                     WHERE decided_at >= :since AND traded = false AND analysis ? 'relationship_followup') q""",
 }
 
 
@@ -128,6 +160,15 @@ async def collect(session, redis, since: datetime) -> dict[str, Any]:
             str(await redis.zcard(pump_stream.MIGRATED))]]
     except Exception as exc:  # noqa: BLE001
         out["stream_migrations_recorded (since | total kept 24 h)"] = f"redis failed: {type(exc).__name__}"
+    try:
+        from yonixalpha_core.ml.readiness import ABLATION_KEY
+
+        raw = await redis.get(ABLATION_KEY)
+        a = json.loads(raw) if raw else None
+        out["feature ablation (last run: status | computed_at | samples)"] = [[
+            a.get("status"), a.get("computed_at"), str(a.get("samples"))]] if a else "not run yet (ml service, every 6 h)"
+    except Exception as exc:  # noqa: BLE001
+        out["feature ablation (last run: status | computed_at | samples)"] = f"redis failed: {type(exc).__name__}"
     return out
 
 

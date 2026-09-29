@@ -17,7 +17,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-FEATURE_VERSION = "oppfeat-2026.09.1"
+FEATURE_VERSION = "oppfeat-2026.09.2"
 
 RISK = {"LOW": 1, "MODERATE": 2, "HIGH": 3, "CRITICAL": 4}
 LEVEL = {"NONE": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3}
@@ -31,9 +31,64 @@ NUMERIC = ("market_cap_sol", "liquidity_sol", "age_seconds", "buyers", "sellers"
            "mom_buyer_acceleration", "mom_trade_rate_acceleration", "mom_volume_acceleration", "manipulation_level",
            "manipulation_families", "mayhem", "reach5_trades", "smart_proven_wallets", "smart_proven_share",
            "dump_cluster_level", "recycled_wallets")
+# Scanner intelligence (solana.wallet_graph, deployer_intel, solana.
+# manufactured_pump). Wallet identities and cluster ids are deliberately NOT
+# features: the models learn from relationship structure, never "wallet X
+# bought" (no wallet-following overfit).
+SCANNER = ("raw_unique_buyers", "effective_unique_buyers", "creator_related_buyers", "coordinated_buyers",
+           "independent_buyers", "funding_cluster_size", "funding_fanout", "funding_time_concentration",
+           "common_funder_count", "funding_known_share",
+           "organic_demand_ratio", "organic_ratio_lower", "organic_ratio_upper", "creator_volume_ratio",
+           "cluster_volume_ratio", "independent_volume_ratio", "net_sol_flow_30s", "net_sol_flow_60s",
+           "organic_net_sol_flow_30s", "raw_volume_acceleration", "organic_volume_acceleration",
+           "effective_buyer_acceleration",
+           "smart_money_quality", "smart_money_independence", "smart_money_signal_strength",
+           "deployer_launch_count", "deployer_resolved_launches", "deployer_bond_rate", "deployer_risk_score",
+           "deployer_recent_success_rate", "deployer_creator_sell_rate", "deployer_median_peak_mc", "deployer_launches_24h",
+           "manufactured_pump_score", "manufactured_pattern_duration", "log_price_r2", "buy_sell_ratio_stability",
+           "positive_return_share", "observation_complete")
+NUMERIC = NUMERIC + SCANNER
 BINARY = ("is_gate", "is_momentum", "is_migrated") + tuple(f"flow_{s}" for s in FLOW_STATES) + tuple(f"pm_{s}" for s in POST_MIG)
 MISSING_OF = NUMERIC
 FEATURE_NAMES: tuple[str, ...] = NUMERIC + tuple(f"{n}__missing" for n in MISSING_OF) + BINARY
+
+# Feature groups for ablation (services/ml/app/ablation.py). A group's
+# __missing indicators travel with it.
+GROUPS: dict[str, tuple[str, ...]] = {
+    "price_volume_buyers": ("market_cap_sol", "liquidity_sol", "age_seconds", "buyers", "sellers", "buy_volume_sol",
+                            "sell_volume_sol", "trades", "volatility", "price_age_seconds", "now_curve_progress",
+                            "now_unique_buyers", "now_buy_sell_ratio", "now_net_flow_sol", "mom_return_1m", "mom_return_5m",
+                            "mom_buyer_acceleration", "mom_trade_rate_acceleration", "mom_volume_acceleration"),
+    "wallet_graph": ("raw_unique_buyers", "effective_unique_buyers", "creator_related_buyers", "coordinated_buyers",
+                     "independent_buyers", "funding_cluster_size", "funding_fanout", "funding_time_concentration",
+                     "common_funder_count", "funding_known_share", "recycled_wallets", "dump_cluster_level"),
+    "deployer": ("deployer_launch_count", "deployer_resolved_launches", "deployer_bond_rate", "deployer_risk_score",
+                 "deployer_recent_success_rate", "deployer_creator_sell_rate", "deployer_median_peak_mc",
+                 "deployer_launches_24h", "creator_share", "creator_launches_24h"),
+    "organic_demand": ("organic_demand_ratio", "organic_ratio_lower", "organic_ratio_upper", "creator_volume_ratio",
+                       "cluster_volume_ratio", "independent_volume_ratio", "net_sol_flow_30s", "net_sol_flow_60s",
+                       "organic_net_sol_flow_30s", "raw_volume_acceleration", "organic_volume_acceleration",
+                       "effective_buyer_acceleration"),
+    "manipulation": ("manipulation_level", "manipulation_families", "manufactured_pump_score", "manufactured_pattern_duration",
+                     "log_price_r2", "buy_sell_ratio_stability", "positive_return_share"),
+    "smart_money": ("smart_proven_wallets", "smart_proven_share", "smart_money_quality", "smart_money_independence",
+                    "smart_money_signal_strength"),
+}
+# Where each scanner feature comes from, and which timestamp bounds it.
+SOURCES: dict[str, dict[str, str]] = {
+    "wallet_graph": {"source": "intel.relationships (pump stream trades + cached funding lookups)", "timestamp": "relationships.as_of"},
+    "organic_demand": {"source": "intel.relationships.demand / flows / acceleration", "timestamp": "relationships.as_of"},
+    "smart_money": {"source": "intel.wallets.smart_money + intel.relationships.smart_money", "timestamp": "wallets.as_of"},
+    "deployer": {"source": "intel.deployer (deployer_launches resolved before the decision)",
+                 "timestamp": "deployer.deployer_history_cutoff"},
+    "manipulation": {"source": "intel.manipulation + intel.manufactured_pump", "timestamp": "manufactured_pump.as_of"},
+}
+
+
+def group_features(group: str, full: bool = True) -> tuple[str, ...]:
+    """A group's features plus their __missing indicators."""
+    names = GROUPS[group]
+    return names + tuple(f"{n}__missing" for n in names if n in MISSING_OF) if full else names
 
 
 def _f(v: Any) -> float | None:
@@ -95,6 +150,7 @@ def features(row_snapshot: dict[str, Any], decided_at: datetime, engine: str, st
         "recycled_wallets": _f(len(wallets["recycled_wallets"])) if isinstance(wallets.get("recycled_wallets"), list)
         and wallets.get("dump_cluster", {}).get("level") != "UNKNOWN" else None,
     }
+    raw.update(_scanner(intel, decided_at))
     out: dict[str, float | None] = dict(raw)
     for n in MISSING_OF:
         out[f"{n}__missing"] = 1.0 if raw[n] is None else 0.0
@@ -107,4 +163,76 @@ def features(row_snapshot: dict[str, Any], decided_at: datetime, engine: str, st
         out[f"flow_{st}"] = 1.0 if flow == st else 0.0
     for st in POST_MIG:
         out[f"pm_{st}"] = 1.0 if pm == st else 0.0
+    return out
+
+
+def _asof_ok(block: dict, key: str, decided_at: datetime) -> bool:
+    """A block stamped after the decision is look-ahead: never used."""
+    v = block.get(key)
+    if not v:
+        return True
+    try:
+        return datetime.fromisoformat(v) <= decided_at
+    except (TypeError, ValueError):
+        return False
+
+
+def _scanner(intel: dict[str, Any], decided_at: datetime) -> dict[str, float | None]:
+    out: dict[str, float | None] = dict.fromkeys(SCANNER)
+    rel = intel.get("relationships") or {}
+    if rel.get("status") == "MEASURED" and _asof_ok(rel, "as_of", decided_at):
+        b, d, c = rel.get("buyers") or {}, rel.get("demand") or {}, rel.get("creator") or {}
+        cov = rel.get("coverage") or {}
+        dep = [x for x in rel.get("clusters") or [] if x.get("classification") in ("COORDINATED", "FUNDING_RELATED")]
+        top = max(dep, key=lambda x: x.get("size") or 0) if dep else None
+        total = _f(d.get("total_volume_sol"))
+        cluster_vol = (_f(d.get("funding_cluster_volume_sol")) or 0) + (_f(d.get("coordinated_volume_sol")) or 0)
+        f30, f60 = (rel.get("flows") or {}).get("30s") or {}, (rel.get("flows") or {}).get("60s") or {}
+        acc = rel.get("acceleration") or {}
+        out.update({
+            "raw_unique_buyers": _f(b.get("raw_unique_buyers")), "effective_unique_buyers": _f(b.get("effective_unique_buyers")),
+            "creator_related_buyers": _f(b.get("creator_related_buyers")), "coordinated_buyers": _f(b.get("coordinated_buyers")),
+            "independent_buyers": _f(b.get("independent_buyers")),
+            "funding_cluster_size": _f(rel.get("largest_dependent_cluster")),
+            "funding_fanout": _f(max((v or 0 for v in (top or {}).get("funding_fanout", {}).values()), default=0)) if top else 0.0,
+            "funding_time_concentration": _f((top or {}).get("funding_window_seconds")),
+            "common_funder_count": _f(len(dep)), "funding_known_share": _f(cov.get("funding_known_share")),
+            "organic_demand_ratio": _f(d.get("organic_demand_ratio")),
+            "organic_ratio_lower": _f(d.get("organic_demand_ratio_lower")),
+            "organic_ratio_upper": _f(d.get("organic_demand_ratio_upper")),
+            "creator_volume_ratio": _f(c.get("creator_related_volume_ratio")),
+            "cluster_volume_ratio": (cluster_vol / total) if total else None,
+            "independent_volume_ratio": _f(d.get("organic_demand_ratio_lower")),
+            # compact storage drops zero flows: absent inside a measured block is 0
+            "net_sol_flow_30s": _f(f30.get("net_sol_flow", 0)), "net_sol_flow_60s": _f(f60.get("net_sol_flow", 0)),
+            "organic_net_sol_flow_30s": _f(f30.get("organic_net_sol_flow", 0)),
+            "raw_volume_acceleration": _f(acc.get("raw_volume_acceleration")),
+            "organic_volume_acceleration": _f(acc.get("organic_volume_acceleration")),
+            "effective_buyer_acceleration": _f(acc.get("effective_buyer_acceleration")),
+        })
+        sm = rel.get("smart_money") or {}
+        if sm.get("status") == "MEASURED":
+            out.update({"smart_money_quality": _f(sm.get("smart_money_quality")),
+                        "smart_money_independence": _f(sm.get("smart_money_independence")),
+                        "smart_money_signal_strength": _f(sm.get("smart_money_signal_strength"))})
+    dep = intel.get("deployer") or {}
+    if dep.get("status") in ("MEASURED", "INSUFFICIENT_HISTORY", "NO_HISTORY") and _asof_ok(dep, "deployer_history_cutoff", decided_at):
+        out.update({"deployer_launch_count": _f(dep.get("deployer_launch_count")),
+                    "deployer_resolved_launches": _f(dep.get("resolved_launches")),
+                    "deployer_launches_24h": _f(dep.get("launches_last_24h"))})
+        if dep.get("resolved_launches"):
+            out.update({"deployer_bond_rate": _f(dep.get("deployer_bond_rate_shrunk")),
+                        "deployer_risk_score": _f(dep.get("deployer_risk_score")),
+                        "deployer_recent_success_rate": _f(dep.get("deployer_recent_success_rate")),
+                        "deployer_creator_sell_rate": _f(dep.get("deployer_creator_sell_rate")),
+                        "deployer_median_peak_mc": _f((dep.get("deployer_peak_mc_sol") or {}).get("median"))})
+    mp = intel.get("manufactured_pump") or {}
+    if mp.get("risk") not in (None, "UNKNOWN") and _asof_ok(mp, "as_of", decided_at):
+        m = mp.get("metrics") or {}
+        out.update({"manufactured_pump_score": _f(mp.get("score")),
+                    "manufactured_pattern_duration": _f(mp.get("pattern_duration_seconds")),
+                    "log_price_r2": _f(m.get("log_price_r2")), "buy_sell_ratio_stability": _f(m.get("buy_sell_ratio_variation")),
+                    "positive_return_share": _f(m.get("positive_return_share"))})
+    cs = (intel.get("observation") or {}).get("coverage_status")
+    out["observation_complete"] = None if cs is None else (1.0 if cs == "COMPLETE" else 0.0)
     return out

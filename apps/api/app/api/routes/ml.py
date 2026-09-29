@@ -120,6 +120,25 @@ async def readiness(db: AsyncSession = Depends(get_db), redis: Redis = Depends(g
                      "ml_contributing": any(m["contributing"] for m in models)})
 
 
+@router.get("/ablation")
+async def ablation(redis: Redis = Depends(get_redis), _: str = Depends(get_current_username)) -> dict:
+    """The last scanner-intelligence feature ablation (A–F, leave-one-out,
+    activity-matched validation), computed by the ml service every 6 h or by
+    `python -m app.ablation`. Read-only; nothing here changes a decision."""
+    import json
+
+    from yonixalpha_core.ml.readiness import ABLATION_KEY
+
+    raw = await redis.get(ABLATION_KEY)
+    if not raw:
+        return {"status": "NOT_RUN", "reason": "no ablation result yet: the ml service runs it every 6 h once at least 200 "
+                                                "completed, labelled ledger rows exist"}
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return {"status": "UNREADABLE"}
+
+
 @router.post("/models/{model_id}/promote")
 async def promote(model_id: UUID, body: PromoteIn, request: Request, db: AsyncSession = Depends(get_db),
                   redis: Redis = Depends(get_redis), username: str = Depends(get_current_username)) -> dict:

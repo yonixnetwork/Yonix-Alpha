@@ -373,3 +373,12 @@ async def test_sol_usd_is_served_only_while_fresh(app, client, auth_headers):
     assert r["price"] == "150.25" and r["source"].startswith("Jupiter") and r["age_s"] < 60
     await sol_price.store(app.state.redis, Decimal("150.25"), "Jupiter quote 1 SOL -> USDC", now - timedelta(minutes=10))
     assert (await client.get("/api/tokens/sol-usd", headers=auth_headers)).json()["price"] is None
+
+
+async def test_ml_ablation_reports_not_run_then_the_stored_result(app, client, auth_headers):
+    from yonixalpha_core.ml.readiness import ABLATION_KEY
+    r = (await client.get("/api/ml/ablation", headers=auth_headers)).json()
+    assert r["status"] == "NOT_RUN" and "200" in r["reason"]
+    await app.state.redis.set(ABLATION_KEY, json.dumps({"status": "EVALUATED", "samples": 900, "targets": {}}))
+    r = (await client.get("/api/ml/ablation", headers=auth_headers)).json()
+    assert r["status"] == "EVALUATED" and r["samples"] == 900

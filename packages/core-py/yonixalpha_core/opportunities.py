@@ -252,6 +252,7 @@ async def track(session: AsyncSession, redis, now: datetime, limit: int = 300) -
             row.status, row.completed_at = "COMPLETE", now
             changed += 1
             await _deployer(session, redis, row, meta, trades, now, wcfg, resolve=True)
+            await _relationship_followup(redis, row, meta, trades, end, now)
         row.updated_at = now
     await session.commit()
     return changed
@@ -325,6 +326,60 @@ async def _deployer(session: AsyncSession, redis, row: OpportunityOutcome, meta:
     except Exception as exc:  # noqa: BLE001 - deployer history never blocks the ledger
         analysis = dict(row.analysis or {})
         analysis["deployer_error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
+        row.analysis = analysis
+
+
+async def _relationship_followup(redis, row: OpportunityOutcome, meta: dict, trades: list, end: datetime,
+                                 now: datetime) -> None:
+    """What happened to the demand structure after the decision (T+60m):
+    did new and independent buyers arrive, did organic demand rise, did the
+    decision-time clusters exit, did the creator sell? Outcome analysis
+    (uses data after the decision): review and labels only, never a
+    feature."""
+    from yonixalpha_core.solana import wallet_graph
+
+    try:
+        intel = (row.snapshot or {}).get("intel") or {}
+        before = intel.get("relationships") or {}
+        meta = meta or await pump_stream.load_meta(redis, row.mint) or {}
+        creator = meta.get("creator") or None
+        upto = [t for t in trades if t.at <= end]
+        if not upto:
+            return
+        ctx = await wallet_graph.gather(redis, list(dict.fromkeys(t.trader for t in upto)), creator)
+        after = wallet_graph.analyse(upto, end, ctx, creator=creator, mint=row.mint)
+        start = row.decided_at
+        buyers_before = {t.trader for t in upto if t.is_buy and t.at <= start}
+        new_buyers = {t.trader for t in upto if t.is_buy and t.at > start} - buyers_before
+        members = {w for c in before.get("clusters") or [] if c.get("classification") in wallet_graph.DEPENDENT
+                   for w in c.get("members") or []}
+        held_at_decision = sum((t.token_raw if t.is_buy else -t.token_raw) for t in upto if t.trader in members and t.at <= start)
+        sold_after = sum(t.token_raw for t in upto if t.trader in members and not t.is_buy and t.at > start)
+        creator_sells = [t for t in upto if creator and t.trader == creator and not t.is_buy and t.at > start]
+        bb, ab = before.get("buyers") or {}, after.get("buyers") or {}
+        bd, ad = before.get("demand") or {}, after.get("demand") or {}
+        new_independent = sum(1 for w in new_buyers if w not in members and w != creator)
+        analysis = dict(row.analysis or {})
+        analysis["relationship_followup"] = {
+            "as_of": end.isoformat(), "computed_at": now.isoformat(),
+            "new_buyers_after_decision": len(new_buyers),
+            "new_buyers_not_known_related": new_independent,
+            "independent_buyers_arrived": new_independent >= 3,
+            "effective_buyers": {"at_decision": bb.get("effective_unique_buyers"), "at_60m": ab.get("effective_unique_buyers")},
+            "organic_ratio_lower": {"at_decision": bd.get("organic_demand_ratio_lower"), "at_60m": ad.get("organic_demand_ratio_lower")},
+            "organic_demand_increased": (ad.get("organic_demand_ratio_lower") or 0) > (bd.get("organic_demand_ratio_lower") or 0)
+            if bd else None,
+            "decision_clusters": len([c for c in before.get("clusters") or [] if c.get("classification") in wallet_graph.DEPENDENT]),
+            "cluster_exit_share": round(min(1.0, sold_after / held_at_decision), 4) if held_at_decision > 0 else None,
+            "cluster_exited": (sold_after / held_at_decision >= 0.8) if held_at_decision > 0 else None,
+            "creator_sold_after_decision": bool(creator_sells) if creator else None,
+            "creator_sold_sol": round(sum(t.sol_lamports for t in creator_sells) / 1e9, 4) if creator else None,
+            "note": "outcome analysis using data after the decision: for review and labels, never a decision-time feature",
+        }
+        row.analysis = analysis
+    except Exception as exc:  # noqa: BLE001 - follow-up never blocks the ledger
+        analysis = dict(row.analysis or {})
+        analysis["relationship_followup_error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
         row.analysis = analysis
 
 

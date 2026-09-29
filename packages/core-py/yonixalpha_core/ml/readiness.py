@@ -40,6 +40,9 @@ MIN_LABELED_SAMPLES = 50
 MIN_AUC = 0.55
 MIN_FORWARD_SAMPLES = 10  # labelled outcomes the drift check needs to measure accuracy
 
+# Last scanner-intelligence feature ablation (services/ml/app/ablation.py).
+ABLATION_KEY = "yx:ml:ablation:last"
+
 STATES = ("INSUFFICIENT_DATA", "LEARNING", "VALIDATING", "SHADOW", "PAPER_VALIDATED", "PRODUCTION_CONTRIBUTOR")
 
 

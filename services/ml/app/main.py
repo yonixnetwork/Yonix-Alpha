@@ -9,6 +9,7 @@ from yonixalpha_core.db.redis import make_redis
 from yonixalpha_core.logging import configure_logging, get_logger
 from yonixalpha_core.notify import send_telegram_alert
 
+from app.ablation import run_ablation
 from app.gate_ml import run_cycle
 from app.shadow_ml import run_shadow_cycle
 from app.train import train_and_maybe_register
@@ -68,6 +69,18 @@ async def _training_loop(session_factory, redis, settings, stop_event: asyncio.E
         except Exception as exc:  # noqa: BLE001
             log.error("shadow_ml.failed", error=str(exc))
             await _record_system_event(session_factory, "shadow_ml_cycle_failed", "error", {"error": str(exc)})
+
+        # Do the scanner-intelligence features help out of sample? (every 6 h;
+        # results stored for the ML Review page, never used for decisions)
+        try:
+            abl = await run_ablation(session_factory, redis)
+            log.info("ablation.completed", status=abl.get("status"), samples=abl.get("samples"))
+            if abl.get("status") == "EVALUATED":
+                await _record_system_event(session_factory, "feature_ablation", "info",
+                                           {"samples": abl.get("samples"), "split": abl.get("split")})
+        except Exception as exc:  # noqa: BLE001
+            log.error("ablation.failed", error=str(exc))
+            await _record_system_event(session_factory, "feature_ablation_failed", "error", {"error": str(exc)})
 
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=TRAIN_INTERVAL_SECONDS)
