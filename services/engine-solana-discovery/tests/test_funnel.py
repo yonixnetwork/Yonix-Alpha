@@ -180,6 +180,28 @@ async def test_momentum_promotes_established_accelerating_tokens_only(redis, ses
     assert (await run_funnel(redis, session_factory, SETTINGS, NOW))["momentum_promoted"] == 0
 
 
+async def test_momentum_prefilter_uses_the_momentum_engines_own_settings(redis, session_factory):
+    """A value saved on the Momentum tab of Risk Settings drives the momentum
+    pre-filter, even when the Fresh tab has a different value."""
+    created = int((NOW - timedelta(hours=2)).timestamp())
+    await redis.hset(pump_stream.meta_key("HOT"), mapping={"symbol": "HOT", "created_at": created, "bonding_curve": "BC",
+                                                           "creator": "C"})
+    await redis.hset(pump_stream.curve_key("HOT"), mapping={"vsol": 1, "vtok": 1, "updated_at": 1})
+    for i in range(10):
+        row = [int((NOW - timedelta(seconds=590 - i * 10)).timestamp()), f"p{i}", 1, 10**8, 10**12, 3 * 10**10, 10**15]
+        await redis.rpush(pump_stream.trades_key("HOT"), json.dumps(row))
+    for i in range(30):
+        row = [int((NOW - timedelta(seconds=290 - i * 5)).timestamp()), f"r{i}", 1, 10**8, 10**12, 3 * 10**10, 10**15]
+        await redis.rpush(pump_stream.trades_key("HOT"), json.dumps(row))
+    await redis.zadd(pump_stream.ACTIVE, {"HOT": int(NOW.timestamp()) - 10})
+    # Momentum tab: tokens must be at least 3 h old; the Fresh tab keeps its default.
+    strict = replace(default_settings_for("solana_momentum"), momentum_min_age_seconds=3 * 3600)
+    counts = await run_funnel(redis, session_factory, SETTINGS, NOW, strict)
+    assert counts["momentum_promoted"] == 0
+    counts = await run_funnel(redis, session_factory, SETTINGS, NOW, default_settings_for("solana_momentum"))
+    assert counts["momentum_promoted"] == 1
+
+
 async def test_momentum_takes_young_tokens_approaching_migration_the_fresh_engine_did_not_take(redis, session_factory):
     async def add(mint, rtok):
         created = int((NOW - timedelta(minutes=12)).timestamp())
