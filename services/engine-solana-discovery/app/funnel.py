@@ -299,7 +299,12 @@ async def observe_fresh(redis: Redis, session_factory, settings: SafetySettings,
     return active
 
 
-async def run_funnel(redis: Redis, session_factory, settings: SafetySettings, now: datetime) -> dict[str, int]:
+async def run_funnel(redis: Redis, session_factory, settings: SafetySettings, now: datetime,
+                     momentum_settings: SafetySettings | None = None) -> dict[str, int]:
+    """`settings` are solana_fresh's (fresh observation, shared gate budget);
+    `momentum_settings` are solana_momentum's, so a value saved on the
+    Momentum tab of Risk Settings drives the momentum pre-filter."""
+    mom = momentum_settings or settings
     counts = {"considered": 0, "prefilter_failed": 0, "promoted": 0, "budget_full": 0, "migrations": 0,
               "momentum_considered": 0, "momentum_promoted": 0, "observing": 0, "continue_monitoring": 0,
               "rejected": 0, "expired": 0, "migration_detected": 0}
@@ -339,15 +344,15 @@ async def run_funnel(redis: Redis, session_factory, settings: SafetySettings, no
             continue
         progress = Decimal(observation.curve_context(curve, int(meta.get("initial_real_token_reserves") or 0) or None)
                            .get("curve_progress") or 0)
-        near = progress >= settings.momentum_near_migration_progress
-        if created_ts and now.timestamp() - created_ts < settings.momentum_min_age_seconds:
+        near = progress >= mom.momentum_near_migration_progress
+        if created_ts and now.timestamp() - created_ts < mom.momentum_min_age_seconds:
             # A young token belongs to the fresh engine, unless it is close to
             # migration and the fresh engine did not take it.
             if (not near or await redis.zscore(pump_stream.PROMOTED, mint) is not None
                     or await redis.zscore(pump_stream.OBS_LIVE, mint) is not None):
                 continue
         counts["momentum_considered"] += 1
-        ok, stats = momentum_prefilter(await pump_stream.load_trades(redis, mint), now, created_ts, settings, near)
+        ok, stats = momentum_prefilter(await pump_stream.load_trades(redis, mint), now, created_ts, mom, near)
         if not ok:
             continue
         if active >= budget:

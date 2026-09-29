@@ -251,3 +251,84 @@ async def test_allow_word_filter_saved_in_the_dashboard_is_loaded_as_allow(db):
     assert sorted(r.action for r in rules) == ["ALLOW", "BLOCK"]
     assert match_blacklist(rules, "solana_momentum", "elon dog", "ED", "M1") is None  # exempted
     assert match_blacklist(rules, "solana_momentum", "elon cat", "EC", "M2") is not None  # still blocked
+
+
+def _alternatives(name, value):
+    """Valid-looking non-default values to try for one setting."""
+    from yonixalpha_core.safety.settings import ENUM_FIELDS
+
+    if name in ENUM_FIELDS:
+        return [o for o in ENUM_FIELDS[name] if o != value]
+    if isinstance(value, bool):
+        return [not value]
+    if name == "tp_r_multiples":
+        return [(Decimal("1.5"), Decimal("2.5"), Decimal("3.5"))]
+    if name == "tp_exit_fractions":
+        return [(Decimal("0.5"), Decimal("0.3"), Decimal("0.2"))]
+    if value is None:
+        return [0.6]
+    if isinstance(value, int):
+        return [value + 1, value - 1, value * 2, 1]
+    if isinstance(value, Decimal):
+        if value == 0:
+            return [Decimal("0.01"), Decimal("1")]
+        return [value * Decimal("1.1"), value * Decimal("0.9"), value * 2, value / 2]
+    return []
+
+
+async def test_every_risk_setting_saved_on_the_dashboard_reaches_every_solana_engine(db):
+    """Each of the risk settings is changed on its own, saved to GLOBAL the
+    way the dashboard saves it, and must then be exactly what the fresh,
+    migration and momentum engines load. A setting with no valid alternative
+    value would be reported, not skipped silently."""
+    from dataclasses import fields, replace
+
+    from yonixalpha_core.safety.settings import clamp, validate
+
+    base = SafetySettings()
+    untestable = []
+    for f in fields(SafetySettings):
+        current = getattr(base, f.name)
+        chosen = None
+        for alt in _alternatives(f.name, current):
+            candidate = replace(base, **{f.name: alt})
+            clamped, _ = clamp(candidate)
+            if not validate(candidate) and getattr(clamped, f.name) == alt:
+                chosen = alt
+                break
+        if chosen is None:
+            untestable.append(f.name)
+            continue
+        await store.save_settings(db, "GLOBAL", settings_to_dict(replace(base, **{f.name: chosen})), None)
+        await db.commit()
+        for engine in ("solana_fresh", "solana_migration", "solana_momentum"):
+            s, meta = await store.load_settings(db, engine)
+            assert getattr(s, f.name) == chosen, (f.name, engine, getattr(s, f.name), chosen)
+            assert store.settings_block_reason(engine, meta) is None
+    assert untestable == [], f"settings with no valid alternative value to test: {untestable}"
+
+
+async def test_global_intel_action_reaches_every_solana_engine_unless_one_overrides_it(db):
+    g = settings_to_dict(SafetySettings())
+    await store.save_settings(db, "GLOBAL", {**g, "dump_cluster_high_action": "NO_TRADE"}, None)
+    await db.commit()
+    for engine in ("solana_fresh", "solana_migration", "solana_momentum"):
+        s, meta = await store.load_settings(db, engine)
+        assert s.dump_cluster_high_action == "NO_TRADE", engine
+        assert store.settings_block_reason(engine, meta) is None
+    # An engine's own saved value wins for that engine only, and is listed as an override.
+    await store.save_settings(db, "solana_momentum", {**g, "dump_cluster_high_action": "WARN"}, None)
+    await db.commit()
+    s, meta = await store.load_settings(db, "solana_momentum")
+    assert s.dump_cluster_high_action == "WARN" and "dump_cluster_high_action" in meta["overrides"]
+    assert (await store.load_settings(db, "solana_fresh"))[0].dump_cluster_high_action == "NO_TRADE"
+
+
+async def test_invalid_saved_settings_block_new_entries_instead_of_trading_on_defaults(db):
+    db.add(RiskSettingsVersion(scope="GLOBAL", version=1, settings={"min_stop_pct": "0.5", "max_stop_pct": "0.1",
+                                                                    "dump_cluster_high_action": "NO_TRADE"}))
+    await db.commit()
+    settings, meta = await store.load_settings(db, "solana_fresh")
+    assert settings.dump_cluster_high_action == "WARN"  # the defaults, which would silently drop NO_TRADE
+    reason = store.settings_block_reason("solana_fresh", meta)
+    assert reason and "failed validation" in reason and "new entries blocked" in reason

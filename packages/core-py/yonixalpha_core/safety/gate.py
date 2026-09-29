@@ -797,6 +797,10 @@ def _check_account(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) 
     a = inp.account
     if a.kill_switch_engaged:
         out.append(_finding(RiskCategory.ACCOUNT, "KILL_SWITCH", RiskLevel.CRITICAL, "kill switch engaged", FinalDecision.NO_TRADE, True))
+    if a.trading_blocked_by:
+        out.append(_finding(RiskCategory.ACCOUNT, "TRADING_CONTROL_OFF", RiskLevel.CRITICAL,
+                            f"operator control: {a.trading_blocked_by} (new entries blocked; exits unaffected)",
+                            FinalDecision.NO_TRADE, True))
     if a.open_positions >= s.max_open_positions:
         out.append(_finding(RiskCategory.ACCOUNT, "MAX_OPEN_POSITIONS", RiskLevel.HIGH,
                             f"{a.open_positions} open positions (max {s.max_open_positions})", FinalDecision.NO_TRADE, True))
