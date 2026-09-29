@@ -64,3 +64,16 @@ Not gaps (already correct, preserved): risk provenance, NO_TRADE on unknown risk
 history (`POST /control/paper/accounts/{name}/reset` changes only balances and requires a flat account),
 pause/resume/exit-now controls (`POST /paper/positions/{id}/pause|resume|exit`), blacklists/rules, tax gate,
 creator-history actions, Mayhem handling, migrated liquidity minimum, hidden futures UI.
+
+## Implementation status (2026-09-29)
+
+| ID | Status | What changed | Verified |
+|---|---|---|---|
+| G1 | IMPLEMENTED | `paper-trading/app/main.py::_position_loop` manages open gate positions every 2 s; PumpSwap (RPC-priced) positions re-priced at most every 5 s (`gate_manage.due`); the main 15 s loop no longer manages positions. Last pass (time, duration, counts) in `yx:pm:last_pass`, shown on System Health with a STALE flag after 15 s. | unit test (`test_fast_loop_reprices_pool_positions_at_most_every_rpc_interval`), API test, browser; **production cadence NOT VERIFIED** until deployed |
+| G2 | IMPLEMENTED | `ml/readiness.py` + `GET /api/ml/readiness` + "ML readiness" panel on the ML Engine page: state per model, why, samples, holdout AUC and lower bound, champion/challenger, drift, dataset counts. Read-only; the gate's use of ML is unchanged. | unit + API tests, browser (empty system → INSUFFICIENT_DATA, rules only) |
+| G3 | IMPLEMENTED | `formatUsdCompact` / `formatSol` (`lib/format.ts`), `useSolUsd` (one shared request per page), `MarketCap` component: USD first, SOL second, "USD unavailable" without a fresh (≤ 5 min) rate. `GET /api/tokens/sol-usd`; paper-trading refreshes the cached Jupiter SOL→USDC quote about once a minute. Used in the token terminal (market cap, liquidity), manual trade preview, launch snapshots and the ledger path (historical rows say in the tooltip that the current rate is used). Opportunity-outcome buckets stay in SOL (their boundaries are SOL). | API test, browser (38.67 SOL × 152.40 → "$5.9K"; no rate → "38.67 SOL · USD unavailable"); **production rate source NOT VERIFIED** (depends on the Jupiter quote working on the droplet) |
+| G4 | IMPLEMENTED | `T+20s` added to `opportunities.HORIZONS` and the path views. Only rows still TRACKING get it; completed rows are unchanged. | unit test |
+| G5 | OPERATOR DECISION | Not changed. Proposal: `tp_exit_fractions` 0.35 / 0.30 / 0.20 leaves 15% on the trailing stop as a runner. | — |
+| G6 | IMPLEMENTED | Settings `trailing_activation_r` (0 = at TP1, default) and `trailing_max_giveback_pct` (0 = no cap, default); defaults reproduce the previous plan exactly; validated; shown under "Stops, targets & trailing". | unit test (defaults give an identical plan) |
+| G7 | OPEN | needs production data | — |
+| G8 | OPERATOR | acceptance procedure in the report | — |

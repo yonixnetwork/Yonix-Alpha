@@ -2,6 +2,7 @@
 
 import { useEffect, useId, useRef, useState } from "react";
 import Link from "next/link";
+import MarketCap from "@/components/MarketCap";
 import { apiGet, apiPost, ApiError } from "@/lib/api";
 import { formatDate, formatDecimal } from "@/lib/format";
 
@@ -100,7 +101,7 @@ export function BuyButton({ mint, engine, source, label = "BUY" }: { mint: strin
                   {p.balance.live_ready === false && <div className="neg">live not ready: {p.balance.live_not_ready_reason}</div>}</td></tr>
                 <tr><td>Route</td><td>{p.route} <span className="muted">· {p.migration_state}</span></td></tr>
                 <tr><td>Current price</td><td>{p.current_price_sol ? `${formatDecimal(p.current_price_sol, 12)} SOL` : "—"} <span className="muted">{p.price_source}{p.price_at ? ` · ${formatDate(p.price_at)}` : ""}</span></td></tr>
-                <tr><td>Market cap</td><td>{p.market_cap_sol ? `${formatDecimal(p.market_cap_sol, 2)} SOL` : "—"} <span className="muted">{p.market_cap_basis ?? ""}</span></td></tr>
+                <tr><td>Market cap</td><td><MarketCap sol={p.market_cap_sol} /> <span className="muted">{p.market_cap_basis ?? ""}</span></td></tr>
                 <tr><td>Liquidity</td><td>{p.liquidity ? `${formatDecimal(p.liquidity.sol, 4)} SOL` : "—"} <span className="muted">{p.liquidity ? `${p.liquidity.kind}${p.liquidity.at ? ` · ${formatDate(p.liquidity.at)}` : ""}` : "not observed"}</span></td></tr>
                 <tr><td>Available balance</td><td>{p.balance.available_sol ? `${formatDecimal(p.balance.available_sol, 6)} SOL` : "unknown"} <span className="muted">{p.balance.kind}</span></td></tr>
                 <tr><td>Estimated amount</td><td>{a?.planned_size_sol ? `${formatDecimal(a.planned_size_sol, 6)} SOL` : "set by the gate at execution"}

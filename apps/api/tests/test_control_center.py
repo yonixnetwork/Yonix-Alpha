@@ -177,7 +177,11 @@ async def test_health_states_from_evidence(app, client, auth_headers):
     assert c["binance"]["state"] == "CONNECTED" and c["bybit"]["state"] == "UNAVAILABLE" and c["hyperliquid"]["state"] == "UNKNOWN"
     assert r.json()["overall"] == "UNAVAILABLE"
     obs = await client.get("/api/system/observability", headers=auth_headers)
-    assert obs.status_code == 200 and "redis_memory" in obs.json()
+    assert obs.status_code == 200 and "redis_memory" in obs.json() and obs.json()["position_loop"] is None
+    await redis.set("yx:pm:last_pass", json.dumps({"at": datetime.now(timezone.utc).isoformat(), "pass_ms": 40,
+                                                    "interval_s": 2.0, "managed": 3, "closed": 0, "unpriced": 0}))
+    pl = (await client.get("/api/system/observability", headers=auth_headers)).json()["position_loop"]
+    assert pl["managed"] == 3 and pl["pass_ms"] == 40 and 0 <= pl["age_s"] < 60
 
 
 async def test_disabled_services_report_not_configured_and_legacy_services_are_hidden(app, client, auth_headers):
@@ -357,3 +361,15 @@ async def test_ml_readiness_reports_rules_only_on_an_empty_system(client, auth_h
     assert set(names) == {"gate_solana_fresh", "gate_solana_momentum", "gate_solana_migration"}
     assert all(m["state"] == "INSUFFICIENT_DATA" and m["samples"]["needed"] == 50 for m in names.values())
     assert r["dataset"]["decisions"] == 0 and "never influence" in r["dataset"]["note"]
+
+
+async def test_sol_usd_is_served_only_while_fresh(app, client, auth_headers):
+    from yonixalpha_core.solana import sol_price
+    r = (await client.get("/api/tokens/sol-usd", headers=auth_headers)).json()
+    assert r["price"] is None and "no SOL/USD" in r["reason"]
+    now = datetime.now(timezone.utc)
+    await sol_price.store(app.state.redis, Decimal("150.25"), "Jupiter quote 1 SOL -> USDC", now)
+    r = (await client.get("/api/tokens/sol-usd", headers=auth_headers)).json()
+    assert r["price"] == "150.25" and r["source"].startswith("Jupiter") and r["age_s"] < 60
+    await sol_price.store(app.state.redis, Decimal("150.25"), "Jupiter quote 1 SOL -> USDC", now - timedelta(minutes=10))
+    assert (await client.get("/api/tokens/sol-usd", headers=auth_headers)).json()["price"] is None

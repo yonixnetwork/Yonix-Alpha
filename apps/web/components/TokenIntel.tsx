@@ -3,6 +3,7 @@
 import { Fragment, useState } from "react";
 import { Brain, Gauge, Layers, ShieldAlert, Users, Waves } from "lucide-react";
 import { PathView, RowAnalysis, type LedgerRow } from "@/components/LedgerReview";
+import MarketCap from "@/components/MarketCap";
 import { Empty, ErrorNotice, Loading, Section, Stat } from "@/components/ui";
 import { formatDate } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
@@ -63,9 +64,9 @@ export default function TokenIntel({ mint, liveIntel }: { mint: string; liveInte
               <div className="table-scroll">
                 <table className="data-table">
                   <caption className="table-caption">Launch snapshots (each from trades up to that moment only)</caption>
-                  <thead><tr><th>T+</th><th>Market cap (SOL)</th><th>Buyers / sellers</th><th>Buy / sell SOL</th><th>Curve</th><th>Trades</th></tr></thead>
+                  <thead><tr><th>T+</th><th>Market cap</th><th>Buyers / sellers</th><th>Buy / sell SOL</th><th>Curve</th><th>Trades</th></tr></thead>
                   <tbody>{intel.snapshots.map((s: J) => (
-                    <tr key={s.offset_seconds}><td>{s.offset_seconds}s</td><td className="mono">{show(s.market_cap_sol, 2)}</td>
+                    <tr key={s.offset_seconds}><td>{s.offset_seconds}s</td><td className="mono"><MarketCap sol={s.market_cap_sol} historical compact /></td>
                       <td className="mono">{s.unique_buyers ?? "—"} / {s.unique_sellers ?? "—"}</td>
                       <td className="mono">{show(s.buy_volume_sol, 3)} / {show(s.sell_volume_sol, 3)}</td>
                       <td className="mono">{s.curve_progress !== undefined ? `${(s.curve_progress * 100).toFixed(1)}%` : "unknown"}</td>

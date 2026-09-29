@@ -47,6 +47,8 @@ const HELP: Record<string, string> = {
   max_pool_fraction: "Largest position as a fraction of pool liquidity.",
   max_round_trip_loss_bps: "Refuse if buying and immediately selling would lose more than this.",
   min_stop_pct: "Floor on the automatic stop distance. Must exceed round-trip costs.",
+  trailing_activation_r: "When the trailing stop starts. 0 = at TP1 (default); 1.5 = once price is 1.5× the stop distance above entry.",
+  trailing_max_giveback_pct: "Most of the move from the peak the trailing stop gives back. 0 = no cap beyond the stop distance (default); 0.15 = 15%.",
   max_risk_level_for_auto: "Findings above this level need operator approval.",
   wait_for_liquidity_max_age_seconds: "Young pools below min liquidity WAIT instead of NO_TRADE for this long.",
   creator_history_check: "Creator History Check ON/OFF.",

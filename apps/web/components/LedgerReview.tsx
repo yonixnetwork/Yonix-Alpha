@@ -4,6 +4,7 @@ import { Fragment, useState } from "react";
 import {
   Activity, AlertTriangle, Ban, CheckCircle2, Clock, Eye, FlaskConical, LogOut, RefreshCcw, ShieldCheck, Target, TrendingUp, XCircle,
 } from "lucide-react";
+import MarketCap from "@/components/MarketCap";
 import { Empty, ErrorNotice, Loading, Section, Stat, TokenLink } from "@/components/ui";
 import { formatDate } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
@@ -22,7 +23,7 @@ interface Review {
   shadow_models: J[];
 }
 
-export const PATH_HORIZONS = ["T+5s", "T+10s", "T+30s", "T+60s", "T+5m", "T+15m", "T+30m", "T+60m"];
+export const PATH_HORIZONS = ["T+5s", "T+10s", "T+20s", "T+30s", "T+60s", "T+5m", "T+15m", "T+30m", "T+60m"];
 const CATS: [string, string, typeof Eye][] = [
   ["observed", "Observed", Eye], ["traded", "Traded", Activity], ["rejected", "Rejected", Ban],
   ["missed_win", "Missed winners", Target], ["rejection_justified_drawdown", "Rejection justified (drawdown first)", ShieldCheck],
@@ -58,7 +59,7 @@ export function PathView({ row }: { row: LedgerRow }) {
               <td>{h}</td>
               <td className={cls(p.change_pct)}>{p.unknown ? <span className="muted">{p.unknown}</span> : pct(p.change_pct)}</td>
               <td className="mono"><span className="pos">{pct(p.peak_so_far_pct)}</span> / <span className="neg">{pct(p.drawdown_so_far_pct)}</span></td>
-              <td className="mono">{p.market_cap_sol ?? "—"}</td>
+              <td className="mono"><MarketCap sol={p.market_cap_sol} historical compact /></td>
               <td className="mono">{p.buys ?? "—"} / {p.sells ?? "—"}</td>
               <td className="mono">{p.buyers ?? "—"} / {p.sellers ?? "—"}</td>
               <td className="mono">{ex.unknown ? <span className="muted" title={ex.unknown}>unknown</span> : ex.executable_return_pct !== undefined

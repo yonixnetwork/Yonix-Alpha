@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Query
@@ -142,7 +143,18 @@ async def observability(
     quality = (await db.execute(select(DataQualityEvent.issue, func.count()).where(
         DataQualityEvent.created_at >= since).group_by(DataQualityEvent.issue))).all()
     memory = await redis.info("memory")
+    # Last pass of the open-position loop (paper-trading _position_loop):
+    # when it ran, how long it took, and how many positions it managed.
+    position_loop = None
+    raw = await redis.get("yx:pm:last_pass")
+    if raw:
+        try:
+            position_loop = json.loads(raw)
+            position_loop["age_s"] = round((datetime.now(timezone.utc) - datetime.fromisoformat(position_loop["at"])).total_seconds(), 1)
+        except (ValueError, KeyError, TypeError):
+            position_loop = None
     return {
+        "position_loop": position_loop,
         "events_published": {k: int(v) for k, v in (await redis.hgetall(events.COUNTS)).items()},
         "decisions_24h": dict(decisions),
         "notifications_24h": dict(notes),

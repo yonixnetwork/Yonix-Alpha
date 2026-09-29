@@ -70,6 +70,7 @@ async def test_rejected_token_horizons_peak_drawdown_and_migration(db, redis):
     row = (await db.execute(select(OpportunityOutcome))).scalar_one()
     hz = row.horizons
     assert hz["T+5s"]["change_pct"] == "0.00" and hz["T+10s"]["change_pct"] == "10.00"
+    assert hz["T+20s"]["change_pct"] == "10.00"  # the 25 s trade is not visible yet at T+20s
     assert hz["T+30s"]["change_pct"] == "50.00" and hz["T+60s"]["change_pct"] == "-10.00"
     assert "T+5m" not in hz and row.status == "TRACKING"
     # Nothing is due until T+5m: the row is not re-read.

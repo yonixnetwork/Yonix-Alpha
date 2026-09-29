@@ -4,6 +4,7 @@ import { Copy, ExternalLink } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
 import LineChart from "@/components/LineChart";
+import MarketCap from "@/components/MarketCap";
 import { BuyButton, SellButton } from "@/components/ManualTrade";
 import { ErrorNotice, Loading, fmtDuration } from "@/components/ui";
 import { formatDate, formatDecimal, gateDecisionPillClass } from "@/lib/format";
@@ -95,9 +96,9 @@ export default function TokenTerminal({ mint }: { mint: string }) {
         <div className="term-metrics">
           <div><span className="term-label">Price</span><span className="term-value mono">{h.price_sol ? formatDecimal(h.price_sol, 12) : "—"}</span>
             <span className="term-sub">{h.price_source ?? "no price"}{h.price_at ? ` · ${formatDate(h.price_at)}` : ""}</span></div>
-          <div><span className="term-label">Market cap</span><span className="term-value mono">{h.market_cap_sol ? `${formatDecimal(h.market_cap_sol, 2)} SOL` : "—"}</span>
+          <div><span className="term-label">Market cap</span><span className="term-value mono"><MarketCap sol={h.market_cap_sol} /></span>
             <span className="term-sub" title={h.market_cap_basis}>price × supply (= FDV on Pump.fun)</span></div>
-          <div><span className="term-label">Liquidity</span><span className="term-value mono">{h.liquidity ? `${formatDecimal(h.liquidity.sol, 3)} SOL` : "—"}</span>
+          <div><span className="term-label">Liquidity</span><span className="term-value mono"><MarketCap sol={h.liquidity?.sol} /></span>
             <span className="term-sub">{h.liquidity?.basis ?? "not observed"}</span></div>
           <div><span className="term-label">State</span><span className="term-value">{h.migration_state}</span>
             <span className="term-sub">age {fmtDuration(h.age_seconds)}</span></div>

@@ -9,7 +9,7 @@ One row per decision episode (opportunity_outcomes):
 Each row stores the state the decision saw (price, market cap, liquidity,
 flow, volatility and its confidence, risk, signal, ML score, deterioration
 signs, data freshness) and then, from the recorded trade stream, what the
-price did at T+5s, 10s, 30s, 60s, 5m, 15m and 30m, the peak and the drawdown
+price did at T+5s, 10s, 20s, 30s, 60s, 5m, 15m and 30m, the peak and the drawdown
 within 30 minutes, and whether the token migrated. Traded rows also get the
 trade result (PnL, MFE/MAE, exit reason, execution quality) and, for a
 loss, a LOSS_ANALYSIS with its classification.
@@ -37,7 +37,7 @@ from yonixalpha_core.db.models import ExecutionOrder, OpportunityOutcome, TokenO
 from yonixalpha_core.solana import launch_features as lf
 from yonixalpha_core.solana import pump_stream
 
-HORIZONS: tuple[tuple[str, int], ...] = (("T+5s", 5), ("T+10s", 10), ("T+30s", 30), ("T+60s", 60),
+HORIZONS: tuple[tuple[str, int], ...] = (("T+5s", 5), ("T+10s", 10), ("T+20s", 20), ("T+30s", 30), ("T+60s", 60),
                                          ("T+5m", 300), ("T+15m", 900), ("T+30m", 1800), ("T+60m", 3600))
 PEAK_WINDOW_SECONDS = 1800  # peak_pct / drawdown_pct keep their 30-minute meaning
 TRACK_SECONDS = 3600

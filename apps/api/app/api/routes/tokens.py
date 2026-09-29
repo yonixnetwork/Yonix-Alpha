@@ -2,6 +2,7 @@
 registry row, live stream state (curve, recent trades), candidates across
 engines, every safety-gate decision, and paper positions."""
 
+import json
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Path
@@ -12,12 +13,33 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_username, get_db, get_redis
 from app.api.util import jsonable
 from yonixalpha_core.db.models import PaperPosition, RiskAssessment, Token, TokenEvent, TradingCandidate
-from yonixalpha_core.solana import pump_stream
+from yonixalpha_core.solana import pump_stream, sol_price
 from yonixalpha_core.token_market import market_view as token_market_view
 
 router = APIRouter(prefix="/tokens", tags=["tokens"])
 
 MINT = Path(..., pattern=r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
+# Older than this, the dashboard shows "USD unavailable" instead of a USD value.
+SOL_USD_MAX_AGE_SECONDS = 300
+
+
+@router.get("/sol-usd")
+async def sol_usd(redis: Redis = Depends(get_redis), _: str = Depends(get_current_username)) -> dict:
+    """The SOL/USD rate the dashboard converts SOL amounts with: the cached
+    executable quote (refreshed about once a minute by paper-trading), its
+    source and age. price is null when there is no fresh rate; the UI then
+    shows SOL only and never guesses."""
+    raw = await redis.get(sol_price.CACHE_KEY)
+    if raw:
+        try:
+            c = json.loads(raw)
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(c["at"])).total_seconds()
+            if age <= SOL_USD_MAX_AGE_SECONDS:
+                return {"price": c["price"], "source": c["source"], "at": c["at"], "age_s": round(age, 1)}
+        except (ValueError, KeyError, TypeError):
+            pass
+    return {"price": None, "source": None, "at": None, "age_s": None,
+            "reason": "no SOL/USD quote in the last 5 minutes"}
 
 
 @router.get("/{mint}")

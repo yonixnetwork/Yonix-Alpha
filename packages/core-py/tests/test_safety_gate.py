@@ -162,6 +162,24 @@ def test_missing_trailing_is_calculated_and_activates_at_tp1():
     assert t.trailing.distance_pct <= t.stop_distance_pct
 
 
+def test_trailing_activation_and_max_giveback_are_configurable():
+    from yonixalpha_core.safety.settings import validate
+    base = decide().plan
+    t = decide(settings=SafetySettings(trailing_activation_r=Decimal("1.5"))).plan
+    assert t.trailing.activation_price == base.entry_price * (1 + Decimal("1.5") * base.stop_distance_pct)
+    assert "activates at 1.5R" in t.trailing.method
+    assert t.trailing.distance_pct == base.trailing.distance_pct  # activation changes nothing else
+    cap = base.trailing.distance_pct / 2
+    c = decide(settings=SafetySettings(trailing_max_giveback_pct=cap)).plan
+    assert c.trailing.distance_pct == cap and "trailing_max_giveback_pct" in c.trailing.method
+    assert c.stop_loss.value == base.stop_loss.value  # the stop itself is untouched
+    # 0 = defaults: exactly today's plan
+    d = decide(settings=SafetySettings(trailing_activation_r=Decimal("0"), trailing_max_giveback_pct=Decimal("0"))).plan
+    assert d.trailing.to_dict() == base.trailing.to_dict()
+    assert validate(SafetySettings(trailing_activation_r=Decimal("-1")))
+    assert validate(SafetySettings(trailing_max_giveback_pct=Decimal("0.9")))
+
+
 def test_trailing_stop_never_loosens():
     stop = ratchet_trailing_stop(None, Decimal("100"), Decimal("0.1"))
     assert stop == Decimal("90")

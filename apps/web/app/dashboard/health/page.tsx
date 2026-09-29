@@ -112,6 +112,14 @@ export default function HealthPage() {
       {obs.data && (
         <Section title="Observability (24 h)">
           <div className="stat-grid">
+            <Stat label="Open-position management" hint="Stops, take-profits and trailing stops are checked on every pass (target every 2 s; migrated positions re-priced at most every 5 s).">
+              {obs.data.position_loop
+                ? <>
+                    {obs.data.position_loop.age_s > 15 && <span className="pill pill-danger">STALE</span>}{" "}
+                    last pass {obs.data.position_loop.age_s}s ago · took {obs.data.position_loop.pass_ms} ms · {obs.data.position_loop.managed} managed{obs.data.position_loop.failed ? ` · ${obs.data.position_loop.failed} failed` : ""}
+                  </>
+                : <span className="neg">no pass recorded in the last 5 minutes: open positions are not being managed</span>}
+            </Stat>
             <Stat label="Dashboard WebSocket clients">{obs.data.websocket_clients}</Stat>
             <Stat label="Redis memory">
               {obs.data.redis_memory.used} / {obs.data.redis_memory.max || "no limit"}

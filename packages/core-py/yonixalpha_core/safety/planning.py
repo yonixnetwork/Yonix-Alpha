@@ -524,7 +524,12 @@ def plan_trade(
         plan.take_profits = tps
 
     # --- Trailing stop ------------------------------------------------------
-    activation = plan.take_profits[0].price.value
+    if settings.trailing_activation_r > 0:
+        activation = entry_price * (1 + sign * settings.trailing_activation_r * stop_pct)
+        when = f"activates at {settings.trailing_activation_r}R"
+    else:
+        activation = plan.take_profits[0].price.value
+        when = "activates at TP1"
     if overrides.trailing_distance_pct is not None:
         dist = overrides.trailing_distance_pct
         if dist <= 0 or dist > settings.max_stop_pct:
@@ -534,10 +539,14 @@ def plan_trade(
     elif volatility is not None:
         dist = max(settings.trailing_volatility_multiple * volatility, settings.min_trailing_pct)
         dist = min(dist, stop_pct)
+        cap = ""
+        if settings.trailing_max_giveback_pct > 0 and dist > settings.trailing_max_giveback_pct:
+            dist = settings.trailing_max_giveback_pct
+            cap = f" and at trailing_max_giveback_pct {settings.trailing_max_giveback_pct}"
         plan.trailing = TrailingPlan(
             True,
             Provenance.AUTO,
-            "max(trailing_volatility_multiple * volatility, min_trailing_pct), capped at stop distance; activates at TP1",
+            f"max(trailing_volatility_multiple * volatility, min_trailing_pct), capped at stop distance{cap}; {when}",
             dist,
             activation,
             dist / 4,

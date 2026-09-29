@@ -55,3 +55,26 @@ export function formatBps(value: string | null | undefined): string {
   const n = Number(value);
   return Number.isNaN(n) ? value : `${(n / 100).toFixed(2)}%`;
 }
+
+/** USD in compact form for market caps and liquidity: $950, $9.5K, $95.3K,
+ * $953K, $1.2M, $3.4B. "—" when the value is missing or not a number. */
+export function formatUsdCompact(value: number | string | null | undefined): string {
+  if (value === null || value === undefined || value === "") return "—";
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "—";
+  const sign = n < 0 ? "-" : "";
+  const a = Math.abs(n);
+  const unit = (v: number, suffix: string) => `${sign}$${v < 100 ? v.toFixed(1).replace(/\.0$/, "") : v.toFixed(0)}${suffix}`;
+  if (a >= 1e9) return unit(a / 1e9, "B");
+  if (a >= 1e6) return unit(a / 1e6, "M");
+  if (a >= 1e3) return unit(a / 1e3, "K");
+  return `${sign}$${a < 10 ? a.toFixed(2) : a.toFixed(0)}`;
+}
+
+/** SOL amount with thousands grouping and at most `digits` decimals. */
+export function formatSol(value: number | string | null | undefined, digits = 2): string {
+  if (value === null || value === undefined || value === "") return "—";
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "—";
+  return `${n.toLocaleString("en-US", { maximumFractionDigits: digits })} SOL`;
+}

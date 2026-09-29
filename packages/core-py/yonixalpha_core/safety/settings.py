@@ -81,6 +81,13 @@ class SafetySettings:
     tp_exit_fractions: tuple[Decimal, ...] = (Decimal("0.4"), Decimal("0.3"), Decimal("0.3"))
     trailing_volatility_multiple: Decimal = Decimal("1.5")
     min_trailing_pct: Decimal = Decimal("0.05")
+    # When the trailing stop starts: 0 = at TP1 (the default); otherwise once
+    # price reaches this R multiple of the stop distance.
+    trailing_activation_r: Decimal = Decimal("0")
+    # Largest giveback from the peak the trailing stop allows: 0 = no cap
+    # beyond the stop distance (the default); otherwise the trailing distance
+    # never exceeds this fraction (0.15 = 15%).
+    trailing_max_giveback_pct: Decimal = Decimal("0")
     max_risk_level_for_auto: str = "MODERATE"
 
     # Fresh pump.fun observation (discovery funnel; read from the
@@ -345,6 +352,10 @@ def validate(settings: SafetySettings) -> list[str]:
         errors.append("tp_exit_fractions must not sum above 1")
     if list(settings.tp_r_multiples) != sorted(settings.tp_r_multiples) or any(r <= 0 for r in settings.tp_r_multiples):
         errors.append("tp_r_multiples must be positive and ascending")
+    if settings.trailing_activation_r < 0:
+        errors.append("trailing_activation_r must be 0 (at TP1) or positive")
+    if settings.trailing_max_giveback_pct < 0 or settings.trailing_max_giveback_pct > settings.max_stop_pct:
+        errors.append("trailing_max_giveback_pct must be 0 (no cap) or at most max_stop_pct")
     if settings.max_leverage < 1:
         errors.append("max_leverage must be at least 1")
     if settings.risk_per_trade_pct <= 0:

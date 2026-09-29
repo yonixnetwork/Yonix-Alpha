@@ -17,6 +17,7 @@ from yonixalpha_core.venues.common import venue_health_snapshot
 from yonixalpha_core.logging import configure_logging, get_logger
 from yonixalpha_core.notify import send_telegram_alert
 from yonixalpha_core.solana.market_data import JupiterClient, RateBudget
+from yonixalpha_core.solana import sol_price
 from yonixalpha_core.solana.rpc import RpcManager, with_priority
 from yonixalpha_core.runtime_watch import run_watcher
 from yonixalpha_core.state_machine import CandidateState
@@ -171,6 +172,10 @@ async def _paper_trading_loop(
                     await track_observation_followups(session, redis, with_priority(rpc, "background"), now)
                 async with session_factory() as session:
                     await opportunities.track(session, redis, now)
+                # SOL/USD for the dashboard's USD values (cached 60 s, so at
+                # most one Jupiter quote a minute); unknown stays unknown.
+                if jupiter is not None:
+                    await sol_price.sol_usd(redis, jupiter, None, None, now)
                 if venues is not None:
                     grid_status = await run_grid(session_factory, redis, app_settings, venues, now)
                     if grid_status.get("fills"):
