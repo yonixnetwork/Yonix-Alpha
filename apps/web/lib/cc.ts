@@ -77,38 +77,15 @@ export interface AccountPerf {
   by_venue: Record<string, Perf>;
 }
 
-export interface GridSession {
-  coin: string;
-  status: string;
-  reason: string | null;
-  reserved?: string | null;
-  worst_case_loss?: string | null;
-  equity?: string;
-  realized_pnl?: string;
-  fees?: string;
-  fills?: number;
-  net_position?: string;
-  unrealized?: string;
-  drawdown_pct?: string;
-  range_lower?: string;
-  range_upper?: string;
-  levels?: number;
-  paused?: string | null;
-  pnl?: string;
-  last_mid?: string | null;
-  started_at?: string | null;
-}
-
 export interface PerformanceOut {
   accounts: AccountPerf[];
-  grid: GridSession[];
   notes: string[];
 }
 
 export interface StrategyOut {
   name: string;
   label: string;
-  kind: "solana" | "futures" | "grid" | "analytics" | "venue";
+  kind: "solana";
   status: string;
   engine: string | null;
   account: string | null;
@@ -126,18 +103,6 @@ export interface StrategyOut {
   total_pnl?: string;
   profit_factor?: string | null;
   max_drawdown?: string;
-  grid_sessions?: GridSession[];
-}
-
-export interface VenueOut {
-  venue: string;
-  engine: string;
-  mode: string;
-  credentials_configured: boolean;
-  account: { status: string; verified_at: string | null };
-  market_data: Connection | null;
-  paper_account: { name: string; currency: string; cash: string };
-  live_orders: Connection | null;
 }
 
 export interface ConfigModule {

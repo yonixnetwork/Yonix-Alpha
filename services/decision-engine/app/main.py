@@ -19,12 +19,10 @@ from yonixalpha_core.solana.assembler import Sources
 from yonixalpha_core.solana.market_data import DexScreenerClient, JupiterClient, RateBudget
 from yonixalpha_core.solana.rpc import RpcManager
 from yonixalpha_core.runtime_watch import run_watcher
-from yonixalpha_core.venues.registry import build_venues
 from yonixalpha_core.state_machine import CandidateState
 
 from app import diagnostics
 from app.evaluate import evaluate_candidate
-from app.futures_eval import run_all as run_futures
 from app.gate_eval import evaluate_with_gate, is_gate_candidate
 
 log = get_logger("decision-engine.main")
@@ -139,28 +137,6 @@ async def _evaluation_loop(session_factory, redis, settings, stop_event: asyncio
             pass
 
 
-FUTURES_INTERVAL_SECONDS = 20
-
-
-async def _futures_loop(session_factory, redis, settings, venues, stop_event: asyncio.Event) -> None:
-    """Futures strategies (Meta Muse, Confluence). Each closed candle is
-    evaluated once (deduplicated in futures_eval), so polling every 20 s
-    only bounds how late after a candle close the decision happens."""
-    while not stop_event.is_set():
-        try:
-            results = await run_futures(session_factory, redis, settings, venues, datetime.now(timezone.utc))
-            for r in results:
-                if r.get("status") not in ("off", "candle already evaluated", "holding", "no signal"):
-                    log.info("futures_loop.result", **{k: str(v) for k, v in r.items()})
-        except Exception as exc:  # noqa: BLE001
-            log.error("futures_loop.failed", error=str(exc))
-            await _record_system_event(session_factory, "futures_loop_failed", "error", {"error": str(exc)})
-        try:
-            await asyncio.wait_for(stop_event.wait(), timeout=FUTURES_INTERVAL_SECONDS)
-        except asyncio.TimeoutError:
-            pass
-
-
 async def run() -> None:
     settings = get_settings()
     configure_logging(settings.LOG_LEVEL)
@@ -200,11 +176,9 @@ async def run() -> None:
         log.warning("decision-engine.gate_disabled", reason="SOLANA_RPC_URL not set; pump.fun candidates are not evaluated")
 
     try:
-        venues = build_venues(http_client, settings)
         await asyncio.gather(
             _evaluation_loop(session_factory, redis, settings, stop_event, sources),
             _manual_loop(session_factory, redis, settings, stop_event, sources),
-            _futures_loop(session_factory, redis, settings, venues, stop_event),
             heartbeat_loop(settings, "decision-engine", stop_event, lambda: {"venues": venue_health_snapshot()}),
             run_watcher("decision-engine", settings, session_factory, stop_event, rpc=sources.rpc if sources else None,
                         redis=redis),

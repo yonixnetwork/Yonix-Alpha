@@ -57,6 +57,18 @@ class Settings(BaseSettings):
     # (provider URLs). Derived from JWT_SECRET when unset.
     CONFIG_ENCRYPTION_KEY: Optional[str] = None
     HELIUS_API_KEY: Optional[str] = None
+
+    # EVM chains (multi-chain phase): comma-separated RPC URLs tried in order
+    # before the chain's public endpoints. URLs may embed API keys; they are
+    # only ever shown as scheme://host.
+    BSC_RPC_URLS: Optional[str] = None
+    ROBINHOOD_RPC_URLS: Optional[str] = None
+    # One EVM account for both BSC and Robinhood Chain. The address alone is
+    # enough (watch-only: balances); the private key is optional, server-only,
+    # never logged or returned, and only checked against the address — EVM
+    # LIVE execution is not implemented.
+    EVM_WALLET_ADDRESS: Optional[str] = None
+    EVM_WALLET_PRIVATE_KEY: Optional[SecretStr] = None
     JUPITER_API_KEY: Optional[str] = None
 
     # Live Solana execution (only used when every live lock is open).
@@ -73,49 +85,6 @@ class Settings(BaseSettings):
     # per message from the key's linked wallet). Trading uses PumpPortal's
     # Local Transaction API, which needs no key: YonixAlpha signs locally.
     PUMPPORTAL_API_KEY: Optional[SecretStr] = None
-
-    # Binance USDⓈ-M futures. Read + trade permission when live futures
-    # execution is used; never enable withdrawals. BINANCE_TESTNET=true
-    # points every signed call at testnet.binancefuture.com.
-    BINANCE_API_KEY: Optional[str] = None
-    BINANCE_API_SECRET: Optional[str] = None
-    BINANCE_TESTNET: bool = True
-
-    # Bybit V5 linear perpetuals. A READ-ONLY key is enough for account
-    # views; live execution needs Contract "Orders" + "Positions" trade
-    # permission. Never enable withdrawals.
-    BYBIT_API_KEY: Optional[str] = None
-    BYBIT_API_SECRET: Optional[str] = None
-    BYBIT_TESTNET: bool = False
-
-    # Hyperliquid. The public account address is enough for read-only
-    # views. Live execution signs with an API ("agent") wallet approved for
-    # that account at app.hyperliquid.xyz/API — an agent wallet can trade
-    # but cannot withdraw. Never put the main wallet's key here.
-    HYPERLIQUID_ACCOUNT_ADDRESS: Optional[str] = None
-    HYPERLIQUID_API_WALLET_PRIVATE_KEY: Optional[SecretStr] = None
-    HYPERLIQUID_TESTNET: bool = False
-
-    # MetaTrader 5, through services/mt5-bridge on the Windows host that
-    # runs the MT5 terminal. MT5_LOGIN / MT5_PASSWORD / MT5_SERVER live in
-    # the BRIDGE's environment only; this server knows just the bridge URL
-    # and its bearer token.
-    MT5_BRIDGE_URL: Optional[str] = None
-    MT5_BRIDGE_TOKEN: Optional[SecretStr] = None
-
-    # External bots' control APIs (CONTROL_API_CONTRACT v1 of
-    # trading-command-center): status / close / config of the standalone
-    # bots, if they still run. Each token equals THAT bot's own
-    # CONTROL_API_TOKEN. Leave unset when the bots are not deployed —
-    # YonixAlpha runs these strategies natively.
-    META_MUSE_CONTROL_URL: Optional[str] = None
-    META_MUSE_TOKEN: Optional[SecretStr] = None
-    GOLDVSBTC_CONTROL_URL: Optional[str] = None
-    GOLDVSBTC_TOKEN: Optional[SecretStr] = None
-    MEME_BOT_CONTROL_URL: Optional[str] = None
-    MEME_BOT_TOKEN: Optional[SecretStr] = None
-    HYPERLIQUID_GRID_CONTROL_URL: Optional[str] = None
-    HYPERLIQUID_GRID_TOKEN: Optional[SecretStr] = None
 
     # Telegram (wired up Phase 11 — yonixalpha_core.notify.send_telegram_alert)
     TELEGRAM_BOT_TOKEN: Optional[str] = None

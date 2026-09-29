@@ -1,14 +1,14 @@
-"""Strategy center: every strategy and venue with its mode (stored and
-effective), validated configuration, implementation status and paper
-results; grid start/stop requests.
+"""Strategy center: the Solana strategies with their mode, validated
+configuration, implementation status and paper results. (The futures, FX,
+grid and Gold vs BTC strategies were removed; see branch
+archive/legacy-futures-forex-grid-2026-09-29.)
 
 Config never holds secrets (those stay in .env). A mode can never exceed
 what the environment locks allow: LIVE needs the global mode AND the
 environment flags; live execution exists only for the Pump.fun strategies
-(yonixalpha_core.live_trading), futures venues stay paper-only.
+(yonixalpha_core.live_trading).
 """
 
-from datetime import datetime
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -18,14 +18,13 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_username, get_db, get_redis
-from app.api.util import audit, user_id
-from yonixalpha_core import events, kill_switch
+from app.api.util import user_id
+from yonixalpha_core import events
 from yonixalpha_core.analytics import ClosedTrade, performance
-from yonixalpha_core.db.models import PaperPosition, RiskAssessment, StrategyState
-from yonixalpha_core.safety import pipeline, store
+from yonixalpha_core.db.models import PaperPosition, RiskAssessment
+from yonixalpha_core.safety import store
 from yonixalpha_core.safety.models import StrategyMode
-from yonixalpha_core.strategies import grid
-from yonixalpha_core.strategies.catalog import CATALOG, STRATEGY_VENUE_ENGINE, Entry, validate_config
+from yonixalpha_core.strategies.catalog import CATALOG, Entry, validate_config
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
 
@@ -44,12 +43,6 @@ def _position_filter(e: Entry):
     return RiskAssessment.strategy == e.name
 
 
-def _venue_engine(e: Entry, config: dict) -> str | None:
-    if e.kind == "futures":
-        return STRATEGY_VENUE_ENGINE.get(config.get("venue") or "binance")
-    return e.engine if e.kind in ("grid",) else None
-
-
 async def _describe(db: AsyncSession, e: Entry) -> dict:
     saved = await store.load_strategy_config(db, e.name) if e.rules else {}
     config = {**e.defaults, **saved}
@@ -57,18 +50,7 @@ async def _describe(db: AsyncSession, e: Entry) -> dict:
                  "account": e.account, "config": config, "saved_config": saved, "editable": sorted(e.rules)}
     if e.has_mode:
         mode = await store.load_strategy_mode(db, e.name)
-        venue_engine = _venue_engine(e, config)
-        effective = mode
-        if venue_engine:
-            effective = pipeline.effective_mode(mode, await store.load_strategy_mode(db, venue_engine))
-        out.update(mode=mode.value, effective_mode=effective.value, venue_mode_key=venue_engine)
-    if e.kind == "analytics":
-        return out
-    if e.kind == "grid":
-        rows = (await db.execute(select(StrategyState).where(StrategyState.strategy == e.name))).scalars().all()
-        out["grid_sessions"] = [{"coin": r.key.removeprefix("live:"), "mode": "LIVE" if r.key.startswith("live:") else "PAPER",
-                                 **grid.session_summary(r.status, r.state or {})} for r in rows]
-        return out
+        out.update(mode=mode.value, effective_mode=mode.value, venue_mode_key=None)
     acct = await store.get_paper_account(db, e.account) if e.account else None
     base = select(PaperPosition).outerjoin(RiskAssessment, RiskAssessment.id == PaperPosition.assessment_id).where(
         _position_filter(e))
@@ -134,31 +116,3 @@ async def put_mode(name: str, body: ModeIn, request: Request, db: AsyncSession =
     await db.commit()
     await events.publish(redis, "strategy.updated", {"strategy": name, "mode": mode.value}, "api")
     return await _describe(db, e)
-
-
-async def _grid_command(cmd: str, request: Request, db: AsyncSession, redis: Redis, username: str) -> dict:
-    e = CATALOG["hyperliquid_grid"]
-    if cmd == "start":
-        desc = await _describe(db, e)
-        if desc["effective_mode"] == StrategyMode.OFF.value:
-            raise HTTPException(409, "grid (or the hyperliquid_perps venue) is OFF; set a mode first")
-        if await kill_switch.is_engaged(redis):
-            raise HTTPException(409, "kill switch is engaged")
-    await redis.set(grid.COMMAND_KEY, cmd, ex=600)
-    await audit(db, username, request, f"grid.{cmd}_requested", {"at": datetime.now().isoformat()})
-    await db.commit()
-    return {"requested": cmd, "note": "applied on the next tick using the current mid — by the paper grid loop (≈15 s), or "
-                                      "in LIVE mode by execution-futures (≈5 s)"}
-
-
-@router.post("/hyperliquid_grid/start")
-async def grid_start(request: Request, db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
-                     username: str = Depends(get_current_username)) -> dict:
-    return await _grid_command("start", request, db, redis, username)
-
-
-@router.post("/hyperliquid_grid/stop")
-async def grid_stop(request: Request, db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
-                    username: str = Depends(get_current_username)) -> dict:
-    return await _grid_command("stop", request, db, redis, username)
-

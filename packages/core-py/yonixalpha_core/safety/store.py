@@ -46,13 +46,31 @@ GLOBAL_MODE_KEY = "global_mode"
 
 # One paper book per quote currency. Starting balances are simulation
 # parameters chosen by the operator (editable via the API), not market data.
-DEFAULT_PAPER_ACCOUNTS = {
+# Paper accounts of the active app, listed on the dashboard (summary, paper
+# accounts, analytics). The EVM / copy values match chains.evm.paper and
+# services/copy-engine, which create those accounts on first use.
+ACTIVE_PAPER_ACCOUNTS = {
     "solana": ("SOL", Decimal("10")),
+    "copy_solana": ("SOL", Decimal("10")),
+    "evm_bsc": ("BNB", Decimal("1")),
+    "evm_copy_bsc": ("BNB", Decimal("1")),
+    "evm_robinhood": ("ETH", Decimal("0.3")),
+    "evm_copy_robinhood": ("ETH", Decimal("0.3")),
+}
+# Accounts of the removed futures / FX / grid engines: still resolvable so
+# their historic rows and the engine-generic gate code keep working, but
+# never listed (branch archive/legacy-futures-forex-grid-2026-09-29).
+LEGACY_PAPER_ACCOUNTS = {
     "binance_futures": ("USDT", Decimal("1000")),
     "bybit_futures": ("USDT", Decimal("1000")),
     "hyperliquid": ("USDC", Decimal("1000")),
     "mt5": ("USD", Decimal("1000")),
 }
+DEFAULT_PAPER_ACCOUNTS = {**ACTIVE_PAPER_ACCOUNTS, **LEGACY_PAPER_ACCOUNTS}
+# Engines / LIVE providers of the removed code: nothing manages their
+# positions any more, so position loops and bulk actions skip them.
+LEGACY_ENGINES = ("binance_futures", "bybit_futures", "hyperliquid_perps", "mt5_fx")
+LEGACY_PROVIDERS = ("binance_futures", "bybit_linear", "hyperliquid_perps", "mt5_bridge")
 ENGINE_ACCOUNT = {
     "solana_fresh": "solana",
     "solana_migration": "solana",

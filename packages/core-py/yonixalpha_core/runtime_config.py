@@ -48,7 +48,8 @@ SERVICES: dict[str, str] = {
     "engine-solana-migration": "RPC endpoints",
     "paper-trading": "position management, paper/live execution settings, RPC endpoints",
     "data-solana": "RPC endpoints",
-    "execution-futures": "futures live settings and strategy modes",
+    "data-evm": "EVM trading settings, trading controls and launchpad modes (read every pass)",
+    "copy-engine": "copy targets, modes and limits, trading controls (read every pass)",
 }
 # Legacy containers (compose profile "legacy"), not started by the default
 # deployment: Momentum and Migration run inside discovery + decision-engine.

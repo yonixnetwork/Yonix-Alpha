@@ -1,5 +1,4 @@
-"""Performance analytics over closed paper trades, and Gold vs BTC ratio
-analytics.
+"""Performance analytics over closed paper trades.
 
 Trades are grouped by paper account first, because accounts are in
 different currencies (SOL, USDT, USDC) and must never be summed together.
@@ -8,26 +7,19 @@ enter a win rate. By default only trades since each account's last reset
 count, so a reset really does start a fresh record.
 """
 
-import json
-from dataclasses import asdict
 from datetime import datetime
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from redis.asyncio import Redis
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_username, get_db, get_redis
+from app.api.deps import get_current_username, get_db
 from yonixalpha_core.analytics import ClosedTrade, performance
-from yonixalpha_core.db.models import PaperPosition, RiskAssessment, StrategyState
+from yonixalpha_core.db.models import PaperPosition, RiskAssessment
 from yonixalpha_core.safety import store
-from yonixalpha_core.strategies import gold_btc, grid
-from yonixalpha_core.venues.common import VenueError
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
-
-GOLD_BTC_CACHE_SECONDS = 60
 
 
 def venue_of(p: PaperPosition) -> str:
@@ -59,10 +51,10 @@ async def performance_report(
     _: str = Depends(get_current_username),
 ) -> dict:
     out = []
-    names = [account] if account else list(store.DEFAULT_PAPER_ACCOUNTS)
+    names = [account] if account else list(store.ACTIVE_PAPER_ACCOUNTS)
     for name in names:
-        if name not in store.DEFAULT_PAPER_ACCOUNTS:
-            raise HTTPException(404, f"unknown account; one of {list(store.DEFAULT_PAPER_ACCOUNTS)}")
+        if name not in store.ACTIVE_PAPER_ACCOUNTS:
+            raise HTTPException(404, f"unknown account; one of {list(store.ACTIVE_PAPER_ACCOUNTS)}")
         acct = await store.get_paper_account(db, name)
         q = (select(PaperPosition, RiskAssessment.strategy)
              .outerjoin(RiskAssessment, RiskAssessment.id == PaperPosition.assessment_id)
@@ -100,37 +92,9 @@ async def performance_report(
             "by_engine": group(lambda p, s: p.engine or "unknown"),
             "by_venue": group(lambda p, s: venue_of(p)),
         })
-    grids = (await db.execute(select(StrategyState).where(StrategyState.strategy == "hyperliquid_grid"))).scalars().all()
-    grid_rows = [{"coin": g.key, **grid.session_summary(g.status, g.state or {})} for g in grids]
     return {
         "accounts": out,
-        "grid": grid_rows,
         "notes": ["Currencies are never mixed: each account reports in its own quote currency.",
                   "Open positions are excluded from every statistic until they close.",
-                  "Grid results are reported as session equity vs reserved capital, not per-trade win/loss.",
                   "Paper results simulate fills from live books/curves; they are not evidence of live profitability."],
     }
-
-
-@router.get("/gold-btc")
-async def gold_vs_btc(request: Request, db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
-                      _: str = Depends(get_current_username)) -> dict:
-    params = {**gold_btc.DEFAULTS, **await store.load_strategy_config(db, "gold_vs_btc")}
-    key = "yx:cache:gold_btc:" + json.dumps(params, sort_keys=True, default=str)
-    cached = await redis.get(key)
-    if cached:
-        return json.loads(cached)
-    venue = request.app.state.venues["binance"]
-    try:
-        btc = await venue.klines(params["btc"], params["interval"], int(params["candles"]))
-        gold = await venue.klines(params["gold"], params["interval"], int(params["candles"]))
-        a = gold_btc.analyse(btc, gold, params)
-    except VenueError as exc:
-        raise HTTPException(502, f"Binance market data unavailable: {exc}") from exc
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
-    body = {**{k: v for k, v in asdict(a).items() if k != "points"}, "points": [asdict(p) for p in a.points],
-            "params": params, "source": f"Binance USDⓈ-M {params['btc']} / {params['gold']} closed {params['interval']} candles",
-            "note": "Descriptive analytics only — no trading signal is generated."}
-    await redis.set(key, json.dumps(body, default=str), ex=GOLD_BTC_CACHE_SECONDS)
-    return body

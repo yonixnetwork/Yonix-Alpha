@@ -18,7 +18,7 @@ const MATCH = [
   { value: "pattern", label: "pattern (glob)" },
   { value: "regex", label: "regex" },
 ];
-const RULE_SCOPES = ["GLOBAL", "solana_fresh", "solana_migration", "solana_momentum", "binance_futures", "bybit_futures", "hyperliquid_perps"];
+const RULE_SCOPES = ["GLOBAL", "solana_fresh", "solana_migration", "solana_momentum"];
 const OPS = ["<", "<=", ">", ">=", "==", "!="];
 const ACTIONS = ["WAIT", "REQUIRE_MANUAL_APPROVAL", "NO_TRADE", "REJECT", "ALLOW"];
 

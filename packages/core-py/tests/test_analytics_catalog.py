@@ -29,23 +29,14 @@ def test_performance_edge_cases_are_null_not_invented():
     assert only_wins["profit_factor"] is None and only_wins["avg_loss"] is None
 
 
-def test_catalog_covers_every_strategy_and_venue():
-    assert {"solana_fresh", "solana_migration", "solana_momentum", "meta_muse", "confluence_matrix", "hyperliquid_grid",
-            "gold_vs_btc", "gold_btc_trend", "binance_futures", "bybit_futures", "hyperliquid_perps", "mt5_fx"} == set(CATALOG)
-    assert "gold_vs_btc" not in MODE_KEYS
+def test_catalog_is_the_solana_strategies_only():
+    # Futures, FX, grid and Gold vs BTC were removed (archive/legacy-futures-forex-grid-2026-09-29).
+    assert {"solana_fresh", "solana_migration", "solana_momentum"} == set(CATALOG) == set(MODE_KEYS)
 
 
 def test_config_validation_rejects_bad_input_without_coercion():
-    clean, errors = validate_config("meta_muse", {"fast": 9, "slow": 21, "stop_pct": "0.02"})
-    assert errors == [] and clean["stop_pct"] == "0.02"
-    for bad in ({"fast": "9"}, {"fast": True}, {"stop_pct": "abc"}, {"stop_pct": "NaN"}, {"interval": "7m"},
-                {"asset1": "eth usdt"}, {"api_key": "x"}, {"fast": 30}):
-        assert validate_config("meta_muse", bad)[1], bad
-    assert validate_config("hyperliquid_grid", {"leverage": "10"})[1]
-    assert validate_config("hyperliquid_grid", {"range_mode": "manual"})[1]
-    assert validate_config("hyperliquid_grid", {"range_mode": "manual", "range_lower": "90", "range_upper": "110"})[1] == []
-    assert validate_config("confluence_matrix", {"killzones": [[7, 10], [12, 15]]})[1] == []
-    assert validate_config("confluence_matrix", {"killzones": [[10, 7]]})[1]
+    for removed in ("meta_muse", "hyperliquid_grid", "confluence_matrix", "gold_btc_trend"):
+        assert validate_config(removed, {"fast": 9})[1] == [f"{removed} has no editable configuration"]
     # Pump.fun strategies: optional operator exit plan, empty = automatic.
     assert validate_config("solana_fresh", {})[1] == []
     clean, errors = validate_config("solana_fresh", {"manual_stop_loss_pct": "0.2", "manual_tp1_pct": "0.5",

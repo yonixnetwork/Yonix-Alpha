@@ -34,7 +34,10 @@ echo "==> Building images"
 ${COMPOSE} build
 
 echo "==> Starting/updating the stack"
-${COMPOSE} up -d
+# --remove-orphans stops containers of services no longer in the compose
+# files (e.g. the removed data-binance / engine-binance-futures /
+# execution-futures), so no old image keeps running against the database.
+${COMPOSE} up -d --remove-orphans
 
 echo "==> Waiting for api to report healthy"
 ATTEMPTS=0

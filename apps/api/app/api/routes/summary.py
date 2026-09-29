@@ -35,7 +35,7 @@ async def summary(db: AsyncSession = Depends(get_db), redis: Redis = Depends(get
     day = now.replace(hour=0, minute=0, second=0, microsecond=0)
     killed = await kill_switch.is_engaged(redis)
     accounts = []
-    for name in store.DEFAULT_PAPER_ACCOUNTS:
+    for name in store.ACTIVE_PAPER_ACCOUNTS:
         acct = await store.get_paper_account(db, name)
         state = await store.account_state(db, acct, None, now, killed)
         today, total = (await db.execute(select(
@@ -122,7 +122,7 @@ async def memecoin_summary(db: AsyncSession = Depends(get_db), redis: Redis = De
     solana = {k: v for k, v in conns.items() if v.get("category") in ("solana", "infrastructure")}
     system = {
         # Solana-side connections only; a module that is not configured
-        # (e.g. futures venues, now hidden) is not a problem.
+        # (e.g. an unused engine) is not a problem.
         "rpc": {k: v["state"] for k, v in solana.items()},
         "problems": {k: {"state": v["state"], "detail": v.get("detail")} for k, v in solana.items()
                      if v["state"] not in ("CONNECTED", health_state.NOT_CONFIGURED)},

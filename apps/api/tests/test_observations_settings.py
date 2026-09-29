@@ -63,8 +63,8 @@ def _use_env(app):
 
 async def test_settings_overview_never_returns_secret_values(app, client, auth_headers, monkeypatch):
     secret = "SUPERSECRETKEYVALUE123456"
-    monkeypatch.setenv("BINANCE_API_KEY", secret)
-    monkeypatch.setenv("BINANCE_API_SECRET", secret + "x")
+    monkeypatch.setenv("HELIUS_API_KEY", secret)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", secret + "x")
     monkeypatch.setenv("WALLET_PRIVATE_KEY", "")
     monkeypatch.setenv("SOLANA_RPC_URL", f"https://rpc.example.com/?api-key={secret}")
     _use_env(app)
@@ -75,24 +75,26 @@ async def test_settings_overview_never_returns_secret_values(app, client, auth_h
     assert r.status_code == 200
     assert secret not in r.text
     groups = {g["key"]: g for g in r.json()["groups"]}
-    assert groups["binance"]["secrets"] == {"BINANCE_API_KEY": "configured", "BINANCE_API_SECRET": "configured"}
+    assert groups["helius"]["secrets"] == {"HELIUS_API_KEY": "configured"}
+    assert groups["telegram"]["secrets"] == {"TELEGRAM_BOT_TOKEN": "configured"}
+    assert not set(groups) & {"binance", "bybit", "hyperliquid", "mt5"}
     assert groups["solana"]["endpoints"]["SOLANA_RPC_URL"] == "https://rpc.example.com/…"
     assert groups["wallet"]["secrets"]["WALLET_PRIVATE_KEY"] == "not configured"
     assert any(s["section"] == "Risk & thresholds" for s in r.json()["sections"])
 
 
 async def test_provider_test_reports_invalid_configuration_without_calling_out(app, client, auth_headers, monkeypatch):
-    monkeypatch.setenv("BYBIT_API_KEY", "")
-    monkeypatch.setenv("BYBIT_API_SECRET", "")
+    monkeypatch.setenv("HELIUS_API_KEY", "")
     _use_env(app)
     try:
-        r = await client.post("/api/settings/providers/bybit/test", headers=auth_headers)
-        again = await client.post("/api/settings/providers/bybit/test", headers=auth_headers)
+        r = await client.post("/api/settings/providers/helius/test", headers=auth_headers)
+        again = await client.post("/api/settings/providers/helius/test", headers=auth_headers)
     finally:
         get_settings.cache_clear()
     assert r.status_code == 200 and r.json()["status"] == "INVALID CONFIGURATION", r.json()
     assert again.status_code == 429  # cooldown
     overview = (await client.get("/api/settings/overview", headers=auth_headers)).json()
-    bybit = next(g for g in overview["groups"] if g["key"] == "bybit")
-    assert bybit["last_test"]["bybit"]["status"] == "INVALID CONFIGURATION"
-    assert (await client.post("/api/settings/providers/nope/test", headers=auth_headers)).status_code == 404
+    helius = next(g for g in overview["groups"] if g["key"] == "helius")
+    assert helius["last_test"]["helius"]["status"] == "INVALID CONFIGURATION"
+    for gone in ("nope", "bybit", "binance"):
+        assert (await client.post(f"/api/settings/providers/{gone}/test", headers=auth_headers)).status_code == 404

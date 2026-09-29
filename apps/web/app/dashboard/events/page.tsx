@@ -8,14 +8,14 @@ import type { SystemEventOut } from "@/lib/types";
 
 const SERVICES = [
   "data-solana",
-  "data-binance",
   "engine-solana-discovery",
   "engine-solana-migration",
   "engine-solana-momentum",
-  "engine-binance-futures",
   "decision-engine",
   "ml",
   "paper-trading",
+  "data-evm",
+  "copy-engine",
   "api",
 ];
 

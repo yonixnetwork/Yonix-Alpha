@@ -253,6 +253,15 @@ async def test_allow_word_filter_saved_in_the_dashboard_is_loaded_as_allow(db):
     assert match_blacklist(rules, "solana_momentum", "elon cat", "EC", "M2") is not None  # still blocked
 
 
+def test_active_paper_accounts_match_the_engines_that_create_them():
+    from yonixalpha_core.chains.evm import paper as evm_paper
+
+    for chain in ("bsc", "robinhood"):
+        for name in (evm_paper.engine_for(chain), f"evm_copy_{chain}"):
+            assert store.ACTIVE_PAPER_ACCOUNTS[name] == (evm_paper.NATIVE[chain], evm_paper.STARTING_BALANCE[chain])
+    assert not set(store.ACTIVE_PAPER_ACCOUNTS) & set(store.LEGACY_PAPER_ACCOUNTS)
+
+
 def _alternatives(name, value):
     """Valid-looking non-default values to try for one setting."""
     from yonixalpha_core.safety.settings import ENUM_FIELDS

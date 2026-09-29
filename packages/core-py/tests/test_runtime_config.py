@@ -134,7 +134,8 @@ def test_sync_status():
     st = {s["service"]: s["status"] for s in runtime_config.sync_status(5, acks, now)["services"]}
     assert st["decision-engine"] == "SYNCED" and st["paper-trading"] == "OUT_OF_SYNC"
     assert st["data-solana"] == "NOT_REPORTING" and st["engine-solana-discovery"] == "OUT_OF_SYNC"
-    assert st["execution-futures"] == "NOT_REPORTING"
+    assert st["data-evm"] == "NOT_REPORTING" and st["copy-engine"] == "NOT_REPORTING"
+    assert "execution-futures" not in st  # removed with the futures venues
     # Legacy engines the production compose does not run: not an alarm.
     assert st["engine-solana-momentum"] == "NOT_DEPLOYED" and st["engine-solana-migration"] == "NOT_DEPLOYED"
     assert runtime_config.sync_status(5, acks, now)["status"] == "OUT_OF_SYNC"

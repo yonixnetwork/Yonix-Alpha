@@ -24,6 +24,10 @@ dependencies = [
     "solders==0.29.0",
     # Encrypts dashboard-managed provider URLs (they embed API keys) at rest.
     "cryptography==50.0.1",
+    # EVM chains (BSC, Robinhood Chain): ABI encoding / log decoding and
+    # server-side transaction signing.
+    "eth-abi==5.2.0",
+    "eth-account==0.13.7",
 ]
 
 [project.optional-dependencies]
@@ -35,12 +39,6 @@ ml = [
     "numpy==2.1.3",
     "scikit-learn==1.5.2",
     "joblib==1.4.2",
-]
-
-# Only services/execution-futures needs this: Hyperliquid order signing
-# (EIP-712 L1 actions) from the official SDK.
-hyperliquid = [
-    "hyperliquid-python-sdk==0.24.0",
 ]
 
 [tool.hatch.build.targets.wheel]

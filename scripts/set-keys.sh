@@ -33,21 +33,14 @@ Solana data (Helius)|SOLANA_RPC_BACKUP_URL_3|secret|optional fourth RPC URL, ano
 Solana data (Helius)|SOLANA_WS_BACKUP_URL|secret|optional second WebSocket URL (Enter to skip)
 Jupiter|JUPITER_API_KEY|secret|portal.jup.ag -> API key
 PumpPortal (optional, paid data only)|PUMPPORTAL_API_KEY|secret|pumpportal.fun (leave empty unless you want the paid feed)
-Binance futures|BINANCE_API_KEY|secret|API key (testnet: testnet.binancefuture.com)
-Binance futures|BINANCE_API_SECRET|secret|API secret
-Binance futures|BINANCE_TESTNET|bool|true = testnet keys, false = real-account keys
-Bybit futures|BYBIT_API_KEY|secret|API key
-Bybit futures|BYBIT_API_SECRET|secret|API secret
-Bybit futures|BYBIT_TESTNET|bool|true = testnet keys, false = real-account keys
-Hyperliquid|HYPERLIQUID_ACCOUNT_ADDRESS|text|your MAIN wallet address (0x...)
-Hyperliquid|HYPERLIQUID_API_WALLET_PRIVATE_KEY|secret|the API wallet private key from app.hyperliquid.xyz/API (never the main wallet key)
-Hyperliquid|HYPERLIQUID_TESTNET|bool|true = testnet, false = mainnet
+BSC / Robinhood Chain RPC|BSC_RPC_URLS|secret|comma-separated https:// RPC URLs for BSC (chain id 56); Enter to keep the public defaults
+BSC / Robinhood Chain RPC|ROBINHOOD_RPC_URLS|secret|comma-separated https:// RPC URLs for Robinhood Chain (chain id 4663)
 Telegram alerts|TELEGRAM_BOT_TOKEN|secret|from @BotFather
 Telegram alerts|TELEGRAM_CHAT_ID|text|number from api.telegram.org/bot<TOKEN>/getUpdates
 Solana LIVE wallet (real SOL - stage C only)|WALLET_PUBLIC_KEY|text|dedicated wallet address
 Solana LIVE wallet (real SOL - stage C only)|WALLET_PRIVATE_KEY|secret|that wallet's private key (base58 or JSON array)
-MT5 bridge|MT5_BRIDGE_URL|text|private URL of services/mt5-bridge
-MT5 bridge|MT5_BRIDGE_TOKEN|secret|same value as the bridge's MT5_BRIDGE_TOKEN
+EVM wallet (BSC + Robinhood Chain, watch-only today)|EVM_WALLET_ADDRESS|text|the 0x address (enough for balances)
+EVM wallet (BSC + Robinhood Chain, watch-only today)|EVM_WALLET_PRIVATE_KEY|secret|optional; EVM live execution is not implemented, so leave empty
 EOF
 )
 
@@ -173,12 +166,9 @@ pair() {
     if [ "${sb}" = "set" ] && [ "${sa}" != "set" ]; then warn "${b} is set but ${a} is not - set both or neither."; fi
 }
 echo
-pair BINANCE_API_KEY BINANCE_API_SECRET
-pair BYBIT_API_KEY BYBIT_API_SECRET
 pair TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
-pair MT5_BRIDGE_URL MT5_BRIDGE_TOKEN
-if [ "$(status_of HYPERLIQUID_API_WALLET_PRIVATE_KEY)" = "set" ] && [ "$(status_of HYPERLIQUID_ACCOUNT_ADDRESS)" != "set" ]; then
-    warn "HYPERLIQUID_API_WALLET_PRIVATE_KEY needs HYPERLIQUID_ACCOUNT_ADDRESS."
+if [ "$(status_of EVM_WALLET_PRIVATE_KEY)" = "set" ] && [ "$(status_of EVM_WALLET_ADDRESS)" != "set" ]; then
+    warn "EVM_WALLET_PRIVATE_KEY is set without EVM_WALLET_ADDRESS: the dashboard reports it as INVALID until the address is set."
 fi
 if [ "$(status_of WALLET_PRIVATE_KEY)" = "set" ]; then
     warn "WALLET_PRIVATE_KEY is set: the Solana live wallet (real SOL) can be used once the locks are opened."

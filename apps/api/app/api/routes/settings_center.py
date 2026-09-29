@@ -39,6 +39,9 @@ LAST_RESULT_TTL = 7 * 86400
 
 # (group, provider test name or None, secrets, non-secret values shown as-is, URL values shown as scheme://host)
 PROVIDERS = {
+    "bsc": ("BSC (BNB Smart Chain)", ["bsc_rpc"], [], [], ["BSC_RPC_URLS"]),
+    "robinhood": ("Robinhood Chain", ["robinhood_rpc"], [], [], ["ROBINHOOD_RPC_URLS"]),
+    "honeypot": ("Honeypot.is (BSC safety enrichment)", ["honeypot_is"], [], [], []),
     "solana": ("Solana", ["solana_rpc", "solana_ws", "solana_rpc_backup", "solana_rpc_backup_2", "solana_rpc_backup_3"],
                ["HELIUS_API_KEY"], [],
                ["SOLANA_RPC_URL", "SOLANA_WS_URL", "SOLANA_RPC_BACKUP_URL", "SOLANA_RPC_BACKUP_URL_2", "SOLANA_RPC_BACKUP_URL_3",
@@ -46,12 +49,8 @@ PROVIDERS = {
     "helius": ("Helius", ["helius"], ["HELIUS_API_KEY"], [], []),
     "pumpportal": ("Pump.fun / PumpPortal", ["pumpportal"], ["PUMPPORTAL_API_KEY"], [], []),
     "jupiter": ("Jupiter", ["jupiter"], ["JUPITER_API_KEY"], [], []),
-    "wallet": ("Wallet", [], ["WALLET_PRIVATE_KEY"], ["WALLET_PUBLIC_KEY"], []),
-    "binance": ("Binance", ["binance"], ["BINANCE_API_KEY", "BINANCE_API_SECRET"], ["BINANCE_TESTNET"], []),
-    "bybit": ("Bybit", ["bybit"], ["BYBIT_API_KEY", "BYBIT_API_SECRET"], ["BYBIT_TESTNET"], []),
-    "hyperliquid": ("Hyperliquid", ["hyperliquid"], ["HYPERLIQUID_API_WALLET_PRIVATE_KEY"],
-                    ["HYPERLIQUID_ACCOUNT_ADDRESS", "HYPERLIQUID_TESTNET"], []),
-    "mt5": ("MT5 / Forex bridge", ["mt5"], ["MT5_BRIDGE_TOKEN"], [], ["MT5_BRIDGE_URL"]),
+    "wallet": ("Wallet (Solana)", [], ["WALLET_PRIVATE_KEY"], ["WALLET_PUBLIC_KEY"], []),
+    "evm_wallet": ("Wallet (EVM: BSC + Robinhood Chain)", [], ["EVM_WALLET_PRIVATE_KEY"], ["EVM_WALLET_ADDRESS"], []),
     "telegram": ("Notifications (Telegram)", ["telegram"], ["TELEGRAM_BOT_TOKEN"], ["TELEGRAM_CHAT_ID"], []),
     "application": ("General", [], ["JWT_SECRET", "ADMIN_PASSWORD_HASH"],
                     ["APP_ENV", "LOG_LEVEL", "PUBLIC_DOMAIN", "TRADING_ENABLED", "LIVE_TRADING_ENABLED", "PAPER_TRADING"], []),
@@ -64,14 +63,14 @@ SECTIONS = [
                "emergency-exit thresholds, TP R-multiples / fractions, trailing"},
     {"section": "Modes", "where": "/dashboard/settings", "covers": "global mode PAPER / MANUAL / LIVE"},
     {"section": "Strategies", "where": "/dashboard/strategies",
-     "covers": "per-strategy mode and parameters (Meta Muse, Confluence Matrix, Hyperliquid Grid, Gold vs BTC, Solana), "
+     "covers": "per-strategy mode and parameters (Pump.fun fresh, migrated, momentum), "
                "manual TP1-3 / stop / trailing overrides"},
     {"section": "Live execution", "where": "/dashboard/live",
-     "covers": "Solana slippage, priority fees, SOL reserve; futures leverage cap, free-balance floor, fill deviation"},
+     "covers": "Solana slippage, priority fees, SOL reserve"},
     {"section": "Word filters & rules", "where": "/dashboard/rules", "covers": "blacklist, custom rules"},
     {"section": "ML", "where": "/dashboard/ml", "covers": "models, champion / challenger, drift"},
     {"section": "Provider API keys", "where": "/dashboard/settings",
-     "covers": "Helius, RPC/WS URLs, Jupiter, PumpPortal, Binance, Bybit, Hyperliquid address, MT5, Telegram — "
+     "covers": "Helius, Solana RPC/WS URLs, BSC / Robinhood Chain RPC URLs, Jupiter, PumpPortal, Telegram — "
                "write-only, never displayed; applied to .env by the server helper"},
     {"section": "Server-only secrets", "where": "server: scripts/set-keys.sh",
      "covers": "wallet private keys, admin password, JWT/DB/Redis secrets, testnet flags, trading locks"},
@@ -97,7 +96,8 @@ async def overview(settings: Settings = Depends(get_settings), redis: Redis = De
             "key": key, "title": title, "tests": tests,
             "secrets": {n: ("configured" if _value(settings, n) else "not configured") for n in secrets},
             "values": {n: _value(settings, n) for n in plain},
-            "endpoints": {n: redact_url(_value(settings, n)) or None for n in urls},
+            "endpoints": {n: ", ".join(redact_url(u.strip()) for u in str(_value(settings, n)).split(",") if u.strip())
+                          if _value(settings, n) else None for n in urls},
             "last_test": last,
         })
     return {"groups": groups, "sections": SECTIONS, "results": provider_tests.RESULTS,

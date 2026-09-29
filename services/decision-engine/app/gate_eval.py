@@ -133,7 +133,8 @@ async def evaluate_with_gate(
     live_intent = (await store.load_global_mode(session) == GlobalMode.LIVE and strategy_mode in (StrategyMode.AUTO, StrategyMode.MANUAL)
                    and store.live_trading_permitted(settings))
     controls, account, settings_meta = await pipeline.load_controls(session, redis, settings, engine, strategy_mode, mint, now,
-                                                                    approval, live=live_intent)
+                                                                    approval, live=live_intent,
+                                                                    source="manual" if operator is not None else "sniper")
     live_ready, live_reason = await live_trading.live_readiness(redis, settings, now) if live_intent else (None, None)
     if engine == "solana_migration":
         inp, evidence = await assemble_migrated(sources, mint, now, controls)

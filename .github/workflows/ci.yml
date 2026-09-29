@@ -19,16 +19,14 @@ jobs:
           - packages/core-py
           - apps/api
           - services/data-solana
-          - services/data-binance
+          - services/data-evm
+          - services/copy-engine
           - services/engine-solana-discovery
           - services/engine-solana-momentum
           - services/engine-solana-migration
-          - services/engine-binance-futures
           - services/decision-engine
           - services/ml
           - services/paper-trading
-          - services/execution-futures
-          - services/mt5-bridge
     services:
       postgres:
         image: postgres:16-alpine

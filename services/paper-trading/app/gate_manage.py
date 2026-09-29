@@ -31,18 +31,17 @@ from redis.asyncio import Redis
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from yonixalpha_core import copy_trading as ct
 from yonixalpha_core import events, live_trading, paper_engine, paper_execution
 from yonixalpha_core.db.models import PaperAccount, PaperPosition, RiskAssessment
-from yonixalpha_core.execution.registry import FUTURES_PROVIDERS
 from yonixalpha_core.exit_intel import ExitConfig, solana_exit_decision
-from yonixalpha_core.safety.store import add_timeline_event, load_settings
+from yonixalpha_core.safety.store import LEGACY_ENGINES, LEGACY_PROVIDERS, add_timeline_event, load_settings
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.safety.liquidity import ConstantProductModel
 from yonixalpha_core.solana import pump_stream, pumpswap
 from yonixalpha_core.solana.assembler import fetch_holders
 from yonixalpha_core.solana.market_data import JupiterClient
 from yonixalpha_core.solana.pumpfun import WSOL_MINT
-from yonixalpha_core.venues.common import VenueError
 from yonixalpha_core.notify import alert_error
 
 log = get_logger("paper-trading.gate_manage")
@@ -77,17 +76,9 @@ async def pool_price(rpc, redis: Redis, mint: str, decimals: int, now: datetime)
 async def price_position(redis: Redis, jupiter: JupiterClient | None, p: PaperPosition, now: datetime, venues: dict | None = None,
                          rpc=None, ctx: dict | None = None):
     """Returns (price, model, exit_cost_bps, source) or (None, None, None, reason).
+    `venues` is unused (the futures venues were removed); kept for callers.
     `ctx` receives the pool's recent trades when priced from PumpSwap."""
     venue = (p.plan or {}).get("venue") or {}
-    if venue.get("kind") == "futures":
-        adapter = (venues or {}).get(venue.get("venue"))
-        if adapter is None:
-            return None, None, None, f"venue {venue.get('venue')} not configured"
-        try:
-            book = await adapter.book(venue.get("symbol") or p.asset_id)
-        except VenueError as exc:
-            return None, None, None, f"order book unavailable: {exc}"
-        return book.mid, book, None, f"{venue.get('venue')}:book"
     decimals = venue.get("decimals")
     if decimals is None:
         return None, None, None, "token decimals unknown"
@@ -191,6 +182,18 @@ async def _exit_intelligence(redis: Redis, p: PaperPosition, model, now: datetim
     return qty, f"exit_intel_{d.action.lower()}"
 
 
+def _copy_partial_exit(p: PaperPosition) -> tuple | None:
+    """A mirrored partial sell queued by copy-engine on a copy_solana paper
+    position: (quantity, reason) for apply_step, or None. Held while the
+    position is paused or already exiting in full."""
+    frac = ct.pending_partial_exit(p.plan)
+    if frac is None or p.exit_requested or p.management_paused:
+        return None
+    remaining = p.remaining_quantity if p.remaining_quantity is not None else p.quantity
+    qty = remaining * frac
+    return (qty, "copy_partial_sell") if qty > 0 else None
+
+
 async def _manage_live(session, redis: Redis, app_settings, p: PaperPosition, price, model, extra, now: datetime,
                        source: str) -> None:
     out = await live_trading.manage_live_position(session, p, price, model, now, extra)
@@ -253,9 +256,13 @@ async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterC
         ids = (await session.execute(
             select(PaperPosition.id).where(
                 PaperPosition.status == "open", PaperPosition.engine.is_not(None),
-                # LIVE futures/FX positions are managed by services/execution-futures.
+                # EVM (BSC / Robinhood Chain) positions are managed by services/data-evm.
+                PaperPosition.engine.not_like("evm\\_%"),
+                # Futures / FX / grid were removed (branch archive/legacy-futures-forex-grid-2026-09-29);
+                # any position they left open is not managed here and stays as history.
+                PaperPosition.engine.not_in(LEGACY_ENGINES),
                 or_(PaperPosition.execution_provider.is_(None),
-                    PaperPosition.execution_provider.not_in(FUTURES_PROVIDERS)))
+                    PaperPosition.execution_provider.not_in(LEGACY_PROVIDERS)))
         )).scalars().all()
     for pid in ids:
         # Per-position isolation: one failing row must never stop the other
@@ -285,6 +292,9 @@ async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterC
                     await _manage_live(session, redis, app_settings, p, price, model, extra, now, source)
                     counts["managed"] += 1
                     continue
+                copy_exit = _copy_partial_exit(p)
+                if copy_exit is not None and (extra is None or copy_exit[0] > extra[0]):
+                    extra = copy_exit  # the larger of exit intelligence and the mirrored sell, never both
                 if rates is None:
                     rates = await paper_execution.effective_rates(session)
                 if rates["exit_pct"] > 0 and p.exit_failures < MAX_SIMULATED_EXIT_FAILURES:
@@ -315,6 +325,11 @@ async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterC
                 )
                 if result.exits:
                     p.exit_failures = 0
+                if copy_exit is not None:
+                    p.plan = ct.clear_partial_exit(p.plan)
+                    await add_timeline_event(session, "copy_partial_exit_filled", now,
+                                             {"quantity": str(copy_exit[0]), "price": str(price),
+                                              "applied_as": extra[1] if extra else None}, position_id=p.id)
                 for _, reason in result.exits:
                     kind = NOTIFY_KIND.get(reason)
                     if kind:

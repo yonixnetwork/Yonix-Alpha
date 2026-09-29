@@ -7,7 +7,7 @@ import { formatDate } from "@/lib/format";
 import type { SettingsOut, SettingsVersionOut } from "@/lib/types";
 import RuntimeApply from "@/components/RuntimeApply";
 
-const SCOPES = ["GLOBAL", "solana_fresh", "solana_migration", "solana_momentum", "binance_futures", "bybit_futures", "hyperliquid_perps"];
+const SCOPES = ["GLOBAL", "solana_fresh", "solana_migration", "solana_momentum"];
 
 type Value = string | number | boolean | string[] | null;
 

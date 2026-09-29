@@ -1,10 +1,9 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from sqlalchemy import select
 
 from yonixalpha_core import paper_engine
-from yonixalpha_core.db.models import Notification, PaperAccount, PaperOrder, PaperPosition, StrategyState
+from yonixalpha_core.db.models import PaperPosition
 from yonixalpha_core.exit_intel import solana_exit_decision
 from yonixalpha_core.safety import store
 from yonixalpha_core.safety.gate import assess
@@ -15,14 +14,12 @@ from yonixalpha_core.safety.models import (
     MarketInfo,
     Observation,
     StrategyLevels,
-    StrategyMode,
     StrategySignal,
 )
 from yonixalpha_core.safety.settings import default_settings_for
 from yonixalpha_core.solana.flow import Trade
 
 from app.gate_manage import manage_gate_positions
-from app.grid_engine import load_state, run_grid, stop_grid
 
 NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
@@ -31,17 +28,6 @@ def book(mid, depth=Decimal(50)):
     bids = [(mid - Decimal("0.05") - Decimal("0.1") * i, depth) for i in range(100)]
     asks = [(mid + Decimal("0.05") + Decimal("0.1") * i, depth) for i in range(100)]
     return book_from_levels(bids, asks, Decimal(5))
-
-
-class Venue:
-    def __init__(self, mid):
-        self.mid_price = Decimal(mid)
-
-    async def book(self, symbol, limit=100):
-        return book(self.mid_price)
-
-    async def mid(self, coin):
-        return self.mid_price
 
 
 async def open_futures_short(session_factory):
@@ -65,24 +51,12 @@ async def open_futures_short(session_factory):
         return pos.id
 
 
-async def test_futures_short_takes_profit_against_live_book(session_factory, redis_client):
+async def test_leftover_legacy_futures_position_is_not_managed(session_factory, redis_client):
+    """Futures were removed: a position that engine left open stays as
+    history - it is neither priced nor closed by the Solana manager."""
     pid = await open_futures_short(session_factory)
-    counts = await manage_gate_positions(session_factory, redis_client, None, NOW + timedelta(minutes=5),
-                                         {"binance": Venue("2930")}, None)
-    assert counts["closed"] == 1
-    async with session_factory() as s:
-        p = await s.get(PaperPosition, pid)
-        acct = await s.get(PaperAccount, p.account_id)
-        kinds = [n.kind for n in (await s.execute(select(Notification))).scalars()]
-    assert p.exit_reason == "take_profit_1" and p.realized_pnl > 0
-    assert acct.cash_balance == Decimal(1000) + p.realized_pnl
-    assert "tp1" in kinds and "close" in kinds
-
-
-async def test_futures_position_left_alone_when_book_unavailable(session_factory, redis_client):
-    pid = await open_futures_short(session_factory)
-    counts = await manage_gate_positions(session_factory, redis_client, None, NOW, {}, None)
-    assert counts["unpriced"] == 1
+    counts = await manage_gate_positions(session_factory, redis_client, None, NOW + timedelta(minutes=5), None, None)
+    assert counts == {"managed": 0, "closed": 0, "unpriced": 0}
     async with session_factory() as s:
         assert (await s.get(PaperPosition, pid)).status == "open"
 
@@ -103,72 +77,3 @@ def test_exit_intelligence_needs_two_pieces_of_evidence():
     assert solana_exit_decision(quiet, NOW, None, Decimal(30), Decimal(15)).action == "HOLD"
     # A collapse past exit_emergency_liquidity_drop (60%) is an emergency on its own.
     assert solana_exit_decision(quiet, NOW, None, Decimal(30), Decimal(10)).action == "EXIT_NOW"
-
-
-async def test_grid_starts_fills_and_stops_returning_capital(session_factory, redis_client):
-    venues = {"hyperliquid": Venue("100")}
-    async with session_factory() as s:
-        await store.save_strategy_config(s, "hyperliquid_grid", {"coin": "BTC", "grid_levels": 4, "range_pct": "1",
-                                                                "capital": "100", "maker_fee_bps": "0"}, None)
-        await s.commit()
-    assert (await run_grid(session_factory, redis_client, None, venues, NOW))["status"] == "running"
-    async with session_factory() as s:
-        acct = await store.get_paper_account(s, "hyperliquid")
-        assert acct.cash_balance == Decimal(900)
-    venues["hyperliquid"].mid_price = Decimal("99.4")
-    r = await run_grid(session_factory, redis_client, None, venues, NOW + timedelta(seconds=15))
-    assert r["fills"] == 1
-    venues["hyperliquid"].mid_price = Decimal("100.1")
-    await run_grid(session_factory, redis_client, None, venues, NOW + timedelta(seconds=30))
-    async with session_factory() as s:
-        orders = (await s.execute(select(PaperOrder))).scalars().all()
-        assert [o.side for o in orders] == ["BUY", "SELL"]
-        row = await load_state(s, "BTC")
-        await stop_grid(s, redis_client, row, Decimal("100.1"), "test")
-        await s.commit()
-        acct = await store.get_paper_account(s, "hyperliquid")
-    assert acct.cash_balance > Decimal(1000)  # one completed grid round trip at zero fee
-
-
-async def test_grid_refuses_when_worst_case_exceeds_risk_budget(session_factory, redis_client):
-    async with session_factory() as s:
-        await store.save_strategy_config(s, "hyperliquid_grid", {"coin": "ETH", "capital": "900", "range_pct": "20", "range_break_pct": "10",
-                                                                "grid_levels": 10}, None)
-        await s.commit()
-    r = await run_grid(session_factory, redis_client, None, {"hyperliquid": Venue("3000")}, NOW)
-    assert r["status"] == "refused"
-    async with session_factory() as s:
-        row = (await s.execute(select(StrategyState))).scalar_one()
-        assert "worst-case loss" in row.state["reason"]
-        assert (await store.get_paper_account(s, "hyperliquid")).cash_balance == Decimal(1000)
-
-
-async def test_grid_stops_when_strategy_turned_off(session_factory, redis_client):
-    venues = {"hyperliquid": Venue("100")}
-    async with session_factory() as s:
-        await store.save_strategy_config(s, "hyperliquid_grid", {"coin": "BTC", "capital": "50"}, None)
-        await s.commit()
-    await run_grid(session_factory, redis_client, None, venues, NOW)
-    async with session_factory() as s:
-        await store.set_strategy_mode(s, "hyperliquid_grid", StrategyMode.OFF, None)
-        await s.commit()
-    assert (await run_grid(session_factory, redis_client, None, venues, NOW))["status"] == "stopped"
-    async with session_factory() as s:
-        assert (await store.get_paper_account(s, "hyperliquid")).cash_balance == Decimal(1000)
-
-
-async def test_manual_grid_waits_for_operator_start_and_stops_on_request(session_factory, redis_client):
-    from yonixalpha_core.strategies import grid as grid_math
-
-    venues = {"hyperliquid": Venue("100")}
-    async with session_factory() as s:
-        await store.save_strategy_config(s, "hyperliquid_grid", {"coin": "BTC", "capital": "50"}, None)
-        await store.set_strategy_mode(s, "hyperliquid_grid", StrategyMode.MANUAL, None)
-        await s.commit()
-    assert (await run_grid(session_factory, redis_client, None, venues, NOW))["status"] == "not started"
-    await redis_client.set(grid_math.COMMAND_KEY, "start")
-    assert (await run_grid(session_factory, redis_client, None, venues, NOW))["status"] == "running"
-    await redis_client.set(grid_math.COMMAND_KEY, "stop")
-    assert (await run_grid(session_factory, redis_client, None, venues, NOW))["status"] == "stopped"
-    async with session_factory() as s:
-        assert (await store.get_paper_account(s, "hyperliquid")).cash_balance == Decimal(1000)

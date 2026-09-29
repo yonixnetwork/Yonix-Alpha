@@ -13,7 +13,6 @@ from yonixalpha_core.logging import configure_logging, get_logger
 from yonixalpha_core.db.base import make_engine, make_session_factory
 from yonixalpha_core.db.models import User
 from yonixalpha_core.db.redis import make_redis
-from yonixalpha_core.venues.registry import build_venues
 
 log = get_logger("api.main")
 
@@ -69,10 +68,9 @@ async def lifespan(app: FastAPI):
     app.state.engine = engine
     app.state.db_session_factory = session_factory
     app.state.redis = redis
-    # Public market data / read-only account calls for the venue pages.
+    # Outbound calls made by the API itself (provider TEST CONNECTION, EVM wallet balances).
     http = httpx.AsyncClient(headers={"User-Agent": "yonixalpha-api"})
     app.state.http = http
-    app.state.venues = build_venues(http, settings)
 
     await _seed_admin_user(session_factory)
     await _validate_configuration(session_factory, redis, settings)

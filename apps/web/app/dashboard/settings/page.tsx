@@ -34,8 +34,8 @@ export default function SettingsPage() {
             </div>
             <div className="notice">
               The environment flags live in the server&apos;s .env and cannot be changed from the dashboard. LIVE is refused while
-              they are closed. Live execution covers Pump.fun tokens (fresh and PumpSwap-migrated) and the futures/FX venues
-              (Binance, Bybit, Hyperliquid, MT5 bridge); see Live Execution. To stop everything, use the kill switch or set strategies to OFF.
+              they are closed. Live execution covers Pump.fun tokens (fresh and PumpSwap-migrated) only; BSC and Robinhood Chain
+              are paper only. See Live Execution. To stop everything, use the kill switch or set strategies to OFF.
             </div>
             <div className="btn-row" role="group" aria-label="Global mode">
               {GLOBAL_MODES.map((g) => (

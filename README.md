@@ -1,6 +1,12 @@
-# YonixAlpha
+# YONIXALPHA
 
-Private, automated trading intelligence and execution platform. See
+Private, server-side memecoin trading intelligence and execution platform for
+**Solana, BSC and Robinhood Chain**. Futures, forex, the Hyperliquid grid, Meta
+Muse, Confluence and Gold vs BTC were removed from the active app on
+2026-09-29; their code is kept on branch
+`archive/legacy-futures-forex-grid-2026-09-29`. See
+`docs/MULTICHAIN_AUDIT_2026.md` for the multi-chain work and its verification
+status. See
 `ARCHITECTURE_AUDIT.md` and `REUSE_MATRIX.md` for the Phase 0 audit of the
 reference repositories this platform draws patterns from.
 
@@ -214,18 +220,14 @@ apps/
                               signals, risk, ML, paper trading, system events
 services/
   data-solana/               Solana RPC/WS ingestion worker (public data)
-  data-binance/              Binance Futures market-data ingestion worker (public data)
+  data-evm/                  BSC + Robinhood Chain launchpad discovery, safety checks, paper trading
+  copy-engine/               Wallet profiles + paper copy trading on Solana, BSC and Robinhood Chain
   engine-solana-discovery/   Engine A: new SPL mint detection
   engine-solana-momentum/    Engine C: transfer-acceleration detection
   engine-solana-migration/   Engine B: scaffolding, no live detection yet (see Status)
-  engine-binance-futures/    Authenticated account/order/position engine (Phase 4)
   decision-engine/           Feature/signal scoring + risk-gated Decision persistence (Phase 5)
   ml/                        Training job: labeled-dataset loading, model registry writes (Phase 6)
   paper-trading/             Simulated entry/exit + ML label backfill (Phase 7); Pump.fun live worker
-  execution-futures/         LIVE futures/FX: Binance, Bybit, Hyperliquid, MT5 bridge; live grid;
-                              reconciliation; external-bot polling (locks closed → does nothing)
-  mt5-bridge/                Runs on the Windows MT5 host, NOT in the Docker stack: authenticated
-                              HTTP bridge to a MetaTrader 5 terminal (see its README)
 packages/
   core-py/                   Shared config, logging, security, DB models/schemas,
                               Solana RPC/WS transport, SPL Token Program parsing,

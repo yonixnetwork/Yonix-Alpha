@@ -26,14 +26,14 @@ async def test_status_reports_unknown_for_services_with_no_events(client, auth_h
     # every known service is reported, even with zero rows
     assert set(body["services"].keys()) == {
         "data-solana",
-        "data-binance",
         "engine-solana-discovery",
         "engine-solana-migration",
         "engine-solana-momentum",
-        "engine-binance-futures",
         "decision-engine",
         "ml",
         "paper-trading",
+        "data-evm",
+        "copy-engine",
     }
 
 

@@ -3,10 +3,12 @@ from fastapi import APIRouter
 from app.api.routes import (
     analytics,
     auth,
-    bots,
     candidates,
+    chains,
     config,
     control,
+    copy,
+    evm,
     health,
     live,
     ml,
@@ -22,7 +24,6 @@ from app.api.routes import (
     system,
     tokens,
     trade,
-    venues,
     ws,
 )
 
@@ -42,11 +43,12 @@ api_router.include_router(rpc.router)
 api_router.include_router(trade.router)
 api_router.include_router(analytics.router)
 api_router.include_router(strategies.router)
-api_router.include_router(venues.router)
 api_router.include_router(summary.router)
 api_router.include_router(notifications.router)
 api_router.include_router(tokens.router)
-api_router.include_router(bots.router)
 api_router.include_router(observations.router)
 api_router.include_router(settings_center.router)
+api_router.include_router(chains.router)
+api_router.include_router(evm.router)
+api_router.include_router(copy.router)
 api_router.include_router(ws.router)

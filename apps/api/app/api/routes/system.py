@@ -24,14 +24,14 @@ router = APIRouter(prefix="/system", tags=["system"])
 # SOLANA_RPC_URL), and this environment may simply never have run others.
 KNOWN_SERVICES = [
     "data-solana",
-    "data-binance",
     "engine-solana-discovery",
     "engine-solana-migration",
     "engine-solana-momentum",
-    "engine-binance-futures",
     "decision-engine",
     "ml",
     "paper-trading",
+    "data-evm",
+    "copy-engine",
 ]
 
 

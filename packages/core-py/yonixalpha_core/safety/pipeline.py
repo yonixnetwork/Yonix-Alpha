@@ -62,30 +62,36 @@ async def rules_version(session: AsyncSession) -> str:
 
 async def load_controls(session: AsyncSession, redis: Redis, app_settings: Any, engine: str, strategy_mode: StrategyMode,
                         asset_id: str, now: datetime, approval: bool, live: bool = False,
-                        live_venue: str | None = None) -> tuple[Controls, Any, dict]:
+                        live_venue: str | None = None, source: str = "sniper") -> tuple[Controls, Any, dict]:
     """`live=True` sizes against the live wallet's book (synced from chain)
     instead of the engine's paper book; `live_venue` (binance / bybit /
     hyperliquid / mt5) against that exchange account's live book (synced
     from the exchange by services/execution-futures)."""
     safety, settings_meta = await store.load_settings(session, engine)
     if live_venue:
-        from yonixalpha_core.futures_live import get_live_account as futures_live_account
-
-        quote = store.DEFAULT_PAPER_ACCOUNTS.get(store.ENGINE_ACCOUNT.get(engine, ""), ("USDT", None))[0]
-        account = await futures_live_account(session, live_venue, quote)
-    elif live:
+        # Exchange (futures / FX) books were removed with the legacy venues.
+        raise ValueError(f"live venue {live_venue!r} is not supported")
+    if live:
         from yonixalpha_core.live_trading import get_live_account
 
         account = await get_live_account(session)
     else:
         account = await store.get_paper_account(session, store.ENGINE_ACCOUNT[engine])
     state = await store.account_state(session, account, asset_id, now, await kill_switch.is_engaged(redis))
+    # Operator switches (chain / sniper / copy / new entries); `source` is
+    # sniper for autonomous entries, manual for operator requests.
+    from yonixalpha_core.chains import controls as trading_controls
+
+    blocked = trading_controls.blocked_by(await trading_controls.load(session),
+                                          trading_controls.ENGINE_CHAIN.get(engine), source)
     invalid = store.settings_block_reason(engine, settings_meta)
     if invalid:
         from yonixalpha_core.notify import alert_error
 
         await alert_error("safety-gate", f"risk_settings_invalid:{engine}", invalid)
-        state = replace(state, trading_blocked_by=invalid)
+        blocked = f"{blocked}; {invalid}" if blocked else invalid
+    if blocked:
+        state = replace(state, trading_blocked_by=blocked)
     if live and not live_venue and state.available_balance is not None:
         # The live wallet keeps min_sol_reserve for fees and exits; enter_live
         # refuses any size above wallet - reserve, so size against that

@@ -27,7 +27,10 @@ services:
   data-solana:
     restart: unless-stopped
 
-  data-binance:
+  data-evm:
+    restart: unless-stopped
+
+  copy-engine:
     restart: unless-stopped
 
   engine-solana-discovery:
@@ -46,12 +49,6 @@ services:
     restart: unless-stopped
 
   paper-trading:
-    restart: unless-stopped
-
-  engine-binance-futures:
-    restart: unless-stopped
-
-  execution-futures:
     restart: unless-stopped
 
   reverse-proxy:
