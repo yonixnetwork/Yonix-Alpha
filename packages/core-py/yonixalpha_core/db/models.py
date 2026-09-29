@@ -1072,3 +1072,35 @@ class DeployerLaunch(Base):
     unique_buyers_60m: Mapped[int | None] = mapped_column(Integer, nullable=True)
     tracked_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class TradingControl(Base):
+    """Operator switches below the global kill switch (chains.controls):
+    chain:<chain>, sniper, copy, new_entries, launchpad:<key>. A missing row
+    means the default (enabled; launchpads follow chains.controls.DEFAULT_MODE)."""
+
+    __tablename__ = "trading_controls"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    mode: Mapped[str | None] = mapped_column(String(8), nullable=True)  # OFF | PAPER | LIVE (launchpads)
+    note: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    updated_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class LaunchpadCheck(Base):
+    """Evidence that a launchpad capability works on the real chain (one row
+    per check run: tools/launchpad_verify, the EVM discovery service, or a
+    confirmed order). Launchpad status is computed from these, never set."""
+
+    __tablename__ = "launchpad_checks"
+    __table_args__ = (Index("ix_launchpad_checks_lp_check_at", "launchpad", "check", "checked_at"),)
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    launchpad: Mapped[str] = mapped_column(String(32), nullable=False)
+    check: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(8), nullable=False)  # PASS | FAIL
+    evidence: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    source: Mapped[str] = mapped_column(String(48), nullable=False)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

@@ -382,3 +382,29 @@ async def test_ml_ablation_reports_not_run_then_the_stored_result(app, client, a
     await app.state.redis.set(ABLATION_KEY, json.dumps({"status": "EVALUATED", "samples": 900, "targets": {}}))
     r = (await client.get("/api/ml/ablation", headers=auth_headers)).json()
     assert r["status"] == "EVALUATED" and r["samples"] == 900
+
+
+async def test_launchpads_status_is_evidence_based_and_controls_are_audited(app, client, auth_headers):
+    from yonixalpha_core import kill_switch
+    r = (await client.get("/api/launchpads", headers=auth_headers)).json()
+    lp = {x["key"]: x for x in r["launchpads"]}
+    assert lp["noxa"]["status"] == "DISABLED" and "launches" in lp["noxa"]["why"]
+    assert lp["fourmeme"]["status"] == "UNVERIFIED" and lp["fourmeme"]["checks"]["QUOTE"] == {"status": "NOT_RUN"}
+    assert lp["pumpfun"]["checks"]["BUY"]["status"] == "FAIL"  # no confirmed LIVE buy in this empty system
+    assert {x["key"] for x in (await client.get("/api/launchpads?chain=bsc", headers=auth_headers)).json()["launchpads"]} == {"fourmeme", "flap"}
+    # an unverified launchpad cannot be switched LIVE
+    bad = await client.put("/api/controls/launchpad:fourmeme", json={"mode": "LIVE"}, headers=auth_headers)
+    assert bad.status_code == 409 and "cannot be set LIVE" in bad.json()["detail"]
+    ok = await client.put("/api/controls/chain:bsc", json={"enabled": False, "note": "test"}, headers=auth_headers)
+    assert ok.status_code == 200 and ok.json()["switches"]["chain:bsc"]["enabled"] is False
+    chains = (await client.get("/api/chains", headers=auth_headers)).json()["chains"]
+    assert {c["chain"]: c["enabled"] for c in chains} == {"solana": True, "bsc": False, "robinhood": True}
+    assert (await client.put("/api/controls/nonsense", json={"enabled": False}, headers=auth_headers)).status_code == 422
+    # emergency actions need an explicit confirmation phrase
+    assert (await client.post("/api/controls/emergency-exit", json={"confirm": "yes"}, headers=auth_headers)).status_code == 422
+    em = await client.post("/api/controls/emergency-exit", json={"confirm": "EMERGENCY EXIT", "reason": "test"}, headers=auth_headers)
+    assert em.status_code == 200 and em.json()["kill_switch"] == "ENGAGED" and await kill_switch.is_engaged(app.state.redis)
+    cp = await client.post("/api/controls/close-positions", json={"confirm": "CLOSE POSITIONS"}, headers=auth_headers)
+    assert cp.status_code == 200 and cp.json()["exit_requested"] == 0
+    detail = (await client.get("/api/chains/robinhood", headers=auth_headers)).json()
+    assert detail["evm_chain_id"] == 4663 and any(x["key"] == "pons_v2" for x in detail["launchpads"])
