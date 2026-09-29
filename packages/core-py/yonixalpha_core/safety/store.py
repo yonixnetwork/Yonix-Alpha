@@ -157,6 +157,20 @@ async def load_settings(session: AsyncSession, engine: str) -> tuple[SafetySetti
     return settings, {**meta, "clamp_notes": notes}
 
 
+def settings_block_reason(engine: str, meta: dict[str, Any] | None) -> str | None:
+    """Why new entries must not run on `engine`'s settings, or None. A
+    saved settings row that no longer validates is replaced by code
+    defaults in load_settings; trading on those defaults would silently
+    drop what the operator saved (e.g. an intel action set to NO_TRADE),
+    so new entries stop until the settings are saved again. Exits keep
+    running on the defaults' stops."""
+    if meta and meta.get("rejected_row"):
+        errs = "; ".join(meta.get("errors") or [])[:200]
+        return (f"saved risk settings for {engine} (row {meta['rejected_row']}) failed validation ({errs}); "
+                "new entries blocked until they are saved again on the Risk Settings page")
+    return None
+
+
 async def save_settings(
     session: AsyncSession, scope: str, data: dict[str, Any], user_id: uuid.UUID | None, note: str | None = None
 ) -> tuple[RiskSettingsVersion, list[str]]:

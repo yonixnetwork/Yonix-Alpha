@@ -84,6 +84,12 @@ async def load_controls(session: AsyncSession, redis: Redis, app_settings: Any, 
 
     blocked = trading_controls.blocked_by(await trading_controls.load(session),
                                           trading_controls.ENGINE_CHAIN.get(engine), source)
+    invalid = store.settings_block_reason(engine, settings_meta)
+    if invalid:
+        from yonixalpha_core.notify import alert_error
+
+        await alert_error("safety-gate", f"risk_settings_invalid:{engine}", invalid)
+        blocked = f"{blocked}; {invalid}" if blocked else invalid
     if blocked:
         state = replace(state, trading_blocked_by=blocked)
     if live and not live_venue and state.available_balance is not None:

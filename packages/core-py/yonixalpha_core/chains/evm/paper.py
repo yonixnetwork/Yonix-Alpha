@@ -41,7 +41,7 @@ from yonixalpha_core.chains.evm.settings import load as evm_settings_load
 from yonixalpha_core.db.models import EvmToken, PaperAccount, PaperPosition
 from yonixalpha_core.safety.models import AccountState, ExecutionQuote, FinalDecision, ManualOverrides, Observation, Venue
 from yonixalpha_core.safety.planning import plan_trade
-from yonixalpha_core.safety.store import add_timeline_event, load_settings
+from yonixalpha_core.safety.store import add_timeline_event, load_settings, settings_block_reason
 
 NATIVE = {"bsc": "BNB", "robinhood": "ETH"}
 STARTING_BALANCE = {"bsc": Decimal("1"), "robinhood": Decimal("0.3")}
@@ -202,6 +202,10 @@ async def build_plan(session: AsyncSession, adapter, row: EvmToken, size: Decima
     vol = Decimal((row.stats or {})["volatility"]) if (row.stats or {}).get("volatility") else None
 
     settings, _meta = await load_settings(session, engine_for(chain))
+    invalid = settings_block_reason(engine_for(chain), _meta)
+    if invalid:
+        d.block("RISK_SETTINGS_INVALID", invalid)
+        return
     settings = replace(settings, max_position_size_quote=spent, min_position_size_quote=spent / 10,
                        max_total_exposure_quote=max_total_exposure or cs.max_total_exposure, max_token_exposure_quote=spent,
                        max_daily_loss_quote=cs.max_daily_loss, min_liquidity_quote=cs.min_liquidity)

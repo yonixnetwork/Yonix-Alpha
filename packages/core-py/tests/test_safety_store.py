@@ -260,3 +260,29 @@ def test_active_paper_accounts_match_the_engines_that_create_them():
         for name in (evm_paper.engine_for(chain), f"evm_copy_{chain}"):
             assert store.ACTIVE_PAPER_ACCOUNTS[name] == (evm_paper.NATIVE[chain], evm_paper.STARTING_BALANCE[chain])
     assert not set(store.ACTIVE_PAPER_ACCOUNTS) & set(store.LEGACY_PAPER_ACCOUNTS)
+
+
+async def test_global_intel_action_reaches_every_solana_engine_unless_one_overrides_it(db):
+    g = settings_to_dict(SafetySettings())
+    await store.save_settings(db, "GLOBAL", {**g, "dump_cluster_high_action": "NO_TRADE"}, None)
+    await db.commit()
+    for engine in ("solana_fresh", "solana_migration", "solana_momentum"):
+        s, meta = await store.load_settings(db, engine)
+        assert s.dump_cluster_high_action == "NO_TRADE", engine
+        assert store.settings_block_reason(engine, meta) is None
+    # An engine's own saved value wins for that engine only, and is listed as an override.
+    await store.save_settings(db, "solana_momentum", {**g, "dump_cluster_high_action": "WARN"}, None)
+    await db.commit()
+    s, meta = await store.load_settings(db, "solana_momentum")
+    assert s.dump_cluster_high_action == "WARN" and "dump_cluster_high_action" in meta["overrides"]
+    assert (await store.load_settings(db, "solana_fresh"))[0].dump_cluster_high_action == "NO_TRADE"
+
+
+async def test_invalid_saved_settings_block_new_entries_instead_of_trading_on_defaults(db):
+    db.add(RiskSettingsVersion(scope="GLOBAL", version=1, settings={"min_stop_pct": "0.5", "max_stop_pct": "0.1",
+                                                                    "dump_cluster_high_action": "NO_TRADE"}))
+    await db.commit()
+    settings, meta = await store.load_settings(db, "solana_fresh")
+    assert settings.dump_cluster_high_action == "WARN"  # the defaults, which would silently drop NO_TRADE
+    reason = store.settings_block_reason("solana_fresh", meta)
+    assert reason and "failed validation" in reason and "new entries blocked" in reason
