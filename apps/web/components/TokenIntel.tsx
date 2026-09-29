@@ -4,6 +4,7 @@ import { Fragment, useState } from "react";
 import { Brain, Gauge, Layers, ShieldAlert, Users, Waves } from "lucide-react";
 import { PathView, RowAnalysis, type LedgerRow } from "@/components/LedgerReview";
 import MarketCap from "@/components/MarketCap";
+import ScannerIntel from "@/components/ScannerIntel";
 import { Empty, ErrorNotice, Loading, Section, Stat } from "@/components/ui";
 import { formatDate } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
@@ -77,6 +78,7 @@ export default function TokenIntel({ mint, liveIntel }: { mint: string; liveInte
           </>
         )}
       </Section>
+      {intel && <ScannerIntel intel={intel} />}
       <Section title="Decision history and what followed">
         {q.error ? <ErrorNotice error={q.error} /> : !q.data ? <Loading /> : rows.length === 0 ? <Empty>No recorded decision yet.</Empty> : (
           <div className="table-scroll">

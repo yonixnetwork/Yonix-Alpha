@@ -3,6 +3,7 @@
 import { Fragment } from "react";
 import { Gauge } from "lucide-react";
 import ConfirmButton from "@/components/ConfirmDialog";
+import FeatureAblation from "@/components/FeatureAblation";
 import LedgerReview from "@/components/LedgerReview";
 import OpportunityOutcomes from "@/components/OpportunityOutcomes";
 import { Empty, ErrorNotice, Loading, PageHeader, Section, Stat } from "@/components/ui";
@@ -150,6 +151,7 @@ export default function MLReviewPage() {
       {review.loading && !review.data && <Loading />}
       {/* Product focus is Solana memecoins: the futures model group is hidden (its backend is unchanged). */}
       {review.data?.filter((m) => !m.model.includes("futures")).map((m) => <ModelCard key={m.model} m={m} reload={review.reload} />)}
+      <FeatureAblation />
       <Section title="Predictions vs outcomes">
         {preds.data && preds.data.length === 0 ? (
           <Empty>No scored decisions yet.</Empty>
