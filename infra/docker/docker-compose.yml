@@ -127,19 +127,6 @@ services:
         condition: service_healthy
     networks: [yonixalpha]
 
-  data-binance:
-    build:
-      context: ../..
-      dockerfile: services/data-binance/Dockerfile
-    env_file:
-      - ../../.env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      api:
-        condition: service_healthy
-    networks: [yonixalpha]
-
   engine-solana-discovery:
     build:
       context: ../..
@@ -221,37 +208,6 @@ services:
     build:
       context: ../..
       dockerfile: services/paper-trading/Dockerfile
-    env_file:
-      - ../../.env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      api:
-        condition: service_healthy
-    networks: [yonixalpha]
-
-  engine-binance-futures:
-    build:
-      context: ../..
-      dockerfile: services/engine-binance-futures/Dockerfile
-    env_file:
-      - ../../.env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      api:
-        condition: service_healthy
-    networks: [yonixalpha]
-
-  # LIVE execution for the futures/FX strategies (Binance, Bybit,
-  # Hyperliquid, MT5 bridge). With the environment locks closed it only
-  # reports "disabled" and cancels any pending futures order.
-  execution-futures:
-    build:
-      context: ../..
-      dockerfile: services/execution-futures/Dockerfile
     env_file:
       - ../../.env
     depends_on:

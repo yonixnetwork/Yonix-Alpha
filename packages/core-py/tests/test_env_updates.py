@@ -18,10 +18,12 @@ def test_only_provider_keys_are_editable():
     assert env_updates.validate("HELIUS_API_KEY", "abc-123") is None
     assert env_updates.validate("HELIUS_API_KEY", "") is None  # clearing is allowed
     for locked in ("WALLET_PRIVATE_KEY", "TRADING_ENABLED", "LIVE_TRADING_ENABLED", "PAPER_TRADING", "ADMIN_PASSWORD_HASH",
-                   "JWT_SECRET", "BINANCE_TESTNET", "HYPERLIQUID_API_WALLET_PRIVATE_KEY", "DATABASE_URL"):
+                   "JWT_SECRET", "EVM_WALLET_PRIVATE_KEY", "EVM_WALLET_ADDRESS", "DATABASE_URL"):
         err = env_updates.validate(locked, "x")
         assert err and "server only" in err, locked
-    assert "cannot be changed" in env_updates.validate("SOMETHING_ELSE", "x")
+    # Keys of the removed futures / FX venues are no longer settable at all.
+    for gone in ("SOMETHING_ELSE", "BINANCE_API_KEY", "BYBIT_API_KEY", "HYPERLIQUID_API_WALLET_PRIVATE_KEY", "MT5_BRIDGE_URL"):
+        assert "cannot be changed" in env_updates.validate(gone, "x"), gone
 
 
 def test_values_are_checked():
@@ -32,7 +34,8 @@ def test_values_are_checked():
     assert env_updates.validate("SOLANA_WS_URL", "wss://mainnet.helius-rpc.com/?api-key=k") is None
     assert "number" in env_updates.validate("TELEGRAM_CHAT_ID", "abc")
     assert env_updates.validate("TELEGRAM_CHAT_ID", "-1003701096088") is None
-    assert "0x" in env_updates.validate("HYPERLIQUID_ACCOUNT_ADDRESS", "0x12")
+    assert env_updates.validate("BSC_RPC_URLS", "https://a.example,https://b.example") is None
+    assert env_updates.validate("BSC_RPC_URLS", "https://a.example,http://b.example")
     assert env_updates.validate_all({}) == ["no changes given"]
 
 

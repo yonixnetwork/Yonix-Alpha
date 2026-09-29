@@ -46,27 +46,24 @@ export default function StrategyPage({ name, icon, children, positionsEngine, de
   });
   if (error) return <ErrorNotice error={error} />;
   if (!s) return <Loading />;
-  const futures = s.kind === "futures";
   return (
     <div>
       <PageHeader title={s.label} icon={icon} subtitle={s.account ? `Paper account: ${s.account}` : undefined} />
       <StrategyPanel s={s} onChange={setData} />
       {SOLANA_SOURCE[s.name] && <ManualBuyByMint engine={s.name} source={SOLANA_SOURCE[s.name]} />}
       {children}
-      {s.kind !== "analytics" && s.kind !== "grid" && (
+      {(
         <>
           <Section title="Positions">
-            <PositionsTable engine={positionsEngine ?? (futures ? undefined : s.name)} strategy={futures ? s.name : undefined} />
+            <PositionsTable engine={positionsEngine ?? s.name} />
           </Section>
           <Section title="Safety-gate decisions">
-            <DecisionsTable engine={decisionsEngine ?? (futures ? undefined : s.name)} strategy={futures ? s.name : undefined} />
+            <DecisionsTable engine={decisionsEngine ?? s.name} />
           </Section>
           <Section title="Paper performance">
             <PerformancePanel
-              account={futures ? undefined : s.account ?? undefined}
-              strategy={futures ? s.name : undefined}
-              engine={futures ? undefined : s.name}
-              hideEmpty={futures}
+              account={s.account ?? undefined}
+              engine={s.name}
             />
           </Section>
         </>

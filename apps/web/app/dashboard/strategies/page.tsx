@@ -11,9 +11,6 @@ const HREF: Record<string, string> = {
   solana_fresh: "/dashboard/solana/fresh",
   solana_migration: "/dashboard/solana/migrated",
   solana_momentum: "/dashboard/solana/momentum",
-  binance_futures: "/dashboard/venues/binance",
-  bybit_futures: "/dashboard/venues/bybit",
-  hyperliquid_perps: "/dashboard/venues/hyperliquid",
 };
 
 export default function StrategiesPage() {
@@ -23,7 +20,7 @@ export default function StrategiesPage() {
   });
   return (
     <div>
-      <PageHeader title="Strategies" icon={<Layers size={20} aria-hidden />} subtitle="Every strategy and venue, its mode, status and paper results." />
+      <PageHeader title="Strategies" icon={<Layers size={20} aria-hidden />} subtitle="The Solana strategies: mode, status and paper results. BSC and Robinhood Chain are configured under Chains." />
       <ErrorNotice error={error} />
       {loading && !data && <Loading />}
       {data && (
@@ -61,7 +58,7 @@ export default function StrategiesPage() {
                       <span className="muted">n/a</span>
                     )}
                   </td>
-                  <td>{s.open_positions ?? (s.grid_sessions?.filter((g) => g.status === "running").length ?? "—")}</td>
+                  <td>{s.open_positions ?? "—"}</td>
                   <td>{s.trades ?? "—"}</td>
                   <td>{s.trades !== undefined ? <Pct value={s.win_rate} /> : "—"}</td>
                   <td>{s.total_pnl !== undefined ? <Money value={s.total_pnl} currency={s.currency} /> : "—"}</td>

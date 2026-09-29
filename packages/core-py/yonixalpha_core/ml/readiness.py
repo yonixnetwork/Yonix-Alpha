@@ -33,7 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from yonixalpha_core.db.models import MLFeatureSnapshot, ModelVersion, OpportunityOutcome
 from yonixalpha_core.ml import registry
-from yonixalpha_core.ml.gate_features import DRIFT_FLAG_PREFIX, ENGINES_FOR_MODEL, FEATURE_VERSION
+from yonixalpha_core.ml.gate_features import ACTIVE_MODELS, DRIFT_FLAG_PREFIX, ENGINES_FOR_MODEL, FEATURE_VERSION
 
 # Same bars as services/ml (gate_ml.MIN_SAMPLES, train.MIN_ACTIVATION_AUC).
 MIN_LABELED_SAMPLES = 50
@@ -101,7 +101,8 @@ async def model_readiness(session: AsyncSession, redis, min_confidence_for: dict
     """One entry per gate model. `min_confidence_for`: engine -> the
     effective min_ml_confidence setting of that engine."""
     out = []
-    for name, engines in ENGINES_FOR_MODEL.items():
+    for name in ACTIVE_MODELS:
+        engines = ENGINES_FOR_MODEL[name]
         champion = await registry.get_active_model_row(session, name)
         challenger = (await session.execute(select(ModelVersion).where(
             ModelVersion.name == name, ModelVersion.status == "challenger")

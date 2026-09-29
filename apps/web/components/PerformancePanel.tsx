@@ -75,17 +75,16 @@ export default function PerformancePanel({ account: fixedAccount, strategy: fixe
           <select value={account} onChange={(e) => setAccount(e.target.value)} aria-label="Account">
             <option value="">All accounts</option>
             <option value="solana">Solana (SOL)</option>
-            <option value="binance_futures">Binance futures (USDT)</option>
-            <option value="bybit_futures">Bybit futures (USDT)</option>
-            <option value="hyperliquid">Hyperliquid (USDC)</option>
+            <option value="copy_solana">Solana copy trading (SOL)</option>
+            <option value="evm_bsc">BSC (BNB)</option>
+            <option value="evm_copy_bsc">BSC copy trading (BNB)</option>
+            <option value="evm_robinhood">Robinhood Chain (ETH)</option>
+            <option value="evm_copy_robinhood">Robinhood Chain copy trading (ETH)</option>
           </select>
         )}
         <select value={venue} onChange={(e) => setVenue(e.target.value)} aria-label="Venue">
           <option value="">All venues</option>
           <option value="solana">Solana</option>
-          <option value="binance">Binance</option>
-          <option value="bybit">Bybit</option>
-          <option value="hyperliquid">Hyperliquid</option>
         </select>
         <label className="inline-label">
           Since <input type="date" value={since} onChange={(e) => setSince(e.target.value)} />

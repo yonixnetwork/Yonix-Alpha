@@ -43,11 +43,6 @@ services:
       - ../../services/data-solana/app:/app/app
       - ../../packages/core-py:/packages/core-py
 
-  data-binance:
-    volumes:
-      - ../../services/data-binance/app:/app/app
-      - ../../packages/core-py:/packages/core-py
-
   engine-solana-discovery:
     volumes:
       - ../../services/engine-solana-discovery/app:/app/app
@@ -76,14 +71,4 @@ services:
   paper-trading:
     volumes:
       - ../../services/paper-trading/app:/app/app
-      - ../../packages/core-py:/packages/core-py
-
-  engine-binance-futures:
-    volumes:
-      - ../../services/engine-binance-futures/app:/app/app
-      - ../../packages/core-py:/packages/core-py
-
-  execution-futures:
-    volumes:
-      - ../../services/execution-futures/app:/app/app
       - ../../packages/core-py:/packages/core-py

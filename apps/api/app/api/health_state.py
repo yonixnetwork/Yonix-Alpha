@@ -1,8 +1,7 @@
 """Connection monitoring: one state per dependency, derived only from
 evidence — a live probe (Postgres, Redis), a service heartbeat with a TTL,
-the per-venue success/failure record services put in their heartbeats, the
-execution workers' readiness reports, or the external bots' cached
-status. Nothing is ever assumed CONNECTED.
+the per-venue success/failure record services put in their heartbeats.
+Nothing is ever assumed CONNECTED.
 
 CONNECTED       recent success, no current failures
 DEGRADED        working but with failures / partial outage
@@ -15,7 +14,6 @@ NOT CONFIGURED  the credentials/URL it needs are not set (or live
 UNKNOWN         configured, but nothing observed yet
 """
 
-import json
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -26,16 +24,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from yonixalpha_core.db.models import SystemEvent
 from yonixalpha_core.events import read_heartbeats
-from yonixalpha_core.ml.gate_features import DRIFT_FLAG_PREFIX, FEATURES_FOR_MODEL
-from yonixalpha_core import external_bots, futures_live
+from yonixalpha_core.ml.gate_features import ACTIVE_MODELS, DRIFT_FLAG_PREFIX
 from yonixalpha_core.solana import pump_stream, pumpportal_ws
 
-SERVICES = ["data-solana", "data-binance", "engine-solana-discovery", "engine-solana-migration", "engine-solana-momentum",
-            "engine-binance-futures", "decision-engine", "ml", "paper-trading", "execution-futures"]
+SERVICES = ["data-solana", "engine-solana-discovery", "engine-solana-migration", "engine-solana-momentum",
+            "decision-engine", "ml", "paper-trading", "data-evm", "copy-engine"]
 # Started only with `docker compose --profile legacy` (superseded by the
 # discovery funnel in engine-solana-discovery).
 LEGACY_SERVICES = {"engine-solana-migration", "engine-solana-momentum"}
-VENUE_REPORTERS = ("decision-engine", "paper-trading", "execution-futures")
+VENUE_REPORTERS = ("decision-engine", "paper-trading")
 PUMPPORTAL_STALE_SECONDS = 120
 PUMPPORTAL_OFFLINE_SECONDS = 600
 MIN_COVERAGE_SAMPLE = 20
@@ -187,49 +184,13 @@ async def connections(db: AsyncSession, redis: Redis, settings: Any) -> list[dic
                     "WALLET_PRIVATE_KEY not set: Local Transaction API unused" if not wallet
                     else "Local Transaction API needs no key; evidence only from live orders (see Live Execution)"))
 
-    for venue in ("binance", "bybit", "hyperliquid", "jupiter", "mt5"):
-        records = [((hbs.get(s) or {}).get("detail") or {}).get("venues", {}).get(venue) for s in VENUE_REPORTERS]
-        state, detail, extra = _venue_state([r for r in records if r], now)
-        if venue == "mt5" and not getattr(settings, "MT5_BRIDGE_URL", None):
-            state, detail = NOT_CONFIGURED, "MT5_BRIDGE_URL / MT5_BRIDGE_TOKEN not set"
-        if venue == "jupiter":
-            detail += " (api.jup.ag with JUPITER_API_KEY)" if getattr(settings, "JUPITER_API_KEY", None) else \
-                " (keyless lite-api.jup.ag, deprecated by Jupiter)"
-        out.append(conn(venue, "exchange" if venue != "jupiter" else "solana", state, detail, **extra))
+    records = [((hbs.get(s) or {}).get("detail") or {}).get("venues", {}).get("jupiter") for s in VENUE_REPORTERS]
+    state, detail, extra = _venue_state([r for r in records if r], now)
+    detail += " (api.jup.ag with JUPITER_API_KEY)" if getattr(settings, "JUPITER_API_KEY", None) else \
+        " (keyless lite-api.jup.ag, deprecated by Jupiter)"
+    out.append(conn("jupiter", "solana", state, detail, **extra))
 
-    # Live execution per venue: the execution-futures worker's own readiness report.
-    for venue in ("binance", "bybit", "hyperliquid", "mt5"):
-        raw = await redis.get(futures_live.READY_KEY.format(venue=venue))
-        r = json.loads(raw) if raw else None
-        if r is None:
-            state, detail = "UNKNOWN", "execution-futures has not reported (service not running?)"
-        elif r["status"] in ("not_configured", "disabled"):
-            state, detail = NOT_CONFIGURED, r.get("reason") or r["status"]
-        elif r["status"] == "unavailable":
-            state, detail = "UNAVAILABLE", r.get("reason") or "unavailable"
-        else:
-            age = _age(r.get("at"), now)
-            if age is not None and age > VENUE_STALE_SECONDS:
-                state, detail = "STALE", f"last report {int(age)} s ago"
-            elif r["status"] == "ready":
-                state, detail = "CONNECTED", f"balance {r.get('balance')} {r.get('quote') or ''} synced {int(age or 0)} s ago"
-            else:
-                state, detail = "DEGRADED", r.get("reason") or r["status"]
-        out.append(conn(f"{venue}_execution", "execution", state, detail))
-
-    for name, bot in external_bots.BOTS.items():
-        if not external_bots.configured(settings, bot):
-            out.append(conn(f"control_api:{name}", "control_api", NOT_CONFIGURED, f"{bot.url_setting} not set"))
-            continue
-        st = await external_bots.cached(redis, name)
-        if st is None:
-            out.append(conn(f"control_api:{name}", "control_api", "UNKNOWN", "not polled yet (execution-futures not running?)"))
-        else:
-            out.append(conn(f"control_api:{name}", "control_api", st["state"],
-                            st.get("error") or f"running={st.get('running')} position={'yes' if st.get('position') else 'no'}",
-                            checked_at=st.get("checked_at")))
-
-    drift = [n for n in FEATURES_FOR_MODEL if await redis.exists(f"{DRIFT_FLAG_PREFIX}{n}")]
+    drift = [n for n in ACTIVE_MODELS if await redis.exists(f"{DRIFT_FLAG_PREFIX}{n}")]
     ml_hb = next(c for c in out if c["name"] == "ml")
     if drift:
         out.append(conn("ml_models", "ml", "DEGRADED", f"drift detected: {', '.join(drift)} (ignored by decisions)"))

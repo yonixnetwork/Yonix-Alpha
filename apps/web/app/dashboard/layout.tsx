@@ -112,12 +112,12 @@ function TopbarSummary() {
     <>
       <div className="balances" aria-label="Paper balances">
         {data.accounts
-          .filter((a) => a.name === "solana" || a.name === "live_solana")
+          .filter((a) => ["solana", "live_solana", "evm_bsc", "evm_robinhood"].includes(a.name))
           .map((a) => {
             const pnl = Number(a.realized_pnl_today);
             return (
               <span key={a.name} className="balance" title={`${a.name}: available ${a.available} ${a.currency}`}>
-                <span className="muted">{a.name.replace("_futures", "")}</span> {Number(a.balance).toLocaleString(undefined, { maximumFractionDigits: 3 })}{" "}
+                <span className="muted">{a.name}</span> {Number(a.balance).toLocaleString(undefined, { maximumFractionDigits: 3 })}{" "}
                 {a.currency}
                 <span className={pnl > 0 ? "pos" : pnl < 0 ? "neg" : "muted"}>
                   {" "}

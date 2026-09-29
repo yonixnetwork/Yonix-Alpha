@@ -270,3 +270,103 @@ Landing is "not applicable (paper)".
 - API validation and audit.
 
 **NOT VERIFIED:** any of this against real target wallets on chain.
+
+## 8. Phase 5 — providers, wallet, navigation (IMPLEMENTED; EVM parts NOT VERIFIED on chain)
+
+**Provider settings** (Settings, Providers):
+- New groups:
+  - BSC and Robinhood Chain RPC (`BSC_RPC_URLS`, `ROBINHOOD_RPC_URLS`, comma-separated, editable from the dashboard, applied to `.env` by the host helper);
+  - Honeypot.is;
+  - EVM wallet.
+- TEST CONNECTION:
+  - EVM RPC: every configured URL (or the public defaults), with `eth_chainId` checked against 56 / 4663, then `eth_blockNumber`. A wrong chain fails. Keys in URLs are redacted from every result.
+  - Honeypot.is: a probe request for WBNB. An unavailable API is reported as unavailable and is never read as "safe".
+
+**Unified wallet:**
+- Solana: existing, unchanged.
+- EVM: one account for both chains (`EVM_WALLET_ADDRESS`, optional `EVM_WALLET_PRIVATE_KEY`, server-only, never returned by the API).
+- Status values:
+  - `WATCH_ONLY`: address only;
+  - `OK`: a key that derives the address;
+  - `MISMATCH`;
+  - `INVALID`;
+  - `NOT_CONFIGURED`.
+- BNB / ETH balances are read on demand.
+- EVM LIVE execution is **not implemented**, so the key is never used to sign.
+
+**Dashboard:**
+- Brand YONIXALPHA; no emojis; lucide icons.
+- Navigation groups: Chains, Market, Wallet intelligence, Trading, ML, Risk, System.
+- Chain pages (`/dashboard/chains/{solana,bsc,robinhood}`).
+- EVM token / position tables with PnL colours: green above zero, red below zero, neutral at zero; cost is never coloured.
+- Copy Trading, Smart Wallets, the EVM wallet panel.
+- The top bar shows paper balances for Solana, BSC and Robinhood Chain.
+
+## 9. Legacy removal (DONE in code; archive branch `archive/legacy-futures-forex-grid-2026-09-29`)
+
+The archive branch (commit f3d833b) holds the full pre-removal tree. It was pushed before anything was deleted.
+
+**Removed from the active app** (deleted, not hidden):
+
+| Area | Removed |
+|---|---|
+| Services | `data-binance`, `engine-binance-futures`, `execution-futures`, `mt5-bridge`, plus their compose entries (base, dev, prod) and CI matrix rows |
+| Core | `execution/` (Binance, Bybit, Hyperliquid, MT5 providers), `futures_live`, `grid_live`, `external_bots`, `venues/{binance_public,bybit,hyperliquid,mt5,registry}`, `strategies/{meta_muse,confluence,grid,gold_btc,gold_btc_trend,indicators}`, the Binance / Bybit / Hyperliquid / MT5 / control-API settings, provider tests and editable keys, the `hyperliquid` extra |
+| Decision engine | `futures_eval` and the futures loop |
+| Paper trading | `grid_engine`, the grid step, and the futures order-book pricing branch |
+| API | `/api/venues/*`, `/api/bots/*`, `/api/analytics/gold-btc`, `/api/live/futures*`, the grid start / stop routes, the futures / FX strategies, their settings groups, health connections, risk scopes and config-revision route |
+| Web | Venues and Bots pages, FuturesLive, GridSection and GoldBtcSection, the futures options in the filters, risk scopes and performance panel |
+| Scripts | the legacy keys in `set-keys.sh` and `.env.example` |
+
+**Kept deliberately:**
+- `venues/common.py`: Solana uses its call record and health snapshot.
+- The engine-generic tables of the safety gate (`ENGINE_DEFAULTS`, `SHORTABLE_ENGINES`, the legacy accounts in `store.LEGACY_PAPER_ACCOUNTS`):
+  - they hold no live connection to any venue;
+  - historic rows still resolve;
+  - they keep the gate's generic SHORT / order-book tests.
+- The DB tables and rows, which are history. The removal has no migration.
+- Legacy paper accounts, the `gate_futures` model and legacy engines are never listed (`ACTIVE_PAPER_ACCOUNTS`, `ACTIVE_MODELS`). The position loop and CLOSE POSITIONS skip legacy positions (`store.LEGACY_ENGINES`).
+
+**Tests:**
+- Deleted with the feature: futures_eval, futures_live, execution providers, venues, grid, the exchange provider tests, external bots, the futures live API.
+- Rewritten on the active app rather than dropped:
+  - the ML champion invariants now run on the Solana gate (the champion cannot bypass the gate; low confidence only makes it WAIT; a drifted model is ignored);
+  - catalog, config validation, provider tests, env keys, performance / summary / health / strategies / ML review API tests.
+- New assertions check that every removed endpoint returns 404 and that removed keys cannot be set.
+
+**Deploy note:** `scripts/deploy.sh` now runs `up -d --remove-orphans`, so the removed containers are stopped instead of left running old code.
+
+## 10. Final requirement matrix (2026-09-29)
+
+Column meanings:
+- **Implemented:** code exists in the active app.
+- **Tested:** automated tests in this repo, run against Postgres and Redis, with chain nodes faked from published ABIs.
+- **Verified:** proven against the real system. For Solana that is production; for BSC and Robinhood Chain nothing is verified yet. This sandbox has no RPC egress to those chains, and `tools/launchpad_verify` has not been run on the server.
+
+| Requirement (spec §) | Implemented | Tested | Verified | Evidence | Remaining issue |
+|---|---|---|---|---|---|
+| Solana / Pump.fun / PumpSwap preserved (0, 5) | YES (unchanged path; adapters wrap it) | YES: decision-engine, paper-trading and core suites green | VERIFIED in production before this work; NOT VERIFIED after this branch (not deployed) | gate_eval, gate_manage and e2e paper tests; `gate_manage` excludes `evm_%` and legacy engines | Deploy and watch one cycle |
+| Chain / launchpad adapters behind interfaces (3) | YES | YES | NOT VERIFIED on BSC / Robinhood | `chains/base.py`, `chains/registry.py`, `chains/evm/*`, `test_evm_chains.py` | — |
+| Launchpads Four.meme, Flap (BSC); Pons V1/V2, Odyssey (Robinhood) (6–7) | YES (discovery, events, quotes, migration) | YES, against fake nodes built from published ABIs / addresses | NOT VERIFIED | adapters + `tools/launchpad_verify` | Run `python -m yonixalpha_core.tools.launchpad_verify` on the server; any ABI or address mismatch shows up there |
+| NOXA (7) | Registered DISABLED (no launches since block ~5.25M) | YES | n/a | registry + API test | — |
+| Verification states LIVE / PAPER ONLY / DEGRADED / UNVERIFIED / DISABLED (4, 8, 57) | YES, computed from recorded evidence; checks expire | YES | Status logic tested; the evidence itself is NOT VERIFIED (no on-chain run) | `chains/verification.py`; API refuses LIVE on an unverified launchpad | EVM launchpads stay UNVERIFIED until the server run records evidence |
+| Token categories FRESH / MIGRATED / MOMENTUM / OTHER (9–12) | YES (EVM `categorize`; Solana existing engines) | YES | NOT VERIFIED on EVM | `chains/evm/store.py` | — |
+| Migration keeps position identity (12) | YES (same PaperPosition; venue route switched, `venue_switched` timeline event) | YES | NOT VERIFIED on EVM | `paper.manage_position` | — |
+| EVM safety / sellability, honeypot (13–16) | YES: executable buy+sell quote round trip, ERC-20 / proxy / owner checks, Honeypot.is as enrichment only; unavailable ≠ safe | YES | NOT VERIFIED | `chains/evm/safety.py` | Tax / max-tx reads depend on each token's contract; unknown values block automatic entries |
+| Wallet profiles, scoring, labels; no "best", no ranking (17–27) | YES | YES | NOT VERIFIED on real wallets | `wallet_profiles.py`, Smart Wallets page | Solana profiles come from `launch_buyers` only (a narrower view, stated per profile) |
+| Copy trading on 3 chains, modes, chase guard, partial sells, latency (28–32, 55–56) | YES, PAPER only | YES | NOT VERIFIED | `services/copy-engine`, Copy Trading page | Solana partial sells below 50 % are not mirrored (recorded as such); EVM LIVE copy is not implemented |
+| "Smart wallet bought → auto BUY" forbidden | YES: every copy passes the gate or EVM evidence, the risk planner and the chase guard | YES | — | copy-engine tests (no gate approval → no copy) | — |
+| Execution stages / latency (33–37) | YES (Solana existing; EVM paper stages) | YES | Solana VERIFIED earlier; EVM NOT VERIFIED | latency medians in `/api/copy/events` | — |
+| EVM LIVE execution (37) | **NO: NOT COMPLETE** | — | — | wallet status only (watch-only) | Needs a signer, nonce management, tx monitoring and a verified buy+sell per launchpad, explicitly authorized |
+| PnL colours (50) | YES (green > 0, red < 0, neutral 0; cost never coloured) | Build + manual screenshot check in P5b | — | `EvmMarkets.tsx` | — |
+| ML contribution 0 until validated (41–44) | YES (champion only after promotion; ML can only add caution; drift → ignored) | YES (champion invariants now on the Solana gate) | VERIFIED in production (rules only) | `test_ml_champion.py`, `/api/ml/readiness` | EVM rows are not ML features yet |
+| Paper uses the same pipeline as live (45) | YES for Solana; EVM uses the shared `plan_trade` / `apply_step` | YES | — | — | — |
+| Additive DB only (46) | YES (0021–0023 additive; legacy removal has no migration) | `alembic upgrade head` + `alembic check` clean; downgrade / upgrade cycle on 0021–0023 | — | CI migration job | — |
+| 24/7, restart reconciliation, no duplicate trades (47–48) | YES: persisted cursors, unique `(tx, log index)`, unique copy events, partial unique indexes on open EVM / copy positions | YES | NOT VERIFIED on EVM | models + tests | — |
+| Rebrand YONIXALPHA, dark terminal style, real icons, no emojis, navigation (49–54) | YES | Build + lint + screenshots (P5b) | — | layout.tsx | — |
+| Top bar with real data | YES (mode, kill switch, Solana / BSC / Robinhood paper balances, alerts) | build | — | layout.tsx | — |
+| Settings center, provider TEST CONNECTION, runtime settings (58–59) | YES (BSC / Robinhood RPC, Honeypot.is, EVM wallet added) | YES | NOT VERIFIED against the real providers from here | `provider_tests.py` | 0x / MadeOnSol / Nansen not added (no key, no verified use) |
+| Unified wallet (Solana + one EVM account) (60, 63) | YES; EVM watch-only; key server-only, never returned | YES (key never in any response) | NOT VERIFIED on chain (balances) | `/api/evm/wallet` | — |
+| Legacy removal with archive branch (62) | YES (deleted, not hidden) | YES (all suites; removed endpoints return 404) | — | branch `archive/legacy-futures-forex-grid-2026-09-29` | Old containers are stopped only when deployed with `--remove-orphans` (now in `deploy.sh`) |
+| Kill switches GLOBAL / SOLANA / BSC / ROBINHOOD / SNIPER / COPY / NEW ENTRIES / CLOSE POSITIONS / EMERGENCY EXIT / PAPER-LIVE (64) | YES | YES | NOT VERIFIED in production (not deployed) | `chains/controls.py`, `/api/controls/*` | — |
+| Tests / acceptance / final matrix (65–67) | YES | see the suite counts in the final report | — | CI | — |

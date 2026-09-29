@@ -39,6 +39,11 @@ FEATURES_FOR_MODEL = {
 ENGINES_FOR_MODEL: dict[str, list[str]] = {}
 for _engine, _model in MODEL_FOR_ENGINE.items():
     ENGINES_FOR_MODEL.setdefault(_model, []).append(_engine)
+# gate_futures belongs to the removed futures / FX engines: its functions
+# still accept the name (history, tests), but the ML loop, the ML review
+# and readiness list only the models of the active app.
+LEGACY_MODELS = {"gate_futures"}
+ACTIVE_MODELS = [m for m in FEATURES_FOR_MODEL if m not in LEGACY_MODELS]
 
 
 def _num(v: Any) -> float | None:

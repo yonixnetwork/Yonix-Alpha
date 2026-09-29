@@ -51,11 +51,6 @@ PROVIDERS = {
     "jupiter": ("Jupiter", ["jupiter"], ["JUPITER_API_KEY"], [], []),
     "wallet": ("Wallet (Solana)", [], ["WALLET_PRIVATE_KEY"], ["WALLET_PUBLIC_KEY"], []),
     "evm_wallet": ("Wallet (EVM: BSC + Robinhood Chain)", [], ["EVM_WALLET_PRIVATE_KEY"], ["EVM_WALLET_ADDRESS"], []),
-    "binance": ("Binance", ["binance"], ["BINANCE_API_KEY", "BINANCE_API_SECRET"], ["BINANCE_TESTNET"], []),
-    "bybit": ("Bybit", ["bybit"], ["BYBIT_API_KEY", "BYBIT_API_SECRET"], ["BYBIT_TESTNET"], []),
-    "hyperliquid": ("Hyperliquid", ["hyperliquid"], ["HYPERLIQUID_API_WALLET_PRIVATE_KEY"],
-                    ["HYPERLIQUID_ACCOUNT_ADDRESS", "HYPERLIQUID_TESTNET"], []),
-    "mt5": ("MT5 / Forex bridge", ["mt5"], ["MT5_BRIDGE_TOKEN"], [], ["MT5_BRIDGE_URL"]),
     "telegram": ("Notifications (Telegram)", ["telegram"], ["TELEGRAM_BOT_TOKEN"], ["TELEGRAM_CHAT_ID"], []),
     "application": ("General", [], ["JWT_SECRET", "ADMIN_PASSWORD_HASH"],
                     ["APP_ENV", "LOG_LEVEL", "PUBLIC_DOMAIN", "TRADING_ENABLED", "LIVE_TRADING_ENABLED", "PAPER_TRADING"], []),
@@ -68,14 +63,14 @@ SECTIONS = [
                "emergency-exit thresholds, TP R-multiples / fractions, trailing"},
     {"section": "Modes", "where": "/dashboard/settings", "covers": "global mode PAPER / MANUAL / LIVE"},
     {"section": "Strategies", "where": "/dashboard/strategies",
-     "covers": "per-strategy mode and parameters (Meta Muse, Confluence Matrix, Hyperliquid Grid, Gold vs BTC, Solana), "
+     "covers": "per-strategy mode and parameters (Pump.fun fresh, migrated, momentum), "
                "manual TP1-3 / stop / trailing overrides"},
     {"section": "Live execution", "where": "/dashboard/live",
-     "covers": "Solana slippage, priority fees, SOL reserve; futures leverage cap, free-balance floor, fill deviation"},
+     "covers": "Solana slippage, priority fees, SOL reserve"},
     {"section": "Word filters & rules", "where": "/dashboard/rules", "covers": "blacklist, custom rules"},
     {"section": "ML", "where": "/dashboard/ml", "covers": "models, champion / challenger, drift"},
     {"section": "Provider API keys", "where": "/dashboard/settings",
-     "covers": "Helius, RPC/WS URLs, Jupiter, PumpPortal, Binance, Bybit, Hyperliquid address, MT5, Telegram — "
+     "covers": "Helius, Solana RPC/WS URLs, BSC / Robinhood Chain RPC URLs, Jupiter, PumpPortal, Telegram — "
                "write-only, never displayed; applied to .env by the server helper"},
     {"section": "Server-only secrets", "where": "server: scripts/set-keys.sh",
      "covers": "wallet private keys, admin password, JWT/DB/Redis secrets, testnet flags, trading locks"},

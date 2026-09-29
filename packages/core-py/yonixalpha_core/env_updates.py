@@ -39,13 +39,6 @@ EDITABLE_KEYS: dict[str, str] = {
     "SOLANA_WS_BACKUP_URL": "url",
     "JUPITER_API_KEY": "secret",
     "PUMPPORTAL_API_KEY": "secret",
-    "BINANCE_API_KEY": "secret",
-    "BINANCE_API_SECRET": "secret",
-    "BYBIT_API_KEY": "secret",
-    "BYBIT_API_SECRET": "secret",
-    "HYPERLIQUID_ACCOUNT_ADDRESS": "text",
-    "MT5_BRIDGE_URL": "url",
-    "MT5_BRIDGE_TOKEN": "secret",
     "TELEGRAM_BOT_TOKEN": "secret",
     "TELEGRAM_CHAT_ID": "text",
     "BSC_RPC_URLS": "url_list",
@@ -53,10 +46,9 @@ EDITABLE_KEYS: dict[str, str] = {
 }
 
 # Never editable from the dashboard, whatever a request says.
-SERVER_ONLY = ("WALLET_PRIVATE_KEY", "WALLET_PUBLIC_KEY", "EVM_WALLET_PRIVATE_KEY", "EVM_WALLET_ADDRESS", "HYPERLIQUID_API_WALLET_PRIVATE_KEY", "ADMIN_PASSWORD_HASH",
+SERVER_ONLY = ("WALLET_PRIVATE_KEY", "WALLET_PUBLIC_KEY", "EVM_WALLET_PRIVATE_KEY", "EVM_WALLET_ADDRESS", "ADMIN_PASSWORD_HASH",
                "ADMIN_USERNAME", "JWT_SECRET", "POSTGRES_PASSWORD", "DATABASE_URL", "REDIS_PASSWORD", "REDIS_URL",
-               "TRADING_ENABLED", "LIVE_TRADING_ENABLED", "PAPER_TRADING", "BINANCE_TESTNET", "BYBIT_TESTNET",
-               "HYPERLIQUID_TESTNET", "LIVE_SMOKE_TEST_ENABLED", "LIVE_SMOKE_TEST_MAX_SOL", "LIVE_SMOKE_TEST_MAX_TRADES")
+               "TRADING_ENABLED", "LIVE_TRADING_ENABLED", "PAPER_TRADING", "LIVE_SMOKE_TEST_ENABLED", "LIVE_SMOKE_TEST_MAX_SOL", "LIVE_SMOKE_TEST_MAX_TRADES")
 
 MAX_VALUE_LENGTH = 2048
 REQUEST_PREFIX, RESULT_PREFIX = "req-", "res-"
@@ -84,8 +76,6 @@ def validate(key: str, value: object) -> str | None:
         return f"{key}: comma-separated https:// URLs"
     if value and key == "TELEGRAM_CHAT_ID" and not re.match(r"^-?\d+$", value):
         return f"{key}: must be a number (group chats start with -100)"
-    if value and key == "HYPERLIQUID_ACCOUNT_ADDRESS" and not re.match(r"^0x[0-9a-fA-F]{40}$", value):
-        return f"{key}: must be a 0x… address (40 hex characters)"
     return None
 
 

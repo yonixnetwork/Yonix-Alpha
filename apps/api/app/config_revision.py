@@ -20,7 +20,7 @@ log = get_logger("api.config_revision")
 HEADER = b"x-config-revision"
 WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 # Settings writes only. Actions (approvals, paper-account resets, position
-# exits, manual trades, grid start/stop) are not configuration.
+# exits, manual trades) are not configuration.
 CONFIG_ROUTES = [
     (re.compile(r"^/api/control/modes/(global|strategy/(?P<strategy>[^/]+))$"), "mode"),
     (re.compile(r"^/api/control/settings/(?P<scope>[^/]+)(/follow-global)?$"), "risk_settings"),
@@ -29,7 +29,6 @@ CONFIG_ROUTES = [
     (re.compile(r"^/api/control/rules(/.*)?$"), "rules"),
     (re.compile(r"^/api/strategies/(?P<strategy>[^/]+)/(mode|config)$"), "strategy"),
     (re.compile(r"^/api/live/settings$"), "live_settings"),
-    (re.compile(r"^/api/live/futures/settings$"), "futures_settings"),
     (re.compile(r"^/api/paper/execution-settings$"), "paper_execution_settings"),
     (re.compile(r"^/api/notifications/prefs$"), "notification_prefs"),
     (re.compile(r"^/api/risk/kill-switch/(engage|disengage)$"), "kill_switch"),

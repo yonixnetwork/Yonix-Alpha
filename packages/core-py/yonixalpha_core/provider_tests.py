@@ -35,10 +35,6 @@ RESULTS = [CONNECTED, AUTH_FAILED, TIMEOUT, RATE_LIMITED, INVALID, UNAVAILABLE]
 TEST_TIMEOUT_SECONDS = 10.0
 
 # Exchange error codes meaning "your credentials were refused".
-_BINANCE_AUTH = {-2014, -2015, -1022, -2008}
-_BINANCE_RATE = {-1003, -1015}
-_BYBIT_AUTH = {10003, 10004, 10005, 10007, 33004}
-_BYBIT_RATE = {10006, 10018}
 
 
 class _Result(Exception):
@@ -49,8 +45,7 @@ class _Result(Exception):
 
 def _secrets(settings: Any) -> list[str | None]:
     names = ["HELIUS_API_KEY", "SOLANA_RPC_URL", "SOLANA_WS_URL", "SOLANA_RPC_BACKUP_URL", "SOLANA_RPC_BACKUP_URL_2",
-             "SOLANA_RPC_BACKUP_URL_3", "SOLANA_WS_BACKUP_URL", "JUPITER_API_KEY", "PUMPPORTAL_API_KEY", "BINANCE_API_KEY", "BINANCE_API_SECRET", "BYBIT_API_KEY",
-             "BYBIT_API_SECRET", "HYPERLIQUID_API_WALLET_PRIVATE_KEY", "MT5_BRIDGE_TOKEN", "TELEGRAM_BOT_TOKEN",
+             "SOLANA_RPC_BACKUP_URL_3", "SOLANA_WS_BACKUP_URL", "JUPITER_API_KEY", "PUMPPORTAL_API_KEY", "TELEGRAM_BOT_TOKEN",
              "WALLET_PRIVATE_KEY", "EVM_WALLET_PRIVATE_KEY"]
     out = []
     for n in names:
@@ -81,15 +76,14 @@ def classify(exc: BaseException) -> tuple[str, str]:
         return TIMEOUT, f"no answer within {TEST_TIMEOUT_SECONDS:.0f}s"
     if "NotConfigured" in name or "not set" in text or "not configured" in text:
         return INVALID, text
-    code = getattr(exc, "code", None)
     status = getattr(getattr(exc, "response", None), "status_code", None)
     for marker, s in (("HTTP 401", 401), ("HTTP 403", 403), ("HTTP 429", 429), ("status 401", 401), ("status 403", 403),
                       ("status 429", 429), ("HTTP 418", 429)):
         if marker in text:
             status = s
-    if status == 429 or code in _BINANCE_RATE or code in _BYBIT_RATE:
+    if status == 429:
         return RATE_LIMITED, text
-    if status in (401, 403) or code in _BINANCE_AUTH or code in _BYBIT_AUTH:
+    if status in (401, 403):
         return AUTH_FAILED, text
     return UNAVAILABLE, f"{name}: {text}" if text else name
 
@@ -221,20 +215,6 @@ async def test_provider(name: str, settings: Any, client: httpx.AsyncClient) -> 
         what = "data WebSocket (" + ("with key" if key else "free data, no key") + ")"
         return await _ws_probe(url, {"method": "subscribeNewToken"}, what)
 
-    async def venue(v: str) -> str:
-        from yonixalpha_core.execution.registry import build_providers
-
-        p = build_providers(client, settings)[v]
-        if v == "hyperliquid":
-            _need(settings, "HYPERLIQUID_ACCOUNT_ADDRESS")
-        bal = await p.balance()
-        net = {"binance": "BINANCE_TESTNET", "bybit": "BYBIT_TESTNET", "hyperliquid": "HYPERLIQUID_TESTNET"}.get(v)
-        where = (" (TESTNET)" if getattr(settings, net, False) else " (MAINNET)") if net else ""
-        extra = ""
-        if v == "hyperliquid" and not getattr(settings, "HYPERLIQUID_API_WALLET_PRIVATE_KEY", None):
-            extra = "; API wallet key not set: read-only"
-        return f"authenticated read OK{where}: available balance {bal} {p.quote_currency}{extra}"
-
     async def telegram() -> str:
         _need(settings, "TELEGRAM_BOT_TOKEN")
         resp = await client.get(f"https://api.telegram.org/bot{_secret(settings.TELEGRAM_BOT_TOKEN)}/getMe",
@@ -290,8 +270,7 @@ async def test_provider(name: str, settings: Any, client: httpx.AsyncClient) -> 
         "solana_rpc": solana_rpc, "solana_rpc_backup": solana_rpc_backup,
         "solana_rpc_backup_2": backup_n("SOLANA_RPC_BACKUP_URL_2"), "solana_rpc_backup_3": backup_n("SOLANA_RPC_BACKUP_URL_3"),
         "solana_ws": solana_ws, "helius": helius,
-        "jupiter": jupiter, "pumpportal": pumpportal, "binance": lambda: venue("binance"), "bybit": lambda: venue("bybit"),
-        "hyperliquid": lambda: venue("hyperliquid"), "mt5": lambda: venue("mt5"), "telegram": telegram,
+        "jupiter": jupiter, "pumpportal": pumpportal, "telegram": telegram,
     }
     fn = tests.get(name)
     if fn is None:
@@ -300,5 +279,4 @@ async def test_provider(name: str, settings: Any, client: httpx.AsyncClient) -> 
     return await _run(name, settings, fn)
 
 
-PROVIDERS = ["bsc_rpc", "robinhood_rpc", "honeypot_is", "solana_rpc", "solana_rpc_backup", "solana_rpc_backup_2", "solana_rpc_backup_3", "solana_ws", "helius", "jupiter", "pumpportal", "binance", "bybit",
-             "hyperliquid", "mt5", "telegram"]
+PROVIDERS = ["bsc_rpc", "robinhood_rpc", "honeypot_is", "solana_rpc", "solana_rpc_backup", "solana_rpc_backup_2", "solana_rpc_backup_3", "solana_ws", "helius", "jupiter", "pumpportal", "telegram"]

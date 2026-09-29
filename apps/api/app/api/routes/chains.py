@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_username, get_db, get_redis
@@ -100,12 +100,13 @@ async def put_control(key: str, body: ControlIn, request: Request, db: AsyncSess
 
 async def _close_all(db: AsyncSession, username: str, why: str) -> int:
     now = datetime.now(timezone.utc)
-    rows = (await db.execute(select(PaperPosition).where(PaperPosition.status == "open",
-                                                         PaperPosition.exit_requested.is_(False)))).scalars().all()
+    from yonixalpha_core.safety import store
+
+    rows = (await db.execute(select(PaperPosition).where(
+        PaperPosition.status == "open", PaperPosition.exit_requested.is_(False),
+        or_(PaperPosition.engine.is_(None), PaperPosition.engine.not_in(store.LEGACY_ENGINES))))).scalars().all()
     for p in rows:
         p.exit_requested = True
-        from yonixalpha_core.safety import store
-
         await store.add_timeline_event(db, "operator_exit", now, {"by": username, "note": why},
                                        candidate_id=p.candidate_id, assessment_id=p.assessment_id, position_id=p.id)
     return len(rows)

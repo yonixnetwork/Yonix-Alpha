@@ -14,9 +14,7 @@ KEY = "HELIUSKEY123456789"
 def settings(**kw):
     base = dict(SOLANA_RPC_URL=f"https://rpc.test/?api-key={KEY}", SOLANA_WS_URL=None, SOLANA_RPC_BACKUP_URL=None,
                 SOLANA_WS_BACKUP_URL=None, HELIUS_API_KEY=KEY, JUPITER_API_KEY=None, PUMPPORTAL_API_KEY=None,
-                BINANCE_API_KEY="bk", BINANCE_API_SECRET="bs", BINANCE_TESTNET=True, BYBIT_API_KEY=None, BYBIT_API_SECRET=None,
-                BYBIT_TESTNET=False, HYPERLIQUID_ACCOUNT_ADDRESS=None, HYPERLIQUID_API_WALLET_PRIVATE_KEY=None,
-                HYPERLIQUID_TESTNET=False, MT5_BRIDGE_URL=None, MT5_BRIDGE_TOKEN=None, TELEGRAM_BOT_TOKEN="123:tgtokenABC",
+                TELEGRAM_BOT_TOKEN="123:tgtokenABC",
                 TELEGRAM_CHAT_ID="-100", WALLET_PRIVATE_KEY=None)
     base.update(kw)
     return SimpleNamespace(**base)
@@ -50,15 +48,11 @@ async def test_each_failure_class():
     assert (await run("solana_rpc", settings(), timeout))["status"] == pt.TIMEOUT
 
 
-async def test_exchange_auth_and_rate_limit_codes():
-    auth = await run("binance", settings(), lambda req: httpx.Response(401, json={"code": -2015, "msg": "Invalid API-key"}))
-    assert auth["status"] == pt.AUTH_FAILED
-    rate = await run("binance", settings(), lambda req: httpx.Response(429, json={"code": -1003, "msg": "Too many"}))
-    assert rate["status"] == pt.RATE_LIMITED
-    ok = await run("binance", settings(), lambda req: httpx.Response(200, json=[{"asset": "USDT", "availableBalance": "5000"}]))
-    assert ok["status"] == pt.CONNECTED and "TESTNET" in ok["detail"] and "5000" in ok["detail"]
-    missing = await run("bybit", settings(), lambda req: httpx.Response(200))
-    assert missing["status"] == pt.INVALID
+async def test_removed_venues_are_not_testable():
+    # Binance / Bybit / Hyperliquid / MT5 were removed with the futures and FX features.
+    for gone in ("binance", "bybit", "hyperliquid", "mt5_bridge"):
+        assert gone not in pt.PROVIDERS
+        assert (await run(gone, settings(), lambda req: httpx.Response(200)))["status"] == pt.INVALID
 
 
 async def test_telegram_getme_never_sends_a_message():

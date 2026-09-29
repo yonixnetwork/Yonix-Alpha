@@ -65,8 +65,7 @@ from yonixalpha_core.state_machine import CandidateState, apply_transition
 
 router = APIRouter(prefix="/control", tags=["control"])
 
-SCOPES = ["GLOBAL", "solana_fresh", "solana_migration", "solana_momentum", "binance_futures", "bybit_futures", "hyperliquid_perps",
-          "mt5_fx"]
+SCOPES = ["GLOBAL", "solana_fresh", "solana_migration", "solana_momentum"]
 STRATEGIES = MODE_KEYS
 APPROVAL_WINDOW = timedelta(minutes=10)
 FUNNEL_KEY = f"{pump_stream.PREFIX}:funnel"
@@ -533,7 +532,7 @@ async def _account_out(db: AsyncSession, redis: Redis, acct: PaperAccount) -> Pa
 async def paper_accounts(db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
                          _: str = Depends(get_current_username)):
     out = []
-    for name in store.DEFAULT_PAPER_ACCOUNTS:
+    for name in store.ACTIVE_PAPER_ACCOUNTS:
         acct = await store.get_paper_account(db, name)
         out.append(await _account_out(db, redis, acct))
     await db.commit()
@@ -543,7 +542,7 @@ async def paper_accounts(db: AsyncSession = Depends(get_db), redis: Redis = Depe
 @router.post("/paper/accounts/{name}/reset", response_model=PaperAccountOut)
 async def reset_paper_account(name: str, body: PaperResetIn, request: Request, db: AsyncSession = Depends(get_db),
                               redis: Redis = Depends(get_redis), username: str = Depends(get_current_username)):
-    if name not in store.DEFAULT_PAPER_ACCOUNTS:
+    if name not in store.ACTIVE_PAPER_ACCOUNTS:
         raise HTTPException(404, "unknown paper account")
     if body.confirm != name:
         raise HTTPException(422, f"type the account name ({name}) in 'confirm' to reset it")

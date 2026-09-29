@@ -69,11 +69,9 @@ async def load_controls(session: AsyncSession, redis: Redis, app_settings: Any, 
     from the exchange by services/execution-futures)."""
     safety, settings_meta = await store.load_settings(session, engine)
     if live_venue:
-        from yonixalpha_core.futures_live import get_live_account as futures_live_account
-
-        quote = store.DEFAULT_PAPER_ACCOUNTS.get(store.ENGINE_ACCOUNT.get(engine, ""), ("USDT", None))[0]
-        account = await futures_live_account(session, live_venue, quote)
-    elif live:
+        # Exchange (futures / FX) books were removed with the legacy venues.
+        raise ValueError(f"live venue {live_venue!r} is not supported")
+    if live:
         from yonixalpha_core.live_trading import get_live_account
 
         account = await get_live_account(session)

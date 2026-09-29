@@ -33,16 +33,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from yonixalpha_core import events, live_trading, paper_engine, paper_execution
 from yonixalpha_core.db.models import PaperAccount, PaperPosition, RiskAssessment
-from yonixalpha_core.execution.registry import FUTURES_PROVIDERS
 from yonixalpha_core.exit_intel import ExitConfig, solana_exit_decision
-from yonixalpha_core.safety.store import add_timeline_event, load_settings
+from yonixalpha_core.safety.store import LEGACY_ENGINES, LEGACY_PROVIDERS, add_timeline_event, load_settings
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.safety.liquidity import ConstantProductModel
 from yonixalpha_core.solana import pump_stream, pumpswap
 from yonixalpha_core.solana.assembler import fetch_holders
 from yonixalpha_core.solana.market_data import JupiterClient
 from yonixalpha_core.solana.pumpfun import WSOL_MINT
-from yonixalpha_core.venues.common import VenueError
 from yonixalpha_core.notify import alert_error
 
 log = get_logger("paper-trading.gate_manage")
@@ -77,17 +75,9 @@ async def pool_price(rpc, redis: Redis, mint: str, decimals: int, now: datetime)
 async def price_position(redis: Redis, jupiter: JupiterClient | None, p: PaperPosition, now: datetime, venues: dict | None = None,
                          rpc=None, ctx: dict | None = None):
     """Returns (price, model, exit_cost_bps, source) or (None, None, None, reason).
+    `venues` is unused (the futures venues were removed); kept for callers.
     `ctx` receives the pool's recent trades when priced from PumpSwap."""
     venue = (p.plan or {}).get("venue") or {}
-    if venue.get("kind") == "futures":
-        adapter = (venues or {}).get(venue.get("venue"))
-        if adapter is None:
-            return None, None, None, f"venue {venue.get('venue')} not configured"
-        try:
-            book = await adapter.book(venue.get("symbol") or p.asset_id)
-        except VenueError as exc:
-            return None, None, None, f"order book unavailable: {exc}"
-        return book.mid, book, None, f"{venue.get('venue')}:book"
     decimals = venue.get("decimals")
     if decimals is None:
         return None, None, None, "token decimals unknown"
@@ -255,9 +245,11 @@ async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterC
                 PaperPosition.status == "open", PaperPosition.engine.is_not(None),
                 # EVM (BSC / Robinhood Chain) positions are managed by services/data-evm.
                 PaperPosition.engine.not_like("evm\\_%"),
-                # LIVE futures/FX positions are managed by services/execution-futures.
+                # Futures / FX / grid were removed (branch archive/legacy-futures-forex-grid-2026-09-29);
+                # any position they left open is not managed here and stays as history.
+                PaperPosition.engine.not_in(LEGACY_ENGINES),
                 or_(PaperPosition.execution_provider.is_(None),
-                    PaperPosition.execution_provider.not_in(FUTURES_PROVIDERS)))
+                    PaperPosition.execution_provider.not_in(LEGACY_PROVIDERS)))
         )).scalars().all()
     for pid in ids:
         # Per-position isolation: one failing row must never stop the other

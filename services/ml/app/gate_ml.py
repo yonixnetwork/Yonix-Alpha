@@ -1,7 +1,7 @@
 """Models on safety-gate decisions: data quality, challenger training,
 champion/challenger evaluation, and drift monitoring (spec §40-46, §88-89).
 
-Loop per model name (gate_solana_fresh, gate_futures, ...):
+Loop per model name (gate_solana_fresh, gate_solana_momentum, ...):
 1. quality check every labeled, unchecked sample; quarantine bad ones with a
    data_quality_events row (never silently trained on);
 2. if enough clean samples: train a challenger (logistic regression) with a
@@ -32,7 +32,14 @@ from yonixalpha_core import events
 from yonixalpha_core.db.models import DataQualityEvent, MLFeatureSnapshot, ModelVersion, SystemEvent
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.ml import registry
-from yonixalpha_core.ml.gate_features import DRIFT_FLAG_PREFIX, ENGINES_FOR_MODEL, FEATURE_VERSION, FEATURES_FOR_MODEL, vector
+from yonixalpha_core.ml.gate_features import (
+    ACTIVE_MODELS,
+    DRIFT_FLAG_PREFIX,
+    ENGINES_FOR_MODEL,
+    FEATURE_VERSION,
+    FEATURES_FOR_MODEL,
+    vector,
+)
 
 from app.train import AUC_CONFIDENCE_Z, MIN_ACTIVATION_AUC, _auc_standard_error
 
@@ -288,7 +295,7 @@ async def check_drift(session: AsyncSession, redis, app_settings, model_name: st
 
 async def run_cycle(session_factory, redis, app_settings) -> dict[str, Any]:
     out: dict[str, Any] = {}
-    for model_name in FEATURES_FOR_MODEL:
+    for model_name in ACTIVE_MODELS:
         async with session_factory() as session:
             quality = await run_quality_check(session, model_name)
             training = await train_challenger(session, model_name)

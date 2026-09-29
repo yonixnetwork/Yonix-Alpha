@@ -14,7 +14,7 @@ from app.schemas.ml import MLStatsOut, ModelVersionOut
 from yonixalpha_core import events, opportunities
 from yonixalpha_core.db.models import DataQualityEvent, MLFeatureSnapshot, ModelVersion, OpportunityOutcome
 from yonixalpha_core.ml import registry
-from yonixalpha_core.ml.gate_features import DRIFT_FLAG_PREFIX, ENGINES_FOR_MODEL, FEATURE_VERSION, FEATURES_FOR_MODEL
+from yonixalpha_core.ml.gate_features import ACTIVE_MODELS, DRIFT_FLAG_PREFIX, ENGINES_FOR_MODEL, FEATURE_VERSION, FEATURES_FOR_MODEL
 
 router = APIRouter(prefix="/ml", tags=["ml"])
 
@@ -77,7 +77,8 @@ def _model_summary(m: ModelVersion | None) -> dict | None:
 async def review(db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
                  _: str = Depends(get_current_username)) -> list[dict]:
     out = []
-    for name, engines in ENGINES_FOR_MODEL.items():
+    for name in ACTIVE_MODELS:
+        engines = ENGINES_FOR_MODEL[name]
         champion = await registry.get_active_model_row(db, name)
         challenger = (await db.execute(select(ModelVersion).where(ModelVersion.name == name, ModelVersion.status == "challenger")
                                        .order_by(ModelVersion.version.desc()).limit(1))).scalar_one_or_none()

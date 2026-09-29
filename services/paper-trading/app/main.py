@@ -21,13 +21,11 @@ from yonixalpha_core.solana import sol_price
 from yonixalpha_core.solana.rpc import RpcManager, with_priority
 from yonixalpha_core.runtime_watch import run_watcher
 from yonixalpha_core.state_machine import CandidateState
-from yonixalpha_core.venues.registry import build_venues
 
 from app.entry import try_open_position
 from app.gate_manage import manage_gate_positions, track_outcomes
 from yonixalpha_core import opportunities
 from yonixalpha_core.solana.followups import track_observation_followups
-from app.grid_engine import run_grid
 from app.live_worker import live_worker_loop
 from app.manage import evaluate_open_position
 from app.pricing import latest_price
@@ -176,10 +174,6 @@ async def _paper_trading_loop(
                 # most one Jupiter quote a minute); unknown stays unknown.
                 if jupiter is not None:
                     await sol_price.sol_usd(redis, jupiter, None, None, now)
-                if venues is not None:
-                    grid_status = await run_grid(session_factory, redis, app_settings, venues, now)
-                    if grid_status.get("fills"):
-                        log.info("grid.step", **{k: str(v) for k, v in grid_status.items()})
             except Exception as exc:  # noqa: BLE001
                 log.error("gate_loop.failed", error=str(exc))
                 await _record_system_event(session_factory, "gate_loop_failed", "error", {"error": str(exc)})
@@ -208,7 +202,7 @@ async def run() -> None:
     redis = make_redis(settings)
     http_client = httpx.AsyncClient()
     jupiter = JupiterClient(http_client, settings.JUPITER_API_KEY, RateBudget(JUPITER_REQUESTS_PER_MINUTE))
-    venues = build_venues(http_client, settings)
+    venues = None  # the futures venues were removed; Solana positions are priced from the stream / RPC
     # Pool pricing for migrated positions and the LIVE worker both need RPC;
     # without it pumpswap positions report "unpriced" and LIVE is disabled.
     rpc = (RpcManager.create(client=http_client, primary_url=settings.SOLANA_RPC_URL, backup_url=settings.SOLANA_RPC_BACKUP_URL,
