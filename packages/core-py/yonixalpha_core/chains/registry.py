@@ -64,8 +64,8 @@ LAUNCHPADS: dict[str, LaunchpadSpec] = {s.key: s for s in (
         safety_model="TokenManagerHelper3.tryBuy / trySell round trip, TaxToken (creatorType 5) fee config, "
                      "X Mode / AntiSniperFeeMode flags, ERC-20 owner / proxy checks",
         supported_events=("TokenCreate", "TokenPurchase", "TokenSale", "LiquidityAdded"),
-        contracts={"token_manager_v1": "0xEC4549caDcE5DA21Df6E6422d448034B5233bFbC",
-                   "token_manager_v2": "0x5c952063c7fc8610FFDB798152D69F0B9550762b",
+        contracts={"manager_v1": "0xEC4549caDcE5DA21Df6E6422d448034B5233bFbC",
+                   "manager_v2": "0x5c952063c7fc8610FFDB798152D69F0B9550762b",
                    "helper3": "0xF251F83e40a78868FcfA3FA4599Dad6494E46034"},
         quote_asset="BNB (some tokens use a BEP-20 quote)", sources=_FOUR,
         notes="Events are emitted by TokenManager2 (V2) only; V1 tokens are traded, not discovered."),

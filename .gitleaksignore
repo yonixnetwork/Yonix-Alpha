@@ -8,3 +8,7 @@
 68a1a5c719a8f646d19866fa72fb3721b1fad142:packages/core-py/tests/test_provider_tests.py:generic-api-key:11
 # Public PumpSwap pool authority copied from pump.fun's official docs (PUMP_SWAP_README.md).
 6ec428974ba0f39066cc17b2b9e190ade824f524:packages/core-py/tests/test_pumpswap.py:generic-api-key:30
+# Public Four.meme TokenManager V1 / V2 contract addresses on BSC (github.com/four-meme-community/four-meme-ai,
+# contract-addresses.md); flagged only because the dict key contained "token". The key was renamed afterwards.
+35d1fb12d4625d726509212e9dcf65a60339e251:packages/core-py/yonixalpha_core/chains/registry.py:generic-api-key:67
+35d1fb12d4625d726509212e9dcf65a60339e251:packages/core-py/yonixalpha_core/chains/registry.py:generic-api-key:68
