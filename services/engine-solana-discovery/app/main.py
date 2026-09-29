@@ -64,7 +64,8 @@ async def _funnel_loop(redis, session_factory, stop_event: asyncio.Event) -> Non
         try:
             async with session_factory() as session:
                 settings, _ = await store.load_settings(session, "solana_fresh")
-            counts = await run_funnel(redis, session_factory, settings, datetime.now(timezone.utc))
+                momentum_settings, _ = await store.load_settings(session, "solana_momentum")
+            counts = await run_funnel(redis, session_factory, settings, datetime.now(timezone.utc), momentum_settings)
             runs += 1
             if counts["promoted"] or counts["migrations"]:
                 log.info("funnel.run", **counts)

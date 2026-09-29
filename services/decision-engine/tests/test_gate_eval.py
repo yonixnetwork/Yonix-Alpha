@@ -268,3 +268,19 @@ async def test_exit_signal_at_entry_waits_and_opens_nothing(db_session, redis_cl
     row = (await db_session.execute(select(RiskAssessment))).scalar_one()
     assert "EXIT_SIGNAL_AT_ENTRY" in {f["code"] for f in row.assessment["findings"]}
     assert row.assessment["inputs_snapshot"]["entry_exit_check"]["action"] == "REDUCE"
+
+
+async def test_invalid_saved_risk_settings_block_the_entry(db_session, redis_client):
+    """A saved settings row that no longer validates must not be replaced by
+    code defaults for a new entry: the operator's values (e.g. an intel
+    action set to NO_TRADE) would silently stop applying."""
+    from yonixalpha_core.db.models import RiskSettingsVersion
+
+    db_session.add(RiskSettingsVersion(scope="GLOBAL", version=1, settings={"min_stop_pct": "0.5", "max_stop_pct": "0.1"}))
+    await db_session.commit()
+    curve = await seed_healthy_launch(redis_client, NOW)
+    cand = await make_candidate(db_session)
+    a = await evaluate_with_gate(db_session, redis_client, ENV, Sources(redis_client, FakeRpc(curve)), cand, NOW)
+    assert a.decision.value == "NO_TRADE"
+    assert any(f.code == "TRADING_CONTROL_OFF" and "failed validation" in f.message for f in a.findings), a.reasons
+    assert (await db_session.execute(select(PaperPosition))).first() is None

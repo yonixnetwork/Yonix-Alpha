@@ -270,6 +270,9 @@ class AccountState:
     last_loss_at: datetime | None
     token_exposure: Decimal | None
     kill_switch_engaged: bool
+    # An operator switch below the kill switch (chains.controls): NEW ENTRIES
+    # OFF, <CHAIN> OFF, SNIPER OFF, COPY TRADING OFF. None = not blocked.
+    trading_blocked_by: str | None = None
 
 
 @dataclass

@@ -80,6 +80,12 @@ async def load_controls(session: AsyncSession, redis: Redis, app_settings: Any, 
     else:
         account = await store.get_paper_account(session, store.ENGINE_ACCOUNT[engine])
     state = await store.account_state(session, account, asset_id, now, await kill_switch.is_engaged(redis))
+    invalid = store.settings_block_reason(engine, settings_meta)
+    if invalid:
+        from yonixalpha_core.notify import alert_error
+
+        await alert_error("safety-gate", f"risk_settings_invalid:{engine}", invalid)
+        state = replace(state, trading_blocked_by=invalid)
     if live and not live_venue and state.available_balance is not None:
         # The live wallet keeps min_sol_reserve for fees and exits; enter_live
         # refuses any size above wallet - reserve, so size against that
