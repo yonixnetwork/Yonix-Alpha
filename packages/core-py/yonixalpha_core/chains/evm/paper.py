@@ -37,6 +37,7 @@ from yonixalpha_core import kill_switch, paper_engine
 from yonixalpha_core.chains import controls, verification
 from yonixalpha_core.chains.base import Quote
 from yonixalpha_core.chains.evm.settings import EvmTradingSettings
+from yonixalpha_core.chains.evm.settings import load as evm_settings_load
 from yonixalpha_core.db.models import EvmToken, PaperAccount, PaperPosition
 from yonixalpha_core.safety.models import AccountState, ExecutionQuote, FinalDecision, ManualOverrides, Observation, Venue
 from yonixalpha_core.safety.planning import plan_trade
@@ -56,8 +57,8 @@ def is_evm_engine(engine: str | None) -> bool:
     return bool(engine) and engine.startswith("evm_")
 
 
-async def ensure_account(session: AsyncSession, chain: str) -> PaperAccount:
-    name = engine_for(chain)
+async def ensure_account(session: AsyncSession, chain: str, name: str | None = None) -> PaperAccount:
+    name = name or engine_for(chain)
     acct = (await session.execute(select(PaperAccount).where(PaperAccount.name == name))).scalar_one_or_none()
     if acct is None:
         acct = PaperAccount(name=name, quote_currency=NATIVE[chain], starting_balance=STARTING_BALANCE[chain],
@@ -111,9 +112,9 @@ def _signal(d: EntryDecision, row: EvmToken, s: EvmTradingSettings) -> None:
 
 
 async def account_state(session: AsyncSession, redis, chain: str, token: str, now: datetime,
-                        blocked_by: str | None) -> tuple[AccountState, PaperAccount]:
-    eng = engine_for(chain)
-    acct = await ensure_account(session, chain)
+                        blocked_by: str | None, engine: str | None = None) -> tuple[AccountState, PaperAccount]:
+    eng = engine or engine_for(chain)
+    acct = await ensure_account(session, chain, eng)
     pp = PaperPosition
     open_rows = (await session.execute(select(pp).where(pp.engine == eng, pp.status == "open"))).scalars().all()
     exposure = sum((p.entry_cost_quote or Decimal(0)) for p in open_rows)
@@ -174,12 +175,23 @@ async def evaluate_entry(session: AsyncSession, redis, adapter, row: EvmToken, s
     if d.blockers:
         return d  # no quote is spent on a token that cannot be entered anyway
 
-    size_wei = int(cs.position_size * E18)
+    await build_plan(session, adapter, row, cs.position_size, acct_state, liq, now, d)
+    return d
+
+
+async def build_plan(session: AsyncSession, adapter, row: EvmToken, size: Decimal, acct_state: AccountState,
+                     liq: Decimal, now: datetime, d: EntryDecision, max_total_exposure: Decimal | None = None) -> None:
+    """Quotes the executable round trip at `size` (native units) and sizes
+    the trade with the shared plan_trade. Fills d.plan / d.buy, or adds
+    blockers. Shared by automatic entries and copy trading."""
+    chain = adapter.spec.chain.value
+    cs = (await evm_settings_load(session)).chain(chain)
+    size_wei = int(size * E18)
     buy = await adapter.quote_buy(row.token, size_wei)
     sell = await adapter.quote_sell(row.token, buy.amount_out) if buy.ok and buy.amount_out else None
     if not buy.ok or sell is None or not sell.ok:
         d.block("NO_EXECUTABLE_ROUND_TRIP", f"buy: {buy.error or 'ok'}; sell: {(sell.error if sell else 'not quoted') or 'ok'}")
-        return d
+        return
     spent = Decimal(buy.amount_in) / E18  # a curve may fill less than offered
     tokens = Decimal(buy.amount_out) / E18
     entry_price = spent / tokens
@@ -191,7 +203,7 @@ async def evaluate_entry(session: AsyncSession, redis, adapter, row: EvmToken, s
 
     settings, _meta = await load_settings(session, engine_for(chain))
     settings = replace(settings, max_position_size_quote=spent, min_position_size_quote=spent / 10,
-                       max_total_exposure_quote=cs.max_total_exposure, max_token_exposure_quote=spent,
+                       max_total_exposure_quote=max_total_exposure or cs.max_total_exposure, max_token_exposure_quote=spent,
                        max_daily_loss_quote=cs.max_daily_loss, min_liquidity_quote=cs.min_liquidity)
     q = ExecutionQuote(observation=Observation(buy.source, now), venue=Venue.UNKNOWN, size_quote=spent,
                        buy_route_available=True, sell_route_available=True, entry_impact_bps=Decimal(0),
@@ -205,26 +217,27 @@ async def evaluate_entry(session: AsyncSession, redis, adapter, row: EvmToken, s
     if not plan.complete:
         if not d.blockers:
             d.block("PLAN_INCOMPLETE", "risk plan could not be completed")
-        return d
+        return
     if plan.stop_distance_pct is not None and rt_bps / 10_000 >= plan.stop_distance_pct / 2:
         d.block("ROUND_TRIP_EXCEEDS_STOP_BUDGET",
                 f"round-trip cost {rt_bps / 100:.2f}% uses half or more of the {plan.stop_distance_pct:.2%} stop")
-        return d
+        return
     if plan.position_size.value < spent:  # the planner sized it down: fill at that size
         buy = await adapter.quote_buy(row.token, int(plan.position_size.value * E18))
         if not buy.ok:
             d.block("NO_EXECUTABLE_QUOTE", buy.error or "buy quote failed at the planned size")
-            return d
+            return
     d.plan, d.buy = plan, buy
-    return d
 
 
-async def open_position(session: AsyncSession, d: EntryDecision, row: EvmToken, now: datetime) -> PaperPosition:
+async def open_position(session: AsyncSession, d: EntryDecision, row: EvmToken, now: datetime,
+                        engine: str | None = None) -> PaperPosition:
     """Opens the paper position a passing decision describes. The partial
     unique index uq_paper_positions_evm_open makes a duplicate impossible.
     Caller commits."""
     assert d.ok and d.buy is not None
-    acct = await ensure_account(session, d.chain)
+    engine = engine or engine_for(d.chain)
+    acct = await ensure_account(session, d.chain, engine)
     cost = Decimal(d.buy.amount_in) / E18
     qty = Decimal(d.buy.amount_out) / E18
     if cost > acct.cash_balance:
@@ -238,7 +251,7 @@ async def open_position(session: AsyncSession, d: EntryDecision, row: EvmToken, 
     p = PaperPosition(
         symbol=(row.symbol or row.token)[:64], provider="paper", side="LONG", entry_price=price, quantity=qty,
         stop_loss=plan.stop_loss.value, take_profit=[str(tp.price.value) for tp in plan.take_profits], entry_at=now,
-        status="open", account_id=acct.id, engine=engine_for(d.chain), asset_id=row.token,
+        status="open", account_id=acct.id, engine=engine, asset_id=row.token,
         initial_quantity=qty, remaining_quantity=qty, entry_cost_quote=cost, proceeds_quote=Decimal(0),
         fees_paid_quote=Decimal(d.buy.fee or 0) / E18, max_loss_quote=plan.max_loss.value,
         plan={**plan.to_dict(), "venue": venue, "exit_cost_bps": "0", "category": row.category},
@@ -263,8 +276,10 @@ async def mark_price(adapter, p: PaperPosition) -> tuple[Decimal | None, Quote]:
     return (Decimal(q.amount_out) / E18) / remaining, q
 
 
-async def manage_position(session: AsyncSession, adapter, p: PaperPosition, now: datetime) -> dict[str, Any]:
-    """One management tick for an open EVM paper position. Caller commits."""
+async def manage_position(session: AsyncSession, adapter, p: PaperPosition, now: datetime,
+                          extra_exit: tuple[Decimal, str] | None = None) -> dict[str, Any]:
+    """One management tick for an open EVM paper position (`extra_exit`: an
+    additional partial exit, e.g. a mirrored copy-target sell). Caller commits."""
     price, q = await mark_price(adapter, p)
     if price is None:
         return {"status": "UNPRICED", "error": q.error, "source": q.source}
@@ -275,6 +290,7 @@ async def manage_position(session: AsyncSession, adapter, p: PaperPosition, now:
         venue["route"] = q.route
         p.plan = {**(p.plan or {}), "venue": venue}
     acct = await session.get(PaperAccount, p.account_id)
-    result = await paper_engine.apply_step(session, p, acct, price, None, None, now, exit_cost_bps=Decimal(0))
+    result = await paper_engine.apply_step(session, p, acct, price, None, None, now, exit_cost_bps=Decimal(0),
+                                           extra_exit=extra_exit)
     return {"status": "CLOSED" if result.closed else "OPEN", "price": price, "exits": [r for _, r in result.exits],
             "route": q.route}

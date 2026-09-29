@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { ArrowRightLeft, Bell, Boxes, Layers, Brain, ClipboardCheck, Eye, FlaskConical, Filter, Gauge, LayoutDashboard, ListChecks, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Radio, Rocket, Search, Send, Server, Settings, ShieldAlert, SlidersHorizontal, Network, Sparkles, Wallet, WalletCards, Workflow, type LucideIcon } from "lucide-react";
+import { ArrowRightLeft, Bell, Boxes, Copy, Fingerprint, Layers, Brain, ClipboardCheck, Eye, FlaskConical, Filter, Gauge, LayoutDashboard, ListChecks, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Radio, Rocket, Search, Send, Server, Settings, ShieldAlert, SlidersHorizontal, Network, Sparkles, Wallet, WalletCards, Workflow, type LucideIcon } from "lucide-react";
 import NotificationsBell from "@/components/NotificationsBell";
 import RuntimeApply from "@/components/RuntimeApply";
 import { modeClass, stateClass } from "@/components/ui";
@@ -29,6 +29,8 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
       { href: "/dashboard/tokens", label: "Token Explorer", icon: Search },
       { href: "/dashboard/launchpads", label: "Launchpads", icon: Layers },
       { href: "/dashboard/evm", label: "BSC / Robinhood", icon: Boxes },
+      { href: "/dashboard/copy", label: "Copy Trading", icon: Copy },
+      { href: "/dashboard/smart-wallets", label: "Smart Wallets", icon: Fingerprint },
     ],
   },
   {

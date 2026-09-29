@@ -193,3 +193,80 @@ New service `services/data-evm` runs one loop per chain (BSC, Robinhood Chain). 
 - the Solana manager ignores EVM positions.
 
 **NOT VERIFIED:** any of this against the real chains (no RPC egress from the build environment).
+
+## 7. Phase 4 — wallet profiles and copy trading (paper) (IMPLEMENTED, NOT VERIFIED on chain)
+
+**Wallet profiles** (`yonixalpha_core/wallet_profiles.py`, table `wallet_profiles`) are rebuilt every 10 minutes by `copy-engine`.
+
+Sources:
+- **BSC / Robinhood:** every decoded launchpad / pool trade in `evm_trades`.
+- **Solana:** `launch_buyers` (early buyers with resolved launch outcomes). This is a narrower view, and each profile states its source.
+
+Metrics:
+- trades, tokens, closed round trips, wins, realized PnL;
+- median buy, average hold;
+- early-entry share (bought within 60 s of an observed launch);
+- median gap between trades.
+
+Descriptive labels: SNIPER, SCALPER, HOLDER, HIGH_ACTIVITY, POSSIBLE_BOT.
+
+Score:
+- A weighted, configurable score, returned with its components:
+  - win rate, shrunk toward a base rate with a Beta prior;
+  - realized PnL;
+  - early entries;
+  - sample size.
+- Fewer than 5 closed round trips means no score (INSUFFICIENT_DATA).
+- There is no ranking field and no "best" label. The UI sorts by whatever metric the operator picks.
+
+**Copy trading** runs in the `copy-engine` service. It is paper only and nothing is signed or sent. Targets are set per chain with one of three modes:
+- NOTIFY: signal only.
+- BUY_ONLY: copy entries; exits come from our own risk plan.
+- MIRROR: copy entries and the target's sells.
+
+Each target has its own limits: fixed or proportional size and a maximum size, minimum target buy, maximum open copies, maximum delay, and a chase guard.
+
+A target's trade is a candidate, never an order. "Smart wallet bought, so buy" does not exist here.
+
+Every copied buy passes, in order:
+1. kill switch;
+2. trading controls: COPY TRADING, chain, NEW ENTRIES;
+3. delay limit;
+4. per-target open-position limit;
+5. venue approval:
+   - **Solana:** the Solana gate must have marked this exact mint executable in the last 10 minutes; otherwise `NO_GATE_APPROVAL`;
+   - **EVM:** the launchpad's evidence-based status must allow paper, and there must be a fresh safety PASS. The check is run on demand if stale;
+6. the shared risk planner;
+7. the chase guard: no entry when our price is more than N % above the target's.
+
+**Idempotency:** each target trade is recorded in `copy_events` before any decision, and `(target_id, source_event_id)` is unique. Solana stream trades carry no signature, so their id is a hash of the trade's own fields.
+
+**Exits:**
+- **EVM (MIRROR):** a target sell is mirrored as the same fraction of the target's observed holding (partial sells included), at the executable sell quote. Copy positions (`evm_copy_<chain>`) are managed by `copy-engine` with the shared `apply_step`.
+- **Solana:** copy positions (`copy_solana`) use the Solana venue schema, so the existing Solana position loop manages them: curve, PumpSwap after migration, exit intelligence, stops and take-profits.
+  - A target sell of at least 50 % of its holding requests a full exit.
+  - Smaller sells are recorded as `PARTIAL_NOT_MIRRORED_ON_SOLANA`. The Solana loop has no external partial-exit hook, and adding one to the working Solana path was out of scope.
+- A partial unique index blocks a second open copy position per (engine, token).
+
+**Latency stages** are recorded per event, and the API reports medians:
+- detection: target trade to seen. This includes the feed's own delay: EVM confirmations plus the data-evm pass, and the Solana stream plus the 1 s poll;
+- analysis;
+- risk;
+- execution: paper fill;
+- total.
+
+Landing is "not applicable (paper)".
+
+**API and UI:**
+- `/api/copy/targets` (create / update / delete, audited, bumps the config revision), `/api/copy/events`, `/api/copy/positions`, `/api/wallets/profiles`.
+- UI: Copy Trading and Smart Wallets. Watching a profile adds it as a NOTIFY target.
+- Migration: 0023 (additive).
+
+**Tests:**
+- EVM: copies are refused until the launchpad is verified, idempotent across passes, opened with the planner, and partial and full sells are mirrored;
+- NOTIFY, kill switch, delay, and trades made before the target was added;
+- Solana: no gate approval means no copy; approved means copied; small partial sells are not mirrored; a large sell requests the exit;
+- profile metrics, labels and the shrunk score;
+- API validation and audit.
+
+**NOT VERIFIED:** any of this against real target wallets on chain.

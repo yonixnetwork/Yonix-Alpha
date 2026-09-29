@@ -20,6 +20,7 @@ jobs:
           - apps/api
           - services/data-solana
           - services/data-evm
+          - services/copy-engine
           - services/data-binance
           - services/engine-solana-discovery
           - services/engine-solana-momentum

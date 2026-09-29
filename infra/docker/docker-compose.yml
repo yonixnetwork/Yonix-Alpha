@@ -113,6 +113,20 @@ services:
         condition: service_healthy
     networks: [yonixalpha]
 
+  # Paper copy trading (Solana, BSC, Robinhood Chain) + wallet profiles.
+  copy-engine:
+    build:
+      context: ../..
+      dockerfile: services/copy-engine/Dockerfile
+    env_file:
+      - ../../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    networks: [yonixalpha]
+
   data-binance:
     build:
       context: ../..

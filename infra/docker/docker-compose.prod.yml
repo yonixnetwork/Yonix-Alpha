@@ -30,6 +30,9 @@ services:
   data-evm:
     restart: unless-stopped
 
+  copy-engine:
+    restart: unless-stopped
+
   data-binance:
     restart: unless-stopped
 

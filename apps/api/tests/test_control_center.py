@@ -447,3 +447,57 @@ async def test_evm_tokens_positions_and_settings(app, client, auth_headers):
         from sqlalchemy import select
         assert (await s.execute(select(AuditLog).where(AuditLog.event_type == "evm_settings.update"))).scalars().first()
     assert (await client.get("/api/evm/tokens", headers={})).status_code == 401
+
+
+async def test_copy_targets_profiles_and_events(app, client, auth_headers):
+    from datetime import datetime, timezone
+    from decimal import Decimal
+
+    from yonixalpha_core.db.models import AuditLog, CopyEvent, WalletProfile
+
+    evm = "0x" + "a" * 40
+    bad = await client.post("/api/copy/targets", json={"chain": "bsc", "wallet": "not-an-address-at-all-xxxxxxxxxxxx"},
+                            headers=auth_headers)
+    assert bad.status_code == 422
+    bad = await client.post("/api/copy/targets", json={"chain": "bsc", "wallet": evm, "settings": {"size_mode": "ALL_IN"}},
+                            headers=auth_headers)
+    assert bad.status_code == 422
+    r = await client.post("/api/copy/targets", json={"chain": "bsc", "wallet": evm, "label": "watch", "mode": "MIRROR",
+                                                     "settings": {"fixed_size": "0.01", "chase_guard_pct": "0.1"}},
+                          headers=auth_headers)
+    assert r.status_code == 200 and r.headers.get("x-config-revision")
+    t = r.json()
+    assert t["mode"] == "MIRROR" and t["settings"]["fixed_size"] == "0.01" and t["settings"]["max_delay_seconds"] == 30
+    assert (await client.post("/api/copy/targets", json={"chain": "bsc", "wallet": evm.upper().replace("0X", "0x")},
+                              headers=auth_headers)).status_code == 409
+    p = await client.patch(f"/api/copy/targets/{t['id']}", json={"mode": "NOTIFY", "settings": {"max_open_positions": 1}},
+                           headers=auth_headers)
+    assert p.status_code == 200 and p.json()["mode"] == "NOTIFY" and p.json()["settings"]["fixed_size"] == "0.01"
+
+    now = datetime.now(timezone.utc)
+    async with app.state.db_session_factory() as s:
+        s.add(WalletProfile(chain="bsc", wallet=evm, metrics={"win_rate": 0.5}, labels=["SNIPER"], score=Decimal("0.61"),
+                            source="evm_trades", trades=40, tokens=12, last_seen=now))
+        s.add(WalletProfile(chain="bsc", wallet="0x" + "b" * 40, metrics={}, labels=[], score=None,
+                            score_detail={"status": "INSUFFICIENT_DATA"}, source="evm_trades", trades=4, tokens=2, last_seen=now))
+        import uuid
+        s.add(CopyEvent(id=uuid.uuid4(), target_id=uuid.UUID(t["id"]), chain="bsc", wallet=evm, token="0x" + "1" * 40,
+                        side="BUY", source_event_id="bsc:0xab:1", target_token_amount=Decimal(10 ** 21),
+                        target_quote_amount=Decimal(10 ** 16), target_at=now, detected_at=now, decision="SKIPPED",
+                        reason="LAUNCHPAD_NOT_VERIFIED", latency_ms={"detection": 2100, "total": 2300}))
+        await s.commit()
+    prof = (await client.get("/api/wallets/profiles?chain=bsc&sort=score", headers=auth_headers)).json()
+    assert [x["score"] for x in prof["profiles"]] == ["0.6100", None] and prof["profiles"][0]["is_copy_target"]
+    assert "rank" not in prof["profiles"][0] and "best" not in str(prof["profiles"]).lower()
+    assert len((await client.get("/api/wallets/profiles?label=sniper", headers=auth_headers)).json()["profiles"]) == 1
+    ev = (await client.get("/api/copy/events?chain=bsc", headers=auth_headers)).json()
+    assert ev["events"][0]["reason"] == "LAUNCHPAD_NOT_VERIFIED" and ev["events"][0]["target_quote_amount"] == "0.01"
+    tl = (await client.get("/api/copy/targets", headers=auth_headers)).json()["targets"]
+    assert tl[0]["stats"] == {"events": {"SKIPPED": 1}, "open_positions": 0}
+    assert (await client.get("/api/copy/positions", headers=auth_headers)).json()["positions"] == []
+    assert (await client.delete(f"/api/copy/targets/{t['id']}", headers=auth_headers)).status_code == 200
+    assert (await client.get("/api/copy/targets", headers=auth_headers)).json()["targets"] == []
+    async with app.state.db_session_factory() as s:
+        from sqlalchemy import select
+        kinds = set((await s.execute(select(AuditLog.event_type))).scalars())
+    assert {"copy_target.create", "copy_target.update", "copy_target.delete"} <= kinds

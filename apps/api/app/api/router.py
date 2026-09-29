@@ -8,6 +8,7 @@ from app.api.routes import (
     chains,
     config,
     control,
+    copy,
     evm,
     health,
     live,
@@ -53,4 +54,5 @@ api_router.include_router(observations.router)
 api_router.include_router(settings_center.router)
 api_router.include_router(chains.router)
 api_router.include_router(evm.router)
+api_router.include_router(copy.router)
 api_router.include_router(ws.router)

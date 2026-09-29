@@ -523,6 +523,9 @@ class PaperPosition(Base):
         # concurrent passes can never open the same EVM trade twice.
         Index("uq_paper_positions_evm_open", "engine", "asset_id", unique=True,
               postgresql_where=text("status = 'open' AND engine LIKE 'evm_%'")),
+        # Same for copy positions: one open copy position per (engine, token).
+        Index("uq_paper_positions_copy_open", "engine", "asset_id", unique=True,
+              postgresql_where=text("status = 'open' AND engine LIKE 'copy_%'")),
     )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
@@ -1177,3 +1180,88 @@ class EvmCursor(Base):
     launchpad: Mapped[str] = mapped_column(String(32), primary_key=True)
     last_block: Mapped[int] = mapped_column(BigInteger, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class WalletProfile(Base):
+    """Measured behaviour of one wallet on one chain (yonixalpha_core.
+    wallet_profiles). Metrics, descriptive labels and a configurable score
+    with its components; never a ranking or a "best wallet" label."""
+
+    __tablename__ = "wallet_profiles"
+
+    chain: Mapped[str] = mapped_column(String(16), primary_key=True)
+    wallet: Mapped[str] = mapped_column(String(64), primary_key=True)
+    metrics: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    labels: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
+    score_detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    trades: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    first_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class CopyTarget(Base):
+    """A wallet the operator chose to copy on one chain, with its mode
+    (MIRROR / BUY_ONLY / NOTIFY) and limits. Copying never bypasses the
+    gate / safety checks: a target's buy is a candidate, not an order."""
+
+    __tablename__ = "copy_targets"
+    __table_args__ = (UniqueConstraint("chain", "wallet", name="uq_copy_targets_chain_wallet"),)
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    chain: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    wallet: Mapped[str] = mapped_column(String(64), nullable=False)
+    label: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False, default="NOTIFY")
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    settings: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    created_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class CopyEvent(Base):
+    """One observed trade of a copy target and what the copy engine did with
+    it (COPIED / SKIPPED / NOTIFIED / FAILED), with the reason and the
+    latency of each stage. (target_id, source_event_id) is unique, so a
+    restart never copies the same trade twice."""
+
+    __tablename__ = "copy_events"
+    __table_args__ = (UniqueConstraint("target_id", "source_event_id", name="uq_copy_events_target_source"),
+                      Index("ix_copy_events_target_at", "target_id", "detected_at"))
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    target_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("copy_targets.id", ondelete="CASCADE"), nullable=False)
+    chain: Mapped[str] = mapped_column(String(16), nullable=False)
+    wallet: Mapped[str] = mapped_column(String(64), nullable=False)
+    token: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    side: Mapped[str] = mapped_column(String(4), nullable=False)  # BUY | SELL
+    source_event_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    target_token_amount: Mapped[Decimal] = mapped_column(Numeric(78, 0), nullable=False)
+    target_quote_amount: Mapped[Decimal] = mapped_column(Numeric(78, 0), nullable=False)
+    target_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decision: Mapped[str] = mapped_column(String(12), nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    latency_ms: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    position_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("paper_positions.id", ondelete="SET NULL"), nullable=True)
+
+
+class CopyPosition(Base):
+    """Links a copy paper position to its target and tracks the target's own
+    token balance from the buys the engine observed, so a partial sell by the
+    target is mirrored as the same fraction."""
+
+    __tablename__ = "copy_positions"
+
+    position_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("paper_positions.id", ondelete="CASCADE"), primary_key=True)
+    target_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("copy_targets.id", ondelete="CASCADE"), nullable=False, index=True)
+    chain: Mapped[str] = mapped_column(String(16), nullable=False)
+    token: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_tokens: Mapped[Decimal] = mapped_column(Numeric(78, 0), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
