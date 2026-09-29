@@ -348,3 +348,12 @@ async def test_positions_and_decisions_filter_by_strategy(app, client, auth_head
     assert r.json()["total"] == 2
     r = await client.get("/api/control/assessments?strategy=meta_muse", headers=auth_headers)
     assert r.json()["total"] == 1
+
+
+async def test_ml_readiness_reports_rules_only_on_an_empty_system(client, auth_headers):
+    r = (await client.get("/api/ml/readiness", headers=auth_headers)).json()
+    assert r["ml_contributing"] is False and r["states"][0] == "INSUFFICIENT_DATA"
+    names = {m["model"]: m for m in r["models"]}
+    assert set(names) == {"gate_solana_fresh", "gate_solana_momentum", "gate_solana_migration"}
+    assert all(m["state"] == "INSUFFICIENT_DATA" and m["samples"]["needed"] == 50 for m in names.values())
+    assert r["dataset"]["decisions"] == 0 and "never influence" in r["dataset"]["note"]

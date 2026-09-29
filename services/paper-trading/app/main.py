@@ -1,5 +1,7 @@
 import asyncio
+import json
 import signal
+import time
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -32,6 +34,10 @@ from app.pricing import latest_price
 log = get_logger("paper-trading.main")
 
 LOOP_INTERVAL_SECONDS = 15
+# Open-position management runs on its own, much faster cadence.
+POSITION_LOOP_SECONDS = 2.0
+RPC_PRICED_MIN_SECONDS = 5.0
+POSITION_LOOP_KEY = "yx:pm:last_pass"
 # Exit quotes for migrated positions only; conservative, see decision-engine.
 JUPITER_REQUESTS_PER_MINUTE = 20
 SERVICE_NAME = "paper-trading"
@@ -108,6 +114,39 @@ async def _manage_open_positions(session_factory, now: datetime, per_leg_cost_bp
     return closed
 
 
+async def _position_loop(session_factory, stop_event: asyncio.Event, redis, jupiter=None, venues=None, app_settings=None,
+                         rpc=None) -> None:
+    """Stops, take-profits, trailing stops and exit intelligence of open gate
+    positions (paper and LIVE), every POSITION_LOOP_SECONDS — separate from
+    the ledger / follow-up work, so a busy ledger never delays an exit.
+    Positions priced by RPC (PumpSwap pool) are re-priced at most every
+    RPC_PRICED_MIN_SECONDS each, to stay inside provider rate limits. The
+    time each pass took is kept in Redis (POSITION_LOOP_KEY) for the health
+    page and the latency report."""
+    while not stop_event.is_set():
+        started = time.monotonic()
+        now = datetime.now(timezone.utc)
+        try:
+            counts = await manage_gate_positions(session_factory, redis, jupiter, now, venues, app_settings, rpc,
+                                                 rpc_min_interval_seconds=RPC_PRICED_MIN_SECONDS)
+            if counts.get("failed") and await redis.set("yx:pm:failed_alert", "1", nx=True, ex=60):
+                await _record_system_event(session_factory, "gate_manage_failed", "error", counts)
+            elif counts["closed"]:
+                log.info("position_loop.closed", **counts)
+            await redis.set(POSITION_LOOP_KEY, json.dumps({
+                "at": now.isoformat(), "pass_ms": int((time.monotonic() - started) * 1000),
+                "interval_s": POSITION_LOOP_SECONDS, **counts}), ex=300)
+        except Exception as exc:  # noqa: BLE001
+            log.error("position_loop.failed", error=str(exc))
+            if await redis.set("yx:pm:loop_failed_alert", "1", nx=True, ex=60):
+                await _record_system_event(session_factory, "position_loop_failed", "error", {"error": str(exc)})
+        wait = max(0.2, POSITION_LOOP_SECONDS - (time.monotonic() - started))
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=wait)
+        except asyncio.TimeoutError:
+            pass
+
+
 async def _paper_trading_loop(
     session_factory, stop_event: asyncio.Event, per_leg_cost_bps: Decimal = Decimal(0), redis=None, jupiter=None,
     venues=None, app_settings=None, rpc=None,
@@ -123,12 +162,9 @@ async def _paper_trading_loop(
             log.error("loop.failed", error=str(exc))
             await _record_system_event(session_factory, "paper_trading_loop_failed", "error", {"error": str(exc)})
         if redis is not None:
+            # Open gate positions are managed by _position_loop (every
+            # POSITION_LOOP_SECONDS); this loop only does the slower work.
             try:
-                counts = await manage_gate_positions(session_factory, redis, jupiter, now, venues, app_settings, rpc)
-                if counts.get("failed"):
-                    await _record_system_event(session_factory, "gate_manage_failed", "error", counts)
-                elif counts["closed"]:
-                    log.info("gate_loop.completed", **counts)
                 async with session_factory() as session:
                     await track_outcomes(session, redis, now)
                 async with session_factory() as session:
@@ -177,6 +213,7 @@ async def run() -> None:
         await asyncio.gather(
             _paper_trading_loop(session_factory, stop_event, settings.PAPER_TRADING_PER_LEG_COST_BPS, redis, jupiter,
                                 venues, settings, rpc),
+            _position_loop(session_factory, stop_event, redis, jupiter, venues, settings, rpc),
             live_worker_loop(session_factory, redis, settings, rpc, http_client, stop_event, jupiter=jupiter),
             heartbeat_loop(settings, "paper-trading", stop_event, lambda: {"venues": venue_health_snapshot()}),
             run_watcher("paper-trading", settings, session_factory, stop_event, rpc=rpc, redis=redis),

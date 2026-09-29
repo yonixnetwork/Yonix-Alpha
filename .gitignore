@@ -54,3 +54,4 @@ logs/
 
 # Alembic local sqlite fallback (dev only, never used in prod)
 *.sqlite3
+dump.rdb

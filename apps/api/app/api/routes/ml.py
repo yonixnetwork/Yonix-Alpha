@@ -101,6 +101,25 @@ async def review(db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_
     return out
 
 
+@router.get("/readiness")
+async def readiness(db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
+                    _: str = Depends(get_current_username)) -> dict:
+    """ML readiness lifecycle per Solana decision model, whether ML touches
+    any decision right now (and why not), and what the learning dataset
+    holds. Read-only."""
+    from yonixalpha_core.ml import readiness as rd
+    from yonixalpha_core.safety.store import load_settings
+
+    engines = ("solana_fresh", "solana_momentum", "solana_migration")
+    conf = {}
+    for e in engines:
+        s, _meta = await load_settings(db, e)
+        conf[e] = s.min_ml_confidence
+    models = [m for m in await rd.model_readiness(db, redis, conf) if set(m["engines"]) & set(engines)]
+    return jsonable({"models": models, "dataset": await rd.dataset_overview(db), "states": list(rd.STATES),
+                     "ml_contributing": any(m["contributing"] for m in models)})
+
+
 @router.post("/models/{model_id}/promote")
 async def promote(model_id: UUID, body: PromoteIn, request: Request, db: AsyncSession = Depends(get_db),
                   redis: Redis = Depends(get_redis), username: str = Depends(get_current_username)) -> dict:

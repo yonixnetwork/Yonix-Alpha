@@ -227,8 +227,24 @@ async def _note_migration(session, p: PaperPosition, source: str, now: datetime)
     log.info("gate_manage.position_migrated", position_id=str(p.id), mint=p.asset_id, route=p.execution_route)
 
 
+def rpc_priced(p: PaperPosition) -> bool:
+    """Priced from the PumpSwap pool over RPC (not from the stream in Redis)."""
+    venue = (p.plan or {}).get("venue") or {}
+    return venue.get("type") == "pumpswap_pool" or p.lifecycle == "MIGRATED"
+
+
+def due(p: PaperPosition, now: datetime, rpc_min_interval_seconds: float) -> bool:
+    """RPC-priced positions are re-priced at most every
+    rpc_min_interval_seconds; stream-priced ones every pass. An exit the
+    operator requested is always due."""
+    if rpc_min_interval_seconds <= 0 or p.exit_requested or not rpc_priced(p) or p.last_marked_at is None:
+        return True
+    return (now - p.last_marked_at).total_seconds() >= rpc_min_interval_seconds
+
+
 async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterClient | None, now: datetime,
-                                venues: dict | None = None, app_settings=None, rpc=None) -> dict[str, int]:
+                                venues: dict | None = None, app_settings=None, rpc=None,
+                                rpc_min_interval_seconds: float = 0) -> dict[str, int]:
     counts = {"managed": 0, "closed": 0, "unpriced": 0}
     rates = None  # paper execution failure rates, loaded once per pass when needed
     async with session_factory() as session:
@@ -249,11 +265,18 @@ async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterC
                 p = await session.get(PaperPosition, pid)
                 if p is None or p.status != "open":
                     continue
+                if not due(p, now, rpc_min_interval_seconds) or (
+                        rpc_min_interval_seconds > 0 and not p.exit_requested and rpc_priced(p)
+                        and await redis.exists(f"yx:pm:unpriced:{pid}")):
+                    counts["skipped_not_due"] = counts.get("skipped_not_due", 0) + 1
+                    continue
                 ctx: dict = {}
                 price, model, exit_cost, source = await price_position(redis, jupiter, p, now, venues, rpc, ctx)
                 if price is None:
                     counts["unpriced"] += 1
                     log.warning("gate_manage.unpriced", position_id=str(pid), asset=p.asset_id, reason=source)
+                    if rpc_min_interval_seconds > 0 and rpc_priced(p):  # a failing pool read is not retried every pass
+                        await redis.set(f"yx:pm:unpriced:{pid}", "1", ex=max(1, int(rpc_min_interval_seconds)))
                     continue
                 await _note_migration(session, p, source, now)
                 extra = None if p.exit_requested or p.management_paused else await _exit_intelligence(
