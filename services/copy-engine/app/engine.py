@@ -406,11 +406,17 @@ class CopyEngine:
             if target.mode != "MIRROR":
                 await session.commit()
                 return o.skip("NOT_MIRRORED", f"{target.mode} target: exits follow our own risk plan")
-            if frac < s.solana_full_exit_threshold:
-                await session.commit()
-                return o.skip("PARTIAL_NOT_MIRRORED_ON_SOLANA",
-                              f"target sold {frac:.0%} (< {s.solana_full_exit_threshold:.0%}); Solana copies exit in full only")
             p = await session.get(PaperPosition, cp.position_id)
+            if frac < s.solana_full_exit_threshold:
+                # Sold by the Solana position loop on its next pass (same fraction of what we hold).
+                p.plan = ct.queue_partial_exit(p.plan, frac, self.now())
+                await add_timeline_event(session, "copy_partial_exit_requested", self.now(),
+                                         {"target": target.wallet, "target_sold_fraction": str(frac)}, position_id=p.id)
+                await session.commit()
+                o.executed_at = self.now()
+                o.position_id, o.decision = p.id, "COPIED"
+                o.reason = f"partial exit requested ({frac:.0%} of the copy)"
+                return o
             p.exit_requested = True  # the Solana position loop sells it on its next pass
             await add_timeline_event(session, "copy_exit_requested", self.now(), {"target": target.wallet,
                                                                                   "target_sold_fraction": str(frac)},

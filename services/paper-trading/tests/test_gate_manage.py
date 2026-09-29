@@ -111,3 +111,46 @@ async def test_evm_positions_are_left_to_data_evm(session_factory, redis_client)
         await session.commit()
     counts = await manage_gate_positions(session_factory, redis_client, None, now)
     assert counts["managed"] == 0 and counts["unpriced"] == 0 and not counts.get("failed")
+
+
+async def test_queued_copy_partial_sell_is_filled_once_at_the_curve_price(session_factory, redis_client):
+    """copy-engine queues a MIRROR target's partial sell on the position; the
+    Solana loop sells that fraction of what we hold on its next pass, once."""
+    from yonixalpha_core import copy_trading as ct
+    from yonixalpha_core.db.models import TradeTimelineEvent
+
+    curve, pid, _ = await open_gate_position(session_factory, redis_client)
+    async with session_factory() as s:
+        p = await s.get(PaperPosition, pid)
+        start = p.remaining_quantity if p.remaining_quantity is not None else p.quantity
+        p.plan = ct.queue_partial_exit(ct.queue_partial_exit(p.plan, Decimal("0.2"), NOW), Decimal("0.25"), NOW)
+        await s.commit()
+    later = NOW + timedelta(seconds=5)
+    counts = await manage_gate_positions(session_factory, redis_client, None, later)
+    assert counts["managed"] == 1 and counts["closed"] == 0
+    async with session_factory() as s:
+        p = await s.get(PaperPosition, pid)
+        kinds = [e.event_type for e in (await s.execute(select(TradeTimelineEvent).where(
+            TradeTimelineEvent.position_id == pid))).scalars()]
+    # 20 % then 25 % of the rest = 40 % of the position, sold once.
+    assert p.status == "open" and abs(p.remaining_quantity - start * Decimal("0.6")) <= start * Decimal("1e-12")
+    assert ct.pending_partial_exit(p.plan) is None and "copy_partial_exit_filled" in kinds
+    await manage_gate_positions(session_factory, redis_client, None, later + timedelta(seconds=5))
+    async with session_factory() as s:
+        assert abs((await s.get(PaperPosition, pid)).remaining_quantity - start * Decimal("0.6")) <= start * Decimal("1e-12")
+
+
+async def test_copy_partial_sell_waits_while_the_position_is_paused(session_factory, redis_client):
+    from yonixalpha_core import copy_trading as ct
+
+    curve, pid, _ = await open_gate_position(session_factory, redis_client)
+    async with session_factory() as s:
+        p = await s.get(PaperPosition, pid)
+        start = p.remaining_quantity if p.remaining_quantity is not None else p.quantity
+        p.plan, p.management_paused = ct.queue_partial_exit(p.plan, Decimal("0.5"), NOW), True
+        await s.commit()
+    await manage_gate_positions(session_factory, redis_client, None, NOW + timedelta(seconds=5))
+    async with session_factory() as s:
+        p = await s.get(PaperPosition, pid)
+    assert (p.remaining_quantity if p.remaining_quantity is not None else p.quantity) == start
+    assert ct.pending_partial_exit(p.plan) == Decimal("0.5")

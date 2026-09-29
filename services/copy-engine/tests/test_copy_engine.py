@@ -10,6 +10,7 @@ from decimal import Decimal
 
 from sqlalchemy import select
 
+from yonixalpha_core import copy_trading as ct
 from yonixalpha_core import kill_switch
 from yonixalpha_core.chains import verification
 from yonixalpha_core.chains.base import PAPER_REQUIRED
@@ -179,7 +180,7 @@ async def seed_stream(redis, clock, n=12):
     await redis.set(pump_stream.HEARTBEAT, clock().isoformat())
 
 
-async def test_solana_copy_needs_gate_approval_and_mirrors_full_exits(session_factory, redis_client):
+async def test_solana_copy_needs_gate_approval_and_mirrors_partial_and_full_exits(session_factory, redis_client):
     clock = Clock()
     eng = CopyEngine(session_factory, redis_client, {}, clock)
     async with session_factory() as s:
@@ -207,9 +208,14 @@ async def test_solana_copy_needs_gate_approval_and_mirrors_full_exits(session_fa
         assert p.engine == "copy_solana" and p.plan["venue"]["type"] == "pump_curve" and not p.exit_requested
 
     await redis_client.rpush(pump_stream.trades_key(MINT), json.dumps(
-        [int(clock().timestamp()), SOL_WHALE, 0, 5 * 10 ** 8, 5 * 10 ** 12, 40 * 10 ** 9, 800_000_000 * 10 ** 6]))  # sells 12.5%
+        [int(clock().timestamp()), SOL_WHALE, 0, 5 * 10 ** 8, 5 * 10 ** 12, 40 * 10 ** 9, 800_000_000 * 10 ** 6]))  # sells 25% (5 of 20)
     await eng.watch_solana()
-    assert (await events_of(session_factory))[-1].reason.startswith("PARTIAL_NOT_MIRRORED_ON_SOLANA")
+    ev = (await events_of(session_factory))[-1]
+    assert ev.decision == "COPIED" and ev.reason.startswith("partial exit requested"), ev.reason
+    async with session_factory() as s:
+        p = (await s.execute(select(PaperPosition))).scalar_one()
+        # The Solana position loop sells 25 % of our copy on its next pass.
+        assert ct.pending_partial_exit(p.plan) == Decimal("0.25") and not p.exit_requested
     await redis_client.rpush(pump_stream.trades_key(MINT), json.dumps(
         [int(clock().timestamp()) + 1, SOL_WHALE, 0, 3 * 10 ** 9, 30 * 10 ** 12, 40 * 10 ** 9, 800_000_000 * 10 ** 6]))
     clock.t += timedelta(seconds=2)

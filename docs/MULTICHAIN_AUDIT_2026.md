@@ -245,7 +245,7 @@ Every copied buy passes, in order:
 - **EVM (MIRROR):** a target sell is mirrored as the same fraction of the target's observed holding (partial sells included), at the executable sell quote. Copy positions (`evm_copy_<chain>`) are managed by `copy-engine` with the shared `apply_step`.
 - **Solana:** copy positions (`copy_solana`) use the Solana venue schema, so the existing Solana position loop manages them: curve, PumpSwap after migration, exit intelligence, stops and take-profits.
   - A target sell of at least 50 % of its holding requests a full exit.
-  - Smaller sells are recorded as `PARTIAL_NOT_MIRRORED_ON_SOLANA`. The Solana loop has no external partial-exit hook, and adding one to the working Solana path was out of scope.
+  - A smaller sell is queued on the position (`copy_partial_exit` in its plan) and the Solana position loop sells that fraction of our copy on its next pass, at that pass's price, as an extra exit (the larger of it and an exit-intelligence REDUCE, never both). Several partial sells before the pass combine; a paused position keeps the request until it is resumed. Paper path only; the LIVE path is untouched.
 - A partial unique index blocks a second open copy position per (engine, token).
 
 **Latency stages** are recorded per event, and the API reports medians:
@@ -354,7 +354,7 @@ Column meanings:
 | Migration keeps position identity (12) | YES (same PaperPosition; venue route switched, `venue_switched` timeline event) | YES | NOT VERIFIED on EVM | `paper.manage_position` | — |
 | EVM safety / sellability, honeypot (13–16) | YES: executable buy+sell quote round trip, ERC-20 / proxy / owner checks, Honeypot.is as enrichment only; unavailable ≠ safe | YES | NOT VERIFIED | `chains/evm/safety.py` | Tax / max-tx reads depend on each token's contract; unknown values block automatic entries |
 | Wallet profiles, scoring, labels; no "best", no ranking (17–27) | YES | YES | NOT VERIFIED on real wallets | `wallet_profiles.py`, Smart Wallets page | Solana profiles come from `launch_buyers` only (a narrower view, stated per profile) |
-| Copy trading on 3 chains, modes, chase guard, partial sells, latency (28–32, 55–56) | YES, PAPER only | YES | NOT VERIFIED | `services/copy-engine`, Copy Trading page | Solana partial sells below 50 % are not mirrored (recorded as such); EVM LIVE copy is not implemented |
+| Copy trading on 3 chains, modes, chase guard, partial sells, latency (28–32, 55–56) | YES, PAPER only (partial sells mirrored on all 3 chains) | YES | NOT VERIFIED | `services/copy-engine`, Copy Trading page, `gate_manage._copy_partial_exit` | EVM LIVE copy is not implemented |
 | "Smart wallet bought → auto BUY" forbidden | YES: every copy passes the gate or EVM evidence, the risk planner and the chase guard | YES | — | copy-engine tests (no gate approval → no copy) | — |
 | Execution stages / latency (33–37) | YES (Solana existing; EVM paper stages) | YES | Solana VERIFIED earlier; EVM NOT VERIFIED | latency medians in `/api/copy/events` | — |
 | EVM LIVE execution (37) | **NO: NOT COMPLETE** | — | — | wallet status only (watch-only) | Needs a signer, nonce management, tx monitoring and a verified buy+sell per launchpad, explicitly authorized |

@@ -31,6 +31,7 @@ from redis.asyncio import Redis
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from yonixalpha_core import copy_trading as ct
 from yonixalpha_core import events, live_trading, paper_engine, paper_execution
 from yonixalpha_core.db.models import PaperAccount, PaperPosition, RiskAssessment
 from yonixalpha_core.exit_intel import ExitConfig, solana_exit_decision
@@ -181,6 +182,18 @@ async def _exit_intelligence(redis: Redis, p: PaperPosition, model, now: datetim
     return qty, f"exit_intel_{d.action.lower()}"
 
 
+def _copy_partial_exit(p: PaperPosition) -> tuple | None:
+    """A mirrored partial sell queued by copy-engine on a copy_solana paper
+    position: (quantity, reason) for apply_step, or None. Held while the
+    position is paused or already exiting in full."""
+    frac = ct.pending_partial_exit(p.plan)
+    if frac is None or p.exit_requested or p.management_paused:
+        return None
+    remaining = p.remaining_quantity if p.remaining_quantity is not None else p.quantity
+    qty = remaining * frac
+    return (qty, "copy_partial_sell") if qty > 0 else None
+
+
 async def _manage_live(session, redis: Redis, app_settings, p: PaperPosition, price, model, extra, now: datetime,
                        source: str) -> None:
     out = await live_trading.manage_live_position(session, p, price, model, now, extra)
@@ -279,6 +292,9 @@ async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterC
                     await _manage_live(session, redis, app_settings, p, price, model, extra, now, source)
                     counts["managed"] += 1
                     continue
+                copy_exit = _copy_partial_exit(p)
+                if copy_exit is not None and (extra is None or copy_exit[0] > extra[0]):
+                    extra = copy_exit  # the larger of exit intelligence and the mirrored sell, never both
                 if rates is None:
                     rates = await paper_execution.effective_rates(session)
                 if rates["exit_pct"] > 0 and p.exit_failures < MAX_SIMULATED_EXIT_FAILURES:
@@ -309,6 +325,11 @@ async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterC
                 )
                 if result.exits:
                     p.exit_failures = 0
+                if copy_exit is not None:
+                    p.plan = ct.clear_partial_exit(p.plan)
+                    await add_timeline_event(session, "copy_partial_exit_filled", now,
+                                             {"quantity": str(copy_exit[0]), "price": str(price),
+                                              "applied_as": extra[1] if extra else None}, position_id=p.id)
                 for _, reason in result.exits:
                     kind = NOTIFY_KIND.get(reason)
                     if kind:

@@ -14,9 +14,11 @@ Modes:
   NOTIFY    record + publish the signal, never trade
   BUY_ONLY  copy entries; exits come from our own risk plan
   MIRROR    copy entries and the target's sells: a partial sell is mirrored
-            as the same fraction of the target's observed holding (EVM);
-            on Solana a sell of at least `solana_full_exit_threshold` of the
-            holding closes the copy, a smaller one is recorded as not mirrored
+            as the same fraction of the target's observed holding. On Solana
+            a sell of at least `solana_full_exit_threshold` of the holding
+            closes the copy; a smaller one is queued on the position
+            (`queue_partial_exit`) and sold by the Solana position loop on
+            its next pass, at that pass's price
 
 Idempotency: (target_id, source_event_id) is unique in copy_events; the
 event row is inserted before anything is decided, so a restart can never
@@ -128,3 +130,30 @@ def latency(target_at: datetime, detected_at: datetime, analyzed_at: datetime | 
     return {"detection": ms(target_at, detected_at), "analysis": ms(detected_at, analyzed_at),
             "risk": ms(analyzed_at, planned_at), "execution": ms(planned_at, executed_at),
             "landing": "not applicable (paper)", "total": ms(target_at, last)}
+
+
+# --- Solana partial copy exits ----------------------------------------------------
+# The Solana position loop (services/paper-trading gate_manage) owns pricing and
+# fills for copy_solana positions, so a mirrored partial sell is queued on the
+# position's plan and applied there as an extra exit, like an exit-intelligence
+# REDUCE. Several partial sells before the next pass combine multiplicatively.
+PARTIAL_EXIT_KEY = "copy_partial_exit"
+
+
+def queue_partial_exit(plan: dict | None, fraction: Decimal, at: datetime) -> dict:
+    """The plan with `fraction` of the remaining quantity queued for sale."""
+    plan = dict(plan or {})
+    pending = Decimal(str((plan.get(PARTIAL_EXIT_KEY) or {}).get("fraction") or 0))
+    combined = 1 - (1 - pending) * (1 - min(max(fraction, Decimal(0)), Decimal(1)))
+    plan[PARTIAL_EXIT_KEY] = {"fraction": str(combined.quantize(Decimal("0.000001"))), "requested_at": at.isoformat()}
+    return plan
+
+
+def pending_partial_exit(plan: dict | None) -> Decimal | None:
+    raw = (plan or {}).get(PARTIAL_EXIT_KEY) or {}
+    frac = Decimal(str(raw["fraction"])) if raw.get("fraction") is not None else None
+    return frac if frac is not None and frac > 0 else None
+
+
+def clear_partial_exit(plan: dict | None) -> dict:
+    return {k: v for k, v in (plan or {}).items() if k != PARTIAL_EXIT_KEY}
