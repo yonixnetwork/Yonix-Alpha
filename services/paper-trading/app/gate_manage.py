@@ -82,7 +82,7 @@ async def price_position(redis: Redis, jupiter: JupiterClient | None, p: PaperPo
     decimals = venue.get("decimals")
     if decimals is None:
         return None, None, None, "token decimals unknown"
-    if venue.get("type") == "pump_curve":
+    if venue.get("type") == "pump_curve" and p.lifecycle != "MIGRATED":  # a migrated curve is priced from its pool
         hb = await pump_stream.heartbeat(redis)
         if hb is None or (now - hb).total_seconds() > MAX_STREAM_AGE_SECONDS:
             return None, None, None, "pump.fun stream stale"
