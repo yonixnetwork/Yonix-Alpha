@@ -38,7 +38,7 @@ async def _record_system_event(session_factory, event_type: str, severity: str, 
     if severity in ("error", "critical"):
         await send_telegram_alert(
             get_settings(),
-            f"⚠️ [engine-solana-discovery] {severity.upper()}: {event_type}" + (f"\n{detail}" if detail else ""),
+            f"[engine-solana-discovery] {severity.upper()}: {event_type}" + (f"\n{detail}" if detail else ""),
         )
 
 

@@ -31,7 +31,7 @@ async def _record_system_event(session_factory, event_type: str, severity: str, 
         await session.commit()
     if severity in ("error", "critical"):
         await send_telegram_alert(
-            get_settings(), f"⚠️ [{SERVICE_NAME}] {severity.upper()}: {event_type}" + (f"\n{detail}" if detail else "")
+            get_settings(), f"[{SERVICE_NAME}] {severity.upper()}: {event_type}" + (f"\n{detail}" if detail else "")
         )
 
 

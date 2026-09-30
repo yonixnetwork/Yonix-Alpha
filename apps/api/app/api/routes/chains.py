@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_username, get_db, get_redis
 from app.api.util import audit, jsonable
 from yonixalpha_core import events, kill_switch
-from yonixalpha_core.chains import controls, verification
+from yonixalpha_core.chains import activity, controls, verification
 from yonixalpha_core.chains.base import CHECKS, Chain
 from yonixalpha_core.chains.registry import CHAINS, LAUNCHPADS
 from yonixalpha_core.db.models import PaperPosition
@@ -39,7 +39,8 @@ async def _launchpads(db: AsyncSession, redis: Redis, chain: str | None) -> list
         if chain and spec.chain.value != chain:
             continue
         mode = controls.launchpad_mode(ctl, spec.key, spec.chain)
-        out.append({**spec.to_dict(), **await verification.status_for(db, redis, spec, mode)})
+        st = await verification.status_for(db, redis, spec, mode)
+        out.append({**spec.to_dict(), **st, **await activity.launchpad_activity(db, spec, mode, st)})
     return out
 
 
@@ -51,7 +52,8 @@ async def chains(db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_
     return jsonable({"chains": [{"chain": c.value, "name": s.name, "native_symbol": s.native_symbol,
                                  "account_model": s.account_model, "evm_chain_id": s.evm_chain_id, "explorer": s.explorer,
                                  "notes": s.notes, "enabled": ctl.get(f"chain:{c.value}", {}).get("enabled", True),
-                                 "launchpads": [{"key": lp["key"], "name": lp["name"], "status": lp["status"]}
+                                 "launchpads": [{"key": lp["key"], "name": lp["name"], "status": lp["status"],
+                                                 "activity_status": lp["activity_status"], "listed": lp["listed"]}
                                                 for lp in lps if lp["chain"] == c.value]}
                                 for c, s in CHAINS.items()]})
 
@@ -61,7 +63,10 @@ async def launchpads(chain: str | None = Query(None, pattern="^(solana|bsc|robin
                      redis: Redis = Depends(get_redis), _: str = Depends(get_current_username)) -> dict:
     return jsonable({"launchpads": await _launchpads(db, redis, chain), "checks": list(CHECKS),
                      "statuses": ["LIVE", "PAPER_ONLY", "DEGRADED", "UNVERIFIED", "DISABLED"],
-                     "note": "status is computed from recorded evidence on the real chain, never set by hand"})
+                     "activity_statuses": ["ACTIVE", "QUIET", "DEGRADED", "UNVERIFIED", "INACTIVE", "DISABLED"],
+                     "note": "status is computed from recorded evidence on the real chain, never set by hand; "
+                             "activity_status from launches / trades / migrations this system recorded "
+                             "(7 days without any = INACTIVE, listed under archived / inactive adapters)"})
 
 
 @router.get("/controls")

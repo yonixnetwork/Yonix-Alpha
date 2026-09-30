@@ -333,7 +333,7 @@ export default function LiveExecutionPage() {
                     <Money value={p.realized_pnl} currency="SOL" digits={6} />
                   </td>
                   <td className="muted">
-                    SL {p.stop_loss ?? "—"} · TP {(p.take_profits ?? []).map((tp, i) => `${(p.tp_hits ?? []).includes(i) ? "✓" : ""}${tp}`).join(", ") || "—"}
+                    SL {p.stop_loss ?? "—"} · TP {(p.take_profits ?? []).map((tp, i) => `${tp}${(p.tp_hits ?? []).includes(i) ? " (hit)" : ""}`).join(", ") || "—"}
                     {p.trailing_stop ? ` · trail ${p.trailing_stop}` : ""}
                   </td>
                   <td>
