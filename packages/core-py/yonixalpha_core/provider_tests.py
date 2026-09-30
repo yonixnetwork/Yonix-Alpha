@@ -23,7 +23,7 @@ from typing import Any, Awaitable, Callable
 
 import httpx
 
-from yonixalpha_core.redact import redact_url
+from yonixalpha_core.redact import redact_text, redact_url
 
 CONNECTED = "CONNECTED"
 AUTH_FAILED = "AUTHENTICATION FAILED"
@@ -234,24 +234,43 @@ async def test_provider(name: str, settings: Any, client: httpx.AsyncClient) -> 
             from yonixalpha_core.chains.base import Chain
             from yonixalpha_core.chains.registry import CHAINS
 
+            from yonixalpha_core.chains.registry import LAUNCHPADS
+
             spec = CHAINS[Chain(chain)]
             configured = [u.strip() for u in (getattr(settings, f"{chain.upper()}_RPC_URLS", None) or "").split(",") if u.strip()]
             urls = configured or list(spec.public_rpc)
-            results, ok = [], 0
+            # Discovery reads launchpad events with eth_getLogs, which many public
+            # nodes refuse while answering everything else (bsc-dataseed:
+            # "limit exceeded"; publicnode: HTTP 403). An endpoint is only useful
+            # for discovery if it serves logs, so that is tested too, over the
+            # last 100 blocks of one launchpad contract (a small answer).
+            probe = next((a for lp in LAUNCHPADS.values() if lp.chain == spec.chain for a in lp.contracts.values()), None)
+            results, ok, logs_ok = [], 0, 0
             for url in urls:
                 try:
                     cid = int(await _json_rpc(client, url, "eth_chainId"), 16)
                     if cid != spec.evm_chain_id:
                         raise _Result(INVALID, f"{redact_url(url)} answers for chain {cid}, expected {spec.evm_chain_id}")
                     head = int(await _json_rpc(client, url, "eth_blockNumber"), 16)
-                    results.append(f"{redact_url(url)} block {head}")
                     ok += 1
+                    logs = "logs not tested"
+                    if probe:
+                        try:
+                            await _json_rpc(client, url, "eth_getLogs", [{"address": probe, "fromBlock": hex(max(0, head - 99)),
+                                                                          "toBlock": hex(head)}])
+                            logs, logs_ok = "logs OK", logs_ok + 1
+                        except _Result as exc:
+                            logs = f"logs REFUSED ({exc.status}: {redact_text(str(exc.detail), [url])[:80]})"
+                    results.append(f"{redact_url(url)} block {head}, {logs}")
                 except _Result as exc:
                     if exc.status == INVALID:
                         raise
                     results.append(f"{redact_url(url)} {exc.status}")
             if not ok:
                 raise _Result(UNAVAILABLE, "; ".join(results))
+            if probe and not logs_ok:
+                raise _Result(UNAVAILABLE, "no endpoint serves eth_getLogs, so launchpad discovery cannot run; add an RPC "
+                                           "that serves logs: " + "; ".join(results))
             where = f"{len(configured)} configured" if configured else "none configured: tested the public endpoint(s)"
             return f"chain {spec.evm_chain_id} ({where}): " + "; ".join(results)
         return test

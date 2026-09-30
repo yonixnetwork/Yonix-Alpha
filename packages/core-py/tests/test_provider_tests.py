@@ -101,6 +101,24 @@ async def test_evm_rpc_checks_chain_id_and_redacts_keys():
     assert r["status"] == pt.CONNECTED and "none configured" in r["detail"]
     r = await run("bsc_rpc", s, lambda req: httpx.Response(429))
     assert r["status"] == pt.UNAVAILABLE and "RATE LIMITED" in r["detail"]
+    assert "logs OK" in (await run("bsc_rpc", s, node(56)))["detail"]
+
+
+async def test_evm_rpc_that_refuses_logs_is_not_reported_as_connected():
+    """bsc-dataseed answers eth_blockNumber but refuses every eth_getLogs, and
+    discovery cannot run on it: TEST CONNECTION must say so, not CONNECTED."""
+    import json as _j
+
+    def handler(req):
+        m = _j.loads(req.content)["method"]
+        if m == "eth_getLogs":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "error": {"code": -32005, "message": "limit exceeded"}})
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": hex(56 if m == "eth_chainId" else 777)})
+
+    s = settings(BSC_RPC_URLS="https://bsc.test/SECRETKEY123")
+    r = await run("bsc_rpc", s, handler)
+    assert r["status"] == pt.UNAVAILABLE and "eth_getLogs" in r["detail"] and "limit exceeded" in r["detail"]
+    assert "SECRETKEY123" not in str(r)
 
 
 async def test_honeypot_is_is_reported_as_enrichment():
