@@ -43,7 +43,7 @@ async def _record_failed_attempt(redis: Redis, username: str, settings: Settings
         # full lockout window.
         await send_telegram_alert(
             settings,
-            f"⚠️ Login lockout: '{username}' locked out for {LOCKOUT_SECONDS // 60}m "
+            f"Login lockout: '{username}' locked out for {LOCKOUT_SECONDS // 60}m "
             f"after {attempts} failed attempts from {ip or 'unknown IP'}",
         )
 

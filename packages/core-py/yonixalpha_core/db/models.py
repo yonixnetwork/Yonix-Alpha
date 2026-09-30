@@ -1,11 +1,12 @@
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -1112,6 +1113,27 @@ class LaunchpadCheck(Base):
     evidence: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     source: Mapped[str] = mapped_column(String(48), nullable=False)
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class LaunchpadActivity(Base):
+    """Daily activity rollup per launchpad (launches, trades, migrations,
+    volume), written by the discovery service in the same transaction as the
+    events it counts; only newly stored events are counted, so a re-scan
+    never double-counts. Survives evm_trades pruning."""
+
+    __tablename__ = "launchpad_activity"
+
+    chain: Mapped[str] = mapped_column(String(16), primary_key=True)
+    launchpad: Mapped[str] = mapped_column(String(32), primary_key=True)
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    launches: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    trades: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    migrations: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    volume: Mapped[Decimal] = mapped_column(Numeric(78, 0), nullable=False, default=0)
+    last_launch_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_trade_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_migration_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class EvmToken(Base):

@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from yonixalpha_core.chains import activity
 from yonixalpha_core.chains.base import TokenCategory
 from yonixalpha_core.chains.evm.launchpad import ScanResult
 from yonixalpha_core.chains.evm.settings import EvmTradingSettings
@@ -65,6 +66,7 @@ async def persist_scan(session: AsyncSession, adapter, res: ScanResult, now: dat
     advances the cursor to res.to_block. Caller commits."""
     chain, key = adapter.spec.chain.value, adapter.spec.key
     counts = {"launches": 0, "trades": 0, "migrations": 0}
+    acc = activity.Accumulator()
     for ln in res.launches:
         venue = {k: ln.extra[k] for k in VENUE_KEYS if ln.extra.get(k)}
         stmt = insert(EvmToken).values(
@@ -83,6 +85,8 @@ async def persist_scan(session: AsyncSession, adapter, res: ScanResult, now: dat
                   "category": stmt.excluded.category},
             where=EvmToken.created_block.is_(None)))
         counts["launches"] += r.rowcount or 0
+        if r.rowcount:
+            acc.launch(ln.created_at)
     for t in res.trades:
         await _ensure_token(session, chain, key, t.token, t.at)
         r = await session.execute(insert(EvmTrade).values(
@@ -90,6 +94,8 @@ async def persist_scan(session: AsyncSession, adapter, res: ScanResult, now: dat
             token_amount=t.token_amount, quote_amount=t.quote_amount, fee=t.fee, block=t.block, tx_hash=t.tx_hash,
             at=t.at, extra=_js(t.extra) or None).on_conflict_do_nothing(index_elements=["event_id"]))
         counts["trades"] += r.rowcount or 0
+        if r.rowcount:
+            acc.trade(t.at, t.quote_amount)
     for m in res.migrations:
         await _ensure_token(session, chain, key, m["token"], m.get("at") or now)
         row = await session.get(EvmToken, (chain, m["token"]))
@@ -100,6 +106,7 @@ async def persist_scan(session: AsyncSession, adapter, res: ScanResult, now: dat
             if m.get("pool"):
                 row.venue = {**(row.venue or {}), "pool": m["pool"]}
             counts["migrations"] += 1
+            acc.migration(row.migrated_at)
     for o in res.other:
         tok = o.get("token")
         if not tok:
@@ -119,6 +126,7 @@ async def persist_scan(session: AsyncSession, adapter, res: ScanResult, now: dat
             extra.setdefault("events", [])
             extra["events"] = (extra["events"] + [_js(o)])[-10:]
         row.extra = _js(extra)
+    await activity.record(session, chain, key, acc, now)
     await set_cursor(session, chain, key, res.to_block, now)
     return counts
 

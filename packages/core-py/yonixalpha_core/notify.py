@@ -82,7 +82,7 @@ async def alert_error(service: str, event: str, detail: dict | str | None = None
         _last_sent[key] = t
         more = _suppressed.pop(key, 0)
         body = scrub(str(detail))[:1500] if detail else ""
-        text = f"⚠️ [{service}] ERROR: {event}" + (f"\n{body}" if body else "") + (
+        text = f"[{service}] ERROR: {event}" + (f"\n{body}" if body else "") + (
             f"\n(+{more} more of the same in the last {ALERT_THROTTLE_SECONDS // 60} min)" if more else "")
         return await send_telegram_alert(settings, text)
     except Exception as exc:  # noqa: BLE001 - alerting must never take a service down

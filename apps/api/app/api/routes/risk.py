@@ -103,5 +103,5 @@ async def disengage_kill_switch(
     await kill_switch.disengage(redis)
     await _write_audit(db, username, _client_ip(request), "kill_switch_disengaged", {})
     log.warning("risk.kill_switch.disengaged", username=username)
-    await _alert(settings, f"✅ Kill switch disengaged by {username}")
+    await _alert(settings, f"Kill switch disengaged by {username}")
     return KillSwitchStatus(engaged=False, reason=None)

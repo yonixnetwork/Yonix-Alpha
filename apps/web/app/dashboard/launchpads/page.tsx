@@ -13,6 +13,13 @@ const STATUS_CLASS: Record<string, string> = {
   LIVE: "pill pill-ok", PAPER_ONLY: "pill pill-warn", DEGRADED: "pill pill-danger", UNVERIFIED: "pill pill-off", DISABLED: "pill pill-off",
 };
 const STATUS_LABEL: Record<string, string> = { PAPER_ONLY: "PAPER", LIVE: "LIVE", DEGRADED: "DEGRADED", UNVERIFIED: "UNVERIFIED", DISABLED: "DISABLED" };
+const ACTIVITY_CLASS: Record<string, string> = {
+  ACTIVE: "pill pill-ok", QUIET: "pill pill-warn", DEGRADED: "pill pill-danger", UNVERIFIED: "pill pill-off", INACTIVE: "pill pill-off", DISABLED: "pill pill-off",
+};
+const LIST_TABS: [string, string][] = [["listed", "Active"], ["archived", "Archived / inactive adapters"], ["all", "All"]];
+
+function n(v: number | null | undefined) { return v === null || v === undefined ? "not tracked" : v.toLocaleString(); }
+
 const SWITCH_LABEL: Record<string, string> = {
   new_entries: "New entries", sniper: "Sniper", copy: "Copy trading", "chain:solana": "Solana", "chain:bsc": "BSC", "chain:robinhood": "Robinhood Chain",
 };
@@ -72,8 +79,14 @@ function Controls() {
   );
 }
 
+function shown(lps: J[], list: string): J[] {
+  if (list === "all") return lps;
+  return lps.filter((lp) => (list === "listed" ? lp.listed : !lp.listed));
+}
+
 export default function LaunchpadsPage() {
   const [chain, setChain] = useState("");
+  const [list, setList] = useState("listed");
   const { data, error, loading, reload } = useApi<J>("/api/launchpads", chain ? { chain } : undefined, { refreshMs: 60000, reloadOn: ["controls.updated"] });
   const [msg, setMsg] = useState<string | null>(null);
   const setMode = async (key: string, mode: string) => {
@@ -89,13 +102,22 @@ export default function LaunchpadsPage() {
           <button key={v} role="tab" aria-selected={chain === v} className={chain === v ? "btn btn-sm" : "btn btn-ghost btn-sm"} onClick={() => setChain(v)}>{label}</button>
         ))}
       </div>
+      <div className="tabs" role="tablist" style={{ display: "flex", gap: 8, margin: "0 0 12px" }}>
+        {LIST_TABS.map(([v, label]) => (
+          <button key={v} role="tab" aria-selected={list === v} className={list === v ? "btn btn-sm" : "btn btn-ghost btn-sm"} onClick={() => setList(v)}>{label}</button>
+        ))}
+      </div>
+      <p className="muted small">Active lists launchpads with a launch, trade or migration recorded in the last 7 days. After 7 days without any
+        (and at least 7 days of monitoring) a launchpad moves to archived / inactive adapters; its adapter keeps scanning and it returns here when activity resumes.</p>
       <ErrorNotice error={error ?? msg} />
       {loading && !data && <Loading />}
-      {data && data.launchpads.length === 0 && <Empty>No launchpads on this chain.</Empty>}
-      {data?.launchpads.map((lp: J) => (
+      {data && shown(data.launchpads, list).length === 0 && <Empty>No launchpads in this list.</Empty>}
+      {data && shown(data.launchpads, list).map((lp: J) => (
         <Section key={lp.key} title={`${lp.name} · ${lp.chain.toUpperCase()}`}>
           <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-            <span className={STATUS_CLASS[lp.status] ?? "pill pill-off"}>{STATUS_LABEL[lp.status] ?? lp.status}</span>
+            <span className={ACTIVITY_CLASS[lp.activity_status] ?? "pill pill-off"} title="activity">{lp.activity_status}</span>
+            <span className="muted small">{lp.activity_why}</span>
+            <span className={STATUS_CLASS[lp.status] ?? "pill pill-off"} title="verification">{STATUS_LABEL[lp.status] ?? lp.status}</span>
             <span className="muted small">{lp.why}</span>
             <label className="small">Operator mode{" "}
               <select value={lp.operator_mode} disabled={!lp.active || !lp.supports_trading} onChange={(e) => setMode(lp.key, e.target.value)}>
@@ -112,6 +134,17 @@ export default function LaunchpadsPage() {
                 <tr><th>Safety</th><td>{lp.safety_model}</td><th>Events</th><td className="mono small">{lp.supported_events.join(", ")}</td></tr>
               </tbody>
             </table>
+          </div>
+          <div className="stat-grid">
+            <div className="stat"><div className="stat-label">Last launch</div><div className="stat-value small">{lp.last_launch ? formatDate(lp.last_launch) : "none recorded"}</div></div>
+            <div className="stat"><div className="stat-label">Last trade</div><div className="stat-value small">{lp.last_trade ? formatDate(lp.last_trade) : lp.trades_7d === null ? "not tracked" : "none recorded"}</div></div>
+            <div className="stat"><div className="stat-label">Last migration</div><div className="stat-value small">{lp.last_migration ? formatDate(lp.last_migration) : "none recorded"}</div></div>
+            <div className="stat"><div className="stat-label">Launches 7d</div><div className="stat-value small">{n(lp.launches_7d)}</div></div>
+            <div className="stat"><div className="stat-label">Trades 7d</div><div className="stat-value small">{n(lp.trades_7d)}</div></div>
+            <div className="stat"><div className="stat-label">Migrations 7d</div><div className="stat-value small">{n(lp.migrations_7d)}</div></div>
+            <div className="stat"><div className="stat-label">Volume 7d ({lp.quote_asset || "quote"})</div><div className="stat-value small">{lp.volume_7d === null ? "not tracked" : Number(lp.volume_7d).toLocaleString(undefined, { maximumFractionDigits: 2 })}</div></div>
+            <div className="stat"><div className="stat-label">Event monitor / buy / sell verified</div>
+              <div className="stat-value small">{[lp.event_monitor_verified, lp.buy_verified, lp.sell_verified].map((v: boolean) => (v ? "yes" : "no")).join(" / ")}</div></div>
           </div>
           <div className="stat-grid">
             {Object.entries(lp.checks as Record<string, J>).map(([c, v]) => (

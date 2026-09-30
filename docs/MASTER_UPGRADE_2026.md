@@ -1,0 +1,113 @@
+# Master multi-chain upgrade — audit and gap matrix (2026-09-30)
+
+Scope: the "MASTER MULTI-CHAIN TRADING, SNIPING, COPY-TRADING, WALLET
+INTELLIGENCE, ML & RELIABILITY UPGRADE" prompt (sections 0–84), audited
+against the code on `main` at 84d6b86 and the production evidence pasted from
+the server on 2026-09-30.
+
+Status words:
+
+| Word | Meaning |
+|---|---|
+| DONE | implemented and tested in code; production evidence where stated |
+| PARTIAL | part of the requirement exists; the gap is named |
+| MISSING | not implemented |
+| NOT VERIFIED | implemented, but not proven on the real chain / with a real transaction |
+
+Nothing here is LIVE VERIFIED on BSC or Robinhood Chain: no authorized EVM
+transaction has been sent. Solana live execution exists (Pump.fun / PumpSwap)
+and is unchanged by this upgrade.
+
+## 1. Production evidence already collected (2026-09-30)
+
+| Chain | Launchpad | Evidence (launchpad_verify, data-evm) |
+|---|---|---|
+| BSC | Four.meme | ACTIVE, DISCOVERY (807 launches / 1 h), EVENTS (1233 trades), QUOTE (buy+sell), LIQUIDITY PASS; discovery live, 730 trades / 30 min |
+| BSC | Flap | discovery live, 19,129 trades / 30 min; verify run hit an RPC timeout (retry added in 84d6b86) |
+| Robinhood | Pons V2 | ACTIVE, DISCOVERY (308), EVENTS (14,601), QUOTE, LIQUIDITY, MIGRATION_DETECTION PASS; 3,181 trades / 30 min |
+| Robinhood | Pons V1, NOXA, Odyssey curve / instant / reflection | ACTIVE PASS; DISCOVERY FAIL: 0 launches in 1 h, and Odyssey reflection 0 in 24 h (855k blocks). Inactive venue or wrong event set: undecided (M1 raw-log check) |
+| BSC / Robinhood | all | BUY, SELL, TX_MONITORING: NOT RUN (need a real authorized transaction) |
+
+RPC: BSC logs served only by bsc-rpc.publicnode.com (bsc-dataseed* refuse
+eth_getLogs); Robinhood has one public RPC that rate-limits (~1 req/s after
+pacing). Section 51/52's "do not use public RPC as the sole production path"
+is therefore **not met today** — a keyed provider is needed (Settings →
+Providers), see M7.
+
+## 2. Requirement matrix
+
+| § | Requirement | Status | Evidence / gap | Phase |
+|---|---|---|---|---|
+| 1 | Preserve working Solana / Pump.fun / PumpSwap execution | DONE | no change to `solana/live_exec.py`, PumpSwap or the Solana gate in this upgrade | — |
+| 2–3 | Research Jul–Sep 2026, repository records | PARTIAL | `MULTICHAIN_AUDIT_2026.md` §1, `PUMPFUN_EXECUTION_RESEARCH.md`, `SCANNER_INTELLIGENCE_2026.md`; the new repos in §7–12 not yet recorded | M9 |
+| 4 | Only Solana, BSC, Robinhood in the active UI | DONE | legacy futures/forex/grid removed (archive branch) | — |
+| 5 | Launchpad health: activity status, last launch/trade/migration, 7d counts, verified flags | DONE in code (M1), NOT VERIFIED in production yet | `chains/activity.py`, table `launchpad_activity` (migration 0024), rollup written in `evm/store.persist_scan`, `/api/launchpads`, Launchpads page; `tests/test_launchpad_activity.py`, `test_control_center` | M1 |
+| 6 | 7-day inactivity → INACTIVE, hidden from active filter, adapter kept, auto-reactivation | DONE in code (M1) | INACTIVE needs 7 days without activity AND 7 days of monitoring (else UNVERIFIED); Active / Archived tabs; discovery keeps scanning, so activity returns the venue to ACTIVE; Solana trade counts are "not tracked" (None), never 0 | M1 |
+| 7 | Solana launchpads beyond Pump.fun/PumpSwap (LetsBONK, LaunchLab, Meteora DBC, Bags, Moonshot, Jupiter Studio) | MISSING | registry has `pumpfun`, `pumpswap` only | M10 |
+| 8 | BSC: Four.meme, Flap verified; Genius.fun etc. researched | PARTIAL | Four.meme / Flap adapters, discovery live, read-only checks PASS; others not researched | M10 |
+| 9 | BSC mempool wallet copying | MISSING | copy engine reads confirmed trades only; no pending-tx stream | M8 |
+| 10 | Robinhood: Pons, NOXA, Odyssey | PARTIAL | adapters exist; only Pons V2 proven active | M1 |
+| 11 | Pons coordinated-launch safety (privileged / creator-linked / common-funder / simultaneous buyers) | MISSING on EVM (Solana has wallet graph, dump cluster, deployer intel) | | M5 |
+| 12 | Robinhood reference repos inspected | MISSING | | M9 |
+| 13 | Robinhood sequencer feed (+ delayed feed fallback), latency / gaps measured | MISSING | registry note only | M8 |
+| 14–17 | Observation state machine for every token on all chains, windows T0..T+60, expiry, stored | PARTIAL | Solana: `token_observations`, T+5..T+60 snapshots, outcomes ledger; EVM: tokens are categorised and entered directly, no OBSERVING/QUALIFIED/EXPIRED states | M6 |
+| 18–23 | Wallet performance model: 24H–180D windows, avg/median win and loss, profit factor, drawdown, FIFO ledger, INSUFFICIENT DATA | PARTIAL | `wallet_profiles.py`: trades, win rate (shrunk), realized PnL, hold time, early entry; missing: separate win/loss averages and medians, profit factor, drawdown, windows, FIFO lots, fees, explicit INSUFFICIENT DATA reasons | M3 |
+| 24 | Nansen / MadeOnSol enrichment | MISSING | | M11 |
+| 25–28 | Wallet discovery, validation gates, outlier test, regime test | PARTIAL | profiles scored from observed trades; no outlier / regime tests, no validation gates | M3 |
+| 29 | Copy BUY ONLY / SELL ONLY / BUY+SELL | PARTIAL | modes NOTIFY, BUY_ONLY, MIRROR (buy+sell); SELL ONLY missing | M4 |
+| 30–31 | Copy buy checks, chase guard; sell 20/50/100 % replication | DONE (paper) | `copy-engine`, partial sells on Solana (queued) and EVM | — |
+| 32 | Copy position link fields | PARTIAL | `copy_positions` has target / token / target_tokens; source tx, displacement, slippage, latency live in `copy_events` | M4 |
+| 33 | Copy latency stages on dashboard | PARTIAL | detection / analysis / risk / execution / total (ms); build / sign / submit / land are live-only (no live copy yet) | M4 |
+| 34–35 | Copy safety never overridden; paper copy with would-have-won / missed | PARTIAL | safety enforced; missed-trade / would-have-won outcome not recorded | M4 |
+| 36–44 | ML: wallet behaviour, mistake labels, frozen validation set, staged contribution, champion/challenger, no look-ahead, paper as training data | PARTIAL | Solana ML: multi-target shadow models, champion/challenger, labels, contribution 0 until validated, no-look-ahead audit; missing: wallet-behaviour labels (§37), EVM features, BUY/WAIT/REJECT/SELL/HOLD comparison (§41) | M12 |
+| 45 | Manual BUY/SELL on all chains | PARTIAL | Solana only (`manual_trade.py`); EVM manual paper missing | M13 |
+| 46–47 | Automatic-vs-manual sell diagnosis with stage-level evidence | PARTIAL | `solana/live_exec.py` records stages per order; no report comparing automatic and manual exits | **M2** |
+| 48–53 | Provider dashboard, roles, plan health / UPGRADE REQUIRED | PARTIAL | `rpc_providers` (Solana, encrypted, failover, TEST); EVM via `BSC_RPC_URLS` / `ROBINHOOD_RPC_URLS`; TEST CONNECTION checks eth_getLogs; no roles, no plan-capability table | M7 |
+| 54–55 | Token explorer all chains, explorer links per chain | PARTIAL | Solana token pages; EVM page lists tokens; link builder per chain not audited | M14 |
+| 56–58 | Balances, gas reserve, INSUFFICIENT GAS, unified wallet (Solana + EVM accounts) | PARTIAL | Solana live wallet panel; EVM wallet module (`chains/evm/wallet.py`) read-only; gas-reserve NO_TRADE not wired for EVM paper | M13 |
+| 59–61 | PnL always shown with colour, market cap $K/$M | PARTIAL | Solana positions show PnL; USD market cap done for Solana (G3); EVM positions page not audited | M14 |
+| 60 | NO EMOJIS | DONE (this phase) | alert prefixes and the live page tick mark removed | M0 |
+| 62–63 | 24/7 server-side workers | DONE | all engines are containers; dashboard is a viewer | — |
+| 64–66 | GitHub / provider update monitor with Telegram + System Health | MISSING | | M15 |
+| 67–70 | Multiple detection methods, source priority, NO_TRADE on provider failure | PARTIAL | NO_TRADE on unavailable data holds on both chains; single detection path per chain | M8 |
+| 71–75 | Paper trading all chains feeding ML | PARTIAL | Solana complete; EVM paper entries exist, not yet ML features | M12 |
+| 76–77 | Safety hierarchy, decision states EXECUTE / REDUCE_SIZE / WAIT / MANUAL_APPROVAL / REJECT / NO_TRADE | PARTIAL | Solana gate implements the hierarchy; decision words differ (PROMOTE/REJECT/...); MANUAL_APPROVAL not implemented | M6 |
+| 78 | Preserve historical data | DONE | migrations are additive only | — |
+| 79–81 | Test matrix, automatic-sell regression, 24/7 acceptance | PARTIAL | ~800 automated tests; automatic-sell regression suite (§80) missing | M2 |
+| 82–83 | Final requirement audit and report | this document, updated per phase | | every phase |
+
+## 3. Phase plan (smallest safe steps, evidence first)
+
+| Phase | Content | Why this order |
+|---|---|---|
+| M0 | this audit; emoji removal | cheap, required by §60 |
+| **M1** | Launchpad health + 7-day rule + raw-log check for the five quiet Robinhood adapters | the pasted evidence already shows five adapters with no activity; the dashboard must not present them as active |
+| **M2** | Automatic-vs-manual sell diagnosis from existing `execution_orders` data; regression suite | §46 says diagnose before changing execution; the data already exists |
+| M3 | Wallet P/L model: win/loss averages & medians, profit factor, drawdown, windows, outlier test, INSUFFICIENT DATA | the copy engine depends on it |
+| M4 | Copy SELL ONLY, position link fields, missed/would-have-won outcomes | |
+| M5 | Pons / EVM launch-window coordination checks | Pons is the most active Robinhood venue |
+| M6 | EVM observation state machine | |
+| M7 | Provider roles and plan-capability health | public RPCs are the current bottleneck |
+| M8 | Robinhood sequencer feed, BSC pending-tx evaluation | |
+| M9–M15 | research records, more launchpads, enrichment providers, ML extensions, EVM manual trading and gas, explorer/PnL UI audit, update monitor | |
+
+EVM live execution (signing, nonces, submission) stays off and locked until
+a launchpad is paper-verified and the operator explicitly authorizes a smoke
+test.
+
+## 4. M1 — launchpad health (2026-09-30)
+
+- `activity_status` per launchpad: ACTIVE (activity in 24 h), QUIET (in 7 d),
+  INACTIVE (none for 7 d after at least 7 d of monitoring), UNVERIFIED (no
+  activity yet, under 7 d of monitoring), DEGRADED (EVM discovery cursor
+  older than 15 min), DISABLED (registry inactive or operator OFF).
+- Separate from the verification status; neither replaces the other.
+- EVM activity comes from a daily rollup written in the same transaction as
+  the stored events; only newly inserted launches / trades / migrations are
+  counted, so re-scans after a restart do not double-count, and the rollup
+  survives the 14-day `evm_trades` pruning.
+- Solana: Pump.fun launches from `token_observations`, PumpSwap migrations
+  from `token_events`; Solana trades per venue are not stored and are shown
+  as "not tracked".
+- The rollup starts empty on deploy: a Robinhood venue with no activity shows
+  UNVERIFIED until 7 days of monitoring have passed, then INACTIVE.
