@@ -51,9 +51,9 @@ Providers), see M7.
 | 12 | Robinhood reference repos inspected | MISSING | | M9 |
 | 13 | Robinhood sequencer feed (+ delayed feed fallback), latency / gaps measured | MISSING | registry note only | M8 |
 | 14–17 | Observation state machine for every token on all chains, windows T0..T+60, expiry, stored | PARTIAL | Solana: `token_observations`, T+5..T+60 snapshots, outcomes ledger; EVM: tokens are categorised and entered directly, no OBSERVING/QUALIFIED/EXPIRED states | M6 |
-| 18–23 | Wallet performance model: 24H–180D windows, avg/median win and loss, profit factor, drawdown, FIFO ledger, INSUFFICIENT DATA | PARTIAL | `wallet_profiles.py`: trades, win rate (shrunk), realized PnL, hold time, early entry; missing: separate win/loss averages and medians, profit factor, drawdown, windows, FIFO lots, fees, explicit INSUFFICIENT DATA reasons | M3 |
+| 18–23 | Wallet performance model: 24H–180D windows, avg/median win and loss, profit factor, drawdown, FIFO ledger, INSUFFICIENT DATA | DONE in code for BSC / Robinhood (M3); Solana PARTIAL | `wallet_pnl.py` (FIFO lots, usually earns / usually loses, profit factor, drawdown, holds, best / worst), windows 24H / 7D (14D+ INSUFFICIENT DATA: 7-day profile history, 14-day trade retention); fees listed not subtracted (NOT VERIFIED per launchpad), gas not included; Solana profiles have no sells (launch_buyers) and say so | M3 |
 | 24 | Nansen / MadeOnSol enrichment | MISSING | | M11 |
-| 25–28 | Wallet discovery, validation gates, outlier test, regime test | PARTIAL | profiles scored from observed trades; no outlier / regime tests, no validation gates | M3 |
+| 25–28 | Wallet discovery, validation gates, outlier test, regime test | PARTIAL | outlier test DONE (with / without best and top 3 trades, dependence level); validation gates and regime test still MISSING | M3b |
 | 29 | Copy BUY ONLY / SELL ONLY / BUY+SELL | PARTIAL | modes NOTIFY, BUY_ONLY, MIRROR (buy+sell); SELL ONLY missing | M4 |
 | 30–31 | Copy buy checks, chase guard; sell 20/50/100 % replication | DONE (paper) | `copy-engine`, partial sells on Solana (queued) and EVM | — |
 | 32 | Copy position link fields | PARTIAL | `copy_positions` has target / token / target_tokens; source tx, displacement, slippage, latency live in `copy_events` | M4 |
@@ -168,3 +168,22 @@ reconciliation rows:
   `switch_to_pumpswap`), the retry keeps the same slippage, and a migrated
   curve position is priced from its pool, never from the stale curve
   (`gate_manage.price_position`). Tests: `test_exit_parity.py`.
+
+## 6. M3 — wallet profit and loss (2026-09-30)
+
+- `wallet_pnl.py`: FIFO cost basis per token; a closed trade is one token's
+  matched lots. Wins and losses are reported separately ("usually earns" /
+  "usually loses": average, median, % and largest), with win rate, realized
+  PnL, ROI, profit factor, max drawdown (cumulative realized PnL in exit
+  order), average / median hold and best / worst trade.
+- Outlier test (§27): total PnL with and without the best trade and the top
+  3 trades, the best trade's share of gains, and a dependence level.
+- Never shown as zero when missing (§23): fewer than 5 closed trades,
+  windows longer than the retained history, open holdings (not valued),
+  sells with no recorded buy (not counted as profit) and the fee / gas
+  limits are all named in `reasons` / `notes`.
+- Rebuild is bounded: the 2000 most active wallets per chain, their trades
+  loaded 100 wallets at a time (it used to load every trade of 7 days at
+  once; BSC records close to a million launchpad trades a day).
+- Smart Wallets page: a detail row per wallet with the P/L blocks and the
+  window table.

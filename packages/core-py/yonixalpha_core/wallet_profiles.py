@@ -28,10 +28,11 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Iterable
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from yonixalpha_core import wallet_pnl
 from yonixalpha_core.db.models import EvmToken, EvmTrade, LaunchBuyer, WalletProfile
 
 E18 = Decimal(10) ** 18
@@ -81,9 +82,11 @@ def score(m: dict[str, Any], cfg: ScoreConfig) -> tuple[float | None, dict[str, 
     return round(total / weights, 4), {"status": "SCORED", "components": comps, "weights": asdict(cfg)}
 
 
-def evm_metrics(trades: Iterable[Any], launch_at: dict[str, datetime], cfg: ScoreConfig) -> dict[str, Any]:
+def evm_metrics(trades: Iterable[Any], launch_at: dict[str, datetime], cfg: ScoreConfig,
+                now: datetime | None = None, history_days: float = 7) -> dict[str, Any]:
     """trades: one wallet's EvmTrade rows (any order). launch_at: token ->
-    observed launch time (only tokens whose launch was seen)."""
+    observed launch time (only tokens whose launch was seen). `pnl` is the
+    FIFO profit/loss profile (wallet_pnl) over the same trades."""
     rows = sorted(trades, key=lambda t: t.at)
     per: dict[str, dict[str, Any]] = defaultdict(lambda: {"bq": Decimal(0), "bt": Decimal(0), "sq": Decimal(0),
                                                           "st": Decimal(0), "first_buy": None, "last_sell": None})
@@ -115,7 +118,10 @@ def evm_metrics(trades: Iterable[Any], launch_at: dict[str, datetime], cfg: Scor
     early = sum(1 for tok, p in with_launch if (p["first_buy"] - launch_at[tok]).total_seconds() <= cfg.early_seconds)
     gaps = [(b.at - a.at).total_seconds() for a, b in zip(rows, rows[1:])]
     pnl = realized
+    ledger_in = [wallet_pnl.TradeIn(t.token, t.at, t.is_buy, Decimal(t.token_amount), Decimal(t.quote_amount) / E18,
+                                    Decimal(getattr(t, "fee", None) or 0) / E18) for t in rows]
     return {
+        "pnl": wallet_pnl.profile(ledger_in, now or (rows[-1].at if rows else datetime.now()), history_days),
         "trades": len(rows), "buys": sum(1 for t in rows if t.is_buy), "sells": sum(1 for t in rows if not t.is_buy),
         "tokens": len(per), "closed_tokens": closed, "wins": wins,
         "win_rate": round(wins / closed, 4) if closed else None, "realized_pnl": pnl,
@@ -136,6 +142,11 @@ def solana_metrics(rows: Iterable[LaunchBuyer], cfg: ScoreConfig) -> dict[str, A
     with_launch = [r for r in rows if r.launch_created_at]
     early = sum(1 for r in with_launch if (r.first_buy_at - r.launch_created_at).total_seconds() <= cfg.early_seconds)
     return {
+        "pnl": {"all": {"status": "INSUFFICIENT_DATA", "closed_trades": None, "reasons": [
+            "Solana profiles come from launch_buyers: the first buys of launches this system decided on. "
+            "Their sells are not recorded, so per-trade PnL, wins / losses and profit factor cannot be computed; "
+            "win rate below is the launch outcome (WIN / LOSS), not the wallet's own result"]},
+                "windows": {}, "notes": [], "cost_basis": None},
         "trades": len(rows), "buys": len(rows), "sells": None, "tokens": len({r.mint for r in rows}),
         "closed_tokens": len(resolved), "wins": wins, "win_rate": round(wins / len(resolved), 4) if resolved else None,
         "realized_pnl": Decimal(0), "volume": sum((r.sol_in for r in rows), Decimal(0)),
@@ -167,21 +178,32 @@ async def _upsert(session: AsyncSession, chain: str, wallet: str, m: dict[str, A
                                                      set_={k: stmt.excluded[k] for k in values if k not in ("chain", "wallet")}))
 
 
+MAX_WALLETS = 2000  # most active wallets profiled per chain and rebuild
+WALLET_BATCH = 100  # wallets whose trades are loaded at once (bounded memory)
+
+
 async def rebuild_evm(session: AsyncSession, chain: str, now: datetime, cfg: ScoreConfig = ScoreConfig(),
-                      days: int = 7, min_trades: int = 3) -> int:
+                      days: int = 7, min_trades: int = 3, max_wallets: int = MAX_WALLETS) -> int:
+    """Profiles the most active wallets. Trades are loaded per batch of
+    wallets, never the whole chain at once: BSC alone records close to a
+    million launchpad trades a day."""
     since = now - timedelta(days=days)
-    trades = (await session.execute(select(EvmTrade).where(EvmTrade.chain == chain, EvmTrade.at >= since))).scalars().all()
+    t = EvmTrade
+    wallets = [w for w, in (await session.execute(select(t.trader).where(t.chain == chain, t.at >= since)
+                                                   .group_by(t.trader).having(func.count() >= min_trades)
+                                                   .order_by(func.count().desc()).limit(max_wallets))).all()]
     launches = dict((await session.execute(select(EvmToken.token, EvmToken.created_at).where(
         EvmToken.chain == chain, EvmToken.created_block.is_not(None)))).all())
-    by_wallet: dict[str, list] = defaultdict(list)
-    for t in trades:
-        by_wallet[t.trader].append(t)
     n = 0
-    for wallet, rows in by_wallet.items():
-        if len(rows) < min_trades:
-            continue
-        await _upsert(session, chain, wallet, evm_metrics(rows, launches, cfg), "evm_trades", cfg, now)
-        n += 1
+    for i in range(0, len(wallets), WALLET_BATCH):
+        batch = wallets[i:i + WALLET_BATCH]
+        by_wallet: dict[str, list] = defaultdict(list)
+        for row in (await session.execute(select(t).where(t.chain == chain, t.at >= since, t.trader.in_(batch)))).scalars():
+            by_wallet[row.trader].append(row)
+        for wallet, rows in by_wallet.items():
+            await _upsert(session, chain, wallet, evm_metrics(rows, launches, cfg, now, days), "evm_trades", cfg, now)
+            n += 1
+        session.expunge_all()
     return n
 
 
