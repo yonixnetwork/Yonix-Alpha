@@ -46,6 +46,7 @@ from yonixalpha_core.chains.registry import LAUNCHPADS
 SOURCE = "launchpad_verify"
 PROBE_WEI = {"bsc": 10 ** 16, "robinhood": 2 * 10 ** 15}  # 0.01 BNB / 0.002 ETH
 NOT_RECORDED = ("SAFETY", "TX_MONITORING", "BUY", "SELL")
+RETRY_SECONDS = 15
 
 
 @dataclass
@@ -196,12 +197,20 @@ async def main(argv: list[str] | None = None) -> int:
             chain = LAUNCHPADS[key].chain.value
             rpc = rpcs.get(chain) or rpcs.setdefault(chain, make_rpc(chain, settings))
             print(f"== {LAUNCHPADS[key].name} ({chain})")
-            try:
-                fb, tb, bt = await window(rpc, args.hours, args.max_blocks)
-                print(f"   blocks {fb}..{tb} (~{bt:.2f}s per block, {args.hours}h max)")
-                results = await verify(adapter_for(key, rpc), fb, tb, PROBE_WEI[chain])
-            except (EvmRpcUnavailableError, EvmRpcError) as exc:
-                print(f"   RPC UNAVAILABLE: {exc}\n   nothing recorded (an unavailable RPC is not evidence)\n")
+            results = None
+            for attempt in (1, 2):  # a brief network blip (both BSC nodes timed out at once) gets one retry
+                try:
+                    fb, tb, bt = await window(rpc, args.hours, args.max_blocks)
+                    print(f"   blocks {fb}..{tb} (~{bt:.2f}s per block, {args.hours}h max)")
+                    results = await verify(adapter_for(key, rpc), fb, tb, PROBE_WEI[chain])
+                    break
+                except (EvmRpcUnavailableError, EvmRpcError) as exc:
+                    print(f"   RPC UNAVAILABLE: {exc}")
+                    if attempt == 1:
+                        print(f"   retrying in {RETRY_SECONDS}s")
+                        await asyncio.sleep(RETRY_SECONDS)
+            if results is None:
+                print("   nothing recorded (an unavailable RPC is not evidence)\n")
                 continue
             for r in results:
                 word = "PASS" if r.ok else "FAIL" if r.ok is False else "NOT RUN"

@@ -237,8 +237,18 @@ class EvmRpc:
         return int(await self.call("eth_blockNumber"), 16)
 
     async def get_block(self, number: int | str = "latest") -> dict[str, Any]:
+        """A block by number. Load-balanced public nodes (bsc-rpc.publicnode.com)
+        can answer null for a block another of their backends just reported
+        as the head (seen on the server as "'NoneType' object is not
+        subscriptable"): asked again shortly, and an explicit outage if the
+        block is still missing, never a None the caller trips on."""
         tag = hex(number) if isinstance(number, int) else number
-        return await self.call("eth_getBlockByNumber", [tag, False])
+        for attempt in range(3):
+            block = await self.call("eth_getBlockByNumber", [tag, False])
+            if block is not None:
+                return block
+            await asyncio.sleep(0.5 * (attempt + 1))
+        raise EvmRpcUnavailableError(f"{self.chain} RPC: block {number} not available yet")
 
     async def get_code(self, address: str) -> str:
         return await self.call("eth_getCode", [address, "latest"])
