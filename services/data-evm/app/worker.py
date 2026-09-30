@@ -16,6 +16,7 @@ from typing import Any
 from sqlalchemy import delete, or_, select
 from sqlalchemy.exc import IntegrityError
 
+from yonixalpha_core import copy_trading as ct
 from yonixalpha_core import events
 from yonixalpha_core.chains import verification
 from yonixalpha_core.chains.evm import paper, safety, store
@@ -24,6 +25,7 @@ from yonixalpha_core.chains.evm.rpc import EvmRpcUnavailableError
 from yonixalpha_core.db.models import EvmToken, EvmTrade, PaperPosition
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.notify import alert_error
+from yonixalpha_core.safety.store import add_timeline_event
 
 log = get_logger("data-evm.worker")
 SERVICE = "data-evm"
@@ -240,7 +242,16 @@ class ChainWorker:
                     if ad is None:
                         counts["unpriced"] += 1
                         continue
-                    r = await paper.manage_position(session, ad, p, now)
+                    queued = ct.pending_partial_exit(p.plan)  # a SELL_ONLY copy target sold this token
+                    extra = None
+                    if queued is not None:
+                        remaining = p.remaining_quantity if p.remaining_quantity is not None else p.quantity
+                        extra = (remaining * queued, "copy_sell")
+                    r = await paper.manage_position(session, ad, p, now, extra_exit=extra)
+                    if extra is not None and r["status"] != "UNPRICED":
+                        p.plan = ct.clear_partial_exit(p.plan)
+                        await add_timeline_event(session, "copy_partial_exit_filled", now,
+                                                 {"quantity": str(extra[0]), "fraction": str(queued)}, position_id=p.id)
                     await session.commit()
                 if r["status"] == "UNPRICED":
                     counts["unpriced"] += 1

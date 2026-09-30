@@ -19,6 +19,14 @@ Modes:
             closes the copy; a smaller one is queued on the position
             (`queue_partial_exit`) and sold by the Solana position loop on
             its next pass, at that pass's price
+  SELL_ONLY the target's buys are never copied; its sells are mirrored onto
+            our OWN open PAPER positions in the same token (opened by our
+            strategies), as the same fraction of the target's observed
+            holding. With no observed buys of the target, the fraction is
+            unknown and nothing is sold (TARGET_HOLDING_UNKNOWN). LIVE
+            positions are never touched. The sell is queued on the position
+            and filled by the service that owns it (data-evm / the Solana
+            position loop), never by two services at once.
 
 Idempotency: (target_id, source_event_id) is unique in copy_events; the
 event row is inserted before anything is decided, so a restart can never
@@ -36,7 +44,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-MODES = ("NOTIFY", "BUY_ONLY", "MIRROR")
+MODES = ("NOTIFY", "BUY_ONLY", "MIRROR", "SELL_ONLY")
 SIZE_MODES = ("FIXED", "PROPORTIONAL")
 
 
@@ -113,6 +121,14 @@ def chase_guard(target_price: Decimal | None, our_price: Decimal | None, pct: De
     if move > pct:
         return f"our price is {move:.1%} above the target's ({pct:.0%} allowed)"
     return None
+
+
+def observed_fraction(target_sold: Decimal, held_before: Decimal) -> Decimal | None:
+    """SELL_ONLY: the share of its holding the target sold, or None when its
+    holding was never observed (never assume a full exit)."""
+    if held_before <= 0 or target_sold <= 0:
+        return None
+    return min(Decimal(1), target_sold / held_before)
 
 
 def sell_fraction(target_sold: Decimal, target_held: Decimal) -> Decimal:

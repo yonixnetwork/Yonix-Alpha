@@ -34,7 +34,7 @@ function AddTarget({ onDone }: { onDone: () => void }) {
       <label className="small" style={{ flex: "1 1 320px" }}>Wallet<br /><input value={f.wallet} onChange={set("wallet")} required placeholder="address" style={{ width: "100%" }} /></label>
       <label className="small">Label<br /><input value={f.label} onChange={set("label")} maxLength={64} /></label>
       <label className="small">Mode<br />
-        <select value={f.mode} onChange={set("mode")}><option value="NOTIFY">NOTIFY (signal only)</option><option value="BUY_ONLY">BUY ONLY</option><option value="MIRROR">MIRROR (buys and sells)</option></select>
+        <select value={f.mode} onChange={set("mode")}><option value="NOTIFY">NOTIFY (signal only)</option><option value="BUY_ONLY">BUY ONLY</option><option value="MIRROR">MIRROR (buys and sells)</option><option value="SELL_ONLY">SELL ONLY (exits of our own positions)</option></select>
       </label>
       <label className="small">Size (native, blank = default)<br /><input value={f.fixed_size} onChange={set("fixed_size")} inputMode="decimal" size={8} /></label>
       <label className="small">Chase guard<br /><input value={f.chase_guard_pct} onChange={set("chase_guard_pct")} inputMode="decimal" size={5} /></label>

@@ -32,14 +32,14 @@ class TargetIn(BaseModel):
     chain: str = Field(..., pattern=CHAIN)
     wallet: str = Field(..., min_length=32, max_length=64)
     label: str | None = Field(default=None, max_length=64)
-    mode: str = Field(default="NOTIFY", pattern="^(NOTIFY|BUY_ONLY|MIRROR)$")
+    mode: str = Field(default="NOTIFY", pattern="^(NOTIFY|BUY_ONLY|MIRROR|SELL_ONLY)$")
     enabled: bool = True
     settings: dict = Field(default_factory=dict)
 
 
 class TargetPatch(BaseModel):
     label: str | None = Field(default=None, max_length=64)
-    mode: str | None = Field(default=None, pattern="^(NOTIFY|BUY_ONLY|MIRROR)$")
+    mode: str | None = Field(default=None, pattern="^(NOTIFY|BUY_ONLY|MIRROR|SELL_ONLY)$")
     enabled: bool | None = None
     settings: dict | None = None
 
