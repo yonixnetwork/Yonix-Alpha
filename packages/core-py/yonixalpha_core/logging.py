@@ -42,6 +42,10 @@ def configure_logging(level: str = "INFO") -> None:
     root_logger = logging.getLogger()
     root_logger.handlers = [handler]
     root_logger.setLevel(getattr(logging, level.upper(), logging.INFO))
+    # One INFO line per HTTP request drowns the service's own events (and
+    # carries request URLs); failures still surface through our own logs.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 def get_logger(service: str) -> structlog.stdlib.BoundLogger:
