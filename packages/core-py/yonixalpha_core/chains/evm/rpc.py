@@ -105,6 +105,8 @@ def _capability_error(exc: EvmRpcError, method: str) -> bool:
     msg = str(exc).lower()
     if method in ("eth_call", "eth_estimateGas") or exc.code == 3 or "revert" in msg:
         return False
+    if method == "eth_getLogs" and any(k in msg for k in RANGE_ERRORS):
+        return False  # "too many results / range not supported": get_logs halves it, the node serves logs
     return any(k in msg for k in CAPABILITY_ERRORS)
 
 
@@ -206,6 +208,7 @@ class EvmRpc:
                         self._last_error_ep = ep
                         raise  # the request itself failed (e.g. reverted): same answer anywhere
                     ep.mark_unsupported(method)
+                    ep.last_error = self._redact(f"{method} not served: {exc}")[:200]
                     causes.append(f"{redact_url(ep.url)}: {method} not served ({self._redact(str(exc))[:80]})")
                 except _WrongChain as exc:
                     causes.append(f"{redact_url(ep.url)}: {exc}")

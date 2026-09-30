@@ -176,3 +176,30 @@ async def test_restart_restores_announced_contracts(session_factory, redis_clien
 async def _decision(session_factory):
     async with session_factory() as session:
         return (await session.get(EvmToken, ("bsc", TOKEN))).extra.get("entry_decision")
+
+
+async def test_discovery_far_behind_jumps_to_recent_blocks_and_says_so(session_factory, redis_client):
+    """Robinhood discovery fell ~10 hours behind after hours of HTTP 429 (seen
+    on the server): replaying that is useless for real-time entries. Past
+    max_lag_minutes the cursor jumps to the last backfill_minutes, and the
+    skipped range is reported, never silent. 0 disables the jump."""
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    node, lp = fourmeme_node(now)  # 1 s per block, head 1000; trades at blocks 700..970
+    s, errors = evm_settings.parse({"bsc": {"confirmations": 0, "max_lag_minutes": 5, "backfill_minutes": 2}})
+    assert not errors
+    async with session_factory() as session:
+        await store.set_cursor(session, "bsc", "fourmeme", 10, now)
+        await session.commit()
+    w = ChainWorker("bsc", lp.rpc, [lp], session_factory, redis_client)
+    out = (await w.discovery_pass(s, now))["fourmeme"]
+    assert out["skipped"] == {"from": 11, "to": 880, "blocks": 870, "lag_minutes": 16.5}
+    assert out["from"] == 881 and out["trades"] == 3  # blocks 910, 940, 970
+    async with session_factory() as session:
+        assert await store.get_cursor(session, "bsc", "fourmeme") == node.head
+
+    s0, _ = evm_settings.parse({"bsc": {"confirmations": 0, "max_lag_minutes": 0}})
+    async with session_factory() as session:
+        await store.set_cursor(session, "bsc", "fourmeme", 10, now)
+        await session.commit()
+    out = (await w.discovery_pass(s0, now))["fourmeme"]
+    assert "skipped" not in out and out["from"] == 11
