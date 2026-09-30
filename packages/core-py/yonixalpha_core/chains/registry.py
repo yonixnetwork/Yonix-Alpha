@@ -14,7 +14,9 @@ CHAINS: dict[Chain, ChainSpec] = {
     Chain.SOLANA: ChainSpec(Chain.SOLANA, "Solana", "SOL", "solana", explorer="https://solscan.io",
                             notes="Existing production path (pump stream, gate, PumpPortal / PumpSwap execution)."),
     Chain.BSC: ChainSpec(Chain.BSC, "BNB Smart Chain", "BNB", "evm", evm_chain_id=56, explorer="https://bscscan.com",
-                         public_rpc=("https://bsc-dataseed.binance.org", "https://bsc-rpc.publicnode.com"),
+                         # bsc-dataseed answers every eth_getLogs with "limit exceeded" (seen on
+                         # the server 2026-09-30); it stays as a fallback for everything else.
+                         public_rpc=("https://bsc-rpc.publicnode.com", "https://bsc-dataseed.binance.org"),
                          notes="BSC and BNB Smart Chain are the same network: one adapter."),
     Chain.ROBINHOOD: ChainSpec(Chain.ROBINHOOD, "Robinhood Chain", "ETH", "evm", evm_chain_id=4663,
                                explorer="https://robinhoodchain.blockscout.com",

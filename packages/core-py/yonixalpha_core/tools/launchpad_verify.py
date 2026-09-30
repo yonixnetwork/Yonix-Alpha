@@ -40,7 +40,7 @@ from typing import Any
 
 from yonixalpha_core.chains.evm import EVM_LAUNCHPADS, adapter_for
 from yonixalpha_core.chains.evm.launchpad import ScanResult
-from yonixalpha_core.chains.evm.rpc import EvmRpc, EvmRpcUnavailableError, make_rpc
+from yonixalpha_core.chains.evm.rpc import EvmRpc, EvmRpcError, EvmRpcUnavailableError, make_rpc
 from yonixalpha_core.chains.registry import LAUNCHPADS
 
 SOURCE = "launchpad_verify"
@@ -200,7 +200,7 @@ async def main(argv: list[str] | None = None) -> int:
                 fb, tb, bt = await window(rpc, args.hours, args.max_blocks)
                 print(f"   blocks {fb}..{tb} (~{bt:.2f}s per block, {args.hours}h max)")
                 results = await verify(adapter_for(key, rpc), fb, tb, PROBE_WEI[chain])
-            except EvmRpcUnavailableError as exc:
+            except (EvmRpcUnavailableError, EvmRpcError) as exc:
                 print(f"   RPC UNAVAILABLE: {exc}\n   nothing recorded (an unavailable RPC is not evidence)\n")
                 continue
             for r in results:

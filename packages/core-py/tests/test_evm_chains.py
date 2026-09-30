@@ -107,6 +107,46 @@ async def test_get_logs_halves_a_range_the_node_refuses():
     assert spans[:3] == [1000, 500, 250] and sum(s for s in spans if s <= 250) == 1000
 
 
+
+async def test_node_refusing_logs_at_any_range_is_skipped_for_the_next_endpoint():
+    """bsc-dataseed.binance.org answers every eth_getLogs with "limit exceeded",
+    even for one block (seen on the server). It must not end discovery: the
+    node is marked as not serving logs and the next endpoint is asked."""
+    asked = []
+
+    def handler(req):
+        body = json.loads(req.content)
+        rid = body["id"]
+        if body["method"] == "eth_chainId":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": rid, "result": hex(56)})
+        asked.append(req.url.host)
+        if req.url.host == "dataseed.example":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": rid,
+                                             "error": {"code": -32005, "message": "limit exceeded"}})
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": rid, "result": [{"logIndex": "0x0"}]})
+
+    rpc = EvmRpc("bsc", 56, ["https://dataseed.example", "https://publicnode.example"],
+                 client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    assert await rpc.get_logs([TOKEN], [[]], 0, 99, max_span=100) == [{"logIndex": "0x0"}]
+    ep = rpc.health()["endpoints"][0]
+    assert ep["unsupported_methods"] == ["eth_getLogs"] and "one block" in ep["last_error"]
+    asked.clear()
+    assert await rpc.get_logs([TOKEN], [[]], 100, 199, max_span=100) == [{"logIndex": "0x0"}]
+    assert asked == ["publicnode.example"]
+
+
+async def test_no_endpoint_serving_logs_is_an_explicit_outage():
+    def handler(req):
+        body = json.loads(req.content)
+        if body["method"] == "eth_chainId":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": hex(56)})
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"],
+                                         "error": {"code": -32005, "message": "limit exceeded"}})
+
+    rpc = EvmRpc("bsc", 56, ["https://only.example"], client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    with pytest.raises(EvmRpcUnavailableError, match="eth_getLogs"):
+        await rpc.get_logs([TOKEN], [[]], 0, 9, max_span=10)
+
 # --- Four.meme ------------------------------------------------------------------------------------
 
 def four_info(quote=ZERO_ADDRESS, liquidity_added=False):

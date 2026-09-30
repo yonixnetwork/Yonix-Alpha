@@ -96,6 +96,7 @@ class EvmRpc:
         self._client = client or httpx.AsyncClient(timeout=timeout)
         self._own_client = client is None
         self._id = 0
+        self._last_error_ep: _Endpoint | None = None  # the endpoint that answered the last EvmRpcError
 
     async def aclose(self) -> None:
         if self._own_client:
@@ -154,6 +155,7 @@ class EvmRpc:
             except EvmRpcError as exc:
                 ep.ok += 1  # the endpoint works
                 if not _capability_error(exc, method):
+                    self._last_error_ep = ep
                     raise  # the request itself failed (e.g. reverted): same answer anywhere
                 ep.unsupported.add(method)
                 causes.append(f"{redact_url(ep.url)}: {method} not served ({self._redact(str(exc))[:80]})")
@@ -211,7 +213,10 @@ class EvmRpc:
                        *, max_span: int = 2000) -> list[dict[str, Any]]:
         """eth_getLogs over [from_block, to_block] in chunks of at most
         `max_span` blocks; a chunk the node refuses as too large is halved
-        until it is accepted (down to one block)."""
+        until it is accepted. A node that refuses even a single block (some
+        public nodes answer every eth_getLogs with "limit exceeded", e.g.
+        bsc-dataseed.binance.org) does not serve logs: it is marked so and
+        the next endpoint is asked, from the full span again."""
         out: list[dict[str, Any]] = []
         start = from_block
         span = max(1, max_span)
@@ -223,9 +228,16 @@ class EvmRpc:
                     flt["address"] = addresses
                 logs = await self.call("eth_getLogs", [flt])
             except EvmRpcError as exc:
-                if span > 1 and any(k in str(exc).lower() for k in RANGE_ERRORS):
-                    span = max(1, span // 2)
-                    continue
+                if any(k in str(exc).lower() for k in RANGE_ERRORS):
+                    if span > 1:
+                        span = max(1, span // 2)
+                        continue
+                    ep = self._last_error_ep
+                    if ep is not None and "eth_getLogs" not in ep.unsupported:
+                        ep.unsupported.add("eth_getLogs")
+                        ep.last_error = self._redact(f"eth_getLogs refused even for one block: {exc}")[:200]
+                        span = max(1, max_span)
+                        continue
                 raise
             out.extend(logs or [])
             start = end + 1
