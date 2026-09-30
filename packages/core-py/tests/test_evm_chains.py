@@ -190,10 +190,33 @@ async def test_a_long_429_is_still_an_immediate_explicit_outage():
         await rpc.block_number()
 
 
-async def test_http_403_for_logs_skips_only_logs_on_that_node_and_expires():
-    """bsc-rpc.publicnode.com answered eth_blockNumber / eth_getBlockByNumber
-    but HTTP 403 for eth_getLogs (seen on the server). Only eth_getLogs is
-    skipped there, for a limited time; the node keeps serving the rest."""
+async def test_http_403_for_a_large_log_range_is_halved_not_a_dead_node():
+    """bsc-rpc.publicnode.com answered HTTP 403 to the service's 2000-block
+    eth_getLogs, yet served 10 / 100 / 1000-block requests from
+    tools/evm_rpc_probe (seen on the server). A 403 for logs from a node that
+    answers other methods is first treated as "range too large"."""
+    spans = []
+
+    def handler(req):
+        body = json.loads(req.content)
+        if body["method"] == "eth_chainId":
+            return _ok(body, hex(56))
+        if body["method"] == "eth_blockNumber":
+            return _ok(body, hex(7))
+        f = body["params"][0]
+        span = int(f["toBlock"], 16) - int(f["fromBlock"], 16) + 1
+        spans.append(span)
+        return httpx.Response(403) if span > 1000 else _ok(body, [])
+
+    rpc = EvmRpc("bsc", 56, ["https://publicnode.example"], client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    assert await rpc.block_number() == 7
+    assert await rpc.get_logs([TOKEN], [[]], 0, 3999, max_span=2000) == []
+    assert spans[:2] == [2000, 1000] and sum(s for s in spans if s <= 1000) == 4000
+    ep = rpc.health()["endpoints"][0]
+    assert ep["state"] == "OK" and ep["unsupported_methods"] == []
+
+
+async def test_http_403_for_logs_at_any_range_skips_only_logs_on_that_node_and_expires():
     asked = []
 
     def handler(req):
@@ -209,7 +232,7 @@ async def test_http_403_for_logs_skips_only_logs_on_that_node_and_expires():
                  client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     assert await rpc.block_number() == 7
     assert await rpc.get_logs([TOKEN], [[]], 0, 9, max_span=10) == []
-    assert asked[-2:] == [("publicnode.example", "eth_getLogs"), ("logs.example", "eth_getLogs")]
+    assert asked[-1] == ("logs.example", "eth_getLogs")
     ep = rpc.health()["endpoints"][0]
     assert ep["state"] == "OK" and ep["unsupported_methods"] == ["eth_getLogs"] and "403" in ep["last_error"]
     asked.clear()

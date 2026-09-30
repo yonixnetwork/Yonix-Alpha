@@ -12,10 +12,13 @@
 - Requests to one endpoint are paced: every 429 doubles the gap between
   requests (up to 2 s) and every answer shrinks it again, so a public node
   that rate-limits is asked at the rate it accepts.
-- A method an endpoint refuses (JSON-RPC "method not found", eth_getLogs
-  refused even for one block, or HTTP 403 for eth_getLogs from a node that
-  answers other methods) is skipped on that endpoint for 30 minutes, then
-  asked again.
+- A method an endpoint refuses (JSON-RPC "method not found", or eth_getLogs
+  refused even for one block) is skipped on that endpoint for 30 minutes,
+  then asked again. HTTP 403 for eth_getLogs from a node that answers other
+  methods is treated like "range too large" first (bsc-rpc.publicnode.com
+  answered 403 to 2000-block requests from the service but served 1000-block
+  requests from tools/evm_rpc_probe): the range is halved, and only a node
+  that refuses a single block is skipped for logs.
 - A JSON-RPC error (e.g. "execution reverted") is an answer, not an
   endpoint failure: it is raised as EvmRpcError to the caller unchanged.
 - URLs embed API keys, so they only ever appear as scheme://host
@@ -114,7 +117,7 @@ class EvmRpc:
         self.chain = chain
         self.chain_id = chain_id
         self.endpoints = [_Endpoint(u) for u in dict.fromkeys(u.strip() for u in urls if u and u.strip())]
-        self._client = client or httpx.AsyncClient(timeout=timeout)
+        self._client = client or httpx.AsyncClient(timeout=timeout, headers={"user-agent": "yonixalpha-evm-rpc"})
         self._own_client = client is None
         self.cooldown_wait_s = cooldown_wait_s
         self._id = 0
@@ -141,7 +144,7 @@ class EvmRpc:
             raise _RateLimited(_retry_after(r))
         ep.min_gap = ep.min_gap * 0.97 if ep.min_gap > 0.01 else 0.0
         if r.status_code == 403 and method == "eth_getLogs" and ep.ok > 0:
-            raise _MethodRefused("HTTP 403 for eth_getLogs (the node answers other methods)")
+            raise EvmRpcError("HTTP 403 for eth_getLogs: request refused (block range too large?)", 403)
         r.raise_for_status()
         body = r.json()
         if isinstance(body, dict) and body.get("error"):
@@ -204,10 +207,6 @@ class EvmRpc:
                         raise  # the request itself failed (e.g. reverted): same answer anywhere
                     ep.mark_unsupported(method)
                     causes.append(f"{redact_url(ep.url)}: {method} not served ({self._redact(str(exc))[:80]})")
-                except _MethodRefused as exc:
-                    ep.mark_unsupported(method)
-                    ep.last_error = str(exc)
-                    causes.append(f"{redact_url(ep.url)}: {exc}")
                 except _WrongChain as exc:
                     causes.append(f"{redact_url(ep.url)}: {exc}")
                 except _RateLimited as exc:
@@ -318,10 +317,6 @@ class _RateLimited(Exception):
 
 class _WrongChain(Exception):
     pass
-
-
-class _MethodRefused(Exception):
-    """The endpoint refused this method over HTTP (not a JSON-RPC answer)."""
 
 
 def make_rpc(chain: str, settings: Any = None, *, client: httpx.AsyncClient | None = None) -> EvmRpc:
