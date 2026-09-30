@@ -208,3 +208,30 @@ reconciliation rows:
   block it because it only reduces exposure.
 - NOT VERIFIED in production yet: needs a SELL_ONLY target whose wallet
   sells a token we hold in paper.
+
+## 8. BSC event coverage check (2026-09-30, server)
+
+Every log the Four.meme and Flap contracts emitted over ~1500 blocks was
+counted by event type, and a closed block range was compared with the
+database:
+
+- Stored equals on chain: Four.meme 37/37 trades and 53/53 launches, Flap
+  2540/2540 trades and 82/82 launches; no `discovery_gap_skipped` in 24 h.
+- Undecoded events identified by their signature hash: Four.meme
+  `TokenPurchase2` / `TokenSale2` (one per trade, a second event of the same
+  trade); Flap `FlapTokenCirculatingSupplyChanged` / `FlapTokenProgressChanged`
+  (one per trade) and `TokenCurveSetV2` / `TokenDexSupplyThreshSet` /
+  `TokenVersionSet` (one per launch). None is a missed trade. A few Flap
+  events (one about as frequent as trades) remain unidentified; none matches
+  the trade or launch counts.
+- Missing: Flap graduation `LaunchedToDEX(token, pool, amount, eth)` was not
+  decoded (graduations were only found by polling getTokenV8Safe, so the
+  activity rollup showed 0 Flap migrations). Now decoded as a migration;
+  layout confirmed from a real log (all fields in data; 200M tokens and
+  ~89.29 BNB per graduation) and covered by a test built from that log.
+- RPC: publicnode answered 403 even for single blocks right after a burst of
+  log requests, and the client then skipped eth_getLogs on it for 30
+  minutes (BSC's only public logs endpoint). A node that already served
+  logs now gets a short doubling cooldown instead.
+- Four.meme `LiquidityAdded` (graduation) was not seen in the sampled
+  windows: NOT VERIFIED whether Four.meme still emits it; to recheck.

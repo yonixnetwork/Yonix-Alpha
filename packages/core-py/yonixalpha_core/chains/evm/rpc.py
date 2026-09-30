@@ -18,7 +18,11 @@
   methods is treated like "range too large" first (bsc-rpc.publicnode.com
   answered 403 to 2000-block requests from the service but served 1000-block
   requests from tools/evm_rpc_probe): the range is halved, and only a node
-  that refuses a single block is skipped for logs.
+  that refuses a single block is skipped for logs. A node that has already
+  served logs and then answers 403 even for one block is throttling, not
+  refusing (seen on the server right after a burst of log requests to
+  publicnode): it cools down for a doubling backoff instead of losing logs
+  for 30 minutes.
 - A JSON-RPC error (e.g. "execution reverted") is an answer, not an
   endpoint failure: it is raised as EvmRpcError to the caller unchanged.
 - URLs embed API keys, so they only ever appear as scheme://host
@@ -84,6 +88,7 @@ class _Endpoint:
     extra: dict = field(default_factory=dict)
     unsupported: dict = field(default_factory=dict)  # method -> monotonic time until which it is not asked here
     min_gap: float = 0.0  # seconds between requests (grows on 429, shrinks on answers)
+    logs_served: int = 0  # eth_getLogs answers from this endpoint
     next_at: float = 0.0
 
     def refuses(self, method: str, now: float) -> bool:
@@ -124,6 +129,7 @@ class EvmRpc:
         self.cooldown_wait_s = cooldown_wait_s
         self._id = 0
         self._last_error_ep: _Endpoint | None = None  # the endpoint that answered the last EvmRpcError
+        self._last_ok_ep: _Endpoint | None = None  # the endpoint that answered the last successful call
 
     async def aclose(self) -> None:
         if self._own_client:
@@ -201,6 +207,7 @@ class EvmRpc:
                     ep.backoff = 0.0
                     ep.state = "OK"
                     ep.last_error = None
+                    self._last_ok_ep = ep
                     return result
                 except EvmRpcError as exc:
                     ep.ok += 1  # the endpoint works
@@ -298,12 +305,21 @@ class EvmRpc:
                         span = max(1, span // 2)
                         continue
                     ep = self._last_error_ep
+                    if ep is not None and getattr(exc, "code", None) == 403 and ep.logs_served > 0:
+                        # it served logs before: throttled, so a short cooldown, never a 30-minute skip
+                        ep.backoff = min(120.0, max(2.0, ep.backoff * 2))
+                        ep.cooldown_until = time.monotonic() + ep.backoff
+                        ep.state, ep.last_error = "COOLDOWN", "HTTP 403 for eth_getLogs after serving logs: throttled"
+                        span = max(1, max_span)
+                        continue
                     if ep is not None and not ep.refuses("eth_getLogs", time.monotonic()):
                         ep.mark_unsupported("eth_getLogs")
                         ep.last_error = self._redact(f"eth_getLogs refused even for one block: {exc}")[:200]
                         span = max(1, max_span)
                         continue
                 raise
+            if self._last_ok_ep is not None:
+                self._last_ok_ep.logs_served += 1
             out.extend(logs or [])
             start = end + 1
         return out

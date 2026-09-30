@@ -254,6 +254,37 @@ async def test_a_403_from_a_node_that_never_answered_is_an_endpoint_failure():
         await rpc.get_logs([TOKEN], [[]], 0, 9, max_span=10)
     assert rpc.health()["endpoints"][0]["state"] == "FAILING"
 
+
+async def test_a_403_from_a_node_that_already_served_logs_is_a_short_cooldown_not_a_30_minute_skip():
+    """Seen on the server: publicnode served a burst of log requests, then
+    answered 403 even for single blocks for a while. Our client took that as
+    "does not serve logs" and skipped logs on it for 30 minutes (BSC's only
+    logs endpoint). A node that served logs before is throttling: it cools
+    down briefly and is asked again."""
+    served, refusals = [], {"left": 3}
+
+    def handler(req):
+        body = json.loads(req.content)
+        if body["method"] == "eth_chainId":
+            return _ok(body, hex(56))
+        if body["method"] == "eth_blockNumber":
+            return _ok(body, hex(7))
+        if served and refusals["left"] > 0:  # throttled after the first answer
+            refusals["left"] -= 1
+            return httpx.Response(403)
+        served.append(body["params"][0]["fromBlock"])
+        return _ok(body, [])
+
+    rpc = EvmRpc("bsc", 56, ["https://publicnode.example", "https://dataseed.example"],
+                 client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    rpc.endpoints[1].mark_unsupported("eth_getLogs")  # like bsc-dataseed: never serves logs
+    assert await rpc.block_number() == 7
+    assert await rpc.get_logs([TOKEN], [[]], 0, 7, max_span=4) == []
+    ep = rpc.endpoints[0]
+    assert ep.unsupported.get("eth_getLogs", 0.0) == 0.0  # never skipped for 30 minutes
+    assert len(served) == 2 and ep.logs_served == 2 and refusals["left"] == 0
+
+
 # --- Four.meme ------------------------------------------------------------------------------------
 
 def four_info(quote=ZERO_ADDRESS, liquidity_added=False):
@@ -349,6 +380,31 @@ async def test_flap_quotes_state_and_untradable_status():
     assert not q.ok and "KILLED" in q.error
     node.on(lp.portal, "getTokenV8Safe(address)", flap_state(quote=FOREIGN))
     assert not (await lp.quote_sell(TOKEN, 5)).ok
+
+
+async def test_flap_graduation_event_from_a_real_bsc_log_is_a_migration():
+    """LaunchedToDEX exactly as the BSC Portal emitted it (server, 2026-09-30,
+    tx 0xb7aaace8...c2dc): every field in data, no indexed topic."""
+    from yonixalpha_core.chains.evm.flap import EVENTS as FLAP_EVENTS
+
+    node = Node(56)
+    lp = Flap(rpc_for(node))
+    real = ("0x00000000000000000000000041df9249b0c4e34eab6e9591e02d5d7a31547777"
+            "00000000000000000000000029bd8aa0d60206e835bf916b7c0ddd5ed2e9e7bb"
+            "000000000000000000000000000000000000000000a56fa5b99019a5c8000000"
+            "000000000000000000000000000000000000000000000004d71694157ae43235")
+    ev = FLAP_EVENTS.by_name["LaunchedToDEX"]
+    assert ev.topic == "0x6e4f47630b8745b8cacbd44f42a8a33e7eea7cc08ef22fc7630f4f385784ff7d"
+    node.logs = [{"address": lp.portal, "topics": [ev.topic], "data": real, "blockNumber": hex(12),
+                  "logIndex": hex(0), "transactionHash": TX}]
+    res = await lp.scan(0, 100)
+    assert not res.decode_errors and not res.trades
+    m = res.migrations[0]
+    assert m["token"].lower() == "0x41df9249b0c4e34eab6e9591e02d5d7a31547777"
+    assert m["pool"].lower() == "0x29bd8aa0d60206e835bf916b7c0ddd5ed2e9e7bb"
+    assert m["tokens_added"] == 200_000_000 * 10 ** 18
+    assert m["quote_added"] == 0x4d71694157ae43235 == 89_285_714_282_457_346_613  # ~89.29 BNB
+    assert m["evidence"] == "LaunchedToDEX event"
 
 
 # --- Pons V2 --------------------------------------------------------------------------------------
