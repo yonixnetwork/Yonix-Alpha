@@ -19,6 +19,7 @@ from yonixalpha_core.chains.evm.fourmeme import FourMeme
 from yonixalpha_core.db.models import (CopyEvent, CopyPosition, CopyTarget, EvmToken, EvmTrade, PaperPosition,
                                        RiskAssessment)
 from yonixalpha_core.solana import pump_stream
+from yonixalpha_core.solana.flow import Trade
 from yonixalpha_core.testing.evm_node import Node, enc, rpc_for
 
 from app.engine import CopyEngine
@@ -223,3 +224,72 @@ async def test_solana_copy_needs_gate_approval_and_mirrors_partial_and_full_exit
     assert (await events_of(session_factory))[-1].decision == "COPIED"
     async with session_factory() as s:
         assert (await s.execute(select(PaperPosition))).scalar_one().exit_requested is True
+
+
+async def own_position(sf, clock, asset: str, engine: str, mode: str = "PAPER") -> uuid.UUID:
+    async with sf() as s:
+        p = PaperPosition(symbol="OWN", provider="paper", side="LONG", entry_price=Decimal("0.000001"),
+                          quantity=Decimal(1000), remaining_quantity=Decimal(1000), entry_at=clock(), status="open",
+                          engine=engine, asset_id=asset, execution_mode=mode, plan={})
+        s.add(p)
+        await s.commit()
+        return p.id
+
+
+async def test_sell_only_target_queues_exits_on_our_own_paper_positions(session_factory, redis_client):
+    """SELL_ONLY (section 29): the target's buys are never copied; its sells
+    queue the same fraction of OUR open paper position in the token for the
+    owning service to fill. An unobserved holding sells nothing."""
+    clock = Clock()
+    _, lp = fourmeme()
+    eng = CopyEngine(session_factory, redis_client, {"bsc": {"fourmeme": lp}}, clock)
+    await seed_evm(session_factory, clock, mode="SELL_ONLY")
+    await evidence(session_factory, clock)
+    pid = await own_position(session_factory, clock, TOKEN, "evm_bsc")
+
+    await whale_trade(session_factory, clock, 1, True, 10 ** 24, 10 ** 18, ago=timedelta(seconds=10))
+    await eng.watch_evm("bsc")
+    ev = await event_for(session_factory, 1)
+    assert ev.decision == "SKIPPED" and ev.reason.startswith("SELL_ONLY_TARGET")
+    async with session_factory() as s:
+        assert len((await s.execute(select(PaperPosition))).scalars().all()) == 1  # no copy position opened
+
+    await whale_trade(session_factory, clock, 2, False, 25 * 10 ** 22, 10 ** 17)  # sells a quarter of what it held
+    await eng.watch_evm("bsc")
+    ev = await event_for(session_factory, 2)
+    assert ev.decision == "COPIED" and ev.detail["target_sold_fraction"] == "0.2500" and ev.position_id == pid
+    async with session_factory() as s:
+        p = await s.get(PaperPosition, pid)
+        assert ct.pending_partial_exit(p.plan) == Decimal("0.25") and p.status == "open"
+
+
+async def test_sell_only_never_guesses_an_unobserved_holding(session_factory, redis_client):
+    clock = Clock()
+    _, lp = fourmeme()
+    eng = CopyEngine(session_factory, redis_client, {"bsc": {"fourmeme": lp}}, clock)
+    await seed_evm(session_factory, clock, mode="SELL_ONLY")
+    pid = await own_position(session_factory, clock, TOKEN, "evm_bsc")
+    await whale_trade(session_factory, clock, 1, False, 10 ** 23, 10 ** 17)  # a sell, its buy never seen
+    await eng.watch_evm("bsc")
+    ev = await event_for(session_factory, 1)
+    assert ev.decision == "SKIPPED" and ev.reason.startswith("TARGET_HOLDING_UNKNOWN")
+    async with session_factory() as s:
+        assert ct.pending_partial_exit((await s.get(PaperPosition, pid)).plan) is None
+
+
+async def test_sell_only_on_solana_touches_paper_positions_never_live_ones(session_factory, redis_client):
+    clock = Clock()
+    eng = CopyEngine(session_factory, redis_client, {}, clock)
+    async with session_factory() as s:
+        s.add(CopyTarget(chain="solana", wallet=SOL_WHALE, mode="SELL_ONLY", enabled=True, settings={},
+                         created_at=clock() - timedelta(hours=1)))
+        await s.commit()
+    paper_id = await own_position(session_factory, clock, MINT, "solana_fresh")
+    live_id = await own_position(session_factory, clock, MINT, "solana_momentum", mode="LIVE")
+    buy = Trade(clock() - timedelta(seconds=20), SOL_WHALE, True, 10 ** 9, 4 * 10 ** 12, 0, 0)
+    sell = Trade(clock() - timedelta(seconds=2), SOL_WHALE, False, 10 ** 9, 10 ** 12, 0, 0)
+    o = await eng._solana_sell_only((await eng._targets("solana"))[0], MINT, sell, [buy, sell])
+    assert o.decision == "COPIED" and o.detail["target_sold_fraction"] == "0.2500"
+    async with session_factory() as s:
+        assert ct.pending_partial_exit((await s.get(PaperPosition, paper_id)).plan) == Decimal("0.25")
+        assert ct.pending_partial_exit((await s.get(PaperPosition, live_id)).plan) is None

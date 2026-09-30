@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 
@@ -164,7 +164,11 @@ class CopyEngine:
                 continue
             n += 1
             try:
-                o = await (self._evm_buy(target, t, detected) if t.is_buy else self._evm_sell(target, t))
+                if target.mode == "SELL_ONLY":
+                    o = Outcome().skip("SELL_ONLY_TARGET", "buys of a sell-only target are never copied") if t.is_buy \
+                        else await self._evm_sell_only(target, t)
+                else:
+                    o = await (self._evm_buy(target, t, detected) if t.is_buy else self._evm_sell(target, t))
             except Exception as exc:  # noqa: BLE001
                 o = Outcome()
                 o.decision, o.reason = "FAILED", f"{type(exc).__name__}: {str(exc)[:200]}"
@@ -264,6 +268,65 @@ class CopyEngine:
             o.decision, o.reason = "COPIED", f"sold {frac:.0%} of the copy"
         return o
 
+    # --- SELL_ONLY: the target's sells as exits of our own paper positions ---------------------
+
+    async def _queue_own_exits(self, session, target: CopyTarget, positions: list[PaperPosition], frac: Decimal,
+                               sold: Decimal, held: Decimal, o: Outcome) -> Outcome:
+        """Queues `frac` of each position for sale by the service that owns it."""
+        blocked = controls.blocked_by(await controls.load(session), Chain(target.chain), "copy")
+        if blocked:  # an exit never needs the kill switch off, but COPY TRADING OFF means off
+            return o.skip("TRADING_CONTROL_OFF", blocked)
+        if not positions:
+            return o.skip("NO_OWN_POSITION", "no open paper position of ours in this token")
+        o.analyzed_at = o.planned_at = self.now()
+        for p in positions:
+            p.plan = ct.queue_partial_exit(p.plan, frac, self.now())
+            await add_timeline_event(session, "copy_sell_only_requested", self.now(),
+                                     {"target": target.wallet, "target_sold_fraction": str(frac),
+                                      "target_sold": str(sold), "target_held_before": str(held)}, position_id=p.id)
+        await session.commit()
+        o.executed_at, o.position_id = self.now(), positions[0].id
+        o.decision = "COPIED"
+        o.reason = f"exit of {frac:.0%} queued on {len(positions)} own paper position(s)"
+        return o
+
+    async def _evm_sell_only(self, target: CopyTarget, t: EvmTrade) -> Outcome:
+        o = Outcome()
+        async with self.session_factory() as session:
+            e = EvmTrade
+            held = (await session.execute(select(func.coalesce(func.sum(
+                case((e.is_buy, e.token_amount), else_=-e.token_amount)), 0)).where(
+                e.chain == target.chain, func.lower(e.trader) == t.trader.lower(), e.token == t.token,
+                e.at < t.at))).scalar_one()
+            sold = Decimal(t.token_amount)
+            frac = ct.observed_fraction(sold, Decimal(held))
+            o.detail = {"target_sold": str(sold), "target_held_before": str(held)}
+            if frac is None:
+                return o.skip("TARGET_HOLDING_UNKNOWN", "the target's buys of this token were not observed: "
+                                                       "the sold fraction is unknown, nothing is sold")
+            o.detail["target_sold_fraction"] = str(frac.quantize(Decimal("0.0001")))
+            own = (await session.execute(select(PaperPosition).where(
+                PaperPosition.engine == paper.engine_for(target.chain), PaperPosition.asset_id == t.token,
+                PaperPosition.status == "open"))).scalars().all()
+            return await self._queue_own_exits(session, target, list(own), frac, sold, Decimal(held), o)
+
+    async def _solana_sell_only(self, target: CopyTarget, mint: str, t, trades: list) -> Outcome:
+        o = Outcome()
+        held = sum((Decimal(x.token_raw) if x.is_buy else -Decimal(x.token_raw))
+                   for x in trades if x.trader == target.wallet and x.at < t.at)
+        sold = Decimal(t.token_raw)
+        frac = ct.observed_fraction(sold, Decimal(held))
+        o.detail = {"target_sold": str(sold), "target_held_before": str(held)}
+        if frac is None:
+            return o.skip("TARGET_HOLDING_UNKNOWN", "the target's buys of this token were not observed: "
+                                                   "the sold fraction is unknown, nothing is sold")
+        o.detail["target_sold_fraction"] = str(frac.quantize(Decimal("0.0001")))
+        async with self.session_factory() as session:
+            own = (await session.execute(select(PaperPosition).where(
+                PaperPosition.asset_id == mint, PaperPosition.status == "open", PaperPosition.execution_mode == "PAPER",
+                PaperPosition.engine.is_not(None), PaperPosition.engine.not_like("evm\\_%")))).scalars().all()
+            return await self._queue_own_exits(session, target, list(own), frac, sold, Decimal(held), o)
+
     async def manage_evm(self, chain: str) -> dict[str, int]:
         counts = {"managed": 0, "closed": 0, "unpriced": 0}
         async with self.session_factory() as session:
@@ -312,7 +375,12 @@ class CopyEngine:
                     continue
                 n += 1
                 try:
-                    o = await (self._solana_buy(target, mint, t, trades, detected) if t.is_buy else self._solana_sell(target, mint, t))
+                    if target.mode == "SELL_ONLY":
+                        o = Outcome().skip("SELL_ONLY_TARGET", "buys of a sell-only target are never copied") if t.is_buy \
+                            else await self._solana_sell_only(target, mint, t, trades)
+                    else:
+                        o = await (self._solana_buy(target, mint, t, trades, detected) if t.is_buy
+                                   else self._solana_sell(target, mint, t))
                 except Exception as exc:  # noqa: BLE001
                     o = Outcome()
                     o.decision, o.reason = "FAILED", f"{type(exc).__name__}: {str(exc)[:200]}"

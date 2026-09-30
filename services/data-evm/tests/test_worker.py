@@ -119,6 +119,20 @@ async def test_pipeline_discovery_safety_entry_exit(session_factory, redis_clien
 
     r = await w.manage_pass(now)
     assert r["managed"] == 1 and r["closed"] == 0
+
+    # a SELL_ONLY copy target sold half of its holding: the copy engine queued
+    # half of this position; data-evm (which owns it) fills it on its next pass
+    from yonixalpha_core import copy_trading as ct
+    async with session_factory() as session:
+        p = (await session.execute(select(PaperPosition))).scalar_one()
+        before = p.remaining_quantity
+        p.plan = ct.queue_partial_exit(p.plan, Decimal("0.5"), now)
+        await session.commit()
+    r = await w.manage_pass(now)
+    async with session_factory() as session:
+        p = (await session.execute(select(PaperPosition))).scalar_one()
+        assert p.status == "open" and p.remaining_quantity == before / 2 and ct.pending_partial_exit(p.plan) is None
+
     set_quotes(node, lp, sell_back=Decimal("0.4"))  # the exit quote collapses below the stop
     r = await w.manage_pass(now)
     assert r["closed"] == 1

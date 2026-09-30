@@ -54,7 +54,7 @@ Providers), see M7.
 | 18–23 | Wallet performance model: 24H–180D windows, avg/median win and loss, profit factor, drawdown, FIFO ledger, INSUFFICIENT DATA | DONE in code for BSC / Robinhood (M3); Solana PARTIAL | `wallet_pnl.py` (FIFO lots, usually earns / usually loses, profit factor, drawdown, holds, best / worst), windows 24H / 7D (14D+ INSUFFICIENT DATA: 7-day profile history, 14-day trade retention); fees listed not subtracted (NOT VERIFIED per launchpad), gas not included; Solana profiles have no sells (launch_buyers) and say so | M3 |
 | 24 | Nansen / MadeOnSol enrichment | MISSING | | M11 |
 | 25–28 | Wallet discovery, validation gates, outlier test, regime test | PARTIAL | outlier test DONE (with / without best and top 3 trades, dependence level); validation gates and regime test still MISSING | M3b |
-| 29 | Copy BUY ONLY / SELL ONLY / BUY+SELL | PARTIAL | modes NOTIFY, BUY_ONLY, MIRROR (buy+sell); SELL ONLY missing | M4 |
+| 29 | Copy BUY ONLY / SELL ONLY / BUY+SELL | DONE (paper) | modes NOTIFY, BUY_ONLY, MIRROR (buy+sell), SELL_ONLY (M4); SELL ONLY exits PAPER positions only | M4 |
 | 30–31 | Copy buy checks, chase guard; sell 20/50/100 % replication | DONE (paper) | `copy-engine`, partial sells on Solana (queued) and EVM | — |
 | 32 | Copy position link fields | PARTIAL | `copy_positions` has target / token / target_tokens; source tx, displacement, slippage, latency live in `copy_events` | M4 |
 | 33 | Copy latency stages on dashboard | PARTIAL | detection / analysis / risk / execution / total (ms); build / sign / submit / land are live-only (no live copy yet) | M4 |
@@ -187,3 +187,24 @@ reconciliation rows:
   once; BSC records close to a million launchpad trades a day).
 - Smart Wallets page: a detail row per wallet with the P/L blocks and the
   window table.
+
+## 7. M4 — copy SELL ONLY (2026-09-30)
+
+- New mode `SELL_ONLY`: a target's buy is never copied (`SELL_ONLY_TARGET`).
+  When the target sells a token we already hold, the same fraction of our
+  own open position is queued for exit (a target selling 40% of its bag
+  queues 40% of ours; the fraction is capped at 100%).
+- The fraction needs the target's holding before the sell. EVM: the sum of
+  its recorded buys minus sells of that token; Solana: its trades in the
+  observed stream. If the holding was never observed (tokens received by
+  transfer, or bought before the retained history) nothing is guessed: the
+  event is skipped with `TARGET_HOLDING_UNKNOWN`.
+- The copy engine only queues the exit (plan key `copy_partial_exit`); the
+  service that owns the position fills it on its next management pass
+  through its normal exit path (data-evm `manage_pass` for EVM paper
+  positions), then clears the plan and records `copy_partial_exit_filled`.
+- PAPER only. LIVE positions are never selected by SELL ONLY; the copy
+  controls (`blocked_by(..., "copy")`) still apply; the kill switch does not
+  block it because it only reduces exposure.
+- NOT VERIFIED in production yet: needs a SELL_ONLY target whose wallet
+  sells a token we hold in paper.
