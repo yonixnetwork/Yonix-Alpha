@@ -5,7 +5,7 @@ eth_blockNumber but refuse eth_getLogs (seen on the server:
 bsc-dataseed.binance.org "limit exceeded", bsc-rpc.publicnode.com HTTP 403),
 so an endpoint is only useful for discovery if it serves logs. For each
 endpoint this checks eth_chainId, eth_blockNumber and eth_getLogs over the last
-10 / 100 / 1000 blocks of one launchpad contract.
+10 / 100 / 1000 / 2000 blocks of one launchpad contract.
 
 Endpoints tested: the configured ones (BSC_RPC_URLS / ROBINHOOD_RPC_URLS,
 printed redacted), the built-in public ones, and a few public endpoints listed
@@ -37,7 +37,7 @@ CANDIDATES = {
             "https://1rpc.io/bnb", "https://binance.llamarpc.com", "https://bsc.meowrpc.com"),
     "robinhood": (),
 }
-SPANS = (10, 100, 1000)
+SPANS = (10, 100, 1000, 2000)  # 2000: the span the service asks for
 
 
 async def _rpc(client: httpx.AsyncClient, url: str, method: str, params: list | None = None) -> Any:
