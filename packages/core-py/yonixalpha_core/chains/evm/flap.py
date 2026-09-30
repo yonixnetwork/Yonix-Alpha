@@ -4,6 +4,10 @@ All events come from the Portal. Quotes use Portal.quoteExactInput (a
 non-view function, simulated with eth_call exactly as the reference sniper
 does); native BNB is address(0). Token state and graduation come from
 getTokenV8Safe: status 1 = Tradable on the curve, 4 = DEX (graduated).
+Graduation is also read from the Portal's LaunchedToDEX(token, pool, amount,
+eth) event, all fields non-indexed (layout confirmed from real BSC logs on
+2026-09-30: 200M tokens and ~89.29 BNB added per graduation), so a migration
+is recorded when it happens instead of only when a token is polled.
 Only native-BNB quote tokens are supported in this phase.
 """
 
@@ -33,6 +37,7 @@ EVENTS = EventSet(
           ("version", "uint256")),
     event("TokenBought", *_TRADE),
     event("TokenSold", *_TRADE),
+    event("LaunchedToDEX", ("token", "address"), ("pool", "address"), ("amount", "uint256"), ("eth", "uint256")),
 )
 STATE_TYPES = "(uint8,uint256,uint256,uint256,uint8,uint256,uint256,uint256,uint256,address,bool,bytes32,uint256,uint256,address,uint256,uint8,uint8)"
 STATE_KEYS = ("status", "reserve", "circulating_supply", "price", "token_version", "r", "h", "k", "dex_supply_thresh",
@@ -59,6 +64,10 @@ class Flap(EvmLaunchpad):
                 log, at, token=a["token"], trader=a["trader"], is_buy=name == "TokenBought", token_amount=a["amount"],
                 quote_amount=a["eth"], fee=a["fee"], price=Decimal(a["postPrice"]) / E18,
                 extra={"post_price_raw": str(a["postPrice"]), "event_ts": a["ts"]}))
+        elif name == "LaunchedToDEX":
+            res.migrations.append({"token": a["token"], "venue": "dex", "pool": a["pool"],
+                                   "tokens_added": a["amount"], "quote_added": a["eth"],
+                                   "tx_hash": log.get("transactionHash"), "at": at, "evidence": "LaunchedToDEX event"})
         else:
             res.other.append({"event": name, **{k: (str(v) if isinstance(v, int) else v) for k, v in a.items()},
                               "tx_hash": log.get("transactionHash")})
