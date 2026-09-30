@@ -61,7 +61,7 @@ Providers), see M7.
 | 34–35 | Copy safety never overridden; paper copy with would-have-won / missed | PARTIAL | safety enforced; missed-trade / would-have-won outcome not recorded | M4 |
 | 36–44 | ML: wallet behaviour, mistake labels, frozen validation set, staged contribution, champion/challenger, no look-ahead, paper as training data | PARTIAL | Solana ML: multi-target shadow models, champion/challenger, labels, contribution 0 until validated, no-look-ahead audit; missing: wallet-behaviour labels (§37), EVM features, BUY/WAIT/REJECT/SELL/HOLD comparison (§41) | M12 |
 | 45 | Manual BUY/SELL on all chains | PARTIAL | Solana only (`manual_trade.py`); EVM manual paper missing | M13 |
-| 46–47 | Automatic-vs-manual sell diagnosis with stage-level evidence | PARTIAL | `solana/live_exec.py` records stages per order; no report comparing automatic and manual exits | **M2** |
+| 46–47 | Automatic-vs-manual sell diagnosis with stage-level evidence | DONE in code (M2); production result pending the server run | `tools/exit_diagnosis.py` (read-only report from `execution_orders` + position timeline + reconciliation); `tests/test_exit_diagnosis.py` | M2 |
 | 48–53 | Provider dashboard, roles, plan health / UPGRADE REQUIRED | PARTIAL | `rpc_providers` (Solana, encrypted, failover, TEST); EVM via `BSC_RPC_URLS` / `ROBINHOOD_RPC_URLS`; TEST CONNECTION checks eth_getLogs; no roles, no plan-capability table | M7 |
 | 54–55 | Token explorer all chains, explorer links per chain | PARTIAL | Solana token pages; EVM page lists tokens; link builder per chain not audited | M14 |
 | 56–58 | Balances, gas reserve, INSUFFICIENT GAS, unified wallet (Solana + EVM accounts) | PARTIAL | Solana live wallet panel; EVM wallet module (`chains/evm/wallet.py`) read-only; gas-reserve NO_TRADE not wired for EVM paper | M13 |
@@ -73,7 +73,7 @@ Providers), see M7.
 | 71–75 | Paper trading all chains feeding ML | PARTIAL | Solana complete; EVM paper entries exist, not yet ML features | M12 |
 | 76–77 | Safety hierarchy, decision states EXECUTE / REDUCE_SIZE / WAIT / MANUAL_APPROVAL / REJECT / NO_TRADE | PARTIAL | Solana gate implements the hierarchy; decision words differ (PROMOTE/REJECT/...); MANUAL_APPROVAL not implemented | M6 |
 | 78 | Preserve historical data | DONE | migrations are additive only | — |
-| 79–81 | Test matrix, automatic-sell regression, 24/7 acceptance | PARTIAL | ~800 automated tests; automatic-sell regression suite (§80) missing | M2 |
+| 79–81 | Test matrix, automatic-sell regression, 24/7 acceptance | PARTIAL | automatic-vs-manual exit regression added (`services/paper-trading/tests/test_exit_parity.py`); 24/7 acceptance (§81) is an operator procedure on the server, not automated | M2 |
 | 82–83 | Final requirement audit and report | this document, updated per phase | | every phase |
 
 ## 3. Phase plan (smallest safe steps, evidence first)
@@ -111,3 +111,35 @@ test.
   as "not tracked".
 - The rollup starts empty on deploy: a Robinhood venue with no activity shows
   UNVERIFIED until 7 days of monitoring have passed, then INACTIVE.
+
+## 5. M2 — automatic vs manual sells (2026-09-30)
+
+Audit (code, before any change):
+- Automatic and manual exits use ONE path. Dashboard SELL
+  (`/api/trade/.../sell`), paper/position exit, CLOSE POSITIONS /
+  EMERGENCY EXIT and the copy engine only set `exit_requested` and write a
+  timeline event (`operator_exit` / `copy_exit_requested`); the Solana
+  position loop (every 2 s; RPC-priced positions every 5 s, except that a
+  requested exit is always due) calls `live_trading.manage_live_position`,
+  which queues the SELL through `request_live_exit` exactly like a stop loss.
+  The order worker (`process_order`) treats every SELL identically.
+- Per order the system already records: decision time, created / signed /
+  confirmed times, attempts, slippage (raised by `exit_slippage_step_pct`
+  per failed exit), minimum output, route, final stage, error, RPC calls.
+
+Added (no execution change, because no evidence points at a component yet):
+- `tools/exit_diagnosis.py`: per origin (MANUAL / COPY / AUTOMATIC) the
+  confirmed share, latency split (trigger → order, order → signed, signed →
+  confirmed, total; median / p90 / max), positions that needed a second
+  sell, failure stages and errors, slippage, minimum-output use, routes, and
+  the count of positions whose tokens left the wallet outside YonixAlpha
+  (a sell made in another wallet app has no order to compare).
+- Regression (§80): `test_exit_parity.py` runs a stop-loss exit and a
+  dashboard exit under identical conditions; both must create one full SELL
+  with the same route, slippage and limits, close the position from the
+  fill, update PnL and never need a second sell. Both pass.
+
+Result: in code the two paths are identical, so a production difference
+must come from runtime conditions (timing, quote age, slippage after
+failures, RPC). The server run of `exit_diagnosis` decides which; only then
+is a component changed.
