@@ -38,6 +38,11 @@ class ChainTradingSettings:
     confirmations: int = 3
     backfill_minutes: int = 10
     max_blocks_per_pass: int = 2000
+    # Discovery further behind than this (after an RPC outage or rate limits)
+    # jumps to the last backfill_minutes instead of replaying hours of old
+    # events: a real-time pipeline trades nothing on a stale view. The
+    # skipped block range is logged and alerted, never silent. 0 = never skip.
+    max_lag_minutes: int = 60
 
 
 ROBINHOOD_DEFAULTS = ChainTradingSettings(position_size=Decimal("0.005"), max_total_exposure=Decimal("0.03"),

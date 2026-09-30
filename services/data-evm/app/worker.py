@@ -89,9 +89,17 @@ class ChainWorker:
             try:
                 async with self.session_factory() as session:
                     cursor = await store.get_cursor(session, self.chain, key)
+                skipped = None
                 if cursor is None:
                     back = int(cs.backfill_minutes * 60 / await self._block_seconds(head))
                     cursor = max(0, head - back)
+                elif cs.max_lag_minutes and (head - cursor) * await self._block_seconds(head) > cs.max_lag_minutes * 60:
+                    back = int(cs.backfill_minutes * 60 / await self._block_seconds(head))
+                    skipped = {"from": cursor + 1, "to": head - back, "blocks": head - back - cursor,
+                               "lag_minutes": round((head - cursor) * await self._block_seconds(head) / 60, 1)}
+                    cursor = head - back
+                    log.warning("data-evm.discovery_gap_skipped", chain=self.chain, launchpad=key, **skipped)
+                    await alert_error(SERVICE, f"{self.chain}.{key}.discovery_gap_skipped", skipped)
                 fb, tb = cursor + 1, min(head, cursor + cs.max_blocks_per_pass)
                 if fb > tb:
                     out[key] = {"lag": 0}
@@ -119,6 +127,8 @@ class ChainWorker:
                     await alert_error(SERVICE, f"{self.chain}.{key}.decode_errors",
                                       {"count": len(res.decode_errors), "sample": res.decode_errors[:2]})
                 out[key] = {**counts, "from": fb, "to": tb, "lag": head - tb}
+                if skipped:
+                    out[key]["skipped"] = skipped
             except Exception as exc:  # noqa: BLE001 - one launchpad never stops the others
                 out[key] = {"error": f"{type(exc).__name__}: {str(exc)[:160]}"}
                 log.warning("data-evm.discovery_failed", chain=self.chain, launchpad=key, error=out[key]["error"])

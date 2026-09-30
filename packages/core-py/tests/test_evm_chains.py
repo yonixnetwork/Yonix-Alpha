@@ -550,3 +550,27 @@ async def test_rpc_probe_tool_tells_a_logs_node_from_one_that_only_answers_block
     assert "KEY123" not in json.dumps(good)
     wrong = await probe(client, "https://x.example", 97, TOKEN)
     assert wrong["chain"] == "WRONG (56)" and not wrong["logs"]
+
+
+async def test_too_many_results_for_logs_is_halved_never_taken_as_method_not_served():
+    """launchpad_verify asked publicnode for 2000 busy BSC blocks (Flap: ~600
+    trades a minute) and the node was then skipped for logs although the
+    service reads logs from it every few seconds. An answer about size, even
+    worded "not supported", halves the range instead."""
+    spans = []
+
+    def handler(req):
+        body = json.loads(req.content)
+        if body["method"] == "eth_chainId":
+            return _ok(body, hex(56))
+        f = body["params"][0]
+        span = int(f["toBlock"], 16) - int(f["fromBlock"], 16) + 1
+        spans.append(span)
+        if span > 500:
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "error": {
+                "code": -32000, "message": "query exceeds max results 10000, not supported"}})
+        return _ok(body, [])
+
+    rpc = EvmRpc("bsc", 56, ["https://publicnode.example"], client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    assert await rpc.get_logs([TOKEN], [[]], 0, 1999, max_span=2000) == []
+    assert spans[:3] == [2000, 1000, 500] and rpc.health()["endpoints"][0]["unsupported_methods"] == []
