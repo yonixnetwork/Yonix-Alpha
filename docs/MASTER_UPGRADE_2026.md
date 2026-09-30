@@ -143,3 +143,28 @@ Result: in code the two paths are identical, so a production difference
 must come from runtime conditions (timing, quote age, slippage after
 failures, RPC). The server run of `exit_diagnosis` decides which; only then
 is a component changed.
+
+### M2 production result (server, 2026-09-30, last 30 days)
+
+| Origin | Sells | Confirmed | Median total | Needed a 2nd sell |
+|---|---|---|---|---|
+| AUTOMATIC | 72 (33 positions) | 97.2 % | 3.1 s | 1 |
+| MANUAL | 3 | 100 % | 10.1 s | 0 |
+
+Automatic sells are not slower: manual ones wait for the next position-loop
+tick after the click (trigger → order median 1.1 s, max 10.5 s vs 13 ms).
+Signing (0.3 s) and landing (2.4 s median) are the same for both.
+
+The two failed automatic sells, traced with the orders, timeline and
+reconciliation rows:
+- MCASH, `Custom 3012` in simulation (17:43:40): reconciliation found the
+  tokens gone from the wallet 27 s later (sold outside YonixAlpha).
+  Simulation correctly refused a sell that could not fill; nothing sent.
+- NEAR, `Custom 6005` on chain (22:24:58): a take-profit went to the Pump
+  bonding curve after it completed (Pump BondingCurveComplete). The position
+  moved to PumpSwap only at 22:25:15, when its price source changed; the
+  PumpSwap sell then confirmed. **Fixed**: that rejection now moves the
+  position to PumpSwap at once (`live_trading.curve_complete_rejection` /
+  `switch_to_pumpswap`), the retry keeps the same slippage, and a migrated
+  curve position is priced from its pool, never from the stale curve
+  (`gate_manage.price_position`). Tests: `test_exit_parity.py`.

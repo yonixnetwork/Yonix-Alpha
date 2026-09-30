@@ -501,15 +501,51 @@ async def apply_outcome(session: AsyncSession, redis: Redis | None, app_settings
         await events.notify(session, redis, app_settings, "provider_failure", f"LIVE entry failed: {position.symbol}",
                             order.error, "warning", {"position_id": str(position.id)})
     else:
-        position.exit_failures += 1
+        curve_gone = curve_complete_rejection(order)
+        if not curve_gone:
+            position.exit_failures += 1  # a wrong-route rejection never widens the next sell's slippage
         await add_timeline_event(session, "live_exit_failed", now, {"reason": order.reason, "error": order.error,
                                                                     "attempt": position.exit_failures,
-                                                                    "code": _failure_code(order)},
+                                                                    "code": _failure_code(order),
+                                                                    "curve_complete": curve_gone},
                                  candidate_id=position.candidate_id, assessment_id=position.assessment_id, position_id=position.id)
+        if curve_gone:
+            await switch_to_pumpswap(session, position, now, "bonding-curve sell rejected: curve complete (Pump 6005)")
         if position.exit_failures >= 2:
             await events.notify(session, redis, app_settings, "provider_failure",
                                 f"LIVE exit failing: {position.symbol} ({order.reason})",
                                 f"attempt {position.exit_failures}: {order.error}", "critical", {"position_id": str(position.id)})
+
+
+PUMP_CURVE_COMPLETE = 6005  # Pump program error BondingCurveComplete: the curve migrated to PumpSwap
+
+
+def curve_complete_rejection(order: ExecutionOrder) -> bool:
+    """A SELL on the bonding curve that the Pump program rejected because the
+    curve is complete. Seen in production (NEAR, 2026-09-28): the sell failed
+    on chain with Custom 6005 and the position only moved to PumpSwap 17 s
+    later, when its price source changed; the PumpSwap sell then confirmed."""
+    return (order.side == "SELL" and order.route == "pump"
+            and f"'Custom': {PUMP_CURVE_COMPLETE}}}" in (order.error or ""))
+
+
+async def switch_to_pumpswap(session: AsyncSession, position: PaperPosition, now: datetime, why: str) -> None:
+    """The same position, now in its post-migration market: the next sell goes
+    to the canonical PumpSwap pool and the price comes from that pool."""
+    from yonixalpha_core.solana import pumpswap
+
+    if position.lifecycle == "MIGRATED" and position.execution_route == "pump-amm":
+        return
+    before = position.execution_route
+    position.lifecycle = "MIGRATED"
+    position.pool = pumpswap.canonical_pool(position.asset_id)
+    position.execution_route = "pump-amm"
+    await add_timeline_event(session, "position_migrated", now,
+                             {"market_state": "POST_MIGRATION", "previous_market_state": "PRE_MIGRATION",
+                              "pool": position.pool, "route_before": before, "route_after": "pump-amm",
+                              "detected_by": why},
+                             candidate_id=position.candidate_id, assessment_id=position.assessment_id,
+                             position_id=position.id)
 
 
 def failure_code_of(side: str, status: str, error: str | None, signature: str | None, result: dict | None) -> str:
