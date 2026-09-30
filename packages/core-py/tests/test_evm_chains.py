@@ -147,6 +147,90 @@ async def test_no_endpoint_serving_logs_is_an_explicit_outage():
     with pytest.raises(EvmRpcUnavailableError, match="eth_getLogs"):
         await rpc.get_logs([TOKEN], [[]], 0, 9, max_span=10)
 
+
+def _ok(body, result):
+    return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": result})
+
+
+async def test_a_short_429_on_the_only_endpoint_is_waited_out_and_paces_later_requests():
+    """Robinhood Chain has one public RPC and it rate-limits eth_getLogs (seen
+    on the server). One 429 used to fail every launchpad of the pass with
+    "all cooling down"; now the call waits the short cooldown and the
+    endpoint is asked more slowly afterwards."""
+    calls = []
+
+    def handler(req):
+        body = json.loads(req.content)
+        if body["method"] == "eth_chainId":
+            return _ok(body, hex(4663))
+        calls.append(body["method"])
+        if len(calls) == 1:
+            return httpx.Response(429, headers={"retry-after": "0.2"})
+        return _ok(body, [])
+
+    rpc = EvmRpc("robinhood", 4663, ["https://rh.example"], client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    assert await rpc.get_logs([TOKEN], [[]], 0, 9, max_span=10) == []
+    assert await rpc.get_logs([TOKEN], [[]], 10, 19, max_span=10) == []
+    assert calls == ["eth_getLogs"] * 3
+    ep = rpc.health()["endpoints"][0]
+    assert ep["rate_limited"] == 1 and ep["min_gap_s"] > 0
+
+
+async def test_a_long_429_is_still_an_immediate_explicit_outage():
+    def handler(req):
+        body = json.loads(req.content)
+        if body["method"] == "eth_chainId":
+            return _ok(body, hex(4663))
+        return httpx.Response(429, headers={"retry-after": "60"})
+
+    rpc = EvmRpc("robinhood", 4663, ["https://rh.example"], client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    with pytest.raises(EvmRpcUnavailableError, match="HTTP 429"):
+        await rpc.block_number()
+    with pytest.raises(EvmRpcUnavailableError, match="cooling down"):
+        await rpc.block_number()
+
+
+async def test_http_403_for_logs_skips_only_logs_on_that_node_and_expires():
+    """bsc-rpc.publicnode.com answered eth_blockNumber / eth_getBlockByNumber
+    but HTTP 403 for eth_getLogs (seen on the server). Only eth_getLogs is
+    skipped there, for a limited time; the node keeps serving the rest."""
+    asked = []
+
+    def handler(req):
+        body = json.loads(req.content)
+        if body["method"] == "eth_chainId":
+            return _ok(body, hex(56))
+        asked.append((req.url.host, body["method"]))
+        if req.url.host == "publicnode.example" and body["method"] == "eth_getLogs":
+            return httpx.Response(403)
+        return _ok(body, hex(7) if body["method"] == "eth_blockNumber" else [])
+
+    rpc = EvmRpc("bsc", 56, ["https://publicnode.example", "https://logs.example"],
+                 client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    assert await rpc.block_number() == 7
+    assert await rpc.get_logs([TOKEN], [[]], 0, 9, max_span=10) == []
+    assert asked[-2:] == [("publicnode.example", "eth_getLogs"), ("logs.example", "eth_getLogs")]
+    ep = rpc.health()["endpoints"][0]
+    assert ep["state"] == "OK" and ep["unsupported_methods"] == ["eth_getLogs"] and "403" in ep["last_error"]
+    asked.clear()
+    assert await rpc.block_number() == 7
+    assert await rpc.get_logs([TOKEN], [[]], 10, 19, max_span=10) == []
+    assert asked == [("publicnode.example", "eth_blockNumber"), ("logs.example", "eth_getLogs")]
+    rpc.endpoints[0].unsupported["eth_getLogs"] = 0.0  # the refusal window elapsed
+    asked.clear()
+    await rpc.get_logs([TOKEN], [[]], 20, 29, max_span=10)
+    assert asked[0] == ("publicnode.example", "eth_getLogs")
+
+
+async def test_a_403_from_a_node_that_never_answered_is_an_endpoint_failure():
+    def handler(req):
+        return httpx.Response(403)
+
+    rpc = EvmRpc("bsc", 56, ["https://bad-key.example"], client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    with pytest.raises(EvmRpcUnavailableError, match="403"):
+        await rpc.get_logs([TOKEN], [[]], 0, 9, max_span=10)
+    assert rpc.health()["endpoints"][0]["state"] == "FAILING"
+
 # --- Four.meme ------------------------------------------------------------------------------------
 
 def four_info(quote=ZERO_ADDRESS, liquidity_added=False):
@@ -419,3 +503,27 @@ async def test_launchpad_verify_records_only_what_it_proved():
     dead = FourMeme(EvmRpc("bsc", 56, ["https://d.example"], client=httpx.AsyncClient(transport=httpx.MockTransport(down))))
     with pytest.raises(EvmRpcUnavailableError):
         await verify(dead, 0, 100, 10 ** 16)  # the tool records nothing for this launchpad
+
+
+async def test_rpc_probe_tool_tells_a_logs_node_from_one_that_only_answers_blocks():
+    from yonixalpha_core.tools.evm_rpc_probe import probe
+
+    def handler(req):
+        body = json.loads(req.content)
+        if body["method"] == "eth_chainId":
+            return _ok(body, hex(56))
+        if body["method"] == "eth_blockNumber":
+            return _ok(body, hex(5000))
+        if req.url.host == "dataseed.example":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"],
+                                             "error": {"code": -32005, "message": "limit exceeded"}})
+        return _ok(body, [])
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    good = await probe(client, "https://logs.example/KEY123", 56, TOKEN)
+    bad = await probe(client, "https://dataseed.example", 56, TOKEN)
+    assert good["head"] == 5000 and all(v.startswith("OK") for v in good["logs"].values())
+    assert all(v.startswith("REFUSED: limit exceeded") for v in bad["logs"].values())
+    assert "KEY123" not in json.dumps(good)
+    wrong = await probe(client, "https://x.example", 97, TOKEN)
+    assert wrong["chain"] == "WRONG (56)" and not wrong["logs"]

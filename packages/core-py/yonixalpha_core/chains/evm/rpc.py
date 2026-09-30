@@ -5,7 +5,17 @@
   used, so a mistyped URL can never quote or trade on the wrong network.
 - HTTP 429 cools the endpoint down for Retry-After seconds when sent, else
   for a doubling backoff (2 s .. 120 s); network errors and 5xx for 5 s.
-  The next endpoint is tried at once.
+  The next endpoint is tried at once. When the only endpoints left are
+  cooling down after a 429 and the wait is short (<= cooldown_wait_s), the
+  call waits it out instead of failing, so one 429 does not fail every
+  launchpad scanned in the same pass.
+- Requests to one endpoint are paced: every 429 doubles the gap between
+  requests (up to 2 s) and every answer shrinks it again, so a public node
+  that rate-limits is asked at the rate it accepts.
+- A method an endpoint refuses (JSON-RPC "method not found", eth_getLogs
+  refused even for one block, or HTTP 403 for eth_getLogs from a node that
+  answers other methods) is skipped on that endpoint for 30 minutes, then
+  asked again.
 - A JSON-RPC error (e.g. "execution reverted") is an answer, not an
   endpoint failure: it is raised as EvmRpcError to the caller unchanged.
 - URLs embed API keys, so they only ever appear as scheme://host
@@ -44,6 +54,8 @@ class EvmRpcUnavailableError(RuntimeError):
 CAPABILITY_ERRORS = ("method not found", "not supported", "is not available", "not available on", "disabled",
                      "not whitelisted", "unsupported method", "method not allowed")
 RANGE_ERRORS = ("range", "too many", "limit exceeded", "exceed", "response size", "10000 results", "block range")
+UNSUPPORTED_METHOD_SECONDS = 30 * 60.0
+MAX_GAP_S = 2.0
 
 
 def _retry_after(r: httpx.Response) -> float | None:
@@ -67,10 +79,18 @@ class _Endpoint:
     latency_ms: float | None = None
     chain_id: int | None = None
     extra: dict = field(default_factory=dict)
-    unsupported: set = field(default_factory=set)  # methods this endpoint refused to serve
+    unsupported: dict = field(default_factory=dict)  # method -> monotonic time until which it is not asked here
+    min_gap: float = 0.0  # seconds between requests (grows on 429, shrinks on answers)
+    next_at: float = 0.0
+
+    def refuses(self, method: str, now: float) -> bool:
+        return self.unsupported.get(method, 0.0) > now
+
+    def mark_unsupported(self, method: str) -> None:
+        self.unsupported[method] = time.monotonic() + UNSUPPORTED_METHOD_SECONDS
 
     def usable(self, now: float, method: str = "") -> bool:
-        return self.state != "WRONG_CHAIN" and now >= self.cooldown_until and method not in self.unsupported
+        return self.state != "WRONG_CHAIN" and now >= self.cooldown_until and not self.refuses(method, now)
 
 
 def _capability_error(exc: EvmRpcError, method: str) -> bool:
@@ -87,7 +107,8 @@ def _capability_error(exc: EvmRpcError, method: str) -> bool:
 
 class EvmRpc:
     def __init__(self, chain: str, chain_id: int, urls: list[str] | tuple[str, ...], *,
-                 client: httpx.AsyncClient | None = None, timeout: float = 10.0) -> None:
+                 client: httpx.AsyncClient | None = None, timeout: float = 10.0,
+                 cooldown_wait_s: float = 8.0) -> None:
         if not urls:
             raise ValueError(f"{chain}: no RPC URLs")
         self.chain = chain
@@ -95,6 +116,7 @@ class EvmRpc:
         self.endpoints = [_Endpoint(u) for u in dict.fromkeys(u.strip() for u in urls if u and u.strip())]
         self._client = client or httpx.AsyncClient(timeout=timeout)
         self._own_client = client is None
+        self.cooldown_wait_s = cooldown_wait_s
         self._id = 0
         self._last_error_ep: _Endpoint | None = None  # the endpoint that answered the last EvmRpcError
 
@@ -106,12 +128,20 @@ class EvmRpc:
         return redact_text(text, [e.url for e in self.endpoints])
 
     async def _post(self, ep: _Endpoint, method: str, params: list) -> Any:
+        now = time.monotonic()
+        if ep.next_at > now:
+            await asyncio.sleep(ep.next_at - now)
+        ep.next_at = max(now, ep.next_at) + ep.min_gap
         self._id += 1
         t0 = time.monotonic()
         r = await self._client.post(ep.url, json={"jsonrpc": "2.0", "id": self._id, "method": method, "params": params})
         ep.latency_ms = round((time.monotonic() - t0) * 1000, 1)
         if r.status_code == 429:
+            ep.min_gap = min(MAX_GAP_S, max(0.1, ep.min_gap * 2))
             raise _RateLimited(_retry_after(r))
+        ep.min_gap = ep.min_gap * 0.97 if ep.min_gap > 0.01 else 0.0
+        if r.status_code == 403 and method == "eth_getLogs" and ep.ok > 0:
+            raise _MethodRefused("HTTP 403 for eth_getLogs (the node answers other methods)")
         r.raise_for_status()
         body = r.json()
         if isinstance(body, dict) and body.get("error"):
@@ -132,49 +162,72 @@ class EvmRpc:
             raise _WrongChain(ep.last_error)
         ep.state = "OK"
 
+    def _cooldown_wait(self, method: str, now: float) -> float | None:
+        """Seconds until an endpoint cooling down after a 429 can be asked
+        `method` again (None: no endpoint is merely rate-limited)."""
+        waits = [e.cooldown_until - now for e in self.endpoints
+                 if e.state == "COOLDOWN" and e.cooldown_until > now and not e.refuses(method, now)]
+        return min(waits) if waits else None
+
     async def call(self, method: str, params: list | None = None) -> Any:
         params = params or []
-        causes: list[str] = []
-        now = time.monotonic()
-        order = [e for e in self.endpoints if e.usable(now, method)]
-        if not order and any(method in e.unsupported for e in self.endpoints if e.state != "WRONG_CHAIN"):
-            raise EvmRpcUnavailableError(f"{self.chain} RPC: no configured endpoint serves {method}")
-        if not order:
-            waits = [e.cooldown_until - now for e in self.endpoints if e.state != "WRONG_CHAIN"]
-            detail = f"all cooling down for {min(waits):.0f}s more" if waits else "every endpoint answers for the wrong chain"
-            raise EvmRpcUnavailableError(f"{self.chain} RPC unavailable: {detail}")
-        for ep in order:
-            try:
-                await self._ensure_chain(ep)
-                result = await self._post(ep, method, params)
-                ep.ok += 1
-                ep.backoff = 0.0
-                ep.state = "OK"
-                ep.last_error = None
-                return result
-            except EvmRpcError as exc:
-                ep.ok += 1  # the endpoint works
-                if not _capability_error(exc, method):
-                    self._last_error_ep = ep
-                    raise  # the request itself failed (e.g. reverted): same answer anywhere
-                ep.unsupported.add(method)
-                causes.append(f"{redact_url(ep.url)}: {method} not served ({self._redact(str(exc))[:80]})")
-            except _WrongChain as exc:
-                causes.append(f"{redact_url(ep.url)}: {exc}")
-            except _RateLimited as exc:
-                ep.rate_limited += 1
-                ep.backoff = min(120.0, max(2.0, ep.backoff * 2))
-                wait = exc.retry_after if exc.retry_after is not None else ep.backoff
-                ep.cooldown_until = time.monotonic() + wait
-                ep.state, ep.last_error = "COOLDOWN", "HTTP 429"
-                causes.append(f"{redact_url(ep.url)}: HTTP 429")
-            except (httpx.HTTPError, ValueError, json.JSONDecodeError) as exc:
-                ep.errors += 1
-                ep.cooldown_until = time.monotonic() + 5.0
-                ep.state = "FAILING"
-                ep.last_error = self._redact(f"{type(exc).__name__}: {exc}")[:200]
-                causes.append(f"{redact_url(ep.url)}: {ep.last_error}")
-        raise EvmRpcUnavailableError(f"{self.chain} RPC {method} failed on every endpoint: " + "; ".join(causes))
+        deadline = time.monotonic() + self.cooldown_wait_s
+        while True:
+            now = time.monotonic()
+            order = [e for e in self.endpoints if e.usable(now, method)]
+            if not order:
+                wait = self._cooldown_wait(method, now)
+                if wait is not None and now + wait <= deadline:
+                    await asyncio.sleep(wait)
+                    continue
+                alive = [e for e in self.endpoints if e.state != "WRONG_CHAIN"]
+                if alive and all(e.refuses(method, now) for e in alive):
+                    raise EvmRpcUnavailableError(f"{self.chain} RPC: no configured endpoint serves {method}")
+                waits = [e.cooldown_until - now for e in alive if not e.refuses(method, now)]
+                detail = (f"all cooling down for {min(waits):.0f}s more" if waits
+                          else "every endpoint answers for the wrong chain")
+                raise EvmRpcUnavailableError(f"{self.chain} RPC unavailable: {detail}")
+            causes: list[str] = []
+            for ep in order:
+                try:
+                    await self._ensure_chain(ep)
+                    result = await self._post(ep, method, params)
+                    ep.ok += 1
+                    ep.backoff = 0.0
+                    ep.state = "OK"
+                    ep.last_error = None
+                    return result
+                except EvmRpcError as exc:
+                    ep.ok += 1  # the endpoint works
+                    if not _capability_error(exc, method):
+                        self._last_error_ep = ep
+                        raise  # the request itself failed (e.g. reverted): same answer anywhere
+                    ep.mark_unsupported(method)
+                    causes.append(f"{redact_url(ep.url)}: {method} not served ({self._redact(str(exc))[:80]})")
+                except _MethodRefused as exc:
+                    ep.mark_unsupported(method)
+                    ep.last_error = str(exc)
+                    causes.append(f"{redact_url(ep.url)}: {exc}")
+                except _WrongChain as exc:
+                    causes.append(f"{redact_url(ep.url)}: {exc}")
+                except _RateLimited as exc:
+                    ep.rate_limited += 1
+                    ep.backoff = min(120.0, max(2.0, ep.backoff * 2))
+                    wait = exc.retry_after if exc.retry_after is not None else ep.backoff
+                    ep.cooldown_until = time.monotonic() + wait
+                    ep.state, ep.last_error = "COOLDOWN", "HTTP 429"
+                    causes.append(f"{redact_url(ep.url)}: HTTP 429")
+                except (httpx.HTTPError, ValueError, json.JSONDecodeError) as exc:
+                    ep.errors += 1
+                    ep.cooldown_until = time.monotonic() + 5.0
+                    ep.state = "FAILING"
+                    ep.last_error = self._redact(f"{type(exc).__name__}: {exc}")[:200]
+                    causes.append(f"{redact_url(ep.url)}: {ep.last_error}")
+            now = time.monotonic()
+            wait = self._cooldown_wait(method, now)
+            if wait is not None and now + wait <= deadline:
+                continue  # only rate-limited: wait it out at the top of the loop
+            raise EvmRpcUnavailableError(f"{self.chain} RPC {method} failed on every endpoint: " + "; ".join(causes))
 
     # --- typed helpers ---------------------------------------------------------------------------
 
@@ -233,8 +286,8 @@ class EvmRpc:
                         span = max(1, span // 2)
                         continue
                     ep = self._last_error_ep
-                    if ep is not None and "eth_getLogs" not in ep.unsupported:
-                        ep.unsupported.add("eth_getLogs")
+                    if ep is not None and not ep.refuses("eth_getLogs", time.monotonic()):
+                        ep.mark_unsupported("eth_getLogs")
                         ep.last_error = self._redact(f"eth_getLogs refused even for one block: {exc}")[:200]
                         span = max(1, max_span)
                         continue
@@ -249,7 +302,8 @@ class EvmRpc:
             {"url": redact_url(e.url), "state": e.state if e.state != "COOLDOWN" or now < e.cooldown_until else "OK",
              "cooldown_s": round(max(0.0, e.cooldown_until - now), 1), "last_error": e.last_error,
              "ok": e.ok, "errors": e.errors, "rate_limited": e.rate_limited, "latency_ms": e.latency_ms,
-             "chain_id_seen": e.chain_id, "unsupported_methods": sorted(e.unsupported)} for e in self.endpoints]}
+             "chain_id_seen": e.chain_id, "min_gap_s": round(e.min_gap, 3),
+             "unsupported_methods": sorted(m for m, until in e.unsupported.items() if until > now)} for e in self.endpoints]}
 
     async def publish_health(self, redis) -> None:
         if redis is not None:
@@ -264,6 +318,10 @@ class _RateLimited(Exception):
 
 class _WrongChain(Exception):
     pass
+
+
+class _MethodRefused(Exception):
+    """The endpoint refused this method over HTTP (not a JSON-RPC answer)."""
 
 
 def make_rpc(chain: str, settings: Any = None, *, client: httpx.AsyncClient | None = None) -> EvmRpc:
