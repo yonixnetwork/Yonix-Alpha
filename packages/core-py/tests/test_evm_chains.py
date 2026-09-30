@@ -574,3 +574,25 @@ async def test_too_many_results_for_logs_is_halved_never_taken_as_method_not_ser
     rpc = EvmRpc("bsc", 56, ["https://publicnode.example"], client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     assert await rpc.get_logs([TOKEN], [[]], 0, 1999, max_span=2000) == []
     assert spans[:3] == [2000, 1000, 500] and rpc.health()["endpoints"][0]["unsupported_methods"] == []
+
+
+async def test_a_null_block_from_a_load_balanced_node_is_asked_again_then_an_explicit_outage():
+    """bsc-rpc.publicnode.com answered null for a block just reported as the
+    head (seen on the server as "'NoneType' object is not subscriptable")."""
+    answers = {"n": 0}
+
+    def handler(req):
+        body = json.loads(req.content)
+        if body["method"] == "eth_chainId":
+            return _ok(body, hex(56))
+        answers["n"] += 1
+        if body["params"][0] == hex(5) and answers["n"] == 1:
+            return _ok(body, None)
+        if body["params"][0] == hex(6):
+            return _ok(body, None)
+        return _ok(body, {"number": body["params"][0], "timestamp": hex(100)})
+
+    rpc = EvmRpc("bsc", 56, ["https://lb.example"], client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    assert (await rpc.get_block(5))["timestamp"] == hex(100)
+    with pytest.raises(EvmRpcUnavailableError, match="block 6 not available yet"):
+        await rpc.get_block(6)

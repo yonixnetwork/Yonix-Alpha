@@ -71,9 +71,10 @@ class ChainWorker:
 
     async def _block_seconds(self, head: int) -> float:
         if self.block_seconds is None:
-            sample = min(1000, head)
-            a = int((await self.rpc.get_block(head))["timestamp"], 16)
-            b = int((await self.rpc.get_block(head - sample))["timestamp"], 16)
+            top = max(0, head - 10)  # a few blocks under the head: every backend of a load-balanced node has them
+            sample = min(1000, top)
+            a = int((await self.rpc.get_block(top))["timestamp"], 16)
+            b = int((await self.rpc.get_block(top - sample))["timestamp"], 16)
             self.block_seconds = max(0.05, (a - b) / sample) if sample else 1.0
         return self.block_seconds
 
