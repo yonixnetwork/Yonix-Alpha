@@ -28,6 +28,9 @@ dependencies = [
     # server-side transaction signing.
     "eth-abi==5.2.0",
     "eth-account==0.13.7",
+    # Decodes signed transactions from the Robinhood sequencer feed (already
+    # installed by eth-account; pinned because evm.streams imports it).
+    "rlp==5.0.0",
 ]
 
 [project.optional-dependencies]

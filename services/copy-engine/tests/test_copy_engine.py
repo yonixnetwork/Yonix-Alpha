@@ -372,3 +372,24 @@ async def test_a_solana_buy_older_than_the_stream_history_is_no_price_data(sessi
     async with session_factory() as s:
         ev = (await s.execute(select(CopyEvent))).scalar_one()
     assert ev.outcome["status"] == "NO_PRICE_DATA" and ev.outcome["class"] == "NOTIFY_ONLY" and "3 hours" in ev.outcome["reason"]
+
+
+async def test_stream_lead_is_recorded_when_a_stream_saw_the_target_first(session_factory, redis_client):
+    """Master §9 / §13: the target's transaction was on the sequencer feed 1.5 s
+    before the confirmed trade was detected; the copy event records that lead
+    (the decision itself still uses the confirmed trade)."""
+    clock = Clock()
+    node, lp = fourmeme()
+    eng = CopyEngine(session_factory, redis_client, {"bsc": {"fourmeme": lp}}, clock)
+    await seed_evm(session_factory, clock)
+    tx = "0x" + "ab" * 32
+    async with session_factory() as s:
+        s.add(EvmTrade(event_id=f"bsc:{tx}:0", chain="bsc", launchpad="fourmeme", token=TOKEN, trader=WHALE, is_buy=True,
+                       token_amount=Decimal(10 ** 24), quote_amount=Decimal(10 ** 18), at=clock() - timedelta(seconds=2),
+                       tx_hash=tx))
+        await s.commit()
+    await redis_client.set(f"yx:evm:seen:bsc:{tx}", json.dumps(
+        {"hash": tx, "source": "pending_tx", "seen_at": (clock() - timedelta(milliseconds=1500)).isoformat()}))
+    assert await eng.watch_evm("bsc") == 1
+    ev = (await events_of(session_factory))[-1]
+    assert ev.latency_ms["stream_source"] == "pending_tx" and ev.latency_ms["stream_lead"] == 1500

@@ -87,6 +87,42 @@ async def chain_loop(worker: ChainWorker, stop: asyncio.Event) -> None:
             pass
 
 
+def _streams(settings, session_factory, redis, workers: dict) -> list:
+    """Robinhood sequencer feed and BSC pending transactions (master §9, §13):
+    measurement and early sightings only, never a trading trigger."""
+    from sqlalchemy import select
+
+    from yonixalpha_core.chains.evm import rpc_registry, streams
+    from yonixalpha_core.db.models import CopyTarget
+
+    def watch_for(chain: str):
+        async def watch():
+            async with session_factory() as session:
+                wallets = {w.lower() for w in (await session.execute(select(CopyTarget.wallet).where(
+                    CopyTarget.chain == chain, CopyTarget.enabled.is_(True)))).scalars()}
+            contracts = set(streams.EXTRA_CONTRACTS.get(chain, set()))
+            w = workers.get(chain)
+            for ad in (w.adapters.values() if w else []):
+                contracts |= {a.lower() for a in ad.spec.contracts.values()}
+                contracts |= set(getattr(ad, "curves", {}) or {})
+            return wallets, contracts
+        return watch
+
+    async def cfg() -> streams.StreamConfig:
+        async with session_factory() as session:
+            return await streams.load_config(session)
+
+    async def bsc_urls() -> list[str]:
+        async with session_factory() as session:
+            return await rpc_registry.ws_urls(session, settings, "bsc")
+
+    async def bsc_enabled() -> bool:
+        return (await cfg()).bsc_pending_enabled
+
+    return [streams.SequencerFeed("robinhood", streams.StreamConfig(), watch_for("robinhood"), redis, reload=cfg),
+            streams.PendingTxStream("bsc", bsc_urls, watch_for("bsc"), redis, enabled=bsc_enabled)]
+
+
 async def run() -> None:
     settings = get_settings()
     configure_logging(settings.LOG_LEVEL)
@@ -105,6 +141,7 @@ async def run() -> None:
         adapters = [adapter_for(k, rpc) for k in EVM_LAUNCHPADS if LAUNCHPADS[k].chain == chain]
         workers.append(ChainWorker(chain.value, rpc, adapters, session_factory, redis,
                                    etherscan_key=settings.ETHERSCAN_API_KEY, http=http))
+    stream_tasks = _streams(settings, session_factory, redis, {w.chain: w for w in workers})
     await _system_event(session_factory, "service_started", "info", {"chains": [w.chain for w in workers]})
     log.info("data-evm.started", chains=[w.chain for w in workers])
     try:
@@ -112,6 +149,7 @@ async def run() -> None:
             *(chain_loop(w, stop) for w in workers),
             heartbeat_loop(settings, SERVICE, stop, lambda: {w.chain: {**w.status, "rpc": w.rpc.health()} for w in workers}),
             run_watcher(SERVICE, settings, session_factory, stop, redis=redis, evm_rpcs={w.chain: w.rpc for w in workers}),
+            *(t.run(stop) for t in stream_tasks),
         )
     finally:
         await _system_event(session_factory, "service_stopped", "info")

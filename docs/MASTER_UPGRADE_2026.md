@@ -45,11 +45,11 @@ Providers), see M7.
 | 6 | 7-day inactivity → INACTIVE, hidden from active filter, adapter kept, auto-reactivation | DONE in code (M1) | INACTIVE needs 7 days without activity AND 7 days of monitoring (else UNVERIFIED); Active / Archived tabs; discovery keeps scanning, so activity returns the venue to ACTIVE; Solana trade counts are "not tracked" (None), never 0 | M1 |
 | 7 | Solana launchpads beyond Pump.fun/PumpSwap (LetsBONK, LaunchLab, Meteora DBC, Bags, Moonshot, Jupiter Studio) | MISSING | registry has `pumpfun`, `pumpswap` only | M10 |
 | 8 | BSC: Four.meme, Flap verified; Genius.fun etc. researched | PARTIAL | Four.meme / Flap adapters, discovery live, read-only checks PASS; others not researched | M10 |
-| 9 | BSC mempool wallet copying | MISSING | copy engine reads confirmed trades only; no pending-tx stream | M8 |
+| 9 | BSC mempool wallet copying | DONE (measurement) | `evm.streams.PendingTxStream`: eth_subscribe newPendingTransactions (full bodies) over a dashboard WSS endpoint; matches copy targets / launchpads; REFUSED / LIMITED become UPGRADE REQUIRED; copy decisions stay on confirmed trades (§17) | M8 |
 | 10 | Robinhood: Pons, NOXA, Odyssey | PARTIAL | adapters exist; only Pons V2 proven active | M1 |
 | 11 | Pons coordinated-launch safety (privileged / creator-linked / common-funder / simultaneous buyers) | DONE (paper; on-chain assumptions NOT VERIFIED until coordination_check runs on the server) | launch_coordination: 13 detections, configurable NO_TRADE / REDUCE_SIZE / MANUAL_APPROVAL / NONE, data-evm entries + EVM copy buys; see section 13 | M5 |
 | 12 | Robinhood reference repos inspected | PARTIAL | pons-launch-engine and pons-terminal read for M5 (section 13); the other five still M9 | M9 |
-| 13 | Robinhood sequencer feed (+ delayed feed fallback), latency / gaps measured | MISSING | registry note only | M8 |
+| 13 | Robinhood sequencer feed (+ delayed feed fallback), latency / gaps measured | DONE | `evm.streams.SequencerFeed` in data-evm: Nitro broadcast decoding, resume by sequence number, delayed-feed fallback, gaps / duplicates / delay / matches, stream lead on copy events (§17). Real feed NOT VERIFIED from this environment | M8 |
 | 14–17 | Observation state machine for every token on all chains, windows T0..T+60, expiry, stored | DONE (EVM, paper); Solana PARTIAL (own state names, see section 15) | EVM: `evm_observations`, full state machine, T0/T+5/T+10/T+20/T+30/T+60 snapshots with the §16 fields, adaptive MIGRATED / MOMENTUM windows, EXPIRED_NO_ENTRY, entries only while observed; Solana: `token_observations` + follow-ups, T+20m added | M6 |
 | 18–23 | Wallet performance model: 24H–180D windows, avg/median win and loss, profit factor, drawdown, FIFO ledger, INSUFFICIENT DATA | DONE in code for BSC / Robinhood (M3); Solana PARTIAL | `wallet_pnl.py` (FIFO lots, usually earns / usually loses, profit factor, drawdown, holds, best / worst), windows 24H / 7D (14D+ INSUFFICIENT DATA: 7-day profile history, 14-day trade retention); fees listed not subtracted (NOT VERIFIED per launchpad), gas not included; Solana profiles have no sells (launch_buyers) and say so | M3 |
 | 24 | Nansen / MadeOnSol enrichment | MISSING | | M11 |
@@ -492,7 +492,7 @@ override settings):
 - Plan: the plan name the operator records per endpoint (not verified with
   the provider), shown with every finding.
 - WSS URLs are accepted and stored (redacted) for BSC and Robinhood too,
-  for mempool / sequencer streaming (M8); nothing consumes them yet.
+  for mempool / sequencer streaming (M8); nothing consumed them at M7 (BSC WSS is used by the M8 pending stream, §17).
 - Plan health (`GET /api/rpc/plan-health`, RPC / Data Providers and System
   Health): UPGRADE REQUIRED only on an observed limitation — sendTransaction
   or simulate refused ("AUTOMATIC SELL LATENCY MAY BE LIMITED BY CURRENT
@@ -509,4 +509,83 @@ override settings):
   recipient = 33 events), so every entrypoint, including the two still
   unidentified wrappers, has a readable list. The calldata decoder stays
   as the fallback.
+
+## 17. M8 — transaction streams (2026-10-01)
+
+Master §9 and §13 (`yonixalpha_core.chains.evm.streams`, run by data-evm;
+settings key `evm_streams`; no migration).
+
+Robinhood Chain sequencer feed (§13):
+
+- Robinhood Chain is an Arbitrum Orbit chain. data-evm connects to
+  `wss://feed.mainnet.chain.robinhood.com` (Nitro broadcast format,
+  `Arbitrum-Feed-Client-Version: 2`) and checks the `Arbitrum-Chain-Id`
+  response header against 4663 (WRONG_CHAIN otherwise).
+- Each message is decoded: L2 batches are unrolled, every signed
+  transaction (legacy, 2930, 1559, 7702) gives hash, to, value and
+  selector. Compressed messages (kind 7) are counted, not decoded.
+- The sender is recovered for every transaction to a watched contract
+  (launchpad contracts and curves known to the adapters, plus the Pons
+  launchAndBuy router) and for at most `recover_budget_per_s` others per
+  second (pure-Python recovery costs about 7 ms). A transaction from an
+  enabled copy target or to a launchpad is kept in Redis for 15 minutes
+  with the time it was seen.
+- Measured and shown: state, reconnects, messages, transactions, sequence
+  gaps and missing messages, duplicates / out-of-order, feed delay median
+  and p95 (message timestamp, 1 s resolution), matches.
+- On reconnect the client asks for the next sequence number, so a short
+  drop loses nothing. After `fallback_after_failures` (3) failed
+  connections it uses the delayed feed and retries the primary every
+  `primary_retry_minutes` (10). Delayed-feed sightings are labelled
+  `delayed_feed`, never as primary-speed.
+
+BSC pending transactions (§9):
+
+- `eth_subscribe newPendingTransactions, true` over the first enabled
+  WSS URL on RPC / Data Providers for BSC. Full bodies are matched against
+  copy targets and launchpad contracts.
+- A provider that refuses the subscription is REFUSED, one that streams
+  hashes only is LIMITED; both are UPGRADE REQUIRED on plan health
+  ("mempool / pending transactions") and retried every 30 minutes. No WSS
+  endpoint is NOT_CONFIGURED (INFO). The public BSC endpoints do not offer
+  this, so the stream is idle until a provider WSS is added.
+
+What the streams do and do not do:
+
+- They never trade. A sequenced or pending transaction can still revert,
+  so copy decisions stay on confirmed trades (master: "A target wallet
+  buying a token is NOT permission to buy it").
+- The copy engine looks up every confirmed copy-target trade; when a stream
+  saw it first, the copy event's latency carries `stream_source` and
+  `stream_lead` (ms between the stream sighting and confirmed-trade
+  detection). RPC / Data Providers shows, per chain over 24 hours, how
+  many copy-target trades a stream saw first and the median / p95 lead.
+- Settings (RPC / Data Providers, "Stream settings"): feed on/off, feed
+  and delayed-feed URLs (wss:// only), fallback threshold, primary retry,
+  sender-recovery budget, BSC pending on/off. data-evm re-reads them every
+  minute and reconnects when the feed settings change.
+
+Research record — 1chimaruGin/bsc-mempool (master §3):
+
+| Field | Value |
+|---|---|
+| Repository | github.com/1chimaruGin/bsc-mempool |
+| Commit reviewed | 212d4463 (2026-06-12) |
+| License | Apache-2.0 OR MIT |
+| Language | Rust |
+| Chain | BSC |
+| Purpose | copy trading of a KOL wallet list from the mempool |
+| How it gets pending transactions | its own synced bsc-geth full node over IPC (`eth_subscribe newPendingTransactions, true`), submission through BlockRazor / Puissant relays |
+| Other parts | KOL whitelist, adaptive trailing exits, shadow / tiny / full rollout phases |
+| Fit for this server | NO: a BSC full node needs far more than the 2 vCPU / 2 GB server; relays need accounts |
+| Decision | PARTIALLY USE (ideas only, no code): the pending-transaction subscription with full bodies is used against a provider WSS; the shadow-first rollout matches our paper-first copy trading. Relay submission and mempool-triggered buys are not adopted |
+
+Tests: `packages/core-py/tests/test_evm_streams.py` (decoding of real
+signed transactions, batches, sequence gaps / duplicates, delay, matches,
+resume and delayed-feed fallback and pending full / hash-only / refused
+against local WebSocket servers), `test_provider_roles.py`
+(stream findings), data-evm stream wiring, copy-engine stream lead, API
+`/api/evm/streams` and stream settings. The real Robinhood feed and a real
+BSC pending stream are NOT VERIFIED here (no egress from this
+environment); check the panel on the server after deploy.
 

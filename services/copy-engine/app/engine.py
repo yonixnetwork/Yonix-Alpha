@@ -23,7 +23,7 @@ from yonixalpha_core import copy_trading as ct
 from yonixalpha_core import events, kill_switch, launch_coordination, paper_engine, wallet_profiles
 from yonixalpha_core.chains import controls, verification
 from yonixalpha_core.chains.base import Chain
-from yonixalpha_core.chains.evm import paper, safety, store
+from yonixalpha_core.chains.evm import paper, safety, store, streams
 from yonixalpha_core.chains.evm import settings as evm_settings
 from yonixalpha_core.db.models import (CopyEvent, CopyPosition, CopyTarget, EvmToken, EvmTrade, PaperAccount, PaperPosition,
                                        RiskAssessment)
@@ -63,6 +63,7 @@ class Outcome:
         self.detail: dict[str, Any] = {}
         self.analyzed_at = self.planned_at = self.executed_at = None
         self.position_id: uuid.UUID | None = None
+        self.stream: dict[str, Any] | None = None  # the target's tx seen earlier on a stream (master §9 / §13)
 
     def skip(self, code: str, message: str = "") -> "Outcome":
         self.decision, self.reason = "SKIPPED", f"{code}: {message}"[:300] if message else code
@@ -110,6 +111,8 @@ class CopyEngine:
             ev.decision, ev.reason, ev.detail, ev.decided_at = o.decision, o.reason, store._js(o.detail), now
             ev.position_id = o.position_id
             ev.latency_ms = ct.latency(target_at, detected_at, o.analyzed_at, o.planned_at, o.executed_at)
+            if o.stream:  # how much earlier a stream saw the target's transaction than confirmed-trade detection
+                ev.latency_ms = {**ev.latency_ms, "stream_source": o.stream["source"], "stream_lead": o.stream["lead_ms"]}
             await session.commit()
         await events.publish(self.redis, "copy.event", {"target": target.wallet, "chain": target.chain, "token": ev.token,
                                                         "side": ev.side, "decision": o.decision, "reason": o.reason}, SERVICE)
@@ -179,6 +182,13 @@ class CopyEngine:
                 o = Outcome()
                 o.decision, o.reason = "FAILED", f"{type(exc).__name__}: {str(exc)[:200]}"
                 await alert_error(SERVICE, f"{chain}.copy_failed", {"target": target.wallet, "error": o.reason})
+            try:
+                sighting = await streams.seen(self.redis, chain, t.tx_hash)
+                if sighting and sighting.get("seen_at"):
+                    lead = int((detected - datetime.fromisoformat(sighting["seen_at"])).total_seconds() * 1000)
+                    o.stream = {"source": sighting.get("source"), "lead_ms": lead, "seen_at": sighting["seen_at"]}
+            except Exception as exc:  # noqa: BLE001 - a measurement; never blocks recording the copy event
+                log.warning("copy.stream_lookup_failed", chain=chain, error=f"{type(exc).__name__}: {exc}"[:200])
             await self._finish(eid, target, o, t.at, detected)
         return n
 

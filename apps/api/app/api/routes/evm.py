@@ -16,10 +16,12 @@ from app.api.util import audit, jsonable
 from yonixalpha_core import events, launch_coordination
 from yonixalpha_core.chains.evm import observation as evm_observation
 from yonixalpha_core.chains.evm import settings as evm_settings
+from yonixalpha_core.chains.evm import streams as evm_streams
 from yonixalpha_core.chains.evm import wallet as evm_wallet
 from yonixalpha_core.chains.evm import rpc_registry as evm_rpc_registry
 from yonixalpha_core.config import Settings
-from yonixalpha_core.db.models import EvmObservation, EvmToken, EvmTrade, PaperAccount, PaperPosition, PlatformSetting
+from yonixalpha_core.db.models import (CopyEvent, EvmObservation, EvmToken, EvmTrade, PaperAccount, PaperPosition,
+                                       PlatformSetting)
 
 router = APIRouter(prefix="/evm", tags=["evm"])
 CHAIN = "^(bsc|robinhood)$"
@@ -335,3 +337,64 @@ async def put_observation_settings(body: dict, request: Request, db: AsyncSessio
     await db.commit()
     await events.publish(redis, "settings.updated", {"key": evm_observation.SETTINGS_KEY}, "api")
     return {"settings": value}
+
+
+# --- transaction streams (master §9, §13) ------------------------------------------------------------
+
+def _pct(vals: list[float], q: float) -> float | None:
+    if not vals:
+        return None
+    vals = sorted(vals)
+    return vals[min(len(vals) - 1, int(len(vals) * q))]
+
+
+@router.get("/streams")
+async def get_streams(db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
+                      _: str = Depends(get_current_username)) -> dict:
+    """Live state of the Robinhood sequencer feed and the BSC pending-transaction
+    stream as data-evm last published it, plus, over the last 24 hours, how many
+    copy-target trades a stream saw before confirmed-trade detection and by how much."""
+    row = await db.get(PlatformSetting, evm_streams.SETTINGS_KEY)
+    cfg, errors = evm_streams.parse_config(dict(row.value) if row else None)
+    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    chains: dict[str, dict] = {}
+    for chain in ("robinhood", "bsc"):
+        reps = await evm_streams.reports(redis, chain)
+        lat = (await db.execute(select(CopyEvent.latency_ms).where(CopyEvent.chain == chain, CopyEvent.detected_at >= since)
+                                .order_by(desc(CopyEvent.detected_at)).limit(5000))).scalars().all()
+        leads = [float(x["stream_lead"]) for x in lat if isinstance(x, dict) and x.get("stream_lead") is not None]
+        by_source: dict[str, int] = {}
+        for x in lat:
+            if isinstance(x, dict) and x.get("stream_source"):
+                by_source[x["stream_source"]] = by_source.get(x["stream_source"], 0) + 1
+        chains[chain] = {
+            "streams": reps,
+            "expected": ["sequencer_feed"] if chain == "robinhood" else ["pending_tx"],
+            "copy_events_24h": len(lat),
+            "seen_on_stream_24h": len(leads),
+            "by_source_24h": by_source,
+            "lead_ms_median": _pct(leads, 0.5), "lead_ms_p95": _pct(leads, 0.95) if len(leads) >= 20 else None,
+        }
+    return jsonable({"settings": cfg.to_dict(), "defaults": evm_streams.StreamConfig().to_dict(), "errors": errors,
+                     "chains": chains,
+                     "note": "streams record and measure only: a sequenced or pending transaction can still revert, so "
+                             "copy decisions stay on confirmed trades. A stream absent here is not running or has not "
+                             "reported in 3 minutes. Lead = confirmed-trade detection time minus the time a stream saw "
+                             "the same transaction."})
+
+
+@router.put("/stream-settings")
+async def put_stream_settings(body: dict, request: Request, db: AsyncSession = Depends(get_db),
+                              redis: Redis = Depends(get_redis), username: str = Depends(get_current_username)) -> dict:
+    row = await db.get(PlatformSetting, evm_streams.SETTINGS_KEY)
+    current = dict(row.value) if row else {}
+    cfg, errors = evm_streams.parse_config({**current, **body})
+    if errors:
+        raise HTTPException(422, {"errors": errors})
+    value = cfg.to_dict()
+    await db.execute(insert(PlatformSetting).values(key=evm_streams.SETTINGS_KEY, value=value).on_conflict_do_update(
+        index_elements=["key"], set_={"value": value, "updated_at": func.now()}))
+    await audit(db, username, request, "evm_streams.update", {"changes": body})
+    await db.commit()
+    await events.publish(redis, "settings.updated", {"key": evm_streams.SETTINGS_KEY}, "api")
+    return {"settings": value, "note": "data-evm picks the change up within a minute"}

@@ -24,6 +24,7 @@ from app.api.deps import get_current_username, get_db, get_redis, get_settings
 from app.api.util import audit, jsonable, require_password
 from yonixalpha_core import provider_roles, runtime_config, secretbox
 from yonixalpha_core.chains.evm import rpc_registry as evm_registry
+from yonixalpha_core.chains.evm import streams as evm_streams
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import PlatformSetting, RpcProvider
 from yonixalpha_core.redact import redact_url
@@ -525,6 +526,7 @@ async def plan_health(db: AsyncSession = Depends(get_db), redis: Redis = Depends
         rows = await evm_registry.endpoints(db, settings, chain)
         live = await evm_live(redis, chain)
         findings += provider_roles.evm_findings(chain, rows, live)
+        findings += provider_roles.stream_findings(chain, await evm_streams.reports(redis, chain))
         coverage[chain] = {r: sorted(e["name"] for e in rows if e["enabled"] and r in (e.get("roles") or []))
                            for r in provider_roles.ROLES}
         fallbacks[chain] = (live or {}).get("role_fallbacks") or {}
