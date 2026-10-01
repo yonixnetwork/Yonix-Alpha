@@ -18,6 +18,7 @@ from sqlalchemy import case, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 
+from yonixalpha_core import copy_outcomes as co
 from yonixalpha_core import copy_trading as ct
 from yonixalpha_core import events, kill_switch, paper_engine, wallet_profiles
 from yonixalpha_core.chains import controls, verification
@@ -43,6 +44,9 @@ PUMP_DECIMALS = 6
 GATE_MAX_AGE = timedelta(minutes=10)
 LOOKBACK = timedelta(minutes=10)
 E18 = Decimal(10) ** 18
+OUTCOME_BATCH = 200
+SOLANA_HISTORY = timedelta(hours=2, minutes=45)  # the pump stream keeps a mint's trades for 3 hours
+EVM_HISTORY = timedelta(days=13)  # evm_trades are pruned after 14 days
 
 
 def evm_copy_engine(chain: str) -> str:
@@ -502,6 +506,61 @@ class CopyEngine:
             session.add(acct)
             await session.flush()
         return acct
+
+    # --- paper copy outcomes (master upgrade §35) ------------------------------------------------
+
+    async def evaluate_outcomes(self) -> dict[str, int]:
+        """Evaluates every target BUY whose horizon has passed (copy_outcomes):
+        copied, skipped and notify-only alike, so each filter's cost or saving
+        is measured. Each event is evaluated once (outcome_at)."""
+        now = self.now()
+        due = now - co.HORIZON
+        counts = {"evaluated": 0, "no_price_data": 0}
+        async with self.session_factory() as session:
+            rows = (await session.execute(select(CopyEvent, CopyTarget.mode).join(
+                CopyTarget, CopyTarget.id == CopyEvent.target_id).where(
+                CopyEvent.side == "BUY", CopyEvent.outcome_at.is_(None), CopyEvent.target_at <= due,
+                CopyEvent.detected_at <= due, CopyEvent.decision != "PENDING")
+                .order_by(CopyEvent.target_at).limit(OUTCOME_BATCH))).all()
+            for ev, mode in rows:
+                out = await (self._solana_outcome(ev, mode, now) if ev.chain == "solana"
+                             else self._evm_outcome(session, ev, mode, now))
+                out.update({"class": co.skip_class(ev.decision, ev.reason), "decision": ev.decision,
+                            "reason_code": (ev.reason or "").split(":", 1)[0].strip() or None, "mode": mode})
+                ev.outcome, ev.outcome_at = store._js(out), now
+                counts["evaluated" if out["status"] == "EVALUATED" else "no_price_data"] += 1
+            await session.commit()
+        return counts
+
+    async def _evm_outcome(self, session, ev: CopyEvent, mode: str, now: datetime) -> dict[str, Any]:
+        if now - ev.target_at > EVM_HISTORY:
+            return {"status": "NO_PRICE_DATA", "reason": "the token's trades are no longer retained"}
+        e = EvmTrade
+        rows = (await session.execute(select(e.at, e.quote_amount, e.token_amount, e.trader, e.is_buy).where(
+            e.chain == ev.chain, e.token == ev.token, e.at >= ev.detected_at, e.at <= ev.detected_at + co.HORIZON)
+            .order_by(e.at))).all()
+        path = [co.Point(at, px) for at, q, tok, _, _ in rows if (px := co.unit_price(ev.chain, q, tok)) is not None]
+        exit_ = None
+        if mode == "MIRROR":
+            sell = next(((at, q, tok) for at, q, tok, trader, is_buy in rows
+                         if not is_buy and trader.lower() == ev.wallet.lower()), None)
+            if sell is not None and (px := co.unit_price(ev.chain, sell[1], sell[2])) is not None:
+                exit_ = co.Point(sell[0], px)
+        return co.evaluate(ev.detected_at, path, exit_)
+
+    async def _solana_outcome(self, ev: CopyEvent, mode: str, now: datetime) -> dict[str, Any]:
+        if now - ev.target_at > SOLANA_HISTORY:
+            return {"status": "NO_PRICE_DATA", "reason": "the Solana trade stream keeps 3 hours of trades; "
+                                                          "this event was not evaluated within that time"}
+        trades = await pump_stream.load_trades(self.redis, ev.token)
+        path = [co.Point(x.at, px) for x in trades if (px := co.unit_price("solana", x.sol_lamports, x.token_raw))]
+        exit_ = None
+        if mode == "MIRROR":
+            sell = next((x for x in sorted(trades, key=lambda x: x.at)
+                         if not x.is_buy and x.trader == ev.wallet and x.at >= ev.detected_at), None)
+            if sell is not None and (px := co.unit_price("solana", sell.sol_lamports, sell.token_raw)) is not None:
+                exit_ = co.Point(sell.at, px)
+        return co.evaluate(ev.detected_at, path, exit_)
 
     # --- wallet profiles --------------------------------------------------------------------------
 

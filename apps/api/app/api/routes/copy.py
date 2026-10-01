@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_username, get_db, get_redis
 from app.api.util import audit, jsonable
+from yonixalpha_core import copy_outcomes as co
 from yonixalpha_core import copy_trading as ct
 from yonixalpha_core import events
 from yonixalpha_core.db.models import CopyEvent, CopyPosition, CopyTarget, PaperPosition, WalletProfile
@@ -179,10 +180,14 @@ async def copy_events(target_id: str | None = None, chain: str | None = Query(No
     return jsonable({"events": [{"id": r.id, "target_id": r.target_id, "chain": r.chain, "wallet": r.wallet, "token": r.token,
                                  "side": r.side, "decision": r.decision, "reason": r.reason, "target_at": r.target_at,
                                  "detected_at": r.detected_at, "decided_at": r.decided_at, "latency_ms": r.latency_ms,
-                                 "position_id": r.position_id, "detail": r.detail,
+                                 "position_id": r.position_id, "detail": r.detail, "outcome": r.outcome,
                                  "target_quote_amount": str(r.target_quote_amount / 10 ** ct.DECIMALS_QUOTE.get(r.chain, 18))}
                                 for r in rows],
-                     "median_latency_ms_copied": {k: med(k) for k in ("detection", "analysis", "risk", "execution", "total")}})
+                     "median_latency_ms_copied": {k: med(k) for k in ("detection", "analysis", "risk", "decision",
+                                                                      "execution", "total")},
+                     "live_only_stages": list(ct.LIVE_ONLY_STAGES),
+                     "latency_note": "build / sign / submission / landing / confirmation exist only for a signed "
+                                     "transaction; copy trading is paper only"})
 
 
 @router.get("/copy/positions")
@@ -191,8 +196,22 @@ async def copy_positions(status: str = Query("open", pattern="^(open|closed)$"),
     rows = (await db.execute(select(PaperPosition, CopyPosition, CopyTarget).join(
         CopyPosition, CopyPosition.position_id == PaperPosition.id).join(CopyTarget, CopyTarget.id == CopyPosition.target_id)
         .where(PaperPosition.status == status).order_by(desc(PaperPosition.entry_at)).limit(limit))).all()
+    pids = [p.id for p, _, _ in rows]
+    entries = {e.position_id: e for e in (await db.execute(select(CopyEvent).where(
+        CopyEvent.position_id.in_(pids), CopyEvent.side == "BUY", CopyEvent.decision == "COPIED"))).scalars()} if pids else {}
+    sells: dict = {}
+    if rows:
+        for e in (await db.execute(select(CopyEvent).where(
+                CopyEvent.target_id.in_({cp.target_id for _, cp, _ in rows}), CopyEvent.side == "SELL",
+                CopyEvent.token.in_({cp.token for _, cp, _ in rows})))).scalars():
+            sells.setdefault((e.target_id, e.token), []).append(e)
     out = []
     for p, cp, t in rows:
+        entry = entries.get(p.id)
+        after = entry.target_at if entry is not None else p.entry_at
+        link = co.link(chain=cp.chain, wallet=t.wallet, mode=t.mode, entry_event=entry,
+                       sells=[e for e in sells.get((cp.target_id, cp.token), []) if e.target_at >= after],
+                       position=p, target_tokens_held=cp.target_tokens)
         rem = p.remaining_quantity if p.remaining_quantity is not None else p.quantity
         init = p.initial_quantity or p.quantity
         cost_open = (p.entry_cost_quote or 0) * (rem / init) if init else 0
@@ -200,5 +219,49 @@ async def copy_positions(status: str = Query("open", pattern="^(open|closed)$"),
                     "target_label": t.label, "mode": t.mode, "status": p.status, "entry_at": p.entry_at,
                     "entry_cost": p.entry_cost_quote, "quantity": rem, "last_price": p.last_price, "stop_loss": p.stop_loss,
                     "unrealized_pnl": ((p.last_price or p.entry_price) * rem - cost_open) if p.status == "open" else None,
-                    "realized_pnl": p.realized_pnl, "exit_reason": p.exit_reason, "currency": ct.NATIVE.get(cp.chain)})
+                    "realized_pnl": p.realized_pnl, "exit_reason": p.exit_reason, "currency": ct.NATIVE.get(cp.chain),
+                    "link": link})
     return jsonable({"positions": out, "mode": "PAPER"})
+
+
+@router.get("/copy/outcomes")
+async def copy_outcomes(chain: str | None = Query(None, pattern=CHAIN), target_id: str | None = None,
+                        limit: int = Query(100, ge=1, le=500),
+                        db: AsyncSession = Depends(get_db), _: str = Depends(get_current_username)) -> dict:
+    """Paper outcome of every evaluated target buy, grouped by target and by
+    what we did with it (copied / missed / blocked by safety / filtered by
+    settings / not copyable / notify only). Counts with no evaluated event
+    show None, never 0 %."""
+    q = select(CopyEvent, CopyTarget).join(CopyTarget, CopyTarget.id == CopyEvent.target_id).where(
+        CopyEvent.side == "BUY", CopyEvent.outcome_at.is_not(None))
+    if chain:
+        q = q.where(CopyEvent.chain == chain)
+    if target_id:
+        q = q.where(CopyEvent.target_id == target_id)
+    rows = (await db.execute(q.order_by(desc(CopyEvent.outcome_at)).limit(5000))).all()
+    groups: dict = {}
+    for ev, t in rows:
+        o = ev.outcome or {}
+        g = groups.setdefault((t.id, o.get("class") or "UNKNOWN"), {
+            "target_id": t.id, "chain": t.chain, "wallet": t.wallet, "label": t.label, "mode": t.mode,
+            "class": o.get("class") or "UNKNOWN", "events": 0, "no_price_data": 0, "won": 0, "lost": 0, "results": []})
+        g["events"] += 1
+        if o.get("status") != "EVALUATED":
+            g["no_price_data"] += 1
+            continue
+        g["won" if o.get("label") == "WOULD_HAVE_WON" else "lost"] += 1
+        g["results"].append(float(o["result_pct"]))
+    summary = []
+    for g in groups.values():
+        r = sorted(g.pop("results"))
+        n = len(r)
+        summary.append({**g, "evaluated": n, "won_rate": round(g["won"] / n, 4) if n else None,
+                        "avg_result_pct": round(sum(r) / n, 2) if n else None,
+                        "median_result_pct": round(r[n // 2] if n % 2 else (r[n // 2 - 1] + r[n // 2]) / 2, 2) if n else None})
+    summary.sort(key=lambda g: (g["wallet"], co.CLASSES.index(g["class"]) if g["class"] in co.CLASSES else 99))
+    recent = [{"id": ev.id, "chain": ev.chain, "wallet": ev.wallet, "token": ev.token, "target_at": ev.target_at,
+               "decision": ev.decision, "reason": ev.reason, "outcome": ev.outcome} for ev, _ in rows[:limit]]
+    return jsonable({"summary": summary, "recent": recent, "horizon_min": co.HORIZON.total_seconds() / 60,
+                     "classes": list(co.CLASSES), "basis": co.BASIS,
+                     "note": "what each target buy would have done in paper, copied or not: a measure of what each "
+                             "filter cost or saved; it never changes a decision"})

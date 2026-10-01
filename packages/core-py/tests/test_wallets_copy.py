@@ -43,5 +43,6 @@ def test_copy_rules():
     assert ct.sell_fraction(Decimal(5), Decimal(10)) == Decimal("0.5") and ct.sell_fraction(Decimal(20), Decimal(10)) == 1
     lat = ct.latency(T0, T0 + timedelta(seconds=2), T0 + timedelta(seconds=2.3), T0 + timedelta(seconds=2.4),
                      T0 + timedelta(seconds=2.5))
-    assert lat == {"detection": 2000, "analysis": 300, "risk": 100, "execution": 100,
-                   "landing": "not applicable (paper)", "total": 2500}
+    assert lat == {"detection": 2000, "analysis": 300, "risk": 100, "decision": 400, "execution": 100,
+                   "build": None, "sign": None, "submission": None, "landing": None, "confirmation": None,
+                   "live_only": ["build", "sign", "submission", "landing", "confirmation"], "total": 2500}
