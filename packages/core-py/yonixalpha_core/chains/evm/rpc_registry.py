@@ -99,6 +99,19 @@ async def effective_urls(session: AsyncSession, settings: Any, chain: str) -> li
     return list(dict.fromkeys(urls))
 
 
+async def ws_urls(session: AsyncSession, settings: Any, chain: str) -> list[str]:
+    """Decrypted WSS URLs of the enabled dashboard endpoints of `chain`, in
+    priority order (server-side only; used by the pending-transaction stream)."""
+    out = []
+    for p in (await session.execute(select(RpcProvider).where(RpcProvider.chain == chain, RpcProvider.enabled.is_(True))
+                                    .order_by(RpcProvider.priority))).scalars():
+        if p.ws_url_enc:
+            url = secretbox.decrypt(settings, p.ws_url_enc)
+            if url:
+                out.append(url)
+    return out
+
+
 async def effective_roles(session: AsyncSession, settings: Any, chain: str) -> dict[str, tuple]:
     """url -> roles of the enabled endpoints that have roles (provider_roles)."""
     return {r["url"]: tuple(r["roles"]) for r in await endpoints(session, settings, chain)

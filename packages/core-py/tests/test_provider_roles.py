@@ -115,3 +115,28 @@ def test_evm_plan_findings_public_only_and_small_log_span():
     assert "50 blocks" in caps["eth_getLogs block range"]["observed"]
     assert "throughput" not in caps  # 1% 429s is not a plan limit
     assert caps["WebSocket / pending transactions"]["severity"] == "INFO"
+
+
+def test_stream_findings_only_from_observed_states():
+    """Master §9 / §13 / §53: a refused or hash-only pending stream is an
+    UPGRADE REQUIRED finding; the sequencer feed reports a wrong chain, a
+    delayed-feed fallback and repeated failures; a healthy or unreported
+    stream raises nothing. Robinhood needs no provider WSS (the feed is public)."""
+    assert pr.stream_findings("bsc", {}) == []
+    assert pr.stream_findings("bsc", {"pending_tx": {"state": "CONNECTED", "url": "wss://x"}}) == []
+    refused = pr.stream_findings("bsc", {"pending_tx": {"state": "REFUSED", "url": "wss://bsc.example/***",
+                                                        "detail": "method not allowed"}})
+    assert refused[0]["severity"] == "UPGRADE_REQUIRED" and refused[0]["capability"] == "mempool / pending transactions"
+    assert "confirmed" in refused[0]["impact"] and refused[0]["evidence"]["detail"] == "method not allowed"
+    limited = pr.stream_findings("bsc", {"pending_tx": {"state": "LIMITED"}})
+    assert "hashes only" in limited[0]["observed"]
+    wrong = pr.stream_findings("robinhood", {"sequencer_feed": {"state": "WRONG_CHAIN", "last_error": "feed is for chain 42161"}})
+    assert wrong[0]["severity"] == "CONFIGURATION" and "42161" in wrong[0]["observed"]
+    fb = pr.stream_findings("robinhood", {"sequencer_feed": {"state": "CONNECTED", "fallback_active": True}})
+    assert fb[0]["severity"] == "INFO" and "delayed feed" in fb[0]["observed"]
+    assert pr.stream_findings("robinhood", {"sequencer_feed": {"state": "RECONNECTING", "failures_in_row": 1}}) == []
+    down = pr.stream_findings("robinhood", {"sequencer_feed": {"state": "RECONNECTING", "failures_in_row": 4,
+                                                                "last_error": "TimeoutError: x"}})
+    assert down[0]["severity"] == "CONFIGURATION" and "4 failed connections in a row" in down[0]["observed"]
+    rows = [{"label": "public:robinhood:0", "name": "public #1", "url": "https://rpc.example", "source": "public", "enabled": True}]
+    assert not any(f["capability"] == "WebSocket / pending transactions" for f in pr.evm_findings("robinhood", rows, None))

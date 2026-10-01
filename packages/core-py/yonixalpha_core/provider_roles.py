@@ -192,9 +192,44 @@ def evm_findings(chain: str, endpoints: list[dict[str, Any]], live: dict | None)
                             "only the chain's public endpoints are enabled", "public RPC must not be the only "
                             "production path (master §51): rate limits and log ranges are tight",
                             "add a keyed provider in RPC / Data Providers (Alchemy, QuickNode, Chainstack)"))
-    if not any(e.get("ws_url") for e in enabled):
+    # Robinhood Chain's sequencer feed is public and needs no provider WSS; BSC
+    # pending transactions need one (master §9).
+    if chain != "robinhood" and not any(e.get("ws_url") for e in enabled):
         out.append(_finding(INFO, chain, "all endpoints", None, "WebSocket / pending transactions",
-                            "no WSS endpoint configured", "mempool and sequencer streaming are not available "
-                            "(not used yet: polling discovery is unaffected)",
-                            "add a WSS URL to a provider when mempool / sequencer streaming is enabled"))
+                            "no WSS endpoint configured", "the pending-transaction stream is off: copy trading "
+                            "uses confirmed trades (polling discovery is unaffected)",
+                            "add a WSS URL to a provider whose plan streams full pending transactions"))
+    return out
+
+
+STREAM_RECOMMEND_PENDING = ("a provider plan that streams full pending transaction bodies "
+                            "(eth_subscribe newPendingTransactions, true), or an own BSC full node")
+
+
+def stream_findings(chain: str, reports: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """`reports`: data-evm's last StreamStats.report() per source for the
+    chain (evm.streams). Only observed states raise findings."""
+    out: list[dict[str, Any]] = []
+    pending = reports.get("pending_tx")
+    if pending and pending.get("state") in ("REFUSED", "LIMITED"):
+        observed = ("the provider refuses the pending-transaction subscription" if pending["state"] == "REFUSED"
+                    else "the provider streams transaction hashes only")
+        out.append(_finding(UPGRADE, chain, pending.get("url") or "WSS endpoint", None,
+                            "mempool / pending transactions", observed,
+                            "copy-target transactions are seen only once confirmed in a block",
+                            STREAM_RECOMMEND_PENDING, detail=pending.get("detail")))
+    feed = reports.get("sequencer_feed")
+    if feed:
+        if feed.get("state") == "WRONG_CHAIN":
+            out.append(_finding(CONFIGURATION, chain, feed.get("url") or "sequencer feed", None, "sequencer feed",
+                                feed.get("last_error") or "the feed serves another chain", "the feed is not used",
+                                "set the Robinhood Chain feed URL in the stream settings"))
+        elif feed.get("fallback_active"):
+            out.append(_finding(INFO, chain, feed.get("url") or "sequencer feed", None, "sequencer feed",
+                                "the primary feed failed repeatedly; the delayed feed is in use", "transactions are seen later than on the primary feed",
+                                "nothing to buy: the primary feed is retried automatically"))
+        elif feed.get("state") == "RECONNECTING" and (feed.get("failures_in_row") or 0) >= 3:
+            out.append(_finding(CONFIGURATION, chain, feed.get("url") or "sequencer feed", None, "sequencer feed",
+                                f"{feed['failures_in_row']} failed connections in a row: {feed.get('last_error') or 'unknown'}",
+                                "copy trading uses confirmed trades only", "check outbound WSS access from the server"))
     return out

@@ -300,3 +300,31 @@ async def test_a_short_rpc_cooldown_is_not_alerted_but_a_persisting_one_is(sessi
     monkeypatch.setattr(lp, "scan", broken)
     await w.discovery_pass(s, now)
     assert [e for e, _ in sent] == ["bsc.fourmeme.discovery_failed"]  # not an RPC outage: at once
+
+
+async def test_streams_watch_copy_targets_and_launchpad_contracts(session_factory, redis_client):
+    """Master §9 / §13: data-evm builds the Robinhood sequencer feed and the
+    BSC pending stream; they watch enabled copy targets and the launchpads'
+    own contracts, and BSC without a WSS endpoint has no stream URL."""
+    from yonixalpha_core.chains.evm import streams
+    from yonixalpha_core.db.models import CopyTarget, PlatformSetting
+
+    from app.main import _streams
+
+    now = datetime.now(timezone.utc)
+    node, lp = fourmeme_node(now)
+    worker = ChainWorker("bsc", lp.rpc, [lp], session_factory, redis_client)
+    async with session_factory() as s:
+        s.add_all([CopyTarget(chain="bsc", wallet="0x" + "ab" * 20, mode="NOTIFY", enabled=True, settings={}),
+                   CopyTarget(chain="bsc", wallet="0x" + "cd" * 20, mode="NOTIFY", enabled=False, settings={}),
+                   PlatformSetting(key=streams.SETTINGS_KEY, value={"bsc_pending_enabled": False})])
+        await s.commit()
+    feed, pending = _streams(None, session_factory, redis_client, {"bsc": worker})  # app settings: only for WSS decryption
+    assert isinstance(feed, streams.SequencerFeed) and feed.chain == "robinhood"
+    wallets, contracts = await pending.watch()
+    assert wallets == {"0x" + "ab" * 20}  # the disabled target is not watched
+    assert lp.spec.contracts["manager_v2"].lower() in contracts
+    rh_wallets, rh_contracts = await feed.watch()
+    assert not rh_wallets and streams.EXTRA_CONTRACTS["robinhood"] <= rh_contracts
+    assert await pending.urls() == [] and await pending.enabled() is False
+    assert (await feed.reload()).robinhood_feed_enabled

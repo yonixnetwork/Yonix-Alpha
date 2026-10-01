@@ -28,7 +28,7 @@ NEW_ENDPOINTS = ["/api/analytics/performance", "/api/strategies", "/api/summary"
                  "/api/notifications", "/api/notifications/prefs", "/api/system/health", "/api/system/observability",
                  "/api/ml/review", "/api/ml/predictions", "/api/ml/data-quality", "/api/ml/samples", f"/api/tokens/{MINT}",
                  "/api/paper/orders", "/api/evm/coordination-settings", "/api/evm/coordination/summary", "/api/evm/observations",
-                 "/api/evm/observation-settings"]
+                 "/api/evm/observation-settings", "/api/evm/streams"]
 
 
 async def test_new_endpoints_require_auth(client):
@@ -642,3 +642,44 @@ async def test_evm_observations_list_detail_and_settings(app, client, auth_heade
     ok = await client.put("/api/evm/observation-settings", json={"window_min": {"MOMENTUM": 90}}, headers=auth_headers)
     assert ok.status_code == 200 and "x-config-revision" in ok.headers
     assert ok.json()["settings"]["window_min"] == {"FRESH": 60, "MIGRATED": 60, "MOMENTUM": 90}
+
+
+async def test_evm_streams_state_lead_and_settings(app, client, auth_headers):
+    """Master §9 / §13: the streams page shows what data-evm published per
+    stream, how many copy-target trades a stream saw before confirmed-trade
+    detection (and by how much) over 24 hours, and validated settings; a
+    refused BSC pending stream is an UPGRADE REQUIRED plan-health finding."""
+    from yonixalpha_core.db.models import CopyEvent, CopyTarget
+
+    async with app.state.db_session_factory() as s:
+        t = CopyTarget(chain="robinhood", wallet="0x" + "ab" * 20, mode="NOTIFY", enabled=True, settings={})
+        s.add(t)
+        await s.flush()
+        for i, lat in enumerate([{"detect": 900, "stream_source": "sequencer_feed", "stream_lead": 700},
+                                 {"detect": 800, "stream_source": "sequencer_feed", "stream_lead": 500},
+                                 {"detect": 950}]):
+            s.add(CopyEvent(target_id=t.id, chain="robinhood", wallet=t.wallet, token="0x" + "cc" * 20, side="BUY",
+                            source_event_id=f"ev{i}", target_token_amount=1, target_quote_amount=1, target_at=NOW,
+                            detected_at=NOW, decision="NOTIFIED", latency_ms=lat))
+        await s.commit()
+    await app.state.redis.set("yx:evm:stream:robinhood:sequencer_feed", json.dumps(
+        {"chain": "robinhood", "source": "sequencer_feed", "state": "CONNECTED", "messages": 120, "gaps": 0,
+         "delay_s_median": 1.0}))
+    await app.state.redis.set("yx:evm:stream:bsc:pending_tx", json.dumps(
+        {"chain": "bsc", "source": "pending_tx", "state": "REFUSED", "url": "wss://bsc.example/***",
+         "detail": "the provider refuses pending-transaction subscriptions: method not allowed"}))
+    r = (await client.get("/api/evm/streams", headers=auth_headers)).json()
+    rh = r["chains"]["robinhood"]
+    assert rh["streams"]["sequencer_feed"]["state"] == "CONNECTED" and rh["expected"] == ["sequencer_feed"]
+    assert rh["copy_events_24h"] == 3 and rh["seen_on_stream_24h"] == 2 and rh["by_source_24h"] == {"sequencer_feed": 2}
+    assert rh["lead_ms_median"] == 700 and rh["lead_ms_p95"] is None  # too few samples for a p95
+    assert r["chains"]["bsc"]["streams"]["pending_tx"]["state"] == "REFUSED" and r["chains"]["bsc"]["copy_events_24h"] == 0
+    assert r["settings"]["robinhood_feed_url"] == "wss://feed.mainnet.chain.robinhood.com"
+    bad = await client.put("/api/evm/stream-settings", json={"robinhood_feed_url": "http://x"}, headers=auth_headers)
+    assert bad.status_code == 422
+    ok = await client.put("/api/evm/stream-settings", json={"bsc_pending_enabled": False}, headers=auth_headers)
+    assert ok.status_code == 200 and "x-config-revision" in ok.headers
+    assert (await client.get("/api/evm/streams", headers=auth_headers)).json()["settings"]["bsc_pending_enabled"] is False
+    ph = (await client.get("/api/rpc/plan-health", headers=auth_headers)).json()
+    mem = [f for f in ph["findings"] if f["capability"] == "mempool / pending transactions"]
+    assert mem and mem[0]["severity"] == "UPGRADE_REQUIRED" and mem[0]["chain"] == "bsc"

@@ -51,6 +51,9 @@ and what is verified.
 | PumpPortal Lightning API | pumpportal.fun docs | service | custodial trading | PumpPortal holds the private key | REJECT |
 | PumpPortal data WebSocket | pumpportal.fun docs | service | coverage/migration cross-check; held-mint trades with a key | key only in the connection URL, never logged | ACCEPT |
 | Jupiter Swap API v1 | dev.jup.ag (official) | service | quotes | keyed `api.jup.ag`; keyless lite-api is deprecated | ACCEPT (quotes) |
+| 1chimaruGin/bsc-mempool @212d4463 | github.com/1chimaruGin/bsc-mempool | Apache-2.0 OR MIT | reference for BSC mempool copy trading (full pending bodies, shadow-first rollout) | not a dependency; needs its own bsc-geth node and relay accounts | PARTIALLY USE (ideas only; see MASTER_UPGRADE_2026.md §17) |
+| Arbitrum Nitro sequencer feed format | docs.arbitrum.io (official) / Robinhood Chain feed | service | Robinhood Chain sequencer feed (broadcast messages, L2 message kinds, resume header) | message format only, decoded by our own code; no Nitro code taken | ACCEPT (format) |
+| pyrlp 5.0.0 | PyPI (github.com/ApeWorX/pyrlp) | MIT | decoding signed transactions from the feed | already installed by eth-account; now pinned | ACCEPT |
 
 Research note: from this environment, pumpportal.fun, dev.jup.ag and
 developers.binance.com were blocked. The facts above come from official SDK
