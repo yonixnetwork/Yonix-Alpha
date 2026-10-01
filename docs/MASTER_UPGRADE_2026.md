@@ -261,3 +261,22 @@ database:
   row; "Paper copy outcomes" table per target and per class; outcome column
   on copy events; full latency stage line. Rendered locally with seeded
   data (no console errors); NOT VERIFIED with real target wallets.
+
+## 10. RPC alerts seen in Telegram (2026-10-01)
+
+- `[data-solana] rpc_health_check_failed`: the 30-second getHealth check
+  in data-solana and the three Solana engines sent every failure straight
+  to Telegram, bypassing the alert throttle every other service uses. It now
+  goes through `notify.alert_error` (once per 5 minutes per event, with the
+  number suppressed); every failure is still stored as a SystemEvent.
+  The failure itself is the endpoints: in the reported snapshot the
+  SOLANA_RPC_URL Helius key had 0 successes in 88 calls (all HTTP 429),
+  Chainstack 0 / 20 (HTTP 403), Ankr 0 / 2 (getHealth not supported,
+  timeouts), dashboard Helius 44 % with 7.7 s latency; only Alchemy was
+  healthy (96.6 %).
+- `[data-evm] robinhood.<launchpad>.discovery_failed: all cooling down`:
+  Robinhood Chain has no ROBINHOOD_RPC_URLS configured, so data-evm uses the
+  single public endpoint, which rate-limits. A cooldown loses nothing (the
+  cursor resumes; a backlog over 60 minutes is skipped and alerted). Such
+  RPC-unavailable failures are now alerted once they persist 2 minutes
+  (per launchpad and per chain); any other discovery error is alerted at once.

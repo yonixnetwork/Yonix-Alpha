@@ -24,7 +24,7 @@ from yonixalpha_core.logging import configure_logging, get_logger
 from yonixalpha_core.notify import alert_error
 from yonixalpha_core.runtime_watch import run_watcher
 
-from app.worker import SERVICE, ChainWorker, utcnow
+from app.worker import RPC_OUTAGE_ALERT_SECONDS, SERVICE, ChainWorker, utcnow
 
 log = get_logger("data-evm.main")
 DISCOVERY_SECONDS = 3.0
@@ -45,6 +45,7 @@ async def chain_loop(worker: ChainWorker, stop: asyncio.Event) -> None:
     often; evidence every 30 minutes; old trades pruned every 6 hours."""
     await worker.restore()
     last_safety = last_prune = 0.0
+    rpc_down_since: float | None = None
     while not stop.is_set():
         now = utcnow()
         try:
@@ -64,10 +65,16 @@ async def chain_loop(worker: ChainWorker, stop: asyncio.Event) -> None:
                 worker.status["pruned_trades"] = await worker.prune(now)
             await worker.rpc.publish_health(worker.redis)
             worker.status["ok_at"] = now.isoformat()
+            rpc_down_since = None
         except EvmRpcUnavailableError as exc:
             worker.status["rpc_unavailable"] = str(exc)[:200]
             log.warning("data-evm.rpc_unavailable", chain=worker.chain, error=str(exc)[:200])
-            await alert_error(SERVICE, f"{worker.chain}.rpc_unavailable", str(exc)[:300])
+            # A short public-node cooldown loses nothing (cursors resume): alerted once it persists.
+            rpc_down_since = rpc_down_since or time.monotonic()
+            down_s = time.monotonic() - rpc_down_since
+            if down_s >= RPC_OUTAGE_ALERT_SECONDS:
+                await alert_error(SERVICE, f"{worker.chain}.rpc_unavailable",
+                                  f"{str(exc)[:300]} (for {down_s:.0f}s)")
         except Exception as exc:  # noqa: BLE001 - the loop itself never dies
             log.error("data-evm.loop_failed", chain=worker.chain, error=str(exc)[:200])
             await alert_error(SERVICE, f"{worker.chain}.loop_failed", f"{type(exc).__name__}: {str(exc)[:300]}")

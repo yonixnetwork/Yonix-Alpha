@@ -8,6 +8,7 @@ stops the others. Nothing here signs or sends a transaction.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -33,6 +34,7 @@ SAFETY_RECHECK = timedelta(minutes=2)
 SAFETY_PER_PASS = 8
 EVIDENCE_EVERY = timedelta(minutes=30)
 TRADE_RETENTION = timedelta(days=14)
+RPC_OUTAGE_ALERT_SECONDS = 120  # discovery failing on an unavailable RPC this long is alerted
 E18 = Decimal(10) ** 18
 
 
@@ -64,6 +66,7 @@ class ChainWorker:
         self.last_evidence_at: datetime | None = None
         self.block_seconds: float | None = None
         self.status: dict[str, Any] = {}
+        self.failing_since: dict[str, float] = {}  # launchpad -> monotonic time its discovery started failing
 
     async def restore(self) -> None:
         async with self.session_factory() as session:
@@ -106,6 +109,7 @@ class ChainWorker:
                 fb, tb = cursor + 1, min(head, cursor + cs.max_blocks_per_pass)
                 if fb > tb:
                     out[key] = {"lag": 0}
+                    self.failing_since.pop(key, None)
                     continue
                 before = len(await ad._emitters() or [])
                 res = await ad.scan(fb, tb)
@@ -132,10 +136,18 @@ class ChainWorker:
                 out[key] = {**counts, "from": fb, "to": tb, "lag": head - tb}
                 if skipped:
                     out[key]["skipped"] = skipped
+                self.failing_since.pop(key, None)
             except Exception as exc:  # noqa: BLE001 - one launchpad never stops the others
                 out[key] = {"error": f"{type(exc).__name__}: {str(exc)[:160]}"}
                 log.warning("data-evm.discovery_failed", chain=self.chain, launchpad=key, error=out[key]["error"])
-                await alert_error(SERVICE, f"{self.chain}.{key}.discovery_failed", out[key])
+                since = self.failing_since.setdefault(key, time.monotonic())
+                failing_s = time.monotonic() - since
+                # A public node's short rate-limit cooldown clears on a later pass and loses
+                # nothing (the cursor resumes where it stopped): alerted once it persists.
+                # Anything else is alerted at once.
+                if not isinstance(exc, EvmRpcUnavailableError) or failing_s >= RPC_OUTAGE_ALERT_SECONDS:
+                    await alert_error(SERVICE, f"{self.chain}.{key}.discovery_failed",
+                                      {**out[key], "failing_for_s": round(failing_s)})
         return out
 
     # --- safety -------------------------------------------------------------------------------------
