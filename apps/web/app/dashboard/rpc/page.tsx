@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Network } from "lucide-react";
 import ConfirmButton from "@/components/ConfirmDialog";
+import PlanHealth, { RolesPlan, ROLES } from "@/components/PlanHealth";
 import RuntimeApply from "@/components/RuntimeApply";
 import { ErrorNotice, Loading, PageHeader, Section, Stat } from "@/components/ui";
 import { apiDelete, apiPatch, apiPost, apiPut, ApiError } from "@/lib/api";
@@ -20,6 +21,7 @@ interface Provider {
   tx_versions_seen?: Record<string, number>; rate_limited_by_method?: Record<string, number>;
   success_rate: number | null; error_rate: number | null; successes: number; failures: number; rate_limited_count: number;
   latency_ms: number | null; last_success_at: string | null; last_failure_at: string | null; last_error: string | null; services: string[];
+  roles?: string[]; plan?: string | null;
 }
 interface Listing {
   providers: Provider[]; active: string | null; provider_types: string[]; note: string;
@@ -36,7 +38,8 @@ const capClass = (s?: string) => s === "SUPPORTED" ? "pill pill-ok" : s === "UNS
   : s === "RATE_LIMITED" || s === "ERROR" ? "pill pill-warn" : "pill pill-off";
 const pct = (v: number | null) => (v === null ? "—" : `${(v * 100).toFixed(1)}%`);
 
-const EMPTY = { name: "", chain: "solana", provider_type: "alchemy", rpc_url: "", ws_url: "", priority: "150", timeout_seconds: "10", rate_limit_rps: "", notes: "", password: "" };
+const EMPTY = { name: "", chain: "solana", provider_type: "alchemy", rpc_url: "", ws_url: "", priority: "150", timeout_seconds: "10",
+  rate_limit_rps: "", notes: "", password: "", plan: "", roles: [] as string[] };
 const CHAIN_LABEL: Record<string, string> = { solana: "Solana", bsc: "BSC (BNB Smart Chain, id 56)", robinhood: "Robinhood Chain (id 4663)" };
 const PLACEHOLDER: Record<string, string> = {
   solana: "https://solana-mainnet.g.alchemy.com/v2/…", bsc: "https://bnb-mainnet.g.alchemy.com/v2/… (copy from your provider)",
@@ -48,7 +51,8 @@ interface EvmRow {
   label: string; id: string | null; name: string; source: "dashboard" | "env" | "public"; provider_type: string | null;
   rpc_url: string; enabled: boolean; priority: number; decrypt_failed: boolean; notes: string | null; last_test: EvmTest | null;
   live: { state: string; cooldown_s: number; last_error: string | null; ok: number; errors: number; rate_limited: number;
-    latency_ms: number | null; unsupported_methods: string[]; reported_at?: number } | null;
+    latency_ms: number | null; unsupported_methods: string[]; reported_at?: number; logs_span?: number | null } | null;
+  roles: string[]; plan: string | null; ws_url: string | null; rate_limit_rps: number | null;
 }
 interface EvmListing {
   chains: Record<string, { chain_id: number; endpoints: EvmRow[]; in_use: string[] }>;
@@ -88,7 +92,10 @@ function EvmProviders({ busy, run }: { busy: boolean; run: (fn: () => Promise<un
                     <td><input aria-label={`priority of ${r.name}`} style={{ width: 64 }} defaultValue={r.priority} inputMode="numeric"
                       onBlur={(e) => { const v = Number(e.target.value); if (v && v !== r.priority) void change(r, { priority: v }, `Priority of ${r.name} set to ${v}.`); }} /></td>
                     <td><b>{r.name}</b> <span className="muted">{r.source === "dashboard" ? r.provider_type : r.source === "env" ? ".env" : "built-in public"}</span>
-                      <div className="mono muted">{r.rpc_url}</div>
+                      <div className="mono muted">{r.rpc_url}{r.ws_url ? ` · ws ${r.ws_url}` : ""}</div>
+                      {r.rate_limit_rps ? <div className="muted">limit {r.rate_limit_rps} req/s</div> : null}
+                      <RolesPlan roles={r.roles} plan={r.plan} disabled={busy}
+                        onSave={(b) => change(r, b, `Roles / plan of ${r.name} saved.`)} />
                       {r.decrypt_failed && <div className="neg">stored URL cannot be decrypted — re-enter it</div>}</td>
                     <td>{yes(r.enabled)}</td>
                     <td>{r.live ? <><span className={r.live.state === "OK" ? "pill pill-ok" : r.live.state === "COOLDOWN" ? "pill pill-warn" : "pill pill-danger"}>{r.live.state}</span>
@@ -97,7 +104,8 @@ function EvmProviders({ busy, run }: { busy: boolean; run: (fn: () => Promise<un
                       {r.live.last_error && <div className="muted">{r.live.last_error}</div>}</>
                       : <span className="muted small">not used yet</span>}</td>
                     <td>{r.live ? <>{r.live.ok} ok · {r.live.errors} err<div className="muted">429×{r.live.rate_limited}{r.live.latency_ms !== null ? ` · ${r.live.latency_ms} ms` : ""}</div></> : "—"}</td>
-                    <td>{t?.logs_max_span ? `${t.logs_max_span} blocks` : t ? <span className="neg">none</span> : "—"}</td>
+                    <td>{r.live?.logs_span ? <>{r.live.logs_span} blocks<div className="muted small">served lately</div></>
+                      : t?.logs_max_span ? `${t.logs_max_span} blocks` : t ? <span className="neg">none</span> : "—"}</td>
                     <td><button className="btn btn-sm" disabled={busy || testing === r.label} onClick={() => test(r)}>{testing === r.label ? "TESTING…" : "TEST CONNECTION"}</button>
                       {t && <div>{testPill(t.status)} <span className="muted small">{t.detail}</span></div>}</td>
                     <td><div className="btn-row">
@@ -161,7 +169,7 @@ export default function RpcPage() {
     await run(async () => {
       const r = await apiPost<{ test: TestResult }>("/api/rpc/providers", {
         name: form.name, chain: form.chain, provider_type: form.provider_type, rpc_url: form.rpc_url,
-        ws_url: form.chain === "solana" ? form.ws_url || null : null,
+        ws_url: form.ws_url || null, roles: form.roles, plan: form.plan || null,
         priority: Number(form.priority), timeout_seconds: form.timeout_seconds, rate_limit_rps: form.rate_limit_rps || null,
         notes: form.notes || null, password: form.password, enabled: true,
       });
@@ -204,6 +212,7 @@ export default function RpcPage() {
       </div>
       {err && <ErrorNotice error={err} />}
       {msg && <div className="notice">{msg} {saved && <RuntimeApply inline />}</div>}
+      <PlanHealth />
 
       <Section title="Solana providers (tried in priority order, lowest first)">
         <div className="table-scroll">
@@ -222,6 +231,8 @@ export default function RpcPage() {
                     <b>{p.name}</b> <span className="muted">{p.source === "env" ? ".env" : p.provider_type}</span>
                     <div className="mono muted">{p.rpc_url}{p.ws_url ? ` · ws ${p.ws_url}` : ""}</div>
                     {p.rate_limit_rps && <div className="muted">limit {p.rate_limit_rps} req/s · timeout {p.timeout_seconds}s</div>}
+                    <RolesPlan roles={p.roles ?? []} plan={p.plan ?? null} disabled={busy}
+                      onSave={(b) => void patch(p, b, `Roles / plan of ${p.name} saved.`)} />
                     {p.decrypt_failed && <div className="neg">stored URL cannot be decrypted — re-enter it</div>}
                   </td>
                   <td>{yes(p.configured)}</td>
@@ -284,7 +295,15 @@ export default function RpcPage() {
           <label>Chain<select value={form.chain} onChange={(e) => setForm({ ...form, chain: e.target.value })}>
             {Object.entries(CHAIN_LABEL).map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></label>
           <label>RPC URL (full, with key)<input value={form.rpc_url} onChange={(e) => setForm({ ...form, rpc_url: e.target.value })} placeholder={PLACEHOLDER[form.chain]} autoComplete="off" /></label>
-          {form.chain === "solana" && <label>WebSocket URL (optional)<input value={form.ws_url} onChange={(e) => setForm({ ...form, ws_url: e.target.value })} placeholder="wss://…" autoComplete="off" /></label>}
+          <label>WebSocket URL (optional{form.chain === "solana" ? "" : "; stored for mempool / sequencer streaming"})
+            <input value={form.ws_url} onChange={(e) => setForm({ ...form, ws_url: e.target.value })} placeholder="wss://…" autoComplete="off" /></label>
+          <label>Plan (as named by the provider, optional)<input value={form.plan} maxLength={64} placeholder="e.g. Free, Growth, Pay As You Go"
+            onChange={(e) => setForm({ ...form, plan: e.target.value })} /></label>
+          <fieldset><legend className="small">Roles (none ticked = every role)</legend>
+            {ROLES.map((x) => (
+              <label key={x} className="small" style={{ marginRight: 8 }}><input type="checkbox" checked={form.roles.includes(x)}
+                onChange={(e) => setForm({ ...form, roles: e.target.checked ? [...form.roles, x] : form.roles.filter((y) => y !== x) })} /> {x.replaceAll("_", " ").toLowerCase()}</label>))}
+          </fieldset>
           <label>Priority (lower = first)<input value={form.priority} inputMode="numeric" onChange={(e) => setForm({ ...form, priority: e.target.value })} /></label>
           <label>Timeout (s)<input value={form.timeout_seconds} inputMode="decimal" onChange={(e) => setForm({ ...form, timeout_seconds: e.target.value })} /></label>
           <label>Rate limit (req/s, optional)<input value={form.rate_limit_rps} inputMode="decimal" onChange={(e) => setForm({ ...form, rate_limit_rps: e.target.value })} /></label>

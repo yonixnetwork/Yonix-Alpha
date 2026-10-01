@@ -192,9 +192,14 @@ async def test_bsc_and_robinhood_rpc_from_the_dashboard(app, client, auth_header
     _mock_evm(app, 56, logs_limit=10)
     body = {"name": "Alchemy BSC", "provider_type": "alchemy", "chain": "bsc",
             "rpc_url": "https://bnb-mainnet.alchemy.example/v2/TOPSECRET", "password": TEST_ADMIN_PASSWORD}
-    assert (await client.post("/api/rpc/providers", json={**body, "ws_url": "wss://x.example"},
-                              headers=auth_headers)).status_code == 422  # WebSocket is Solana only
-    r = await client.post("/api/rpc/providers", json=body, headers=auth_headers)
+    assert (await client.post("/api/rpc/providers", json={**body, "ws_url": "https://x.example"},
+                              headers=auth_headers)).status_code == 422  # a WebSocket URL must be wss://
+    assert (await client.post("/api/rpc/providers", json={**body, "roles": ["EVERYTHING"]},
+                              headers=auth_headers)).status_code == 422  # unknown role
+    # master §51-52: BSC / Robinhood WSS is stored (mempool / sequencer streaming), roles and plan recorded
+    r = await client.post("/api/rpc/providers", json={**body, "ws_url": "wss://bnb-ws.alchemy.example/v2/TOPSECRET",
+                                                      "roles": ["discovery", "HISTORICAL_DATA"], "plan": "Free"},
+                          headers=auth_headers)
     assert r.status_code == 200, r.text
     t = r.json()["test"]
     assert t["status"] == "CONNECTED" and t["logs_max_span"] == 10 and "slow" in t["detail"] and "x-config-revision" in r.headers
@@ -202,6 +207,9 @@ async def test_bsc_and_robinhood_rpc_from_the_dashboard(app, client, auth_header
     assert "TOPSECRET" not in evm.text
     bsc = evm.json()["chains"]["bsc"]
     assert bsc["chain_id"] == 56 and bsc["endpoints"][0]["name"] == "Alchemy BSC"
+    first = bsc["endpoints"][0]
+    assert first["roles"] == ["DISCOVERY", "HISTORICAL_DATA"] and first["plan"] == "Free"
+    assert first["ws_url"].startswith("wss://bnb-ws.alchemy.example") and "TOPSECRET" not in first["ws_url"]
     assert [e["source"] for e in bsc["endpoints"]][-1] == "public" and evm.json()["guide"]["providers"]
     # not in the Solana list
     assert all(p["name"] != "Alchemy BSC" for p in (await client.get("/api/rpc/providers", headers=auth_headers)).json()["providers"])
@@ -256,3 +264,30 @@ async def test_manual_buy_and_sell_endpoints(app, client, auth_headers):
     async with app.state.db_session_factory() as s:
         assert (await s.get(PaperPosition, pid)).exit_requested is True
     assert (await client.post(f"/api/trade/sell/{pid}?confirm=true", headers=auth_headers)).status_code == 409
+
+
+async def test_provider_roles_and_plan_health(app, client, auth_headers):
+    """Master §49 / §53: a .env / public endpoint can be given roles and a
+    plan; plan health reports a public-only production path and the
+    eth_getLogs span data-evm learned, with provider, plan, capability,
+    observed limitation and recommendation."""
+    import json as _json
+
+    r = await client.put("/api/rpc/evm/public:robinhood:0", json={"roles": ["DISCOVERY", "nope"]}, headers=auth_headers)
+    assert r.status_code == 422
+    r = await client.put("/api/rpc/evm/public:robinhood:0", json={"roles": ["discovery"], "plan": "public"},
+                         headers=auth_headers)
+    assert r.status_code == 200 and "x-config-revision" in r.headers
+    rh = (await client.get("/api/rpc/evm", headers=auth_headers)).json()["chains"]["robinhood"]["endpoints"][0]
+    assert rh["roles"] == ["DISCOVERY"] and rh["plan"] == "public"
+    await app.state.redis.set("yx:evm:rpc:bsc", _json.dumps({"endpoints": [
+        {"url": "https://bsc-rpc.publicnode.com", "state": "OK", "ok": 500, "errors": 0, "rate_limited": 60,
+         "logs_span": 10, "unsupported_methods": []}], "role_fallbacks": {"WALLET_DATA": 3}}))
+    ph = (await client.get("/api/rpc/plan-health", headers=auth_headers)).json()
+    bsc = [f for f in ph["findings"] if f["chain"] == "bsc"]
+    caps = {f["capability"] for f in bsc if f["severity"] == "UPGRADE_REQUIRED"}
+    assert {"production RPC", "eth_getLogs block range", "throughput"} <= caps
+    span = next(f for f in bsc if f["capability"] == "eth_getLogs block range")
+    assert "10 blocks" in span["observed"] and span["current_plan"] == "not stated" and "Alchemy" in span["recommendation"]
+    assert ph["upgrade_required"] >= 3 and ph["role_coverage"]["robinhood"]["DISCOVERY"] == ["public #1"]
+    assert ph["role_fallbacks"]["bsc"] == {"WALLET_DATA": 3}

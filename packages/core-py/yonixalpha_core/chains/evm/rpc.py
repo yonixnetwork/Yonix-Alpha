@@ -39,6 +39,7 @@ from typing import Any
 
 import httpx
 
+from yonixalpha_core import provider_roles
 from yonixalpha_core.redact import redact_text, redact_url
 
 
@@ -93,6 +94,7 @@ class _Endpoint:
     logs_span: int | None = None  # largest eth_getLogs block span this endpoint accepted lately
     logs_since_probe: int = 0  # answers since a larger span was last tried
     next_at: float = 0.0
+    roles: tuple = ()  # provider roles (provider_roles); empty = every role
 
     def refuses(self, method: str, now: float) -> bool:
         return self.unsupported.get(method, 0.0) > now
@@ -133,16 +135,20 @@ class EvmRpc:
         self._id = 0
         self._last_error_ep: _Endpoint | None = None  # the endpoint that answered the last EvmRpcError
         self._last_ok_ep: _Endpoint | None = None  # the endpoint that answered the last successful call
+        self.role_fallbacks: dict[str, int] = {}  # role -> requests no endpoint holding it could take
 
-    def replace_urls(self, urls: list[str] | tuple[str, ...]) -> bool:
+    def replace_urls(self, urls: list[str] | tuple[str, ...], roles: dict[str, tuple] | None = None) -> bool:
         """Swaps in a new ordered endpoint list (dashboard change, no restart).
         An unchanged URL keeps its state (cooldowns, pacing, refused methods);
-        an empty list is ignored, so a chain is never left without endpoints."""
+        an empty list is ignored, so a chain is never left without endpoints.
+        `roles`: url -> provider roles (absent = every role)."""
         clean = list(dict.fromkeys(u.strip() for u in urls if u and u.strip()))
         if not clean:
             return False
         old = {e.url: e for e in self.endpoints}
         self.endpoints = [old.get(u) or _Endpoint(u) for u in clean]
+        for e in self.endpoints:
+            e.roles = tuple((roles or {}).get(e.url) or ())
         return True
 
     async def aclose(self) -> None:
@@ -199,7 +205,8 @@ class EvmRpc:
         deadline = time.monotonic() + self.cooldown_wait_s
         while True:
             now = time.monotonic()
-            order = [e for e in self.endpoints if e.usable(now, method)]
+            order = provider_roles.prefer([e for e in self.endpoints if e.usable(now, method)],
+                                          provider_roles.evm_role(method, params), self.role_fallbacks)
             if not order:
                 wait = self._cooldown_wait(method, now)
                 if wait is not None and now + wait <= deadline:
@@ -347,7 +354,8 @@ class EvmRpc:
         lately (a free tier that serves 10 blocks is not asked 2000, 1000, ...
         on every call), twice that now and then in case its limit was raised."""
         now = time.monotonic()
-        ep = next((e for e in self.endpoints if e.usable(now, "eth_getLogs")), None)
+        usable = provider_roles.prefer([e for e in self.endpoints if e.usable(now, "eth_getLogs")], provider_roles.DISCOVERY)
+        ep = usable[0] if usable else None
         if ep is None or ep.logs_span is None:
             return max(1, max_span)
         if ep.logs_since_probe >= LOGS_SPAN_PROBE_EVERY:
@@ -362,7 +370,9 @@ class EvmRpc:
              "cooldown_s": round(max(0.0, e.cooldown_until - now), 1), "last_error": e.last_error,
              "ok": e.ok, "errors": e.errors, "rate_limited": e.rate_limited, "latency_ms": e.latency_ms,
              "chain_id_seen": e.chain_id, "min_gap_s": round(e.min_gap, 3),
-             "unsupported_methods": sorted(m for m, until in e.unsupported.items() if until > now)} for e in self.endpoints]}
+             "unsupported_methods": sorted(m for m, until in e.unsupported.items() if until > now),
+             "logs_span": e.logs_span, "roles": list(e.roles)} for e in self.endpoints],
+            "role_fallbacks": dict(self.role_fallbacks)}
 
     async def publish_health(self, redis) -> None:
         if redis is not None:

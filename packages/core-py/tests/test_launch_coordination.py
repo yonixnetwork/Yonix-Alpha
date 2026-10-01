@@ -244,6 +244,8 @@ async def test_assess_a_pons_v2_launch_from_stored_trades_and_the_chain(db):
     router, bundler = "0xe33e9e479df8802cb0866d5d05258bec4cf62948", w(0xB0B)
     node.txs["0x" + "ab" * 32] = {"from": CREATOR, "to": router, "input": _launch_calldata(
         "launchAndBuy(P,uint256,address,uint256,uint256,address,address[])", [w(1), w(2)], recipient=CREATOR)}
+    exempted = lambda a: {"address": CURVE, "topics": [lc.SNIPE_TAX_EXEMPTED, "0x" + "0" * 24 + a[2:]], "data": "0x"}  # noqa: E731
+    node.receipts["0x" + "ab" * 32] = {"logs": [exempted(CREATOR), exempted(w(1)), exempted(w(2))]}
     node.on(TOKEN, "totalSupply()", enc(["uint256"], [SUPPLY]))
     node.on(TOKEN, "balanceOf(address)", enc(["uint256"], [SUPPLY - 4 * 10 ** 25]))
     node.on(lp.factory, "getLaunchedToken(address)", enc(
@@ -273,7 +275,9 @@ async def test_assess_a_pons_v2_launch_from_stored_trades_and_the_chain(db):
     row = await db.get(EvmToken, ("robinhood", TOKEN))
     res = await lc.assess(db, lp, row, T0 + timedelta(minutes=3), lc.CoordinationConfig())
     by = {c["check"]: c for c in res["checks"]}
-    assert res["facts"]["exemptions"]["via"] == "launchAndBuy router"
+    ex = res["facts"]["exemptions"]
+    assert ex["via"] == "launch receipt (SnipeTaxExempted events)" and ex["entrypoint"] == "launchAndBuy router"
+    assert ex["declared"] == [CREATOR.lower(), w(1), w(2)]
     assert by["PRIVILEGED_BUYERS"]["wallets"] == [w(1), w(2), w(3)]  # two declared, one confirmed on chain
     assert by["CREATOR_BOUGHT"]["wallets"] == [CREATOR.lower()]  # through the router: the recipient is the holder
     assert by["COMMON_FUNDER"]["wallets"] == [w(1), w(2)] and by["ABNORMAL_INITIAL_OWNERSHIP"]["status"] == lc.OK
@@ -281,3 +285,19 @@ async def test_assess_a_pons_v2_launch_from_stored_trades_and_the_chain(db):
     assert res["action"] == lc.NO_TRADE
     roles = {r["wallet"]: r["roles"] for r in res["wallets"]}
     assert roles[w(3)] == ["CONFIRMED_EXEMPT", "FRESH_WALLET"] and "DECLARED_EXEMPT" in roles[w(1)]
+
+
+def test_exemptions_from_the_launch_receipt():
+    """Seen on the server: one SnipeTaxExempted(address) per exempted wallet,
+    emitted by the launch's curve (31 declared + deployer + fee recipient = 33)."""
+    assert lc.SNIPE_TAX_EXEMPTED.startswith("0xe4b7e48f")
+    pad = lambda a: "0x" + "0" * 24 + a[2:]  # noqa: E731
+    receipt = {"logs": [
+        {"address": CURVE, "topics": [lc.SNIPE_TAX_EXEMPTED, pad(w(1))], "data": "0x"},  # address indexed
+        {"address": CURVE, "topics": [lc.SNIPE_TAX_EXEMPTED], "data": pad(w(2))},  # or in data
+        {"address": w(99), "topics": [lc.SNIPE_TAX_EXEMPTED, pad(w(3))], "data": "0x"},  # another contract: ignored
+        {"address": CURVE, "topics": [lc.SNIPE_TAX_EXEMPTED, pad(w(1))], "data": "0x"},  # duplicate
+        {"address": CURVE, "topics": ["0x" + "11" * 32], "data": "0x"}]}
+    assert lc.exemptions_from_receipt(receipt, CURVE) == [w(1), w(2)]
+    assert lc.exemptions_from_receipt({"logs": []}, CURVE) == []
+    assert lc.exemptions_from_receipt(None, CURVE) is None

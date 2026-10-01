@@ -12,11 +12,12 @@ WINDOW_NOT_OBSERVED) plus a few read-only chain and explorer lookups:
                                launch transaction's own block
   NEAR_SIMULTANEOUS_BUYERS     many distinct wallets' first buys within
                                `simultaneous_seconds` of each other
-  DECLARED_EXEMPTIONS          Pons V2: the launch transaction declared
-                               snipe-tax exemptions (launchToken overload with
-                               an exemption list, launchTokenFor, or the
-                               official launchAndBuy router), i.e. special
-                               treatment for listed wallets
+  DECLARED_EXEMPTIONS          Pons V2: the launch exempted wallets from the
+                               snipe tax: the curve's SnipeTaxExempted events
+                               in the launch receipt (every entrypoint), else
+                               the launch calldata (launchToken overload with
+                               a list, launchTokenFor, the launchAndBuy
+                               router); special treatment for listed wallets
   PRIVILEGED_BUYERS            Pons V2: wallets exempt from the snipe tax
                                (declared, or confirmed on chain: the curve's
                                currentSnipeTaxBps(wallet) is 0 at the block of
@@ -63,6 +64,7 @@ from typing import Any
 
 import httpx
 from eth_abi import decode
+from eth_utils import keccak
 from sqlalchemy import case, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -117,6 +119,9 @@ PONS_V2_LAUNCH_CALLS: dict[str, tuple[str, list[str], int | None, int | None]] =
 # Seen on real launches (server, 2026-10-01), identified by signature search:
 # a third-party contract that calls the factory; what it passes is not visible.
 PONS_V2_WRAPPERS = {"0x" + selector(f"launch({_P},address)").hex(): "a wrapper contract launch(TokenParams, address)"}
+# PonsV2BondingCurve events, identified from launch receipts on the server
+# (2026-10-01): one SnipeTaxExempted per exempted wallet, Initialized at launch.
+SNIPE_TAX_EXEMPTED = "0x" + keccak(text="SnipeTaxExempted(address)").hex()
 SNIPE_REFERENCE = dex.SIM_ACCOUNT  # an address no launch exempts: the tax everyone else pays
 BLOCKSCOUT = {"robinhood": "https://robinhoodchain.blockscout.com"}
 ETHERSCAN_V2 = "https://api.etherscan.io/v2/api"
@@ -522,6 +527,26 @@ def decode_pons_v2_launch(tx_input: str) -> dict[str, Any]:
             "creator_fee_recipient_at_launch": params[5].lower(), "creator_tax_bps": params[6]}
 
 
+def exemptions_from_receipt(receipt: dict | None, curve: str | None) -> list[str] | None:
+    """Wallets the launch exempted from the snipe tax, from the curve's
+    SnipeTaxExempted(address) events in the launch receipt (one per wallet,
+    the automatic deployer / fee-recipient exemptions included). None when
+    the receipt is not available."""
+    if not receipt:
+        return None
+    out: list[str] = []
+    for lg in receipt.get("logs") or []:
+        topics = lg.get("topics") or []
+        if not topics or topics[0].lower() != SNIPE_TAX_EXEMPTED:
+            continue
+        if curve and (lg.get("address") or "").lower() != curve.lower():
+            continue  # only the launch's own curve can exempt on it
+        word = topics[1] if len(topics) > 1 else (lg.get("data") or "0x")[:66]
+        if len(word) >= 42:
+            out.append("0x" + word[-40:].lower())
+    return list(dict.fromkeys(out))
+
+
 async def _nonce(rpc, wallet: str, block: int | None) -> dict[str, Any]:
     for tag in ([hex(block)] if block else []) + ["latest"]:
         try:
@@ -720,9 +745,21 @@ async def assess(session: AsyncSession, adapter, row: EvmToken, now: datetime, c
                 facts["exemptions"] = {"status": UNKNOWN, "detail": "launch transaction not returned by the RPC"}
                 facts["unavailable"].append("launch transaction not readable")
             else:
-                facts["exemptions"] = decode_pons_v2_launch(tx.get("input") or "")
-                facts["exemptions"]["to"] = (tx.get("to") or "").lower()
+                calldata = decode_pons_v2_launch(tx.get("input") or "")
+                calldata["to"] = (tx.get("to") or "").lower()
                 facts["launch_sender"] = (tx.get("from") or "").lower() or None
+                try:
+                    receipt = await rpc.get_receipt(row.created_tx)
+                except EvmRpcError:
+                    receipt = None
+                from_receipt = exemptions_from_receipt(receipt, (row.venue or {}).get("curve"))
+                if from_receipt is not None:  # authoritative for every entrypoint, wrappers included
+                    facts["exemptions"] = {"status": "READ", "via": "launch receipt (SnipeTaxExempted events)",
+                                           "declared": from_receipt, "entrypoint": calldata.get("via"),
+                                           "selector": calldata.get("selector"), "to": calldata["to"],
+                                           "opening_recipient": calldata.get("opening_recipient")}
+                else:
+                    facts["exemptions"] = calldata
         else:
             facts["exemptions"] = {"status": UNKNOWN, "detail": "launch transaction hash not recorded"}
         try:

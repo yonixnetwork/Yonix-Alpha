@@ -1049,6 +1049,10 @@ class RpcProvider(Base):
     rate_limit_rps: Mapped[Decimal | None] = mapped_column(Numeric(8, 2), nullable=True)
     notes: Mapped[str | None] = mapped_column(String(500), nullable=True)
     last_test: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # provider_roles: the roles this endpoint serves ([] = every role) and the
+    # plan the operator says it is on (shown in plan health; not verified).
+    roles: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    plan: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
