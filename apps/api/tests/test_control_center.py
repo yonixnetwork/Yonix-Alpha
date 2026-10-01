@@ -27,7 +27,8 @@ MINT = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
 NEW_ENDPOINTS = ["/api/analytics/performance", "/api/strategies", "/api/summary",
                  "/api/notifications", "/api/notifications/prefs", "/api/system/health", "/api/system/observability",
                  "/api/ml/review", "/api/ml/predictions", "/api/ml/data-quality", "/api/ml/samples", f"/api/tokens/{MINT}",
-                 "/api/paper/orders", "/api/evm/coordination-settings", "/api/evm/coordination/summary"]
+                 "/api/paper/orders", "/api/evm/coordination-settings", "/api/evm/coordination/summary", "/api/evm/observations",
+                 "/api/evm/observation-settings"]
 
 
 async def test_new_endpoints_require_auth(client):
@@ -612,3 +613,32 @@ async def test_launch_coordination_settings_approval_and_summary(app, client, au
         await session.commit()
     assert (await client.post(f"/api/evm/tokens/robinhood/{token}/coordination-approval",
                               headers=auth_headers)).status_code == 409
+
+
+async def test_evm_observations_list_detail_and_settings(app, client, auth_headers):
+    from yonixalpha_core.chains.evm import observation as ob
+    from yonixalpha_core.db.models import EvmToken
+
+    token, t0 = "0x" + "9" * 40, NOW - timedelta(minutes=70)
+    async with app.state.db_session_factory() as session:
+        session.add(EvmToken(chain="bsc", token=token, launchpad="flap", symbol="OBS", created_at=t0, created_block=5,
+                             venue={}, stats={}, extra={"launch_seen": True}, category="FRESH", stage="CURVE"))
+        await ob.ensure(session, "bsc", token, "FRESH", t0, "launch observed", ob.ObservationConfig())
+        await session.commit()
+        await ob.step(session, "bsc", NOW, ob.ObservationConfig())  # T0..T+60 snapshots, then EXPIRED_NO_ENTRY
+        await session.commit()
+    r = (await client.get("/api/evm/observations?chain=bsc", headers=auth_headers)).json()
+    o = r["observations"][0]
+    assert o["symbol"] == "OBS" and o["state"] == "EXPIRED" and o["expiry_reason"] == "EXPIRED_NO_ENTRY"
+    assert o["snapshot_labels"] == ["T0", "T+5", "T+10", "T+20", "T+30", "T+60"] and o["last_snapshot"]["minutes"] == 60
+    assert r["counts"] == {"FRESH": {"EXPIRED": 1}} and r["expired_held_by"] == {"NEVER_EVALUATED": 1}
+    assert (await client.get("/api/evm/observations?state=BOGUS", headers=auth_headers)).status_code == 422
+    d = (await client.get(f"/api/evm/tokens/bsc/{token}", headers=auth_headers)).json()
+    assert d["observations"][0]["history"][-1]["state"] == "EXPIRED" and "T+30" in d["observations"][0]["snapshots"]
+    g = (await client.get("/api/evm/observation-settings", headers=auth_headers)).json()
+    assert g["settings"]["snapshots_min"] == [0, 5, 10, 20, 30, 60]
+    bad = await client.put("/api/evm/observation-settings", json={"snapshots_min": [5, 10]}, headers=auth_headers)
+    assert bad.status_code == 422
+    ok = await client.put("/api/evm/observation-settings", json={"window_min": {"MOMENTUM": 90}}, headers=auth_headers)
+    assert ok.status_code == 200 and "x-config-revision" in ok.headers
+    assert ok.json()["settings"]["window_min"] == {"FRESH": 60, "MIGRATED": 60, "MOMENTUM": 90}

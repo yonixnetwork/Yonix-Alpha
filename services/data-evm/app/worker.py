@@ -14,16 +14,16 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import delete, or_, select
+from sqlalchemy import and_, delete, exists, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from yonixalpha_core import copy_trading as ct
 from yonixalpha_core import events, launch_coordination
 from yonixalpha_core.chains import verification
-from yonixalpha_core.chains.evm import paper, safety, store
+from yonixalpha_core.chains.evm import observation, paper, safety, store
 from yonixalpha_core.chains.evm import settings as evm_settings
 from yonixalpha_core.chains.evm.rpc import EvmRpcUnavailableError
-from yonixalpha_core.db.models import EvmToken, EvmTrade, PaperPosition
+from yonixalpha_core.db.models import EvmObservation, EvmToken, EvmTrade, PaperPosition
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.notify import alert_error
 from yonixalpha_core.safety.store import add_timeline_event
@@ -232,10 +232,14 @@ class ChainWorker:
 
     async def entry_pass(self, s: evm_settings.EvmTradingSettings, now: datetime) -> dict[str, int]:
         counts = {"evaluated": 0, "opened": 0}
+        open_obs = exists().where(and_(  # master §14: only a token under observation can be entered
+            EvmObservation.chain == EvmToken.chain, EvmObservation.token == EvmToken.token,
+            EvmObservation.category == EvmToken.category, EvmObservation.state.not_in(observation.TERMINAL)))
         async with self.session_factory() as session:
             tokens = (await session.execute(select(EvmToken.token).where(
                 EvmToken.chain == self.chain, EvmToken.category.in_(s.entry_categories),
                 EvmToken.safety_at >= now - paper.SAFETY_MAX_AGE, EvmToken.launchpad.in_(list(self.adapters)),
+                open_obs,
             ).order_by(EvmToken.last_trade_at.desc()).limit(20))).scalars().all()
         for token in tokens:
             try:
@@ -245,10 +249,13 @@ class ChainWorker:
                     d = await paper.evaluate_entry(session, self.redis, ad, row, s, now)
                     counts["evaluated"] += 1
                     row.extra = {**(row.extra or {}), "entry_decision": store._js(d.to_dict())}
+                    obs = await observation.open_for(session, self.chain, token, row.category)
                     if d.ok:
                         p = await paper.open_position(session, d, row, now)
                         counts["opened"] += 1
                         log.info("data-evm.paper_entry", chain=self.chain, token=token, position_id=str(p.id))
+                    if obs is not None:
+                        observation.record_entry_decision(obs, d.to_dict(), d.ok, now)
                     await session.commit()
                 if d.ok:
                     await events.publish(self.redis, "trade.opened", {"chain": self.chain, "token": token,
@@ -258,6 +265,16 @@ class ChainWorker:
             except Exception as exc:  # noqa: BLE001
                 log.warning("data-evm.entry_failed", chain=self.chain, token=token, error=str(exc)[:160])
                 await alert_error(SERVICE, f"{self.chain}.entry_failed", {"token": token, "error": str(exc)[:300]})
+        return counts
+
+    # --- observation (master §14-17) ----------------------------------------------------------------
+
+    async def observation_pass(self, now: datetime) -> dict[str, int]:
+        """Due snapshots, safety outcomes, adaptive windows and expiry."""
+        async with self.session_factory() as session:
+            cfg = await observation.load_config(session)
+            counts = await observation.step(session, self.chain, now, cfg)
+            await session.commit()
         return counts
 
     # --- positions ----------------------------------------------------------------------------------

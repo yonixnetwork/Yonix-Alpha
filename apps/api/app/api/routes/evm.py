@@ -14,11 +14,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_username, get_db, get_redis, get_settings
 from app.api.util import audit, jsonable
 from yonixalpha_core import events, launch_coordination
+from yonixalpha_core.chains.evm import observation as evm_observation
 from yonixalpha_core.chains.evm import settings as evm_settings
 from yonixalpha_core.chains.evm import wallet as evm_wallet
 from yonixalpha_core.chains.evm import rpc_registry as evm_rpc_registry
 from yonixalpha_core.config import Settings
-from yonixalpha_core.db.models import EvmToken, EvmTrade, PaperAccount, PaperPosition, PlatformSetting
+from yonixalpha_core.db.models import EvmObservation, EvmToken, EvmTrade, PaperAccount, PaperPosition, PlatformSetting
 
 router = APIRouter(prefix="/evm", tags=["evm"])
 CHAIN = "^(bsc|robinhood)$"
@@ -72,7 +73,9 @@ async def token_detail(chain: str, token: str, db: AsyncSession = Depends(get_db
     positions = (await db.execute(select(PaperPosition).where(
         PaperPosition.engine == f"evm_{chain}", func.lower(PaperPosition.asset_id) == row.token.lower())
         .order_by(desc(PaperPosition.entry_at)))).scalars().all()
-    return jsonable({"token": _token(row, full=True),
+    observations = (await db.execute(select(EvmObservation).where(
+        EvmObservation.chain == chain, EvmObservation.token == row.token).order_by(EvmObservation.started_at))).scalars().all()
+    return jsonable({"token": _token(row, full=True), "observations": [_observation(o) for o in observations],
                      "trades": [{"event_id": t.event_id, "trader": t.trader, "side": "BUY" if t.is_buy else "SELL",
                                  "token_amount": str(t.token_amount), "quote_amount": str(t.quote_amount / 10 ** 18),
                                  "at": t.at, "block": t.block, "tx_hash": t.tx_hash} for t in trades],
@@ -252,3 +255,83 @@ async def coordination_summary(chain: str | None = Query(None, pattern=CHAIN), h
                 o["unknown_checks"][ch["check"]] = o["unknown_checks"].get(ch["check"], 0) + 1
     return {"hours": hours, "launchpads": sorted(out.values(), key=lambda o: -o["assessed"]),
             "note": "tokens assessed by data-evm's safety pass or a copy buy in the window; counts, not verdicts"}
+
+
+# --- observation (master upgrade §14-17) ------------------------------------------------------------
+
+def _observation(o: EvmObservation, full: bool = True) -> dict:
+    d = {"chain": o.chain, "token": o.token, "category": o.category, "state": o.state, "state_at": o.state_at,
+         "reason": o.reason, "started_at": o.started_at, "deadline": o.deadline,
+         "observation_reason": o.observation_reason, "expiry_reason": o.expiry_reason, "decided_at": o.decided_at,
+         "extensions": o.extensions, "safety_failures": o.safety_failures, "last_decision": o.last_decision,
+         "snapshot_labels": sorted(o.snapshots or {}, key=lambda k: (o.snapshots[k] or {}).get("minutes", 0))}
+    if full:
+        d.update(snapshots=o.snapshots, history=o.history)
+    return d
+
+
+@router.get("/observations")
+async def observations(chain: str | None = Query(None, pattern=CHAIN), state: str | None = None,
+                       category: str | None = Query(None, pattern="^(FRESH|MIGRATED|MOMENTUM)$"),
+                       hours: int = Query(24, ge=1, le=720), limit: int = Query(100, ge=1, le=500),
+                       db: AsyncSession = Depends(get_db), _: str = Depends(get_current_username)) -> dict:
+    """Observations started in the window, newest first, with counts per
+    category and state and, for the expired ones, what held them."""
+    if state is not None and state not in evm_observation.STATES:
+        raise HTTPException(422, f"state: one of {', '.join(evm_observation.STATES)}")
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    base = [EvmObservation.started_at >= since, *([EvmObservation.chain == chain] if chain else [])]
+    q = select(EvmObservation, EvmToken.symbol, EvmToken.launchpad).join(EvmToken, (EvmToken.chain == EvmObservation.chain)
+                                                                        & (EvmToken.token == EvmObservation.token)).where(*base)
+    if state:
+        q = q.where(EvmObservation.state == state)
+    if category:
+        q = q.where(EvmObservation.category == category)
+    rows = (await db.execute(q.order_by(desc(EvmObservation.started_at)).limit(limit))).all()
+    counts: dict[str, dict[str, int]] = {}
+    for cat, st, n in (await db.execute(select(EvmObservation.category, EvmObservation.state, func.count())
+                                        .where(*base).group_by(EvmObservation.category, EvmObservation.state))).all():
+        counts.setdefault(cat, {})[st] = n
+    held: dict[str, int] = {}
+    for (ld,) in (await db.execute(select(EvmObservation.last_decision).where(
+            *base, EvmObservation.state == evm_observation.EXPIRED))).all():
+        for code in (ld or {}).get("blockers") or ["NEVER_EVALUATED"]:
+            held[code] = held.get(code, 0) + 1
+    def last_snapshot(o: EvmObservation) -> dict | None:
+        snaps = o.snapshots or {}
+        return max(snaps.values(), key=lambda v: v.get("minutes", -1)) if snaps else None
+
+    return jsonable({"observations": [{**_observation(o, full=False), "symbol": sym, "launchpad": lp,
+                                       "last_snapshot": last_snapshot(o)} for o, sym, lp in rows],
+                     "counts": counts, "expired_held_by": dict(sorted(held.items(), key=lambda kv: -kv[1])),
+                     "states": list(evm_observation.STATES), "hours": hours,
+                     "note": "every discovered token is observed per category before it can be traded; observations "
+                             "are kept (never deleted) as training data"})
+
+
+@router.get("/observation-settings")
+async def get_observation_settings(db: AsyncSession = Depends(get_db), _: str = Depends(get_current_username)) -> dict:
+    row = await db.get(PlatformSetting, evm_observation.SETTINGS_KEY)
+    cfg, errors = evm_observation.parse_config(dict(row.value) if row else None)
+    return {"settings": cfg.to_dict(), "defaults": evm_observation.ObservationConfig().to_dict(), "errors": errors,
+            "note": "snapshot times and windows apply to observations opened after the change"}
+
+
+@router.put("/observation-settings")
+async def put_observation_settings(body: dict, request: Request, db: AsyncSession = Depends(get_db),
+                                   redis: Redis = Depends(get_redis), username: str = Depends(get_current_username)) -> dict:
+    row = await db.get(PlatformSetting, evm_observation.SETTINGS_KEY)
+    current = dict(row.value) if row else {}
+    merged = {**current, **body}
+    if isinstance(body.get("window_min"), dict):
+        merged["window_min"] = {**(current.get("window_min") or {}), **body["window_min"]}
+    cfg, errors = evm_observation.parse_config(merged)
+    if errors:
+        raise HTTPException(422, {"errors": errors})
+    value = cfg.to_dict()
+    await db.execute(insert(PlatformSetting).values(key=evm_observation.SETTINGS_KEY, value=value).on_conflict_do_update(
+        index_elements=["key"], set_={"value": value, "updated_at": func.now()}))
+    await audit(db, username, request, "evm_observation.update", {"changes": body})
+    await db.commit()
+    await events.publish(redis, "settings.updated", {"key": evm_observation.SETTINGS_KEY}, "api")
+    return {"settings": value}

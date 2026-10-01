@@ -54,17 +54,41 @@ async def main() -> int:
                 EvmToken.chain == "robinhood", EvmToken.launchpad == "pons_v2", EvmToken.created_tx.is_not(None))
                 .order_by(desc(EvmToken.created_at)).limit(args.launches))).scalars().all()
             via, sels, lists, sizes = Counter(), Counter(), 0, []
+            unknown_to: Counter = Counter()
+            with_list: list[tuple[EvmToken, list[str]]] = []
             for r in rows:
                 tx = await rpc.call("eth_getTransactionByHash", [r.created_tx])
                 d = lc.decode_pons_v2_launch((tx or {}).get("input") or "")
                 via[d.get("via") or "UNRECOGNISED"] += 1
                 sels[d["selector"]] += 1
+                if d["status"] != "READ":
+                    unknown_to[(d["selector"], (tx or {}).get("to"), len(((tx or {}).get("input") or "")) // 2 - 1)] += 1
                 if d.get("declared"):
                     lists += 1
                     sizes.append(len(d["declared"]))
+                    with_list.append((r, d["declared"]))
             print(f"[1] Pons V2: last {len(rows)} launches by entrypoint: {dict(via)}")
             print(f"    selectors: {dict(sels)}")
             print(f"    launches with a non-empty exemption list: {lists}" + (f" (sizes {sorted(sizes)})" if sizes else ""))
+            for (sel, to, size), n in unknown_to.most_common():
+                print(f"    unrecognised {sel} x{n}: sent to {to}, calldata {size} bytes")
+
+            # 1b. Does the launch receipt name the exempted wallets (an event per exemption)?
+            for r, declared in with_list[:3]:
+                rcpt = await rpc.get_receipt(r.created_tx)
+                curve = ((r.venue or {}).get("curve") or "").lower()
+                topics: Counter = Counter()
+                carries = Counter()
+                for lg in (rcpt or {}).get("logs", []):
+                    key = ("curve" if lg["address"].lower() == curve else lg["address"], lg["topics"][0] if lg["topics"] else None)
+                    topics[key] += 1
+                    blob = (" ".join(lg["topics"][1:]) + lg.get("data", "")).lower()
+                    if any(a.lower().removeprefix("0x") in blob for a in declared):
+                        carries[key] += 1
+                print(f"[1b] receipt of {r.token} ({len(declared)} declared exemption(s)):")
+                for (emitter, t0), n in topics.most_common():
+                    mark = f"  <- names a declared wallet in {carries[(emitter, t0)]} log(s)" if carries[(emitter, t0)] else ""
+                    print(f"      {emitter} {t0} x{n}{mark}")
 
             # 2. currentSnipeTaxBps at a past block.
             snipe_row = next((r for r in rows if (r.venue or {}).get("curve")), None)

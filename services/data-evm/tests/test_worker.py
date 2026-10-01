@@ -111,6 +111,12 @@ async def test_pipeline_discovery_safety_entry_exit(session_factory, redis_clien
     counts = await w.entry_pass(s, now)
     assert counts["opened"] == 1, (await _decision(session_factory))
     assert (await w.entry_pass(s, now))["opened"] == 0  # no second entry on the same token
+    from yonixalpha_core.db.models import EvmObservation
+    async with session_factory() as session:  # master §14: observed from the launch, entered through observation
+        o = (await session.execute(select(EvmObservation))).scalar_one()
+        assert o.category == "FRESH" and o.state == "ENTERED" and o.observation_reason == "launch observed"
+        assert [h["state"] for h in o.history][:2] == ["DISCOVERED", "OBSERVING"]
+    assert (await w.observation_pass(now))["snapshots"] == 2  # T0 and T+5 (the launch was 310 s ago)
     async with session_factory() as session:
         p = (await session.execute(select(PaperPosition))).scalar_one()
         assert p.engine == "evm_bsc" and p.execution_mode in (None, "PAPER") and p.status == "open"
