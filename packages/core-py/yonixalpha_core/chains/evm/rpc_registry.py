@@ -69,7 +69,9 @@ async def endpoints(session: AsyncSession, settings: Any, chain: str) -> list[di
         url = secretbox.decrypt(settings, p.rpc_url_enc)
         rows.append({"label": f"db:{p.name}", "name": p.name, "url": url, "source": "dashboard", "id": str(p.id),
                      "provider_type": p.provider_type, "priority": p.priority, "enabled": p.enabled and url is not None,
-                     "decrypt_failed": url is None, "last_test": p.last_test, "notes": p.notes})
+                     "decrypt_failed": url is None, "last_test": p.last_test, "notes": p.notes,
+                     "roles": list(p.roles or []), "plan": p.plan, "ws_url": bool(p.ws_url_enc),
+                     "ws_display": p.ws_display, "rate_limit_rps": float(p.rate_limit_rps) if p.rate_limit_rps else None})
     var = f"{chain.upper()}_RPC_URLS"
     env = [u.strip() for u in (getattr(settings, var, None) or "").split(",") if u.strip()]
     for i, url in enumerate(env):
@@ -84,6 +86,8 @@ async def endpoints(session: AsyncSession, settings: Any, chain: str) -> list[di
             r["priority"] = int(o.get("priority", r["priority"]))
             r["enabled"] = bool(o.get("enabled", True))
             r["last_test"] = o.get("last_test")
+            r["roles"] = list(o.get("roles") or [])
+            r["plan"] = o.get("plan")
     return sorted(rows, key=lambda r: (r["priority"], r["label"]))
 
 
@@ -95,12 +99,18 @@ async def effective_urls(session: AsyncSession, settings: Any, chain: str) -> li
     return list(dict.fromkeys(urls))
 
 
+async def effective_roles(session: AsyncSession, settings: Any, chain: str) -> dict[str, tuple]:
+    """url -> roles of the enabled endpoints that have roles (provider_roles)."""
+    return {r["url"]: tuple(r["roles"]) for r in await endpoints(session, settings, chain)
+            if r["enabled"] and r.get("url") and r.get("roles")}
+
+
 async def rpc_for(session: AsyncSession, settings: Any, chain: str):
     """A one-off EvmRpc over the effective list (API requests, tools)."""
     from yonixalpha_core.chains.evm.rpc import make_rpc
 
     rpc = make_rpc(chain, settings)
-    rpc.replace_urls(await effective_urls(session, settings, chain))
+    rpc.replace_urls(await effective_urls(session, settings, chain), await effective_roles(session, settings, chain))
     return rpc
 
 
@@ -113,8 +123,9 @@ def make_reloader(rpcs: dict[str, Any], settings: Any, session_factory):
         async with session_factory() as session:
             for chain, rpc in rpcs.items():
                 urls = await effective_urls(session, settings, chain)
-                rpc.replace_urls(urls)
-                out[chain] = [redact_url(u) for u in urls]
+                roles = await effective_roles(session, settings, chain)
+                rpc.replace_urls(urls, roles)
+                out[chain] = [redact_url(u) + (f" [{', '.join(roles[u])}]" if roles.get(u) else "") for u in urls]
         return {"evm_endpoints": out}
 
     return reload_evm_rpc

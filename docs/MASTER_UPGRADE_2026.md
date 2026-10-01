@@ -62,7 +62,7 @@ Providers), see M7.
 | 36–44 | ML: wallet behaviour, mistake labels, frozen validation set, staged contribution, champion/challenger, no look-ahead, paper as training data | PARTIAL | Solana ML: multi-target shadow models, champion/challenger, labels, contribution 0 until validated, no-look-ahead audit; missing: wallet-behaviour labels (§37), EVM features, BUY/WAIT/REJECT/SELL/HOLD comparison (§41) | M12 |
 | 45 | Manual BUY/SELL on all chains | PARTIAL | Solana only (`manual_trade.py`); EVM manual paper missing | M13 |
 | 46–47 | Automatic-vs-manual sell diagnosis with stage-level evidence | DONE in code (M2); production result pending the server run | `tools/exit_diagnosis.py` (read-only report from `execution_orders` + position timeline + reconciliation); `tests/test_exit_diagnosis.py` | M2 |
-| 48–53 | Provider dashboard, roles, plan health / UPGRADE REQUIRED | PARTIAL | `rpc_providers` for Solana, BSC and Robinhood (encrypted, priority, TEST, hot reload); EVM TEST checks chain id and the eth_getLogs span actually served (a free-tier limit is shown); .env and public EVM endpoints can be reordered / disabled; no roles table yet | M7 |
+| 48–53 | Provider dashboard, roles, plan health / UPGRADE REQUIRED | DONE (routing + reporting); mempool / sequencer streaming is M8 | roles per endpoint (dashboard, .env and public), role-preferred routing on Solana and EVM with counted fallbacks, operator-stated plan, WSS stored for BSC / Robinhood, plan health from observed limits on RPC / Data Providers and System Health; see section 16 | M7 |
 | 54–55 | Token explorer all chains, explorer links per chain | PARTIAL | Solana token pages; EVM page lists tokens; link builder per chain not audited | M14 |
 | 56–58 | Balances, gas reserve, INSUFFICIENT GAS, unified wallet (Solana + EVM accounts) | PARTIAL | Solana live wallet panel; EVM wallet module (`chains/evm/wallet.py`) read-only; gas-reserve NO_TRADE not wired for EVM paper | M13 |
 | 59–61 | PnL always shown with colour, market cap $K/$M | PARTIAL | Solana positions show PnL; USD market cap done for Solana (G3); EVM positions page not audited | M14 |
@@ -468,4 +468,45 @@ one row per token and category, never deleted):
   rejection, settings), data-evm pipeline (observed from launch, entered
   through it, snapshots after entry), API (list, counts, held-by, detail,
   settings).
+
+## 16. M7 — provider roles and plan health (2026-10-01)
+
+Master §48-53 (`provider_roles`, migration 0029: `rpc_providers.roles`,
+`rpc_providers.plan`; .env / public endpoints keep theirs in the existing
+override settings):
+
+- Roles DISCOVERY, MARKET_DATA, EXECUTION, CONFIRMATION, HISTORICAL_DATA,
+  WALLET_DATA can be ticked per endpoint on RPC / Data Providers, for
+  dashboard, .env and built-in public endpoints alike. Every request maps
+  to a role by its method (Solana: sendTransaction / simulate / blockhash /
+  fees = EXECUTION, signature statuses / getTransaction = CONFIRMATION,
+  signature history / blocks = HISTORICAL_DATA, balances / token accounts
+  = WALLET_DATA, the rest MARKET_DATA; EVM: eth_getLogs = DISCOVERY, reads
+  at a numbered past block = HISTORICAL_DATA, receipts / tx by hash =
+  CONFIRMATION, balance / nonce = WALLET_DATA, send / gas = EXECUTION) and
+  goes to the healthy endpoints holding that role first.
+- An endpoint without roles serves every role, so nothing changes until
+  roles are set. When no healthy holder exists the request still goes out
+  to any usable endpoint and the fallback is counted (shown per role and
+  chain); roles never stop traffic.
+- Plan: the plan name the operator records per endpoint (not verified with
+  the provider), shown with every finding.
+- WSS URLs are accepted and stored (redacted) for BSC and Robinhood too,
+  for mempool / sequencer streaming (M8); nothing consumes them yet.
+- Plan health (`GET /api/rpc/plan-health`, RPC / Data Providers and System
+  Health): UPGRADE REQUIRED only on an observed limitation — sendTransaction
+  or simulate refused ("AUTOMATIC SELL LATENCY MAY BE LIMITED BY CURRENT
+  RPC PLAN"), getProgramAccounts / holder / history methods refused, >= 5 %
+  HTTP 429 over >= 200 requests, eth_getLogs refused or served under 100
+  blocks (the span data-evm learned on real requests), Helius
+  transactionSubscribe refused in the probe — or on a chain served by
+  public endpoints only. Authentication refusals are CONFIGURATION; no
+  WSS for an EVM chain is INFO. Each finding: provider, current plan,
+  required capability, observed limitation, impact, recommended upgrade.
+- Launch coordination (M5) now reads the snipe-tax exemptions from the
+  launch receipt: the curve emits `SnipeTaxExempted(address)` once per
+  exempted wallet (identified on the server: 31 declared + deployer + fee
+  recipient = 33 events), so every entrypoint, including the two still
+  unidentified wrappers, has a readable list. The calldata decoder stays
+  as the fallback.
 

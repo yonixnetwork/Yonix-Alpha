@@ -34,6 +34,7 @@ class Node:
         self.genesis_ts = 1_790_000_000
         self.storage: dict[tuple[str, str], str] = {}
         self.txs: dict[str, dict] = {}  # eth_getTransactionByHash
+        self.receipts: dict[str, dict] = {}  # eth_getTransactionReceipt
         self.nonces: dict[str, int] = {}  # eth_getTransactionCount (any block)
 
     def on(self, to: str, signature: str, result) -> None:
@@ -70,6 +71,8 @@ class Node:
             return ok(out)
         if m == "eth_getTransactionByHash":
             return ok(self.txs.get(p[0].lower()))
+        if m == "eth_getTransactionReceipt":
+            return ok(self.receipts.get(p[0].lower()))
         if m == "eth_getTransactionCount":
             n = self.nonces.get(p[0].lower())
             return ok(hex(n)) if n is not None else err("method eth_getTransactionCount not faked for this address")

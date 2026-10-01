@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_username, get_db, get_redis, get_settings
 from app.api.util import audit, jsonable, require_password
-from yonixalpha_core import runtime_config, secretbox
+from yonixalpha_core import provider_roles, runtime_config, secretbox
 from yonixalpha_core.chains.evm import rpc_registry as evm_registry
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import PlatformSetting, RpcProvider
@@ -31,7 +31,8 @@ from yonixalpha_core.solana import rpc_registry
 
 router = APIRouter(prefix="/rpc", tags=["rpc"])
 
-PROVIDER_TYPES = ["helius", "alchemy", "chainstack", "quicknode", "triton", "ankr", "public", "custom"]
+PROVIDER_TYPES = ["helius", "alchemy", "chainstack", "quicknode", "triton", "ankr", "blockdaemon", "drpc",
+                  "validation_cloud", "robinhood", "public", "custom"]
 RECENT = timedelta(minutes=5)
 
 
@@ -49,6 +50,8 @@ class ProviderIn(BaseModel):
     timeout_seconds: Decimal = Field(Decimal("10"), ge=Decimal("1"), le=Decimal("60"))
     rate_limit_rps: Decimal | None = Field(None, gt=0, le=Decimal("10000"))
     notes: str | None = Field(None, max_length=500)
+    roles: list[str] = Field(default_factory=list)
+    plan: str | None = Field(None, max_length=64)
     password: str = Field(min_length=1, max_length=256)
 
 
@@ -62,12 +65,25 @@ class ProviderPatch(BaseModel):
     timeout_seconds: Decimal | None = Field(None, ge=Decimal("1"), le=Decimal("60"))
     rate_limit_rps: Decimal | None = Field(None, ge=0, le=Decimal("10000"))  # 0 clears it
     notes: str | None = Field(None, max_length=500)
+    roles: list[str] | None = None
+    plan: str | None = Field(None, max_length=64)  # "" clears it
     password: str | None = Field(None, max_length=256)
 
 
 class EnvPatch(BaseModel):
     enabled: bool | None = None
     priority: int | None = Field(None, ge=1, le=9999)
+    roles: list[str] | None = None
+    plan: str | None = Field(None, max_length=64)
+
+
+def _roles(v: list[str] | None) -> list[str] | None:
+    if v is None:
+        return None
+    roles, errors = provider_roles.parse_roles(v)
+    if errors:
+        raise HTTPException(422, {"errors": errors})
+    return list(roles)
 
 
 def _check_type(t: str | None) -> None:
@@ -174,6 +190,7 @@ async def _listing(db: AsyncSession, redis: Redis, settings: Settings) -> dict:
             "rpc_url": redact_url(r.get("url")), "ws_url": (p.ws_display if p else None),
             "enabled": r["enabled"], "priority": r["priority"], "timeout_seconds": r.get("timeout"), "rate_limit_rps": r.get("rps"),
             "notes": p.notes if p else f"from .env ({r.get('variable')}); URL changes on the server or via Settings → keys",
+            "roles": r.get("roles") or [], "plan": r.get("plan"),
             "configured": not r.get("decrypt_failed", False),
             "decrypt_failed": r.get("decrypt_failed", False), "last_test": last_test,
             **_health(r["label"], acks, last_test, now),
@@ -184,8 +201,11 @@ async def _listing(db: AsyncSession, redis: Redis, settings: Settings) -> dict:
     # Request routing: which endpoint each service used last for each RPC method.
     routing = {service: ((ack.get("status") or {}).get("rpc") or {}).get("methods") or []
                for service, ack in acks.items() if ((ack.get("status") or {}).get("rpc") or {}).get("methods")}
+    role_fallbacks = {service: ((ack.get("status") or {}).get("rpc") or {}).get("role_fallbacks") or {}
+                      for service, ack in acks.items()}
     return jsonable({"providers": out, "active": active, "failovers": failovers, "provider_types": PROVIDER_TYPES,
-                     "routing": routing,
+                     "routing": routing, "roles": list(provider_roles.ROLES),
+                     "role_fallbacks": {k: v for k, v in role_fallbacks.items() if v},
                      "note": "Order = priority (lowest first). Each request goes to the first usable endpoint; on "
                              "failure or HTTP 429 the same request moves to the next one."})
 
@@ -209,8 +229,7 @@ async def add_provider(body: ProviderIn, request: Request, db: AsyncSession = De
     requests succeed."""
     _check_type(body.provider_type)
     _check_urls(body.rpc_url, body.ws_url)
-    if body.chain != "solana" and body.ws_url:
-        raise HTTPException(422, "a WebSocket URL is only used for Solana")
+    roles = _roles(body.roles)
     await require_password(db, redis, username, body.password, request, "rpc",
                            {"action": "add", "name": body.name, "chain": body.chain})
     if (await db.execute(select(RpcProvider).where(RpcProvider.name == body.name))).scalar_one_or_none():
@@ -221,7 +240,7 @@ async def add_provider(body: ProviderIn, request: Request, db: AsyncSession = De
                     ws_url_enc=secretbox.encrypt(settings, body.ws_url) if body.ws_url else None,
                     ws_display=redact_url(body.ws_url) if body.ws_url else None, enabled=body.enabled, priority=body.priority,
                     timeout_seconds=body.timeout_seconds, rate_limit_rps=body.rate_limit_rps, notes=body.notes,
-                    last_test=test, created_by=username)
+                    last_test=test, created_by=username, roles=roles, plan=body.plan or None)
     db.add(p)
     await audit(db, username, request, "rpc.provider_added", {"name": body.name, "type": body.provider_type, "chain": body.chain,
                                                               "host": redact_url(body.rpc_url), "test": test["status"]})
@@ -265,8 +284,12 @@ async def edit_provider(provider_id: UUID, body: ProviderPatch, request: Request
     if body.rate_limit_rps is not None:
         p.rate_limit_rps = body.rate_limit_rps or None
         changed.append("rate_limit_rps")
-    if body.ws_url and p.chain != "solana":
-        raise HTTPException(422, "a WebSocket URL is only used for Solana")
+    if body.roles is not None:
+        p.roles = _roles(body.roles)
+        changed.append("roles")
+    if body.plan is not None:
+        p.plan = body.plan or None
+        changed.append("plan")
     p.updated_at = datetime.now(timezone.utc)
     await db.flush()
     if p.chain == "solana" and await _enabled_count(db, settings) == 0:
@@ -306,6 +329,10 @@ async def edit_env_endpoint(label: str, body: EnvPatch, request: Request, db: As
         entry["enabled"] = body.enabled
     if body.priority is not None:
         entry["priority"] = body.priority
+    if body.roles is not None:
+        entry["roles"] = _roles(body.roles)
+    if body.plan is not None:
+        entry["plan"] = body.plan or None
     overrides[label] = entry
     await db.execute(insert(PlatformSetting).values(key=rpc_registry.ENV_OVERRIDES_KEY, value=overrides)
                      .on_conflict_do_update(index_elements=[PlatformSetting.key], set_={"value": overrides}))
@@ -428,7 +455,9 @@ async def list_evm(db: AsyncSession = Depends(get_db), redis: Redis = Depends(ge
             rows.append({"label": r["label"], "id": r.get("id"), "name": r["name"], "source": r["source"],
                          "provider_type": r.get("provider_type"), "rpc_url": host, "enabled": r["enabled"],
                          "priority": r["priority"], "decrypt_failed": r.get("decrypt_failed", False),
-                         "notes": r.get("notes"), "last_test": r.get("last_test"), "live": live.get(host)})
+                         "notes": r.get("notes"), "last_test": r.get("last_test"), "live": live.get(host),
+                         "roles": r.get("roles") or [], "plan": r.get("plan"), "ws_url": r.get("ws_display"),
+                         "rate_limit_rps": r.get("rate_limit_rps")})
         out[chain] = {"chain_id": evm_registry.chain_id(chain), "endpoints": rows,
                       "in_use": [r["rpc_url"] for r in rows if r["enabled"]]}
     return jsonable({"chains": out, "guide": GUIDE,
@@ -440,6 +469,8 @@ async def list_evm(db: AsyncSession = Depends(get_db), redis: Redis = Depends(ge
 class EvmBuiltinPatch(BaseModel):
     enabled: bool | None = None
     priority: int | None = Field(None, ge=1, le=9999)
+    roles: list[str] | None = None
+    plan: str | None = Field(None, max_length=64)
 
 
 @router.put("/evm/{label}")
@@ -457,7 +488,50 @@ async def edit_evm_builtin(label: str, body: EvmBuiltinPatch, request: Request, 
         raise HTTPException(404, "that endpoint is not configured")
     if body.enabled is False and not any(r["enabled"] and r["label"] != label for r in rows):
         raise HTTPException(409, f"this is the last enabled {chain} endpoint; add or enable another one first")
+    if body.roles is not None:
+        body.roles = _roles(body.roles)
     await _save_evm_override(db, label, body.model_dump(exclude_none=True))
     await audit(db, username, request, "rpc.evm_endpoint_updated", {"label": label, **body.model_dump(exclude_none=True)})
     await db.commit()
     return {"label": label, **body.model_dump(exclude_none=True)}
+
+
+# --- plan health (master upgrade §53) -----------------------------------------------------------------
+
+async def evm_live(redis: Redis, chain: str) -> dict | None:
+    raw = await redis.get(f"yx:evm:rpc:{chain}")
+    try:
+        return json.loads(raw) if raw else None
+    except ValueError:
+        return None
+
+
+@router.get("/plan-health")
+async def plan_health(db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
+                      settings: Settings = Depends(get_settings), _: str = Depends(get_current_username)) -> dict:
+    """UPGRADE REQUIRED and configuration findings per chain, from what the
+    services observed on real requests, plus which roles have a dedicated
+    provider and how often a role had to fall back to any endpoint."""
+    solana = (await _listing(db, redis, settings))
+    findings = provider_roles.solana_findings(solana["providers"])
+    coverage: dict[str, dict] = {"solana": {r: sorted(p["name"] for p in solana["providers"]
+                                                      if p["enabled"] and r in (p.get("roles") or []))
+                                            for r in provider_roles.ROLES}}
+    fallbacks: dict[str, dict] = {"solana": {}}
+    for per_service in (solana.get("role_fallbacks") or {}).values():  # summed over the services that reported
+        for role, n in per_service.items():
+            fallbacks["solana"][role] = fallbacks["solana"].get(role, 0) + n
+    for chain in evm_registry.EVM_CHAINS:
+        rows = await evm_registry.endpoints(db, settings, chain)
+        live = await evm_live(redis, chain)
+        findings += provider_roles.evm_findings(chain, rows, live)
+        coverage[chain] = {r: sorted(e["name"] for e in rows if e["enabled"] and r in (e.get("roles") or []))
+                           for r in provider_roles.ROLES}
+        fallbacks[chain] = (live or {}).get("role_fallbacks") or {}
+    order = {provider_roles.UPGRADE: 0, provider_roles.CONFIGURATION: 1, provider_roles.INFO: 2}
+    findings.sort(key=lambda f: (order.get(f["severity"], 9), f["chain"]))
+    return jsonable({"findings": findings, "upgrade_required": sum(1 for f in findings if f["severity"] == provider_roles.UPGRADE),
+                     "role_coverage": coverage, "role_fallbacks": fallbacks, "roles": list(provider_roles.ROLES),
+                     "note": "from real requests the services reported and the configuration; the plan shown is what "
+                             "you recorded for the provider (not verified with the provider). A role with no dedicated "
+                             "provider is served by every endpoint."})

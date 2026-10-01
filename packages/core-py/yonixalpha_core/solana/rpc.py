@@ -8,6 +8,7 @@ from typing import Any, Awaitable, Callable
 
 import httpx
 
+from yonixalpha_core import provider_roles
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.notify import alert_error
 from yonixalpha_core.redact import redact_text, redact_url
@@ -162,6 +163,7 @@ class _Endpoint:
     inflight_background: int = 0
     rate_limited_by_method: dict = field(default_factory=dict)  # method -> count of 429s
     forbidden_count: int = 0
+    roles: tuple = ()  # provider roles (provider_roles); empty = every role
 
     @property
     def key(self) -> str:
@@ -221,6 +223,7 @@ class RpcManager:
     # background request budget are shared by every service using the same
     # provider, since the provider's limit is per key, not per process.
     shared: Any = field(default=None, init=False)
+    role_fallbacks: dict = field(default_factory=dict, init=False)  # role -> requests no role holder could take
 
     @classmethod
     def create(
@@ -253,6 +256,8 @@ class RpcManager:
             allowed = [e for e in self.endpoints if e.unsupported.get(method, 0) <= now]
         healthy = [e for e in allowed if (e.disabled_until is None or e.disabled_until <= now)
                    and (e.rate_limited_until is None or e.rate_limited_until <= now)]
+        if method is not None:  # role holders first; every endpoint when none holds the role (counted)
+            healthy = provider_roles.prefer(healthy, provider_roles.solana_role(method), self.role_fallbacks)
         if not healthy:
             return allowed
         # An endpoint at its own request budget is tried last, not skipped.
@@ -276,6 +281,7 @@ class RpcManager:
                 if len(recent) >= max(1.0, e.rps * BACKGROUND_BUDGET_SHARE):
                     continue
             out.append(e)
+        out = provider_roles.prefer(out, provider_roles.solana_role(method), self.role_fallbacks)
         if out and self.shared is not None:
             try:
                 keys = [f"yx:rpc:rl:{e.key}" for e in out]
@@ -322,6 +328,7 @@ class RpcManager:
             e.priority = spec.get("priority")
             e.timeout = float(spec["timeout"]) if spec.get("timeout") else None
             e.rps = float(spec["rps"]) if spec.get("rps") else None
+            e.roles = tuple(spec.get("roles") or ())
             new.append(e)
         self.endpoints = new
 
@@ -521,7 +528,7 @@ class RpcManager:
                 "auth_failed": e.auth_failed_until is not None and e.auth_failed_until > now,
                 "capabilities": dict(e.capabilities), "tx_versions": dict(e.tx_versions),
                 "rate_limited_by_method": dict(e.rate_limited_by_method), "forbidden_count": e.forbidden_count,
-                "inflight": e.inflight,
+                "inflight": e.inflight, "roles": list(e.roles),
             }
             for e in self.endpoints
         ]

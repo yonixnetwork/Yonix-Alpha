@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { Server } from "lucide-react";
+import PlanHealth from "@/components/PlanHealth";
 import { ErrorNotice, Loading, PageHeader, Section, Stat, StatePill } from "@/components/ui";
 import type { ConfigValidationOut, HealthOut } from "@/lib/cc";
 import { useLiveStatus } from "@/lib/events";
@@ -34,6 +35,7 @@ export default function HealthPage() {
         </Link>
       </PageHeader>
       <ErrorNotice error={error} />
+      <PlanHealth compact />
       {loading && !data && <Loading />}
       {data && (
         <>

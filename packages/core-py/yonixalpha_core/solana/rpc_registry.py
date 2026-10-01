@@ -51,7 +51,7 @@ def _env_rows(settings: Any, slots: list[tuple[str, str, int]], overrides: dict)
         o = overrides.get(label) or {}
         out.append({"label": label, "name": var, "url": url, "source": "env", "variable": var,
                     "priority": int(o.get("priority", prio)), "enabled": bool(o.get("enabled", True)),
-                    "timeout": None, "rps": None})
+                    "timeout": None, "rps": None, "roles": list(o.get("roles") or []), "plan": o.get("plan")})
     return out
 
 
@@ -65,7 +65,8 @@ async def providers(session: AsyncSession, settings: Any) -> list[dict[str, Any]
         rows.append({"label": f"db:{p.name}", "name": p.name, "url": url, "source": "dashboard", "id": str(p.id),
                      "priority": p.priority, "enabled": p.enabled and url is not None,
                      "decrypt_failed": url is None, "timeout": _num(p.timeout_seconds), "rps": _num(p.rate_limit_rps),
-                     "ws_url": secretbox.decrypt(settings, p.ws_url_enc) if p.ws_url_enc else None})
+                     "ws_url": secretbox.decrypt(settings, p.ws_url_enc) if p.ws_url_enc else None,
+                     "roles": list(p.roles or []), "plan": p.plan})
     return sorted(rows, key=lambda r: (r["priority"], r["source"] != "env", r["label"]))
 
 
@@ -123,7 +124,8 @@ def make_reloaders(service: str, rpc, settings: Any, session_factory, redis: Red
             specs = await effective_rpc(session, settings)
         rpc.replace_endpoints(specs)
         rpc.on_failover = on_failover
-        return {"endpoints": [{"label": s["label"], "url": redact_url(s["url"]), "priority": s["priority"]} for s in specs]}
+        return {"endpoints": [{"label": s["label"], "url": redact_url(s["url"]), "priority": s["priority"],
+                               "roles": s.get("roles") or []} for s in specs]}
 
     out = {"rpc": reload_rpc}
     if ws_urls is not None:
@@ -140,7 +142,8 @@ def rpc_status(rpc) -> dict:
     """For the watcher's acknowledgement: live endpoint health, no URLs."""
     snap = rpc.health_snapshot()
     methods = rpc.method_snapshot() if hasattr(rpc, "method_snapshot") else []
-    return {"active": rpc.active_label, "endpoints": snap, "methods": methods}
+    return {"active": rpc.active_label, "endpoints": snap, "methods": methods,
+            "role_fallbacks": dict(getattr(rpc, "role_fallbacks", {}) or {})}
 
 
 # --- connection test ------------------------------------------------------------
