@@ -584,8 +584,16 @@ async def test_launchpad_verify_records_only_what_it_proved():
         await verify(dead, 0, 100, 10 ** 16)  # the tool records nothing for this launchpad
 
 
-async def test_rpc_probe_tool_tells_a_logs_node_from_one_that_only_answers_blocks():
-    from yonixalpha_core.tools.evm_rpc_probe import probe
+async def test_evm_rpc_test_tells_a_logs_node_from_one_that_only_answers_blocks():
+    """The dashboard TEST CONNECTION and tools/evm_rpc_probe. Seen on the
+    server: the probe called a busy publicnode "NO LOGS" because it asked a
+    dead contract up to the exact head ("block range extends beyond current
+    head block" on a load-balanced node). The test now asks the chain's
+    busiest emitter, a few blocks under the head; accepted with 0 logs is
+    still serving logs."""
+    from yonixalpha_core.chains.evm import rpc_registry as reg
+
+    asked = []
 
     def handler(req):
         body = json.loads(req.content)
@@ -593,19 +601,71 @@ async def test_rpc_probe_tool_tells_a_logs_node_from_one_that_only_answers_block
             return _ok(body, hex(56))
         if body["method"] == "eth_blockNumber":
             return _ok(body, hex(5000))
+        f = body["params"][0]
+        asked.append((req.url.host, f["address"], int(f["toBlock"], 16)))
         if req.url.host == "dataseed.example":
             return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"],
                                              "error": {"code": -32005, "message": "limit exceeded"}})
+        if req.url.host == "free.example" and int(f["toBlock"], 16) - int(f["fromBlock"], 16) + 1 > 10:
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"],
+                                             "error": {"code": -32600, "message": "block range limit 10"}})
         return _ok(body, [])
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    good = await probe(client, "https://logs.example/KEY123", 56, TOKEN)
-    bad = await probe(client, "https://dataseed.example", 56, TOKEN)
-    assert good["head"] == 5000 and all(v.startswith("OK") for v in good["logs"].values())
-    assert all(v.startswith("REFUSED: limit exceeded") for v in bad["logs"].values())
+    good = await reg.test_evm_rpc(client, "https://logs.example/KEY123", "bsc")
+    assert good["status"] == reg.CONNECTED and good["logs_max_span"] == 2000 and good["head"] == 5000
+    assert {(a, tb) for h, a, tb in asked if h == "logs.example"} == {(reg.LOGS_PROBE_CONTRACT["bsc"], 4995)}
     assert "KEY123" not in json.dumps(good)
-    wrong = await probe(client, "https://x.example", 97, TOKEN)
-    assert wrong["chain"] == "WRONG (56)" and not wrong["logs"]
+    free = await reg.test_evm_rpc(client, "https://free.example", "bsc")
+    assert free["status"] == reg.CONNECTED and free["logs_max_span"] == 10 and "slow" in free["detail"]
+    bad = await reg.test_evm_rpc(client, "https://dataseed.example", "bsc")
+    assert bad["status"] == reg.NO_LOGS and "limit exceeded" in bad["detail"]
+    wrong = await reg.test_evm_rpc(client, "https://x.example", "robinhood")
+    assert wrong["status"] == reg.INVALID and "expected 4663" in wrong["detail"] and not wrong["logs"]
+    assert (await reg.test_evm_rpc(client, "http://insecure.example", "bsc"))["status"] == reg.INVALID
+
+
+async def test_get_logs_starts_at_the_span_the_endpoint_accepted_and_probes_larger_now_and_then():
+    """A free tier serving 10 blocks is not asked 2000, 1000, ... 16 on every
+    call: the accepted span is remembered; twice that is tried again after
+    LOGS_SPAN_PROBE_EVERY answers in case the limit was raised."""
+    from yonixalpha_core.chains.evm import rpc as rpc_mod
+
+    spans = []
+
+    def handler(req):
+        body = json.loads(req.content)
+        if body["method"] == "eth_chainId":
+            return _ok(body, hex(56))
+        f = body["params"][0]
+        span = int(f["toBlock"], 16) - int(f["fromBlock"], 16) + 1
+        spans.append(span)
+        if span > 10:
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"],
+                                             "error": {"code": -32600, "message": "block range limit 10"}})
+        return _ok(body, [])
+
+    rpc = EvmRpc("bsc", 56, ["https://free.example"], client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    await rpc.get_logs([TOKEN], [[]], 0, 99, max_span=2000)
+    first = len(spans)
+    spans.clear()
+    learned = rpc.endpoints[0].logs_span  # halving 2000 lands on 7: accepted, so kept
+    await rpc.get_logs([TOKEN], [[]], 100, 199, max_span=2000)
+    assert learned == 7 and first > 8 and max(spans) == learned  # no refused request once learned
+    rpc.endpoints[0].logs_since_probe = rpc_mod.LOGS_SPAN_PROBE_EVERY
+    spans.clear()
+    await rpc.get_logs([TOKEN], [[]], 200, 213, max_span=2000)
+    assert spans == [14, 7, 7]  # one larger try (refused), back to the learned span
+
+
+def test_evm_rpc_replace_urls_keeps_state_of_unchanged_endpoints():
+    rpc = EvmRpc("bsc", 56, ["https://a.example", "https://b.example"])
+    a = rpc.endpoints[0]
+    a.mark_unsupported("eth_getLogs")
+    assert rpc.replace_urls(["https://new.example", "https://a.example"])
+    assert [e.url for e in rpc.endpoints] == ["https://new.example", "https://a.example"]
+    assert rpc.endpoints[1] is a and a.refuses("eth_getLogs", __import__("time").monotonic())
+    assert not rpc.replace_urls([]) and len(rpc.endpoints) == 2  # never left without endpoints
 
 
 async def test_too_many_results_for_logs_is_halved_never_taken_as_method_not_served():

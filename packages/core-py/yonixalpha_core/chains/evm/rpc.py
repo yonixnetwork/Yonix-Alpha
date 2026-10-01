@@ -62,6 +62,7 @@ CAPABILITY_ERRORS = ("method not found", "not supported", "is not available", "n
                      "not whitelisted", "unsupported method", "method not allowed")
 RANGE_ERRORS = ("range", "too many", "limit exceeded", "exceed", "response size", "10000 results", "block range")
 UNSUPPORTED_METHOD_SECONDS = 30 * 60.0
+LOGS_SPAN_PROBE_EVERY = 50  # answers at a learned span before a twice-as-large span is tried again
 MAX_GAP_S = 2.0
 
 
@@ -89,6 +90,8 @@ class _Endpoint:
     unsupported: dict = field(default_factory=dict)  # method -> monotonic time until which it is not asked here
     min_gap: float = 0.0  # seconds between requests (grows on 429, shrinks on answers)
     logs_served: int = 0  # eth_getLogs answers from this endpoint
+    logs_span: int | None = None  # largest eth_getLogs block span this endpoint accepted lately
+    logs_since_probe: int = 0  # answers since a larger span was last tried
     next_at: float = 0.0
 
     def refuses(self, method: str, now: float) -> bool:
@@ -130,6 +133,17 @@ class EvmRpc:
         self._id = 0
         self._last_error_ep: _Endpoint | None = None  # the endpoint that answered the last EvmRpcError
         self._last_ok_ep: _Endpoint | None = None  # the endpoint that answered the last successful call
+
+    def replace_urls(self, urls: list[str] | tuple[str, ...]) -> bool:
+        """Swaps in a new ordered endpoint list (dashboard change, no restart).
+        An unchanged URL keeps its state (cooldowns, pacing, refused methods);
+        an empty list is ignored, so a chain is never left without endpoints."""
+        clean = list(dict.fromkeys(u.strip() for u in urls if u and u.strip()))
+        if not clean:
+            return False
+        old = {e.url: e for e in self.endpoints}
+        self.endpoints = [old.get(u) or _Endpoint(u) for u in clean]
+        return True
 
     async def aclose(self) -> None:
         if self._own_client:
@@ -291,7 +305,7 @@ class EvmRpc:
         the next endpoint is asked, from the full span again."""
         out: list[dict[str, Any]] = []
         start = from_block
-        span = max(1, max_span)
+        span = self._start_span(max_span)
         while start <= to_block:
             end = min(to_block, start + span - 1)
             try:
@@ -310,19 +324,36 @@ class EvmRpc:
                         ep.backoff = min(120.0, max(2.0, ep.backoff * 2))
                         ep.cooldown_until = time.monotonic() + ep.backoff
                         ep.state, ep.last_error = "COOLDOWN", "HTTP 403 for eth_getLogs after serving logs: throttled"
-                        span = max(1, max_span)
+                        span = self._start_span(max_span)
                         continue
                     if ep is not None and not ep.refuses("eth_getLogs", time.monotonic()):
                         ep.mark_unsupported("eth_getLogs")
                         ep.last_error = self._redact(f"eth_getLogs refused even for one block: {exc}")[:200]
-                        span = max(1, max_span)
+                        span = self._start_span(max_span)
                         continue
                 raise
-            if self._last_ok_ep is not None:
-                self._last_ok_ep.logs_served += 1
+            ep = self._last_ok_ep
+            if ep is not None:
+                ep.logs_served += 1
+                ep.logs_since_probe += 1
+                if end - start + 1 == span:  # a full-size chunk was accepted: remember that span
+                    ep.logs_span = span
             out.extend(logs or [])
             start = end + 1
         return out
+
+    def _start_span(self, max_span: int) -> int:
+        """The span to start with: what the first usable endpoint accepted
+        lately (a free tier that serves 10 blocks is not asked 2000, 1000, ...
+        on every call), twice that now and then in case its limit was raised."""
+        now = time.monotonic()
+        ep = next((e for e in self.endpoints if e.usable(now, "eth_getLogs")), None)
+        if ep is None or ep.logs_span is None:
+            return max(1, max_span)
+        if ep.logs_since_probe >= LOGS_SPAN_PROBE_EVERY:
+            ep.logs_since_probe = 0
+            return max(1, min(max_span, ep.logs_span * 2))
+        return max(1, min(max_span, ep.logs_span))
 
     def health(self) -> dict[str, Any]:
         now = time.monotonic()

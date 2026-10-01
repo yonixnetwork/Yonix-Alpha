@@ -95,7 +95,7 @@ async def run() -> None:
         await asyncio.gather(
             loop(engine, stop),
             heartbeat_loop(settings, SERVICE, stop, lambda: dict(engine.status)),
-            run_watcher(SERVICE, settings, session_factory, stop, redis=redis),
+            run_watcher(SERVICE, settings, session_factory, stop, redis=redis, evm_rpcs=rpcs),
         )
     finally:
         for rpc in rpcs.values():

@@ -40,7 +40,8 @@ from typing import Any
 
 from yonixalpha_core.chains.evm import EVM_LAUNCHPADS, adapter_for
 from yonixalpha_core.chains.evm.launchpad import ScanResult
-from yonixalpha_core.chains.evm.rpc import EvmRpc, EvmRpcError, EvmRpcUnavailableError, make_rpc
+from yonixalpha_core.chains.evm import rpc_registry as evm_rpc_registry
+from yonixalpha_core.chains.evm.rpc import EvmRpc, EvmRpcError, EvmRpcUnavailableError
 from yonixalpha_core.chains.registry import LAUNCHPADS
 
 SOURCE = "launchpad_verify"
@@ -195,7 +196,10 @@ async def main(argv: list[str] | None = None) -> int:
     try:
         for key in keys:
             chain = LAUNCHPADS[key].chain.value
-            rpc = rpcs.get(chain) or rpcs.setdefault(chain, make_rpc(chain, settings))
+            if chain not in rpcs:  # dashboard providers first, then .env, then public
+                async with session_factory() as session:
+                    rpcs[chain] = await evm_rpc_registry.rpc_for(session, settings, chain)
+            rpc = rpcs[chain]
             print(f"== {LAUNCHPADS[key].name} ({chain})")
             results = None
             for attempt in (1, 2):  # a brief network blip (both BSC nodes timed out at once) gets one retry

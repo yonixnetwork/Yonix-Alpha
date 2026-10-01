@@ -15,7 +15,7 @@ from app.api.util import audit, jsonable
 from yonixalpha_core import events
 from yonixalpha_core.chains.evm import settings as evm_settings
 from yonixalpha_core.chains.evm import wallet as evm_wallet
-from yonixalpha_core.chains.evm.rpc import make_rpc
+from yonixalpha_core.chains.evm import rpc_registry as evm_rpc_registry
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import EvmToken, EvmTrade, PaperAccount, PaperPosition, PlatformSetting
 
@@ -139,7 +139,7 @@ async def wallet(settings: Settings = Depends(get_settings), db: AsyncSession = 
     acct = evm_wallet.account(settings)
     balances = {}
     if acct.get("address"):
-        rpcs = {c: make_rpc(c, settings) for c in ("bsc", "robinhood")}
+        rpcs = {c: await evm_rpc_registry.rpc_for(db, settings, c) for c in ("bsc", "robinhood")}
         try:
             balances = await evm_wallet.native_balances(acct["address"], rpcs)
         finally:

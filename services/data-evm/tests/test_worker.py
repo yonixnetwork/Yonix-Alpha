@@ -217,3 +217,42 @@ async def test_discovery_far_behind_jumps_to_recent_blocks_and_says_so(session_f
         await session.commit()
     out = (await w.discovery_pass(s0, now))["fourmeme"]
     assert "skipped" not in out and out["from"] == 11
+
+
+async def test_a_short_rpc_cooldown_is_not_alerted_but_a_persisting_one_is(session_factory, redis_client, monkeypatch):
+    """Seen on the server: Robinhood's only public RPC answers 429 and discovery
+    fails for a few seconds ("all cooling down for 4s more"). Nothing is lost
+    (the cursor resumes), so Telegram hears about it only when it lasts
+    RPC_OUTAGE_ALERT_SECONDS; any other discovery error is alerted at once."""
+    import app.worker as worker_mod
+    from yonixalpha_core.chains.evm.rpc import EvmRpcUnavailableError
+
+    now = datetime.now(timezone.utc)
+    node, lp = fourmeme_node(now)
+    sent = []
+
+    async def fake_alert(service, event, detail=None, *a, **k):
+        sent.append((event, detail))
+        return True
+
+    async def cooling(*a, **k):
+        raise EvmRpcUnavailableError("bsc RPC unavailable: all cooling down for 4s more")
+
+    monkeypatch.setattr(worker_mod, "alert_error", fake_alert)
+    monkeypatch.setattr(lp, "scan", cooling)
+    s, _ = evm_settings.parse({"bsc": {"confirmations": 0}})
+    w = ChainWorker("bsc", lp.rpc, [lp], session_factory, redis_client)
+    out = await w.discovery_pass(s, now)
+    assert "cooling down" in out["fourmeme"]["error"] and sent == []
+    w.failing_since["fourmeme"] -= worker_mod.RPC_OUTAGE_ALERT_SECONDS  # it has now lasted that long
+    await w.discovery_pass(s, now)
+    assert sent and sent[-1][0] == "bsc.fourmeme.discovery_failed" and sent[-1][1]["failing_for_s"] >= 120
+
+    async def broken(*a, **k):
+        raise ValueError("bad log")
+
+    sent.clear()
+    w.failing_since.clear()
+    monkeypatch.setattr(lp, "scan", broken)
+    await w.discovery_pass(s, now)
+    assert [e for e, _ in sent] == ["bsc.fourmeme.discovery_failed"]  # not an RPC outage: at once

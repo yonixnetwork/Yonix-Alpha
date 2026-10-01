@@ -62,7 +62,7 @@ Providers), see M7.
 | 36–44 | ML: wallet behaviour, mistake labels, frozen validation set, staged contribution, champion/challenger, no look-ahead, paper as training data | PARTIAL | Solana ML: multi-target shadow models, champion/challenger, labels, contribution 0 until validated, no-look-ahead audit; missing: wallet-behaviour labels (§37), EVM features, BUY/WAIT/REJECT/SELL/HOLD comparison (§41) | M12 |
 | 45 | Manual BUY/SELL on all chains | PARTIAL | Solana only (`manual_trade.py`); EVM manual paper missing | M13 |
 | 46–47 | Automatic-vs-manual sell diagnosis with stage-level evidence | DONE in code (M2); production result pending the server run | `tools/exit_diagnosis.py` (read-only report from `execution_orders` + position timeline + reconciliation); `tests/test_exit_diagnosis.py` | M2 |
-| 48–53 | Provider dashboard, roles, plan health / UPGRADE REQUIRED | PARTIAL | `rpc_providers` (Solana, encrypted, failover, TEST); EVM via `BSC_RPC_URLS` / `ROBINHOOD_RPC_URLS`; TEST CONNECTION checks eth_getLogs; no roles, no plan-capability table | M7 |
+| 48–53 | Provider dashboard, roles, plan health / UPGRADE REQUIRED | PARTIAL | `rpc_providers` for Solana, BSC and Robinhood (encrypted, priority, TEST, hot reload); EVM TEST checks chain id and the eth_getLogs span actually served (a free-tier limit is shown); .env and public EVM endpoints can be reordered / disabled; no roles table yet | M7 |
 | 54–55 | Token explorer all chains, explorer links per chain | PARTIAL | Solana token pages; EVM page lists tokens; link builder per chain not audited | M14 |
 | 56–58 | Balances, gas reserve, INSUFFICIENT GAS, unified wallet (Solana + EVM accounts) | PARTIAL | Solana live wallet panel; EVM wallet module (`chains/evm/wallet.py`) read-only; gas-reserve NO_TRADE not wired for EVM paper | M13 |
 | 59–61 | PnL always shown with colour, market cap $K/$M | PARTIAL | Solana positions show PnL; USD market cap done for Solana (G3); EVM positions page not audited | M14 |
@@ -261,3 +261,47 @@ database:
   row; "Paper copy outcomes" table per target and per class; outcome column
   on copy events; full latency stage line. Rendered locally with seeded
   data (no console errors); NOT VERIFIED with real target wallets.
+
+## 10. RPC alerts seen in Telegram (2026-10-01)
+
+- `[data-solana] rpc_health_check_failed`: the 30-second getHealth check
+  in data-solana and the three Solana engines sent every failure straight
+  to Telegram, bypassing the alert throttle every other service uses. It now
+  goes through `notify.alert_error` (once per 5 minutes per event, with the
+  number suppressed); every failure is still stored as a SystemEvent.
+  The failure itself is the endpoints: in the reported snapshot the
+  SOLANA_RPC_URL Helius key had 0 successes in 88 calls (all HTTP 429),
+  Chainstack 0 / 20 (HTTP 403), Ankr 0 / 2 (getHealth not supported,
+  timeouts), dashboard Helius 44 % with 7.7 s latency; only Alchemy was
+  healthy (96.6 %).
+- `[data-evm] robinhood.<launchpad>.discovery_failed: all cooling down`:
+  Robinhood Chain has no ROBINHOOD_RPC_URLS configured, so data-evm uses the
+  single public endpoint, which rate-limits. A cooldown loses nothing (the
+  cursor resumes; a backlog over 60 minutes is skipped and alerted). Such
+  RPC-unavailable failures are now alerted once they persist 2 minutes
+  (per launchpad and per chain); any other discovery error is alerted at once.
+
+## 11. One place for every chain's RPC (2026-10-01)
+
+- RPC & Data Providers now takes BSC and Robinhood Chain endpoints as well as
+  Solana (same table, `rpc_providers.chain`; URLs encrypted; admin password
+  to add or change a URL). data-evm and copy-engine apply the list on the
+  configuration revision (no restart). Order: dashboard (150) → .env
+  BSC_RPC_URLS / ROBINHOOD_RPC_URLS (500+) → built-in public (900+); .env and
+  public endpoints can be reordered or disabled; a chain never ends up with
+  no endpoint.
+- EVM TEST CONNECTION (`chains/evm/rpc_registry.test_evm_rpc`, also used by
+  `tools/evm_rpc_probe`): chain id must match; eth_getLogs over 10 / 100 /
+  1000 / 2000 blocks of the chain's busiest launchpad contract, ending 5
+  blocks under the head. The old probe asked a dead Four.meme V1 contract up
+  to the exact head and reported the working publicnode as NO LOGS.
+- The EVM client now remembers the eth_getLogs span each endpoint accepted
+  (a 10-block free tier is no longer asked 2000, 1000, ... first on every
+  call) and retries twice that after 50 answers.
+- Provider research (2026-10-01, from provider pages / docs via search):
+  Alchemy and QuickNode both serve Solana, BNB Smart Chain and Robinhood Chain
+  mainnet. Free tiers limit eth_getLogs (Alchemy free: 10 blocks on BNB and
+  Robinhood; QuickNode free trial: 5 blocks); paid plans lift it (Alchemy Pay
+  As You Go: unlimited on BNB and Robinhood; QuickNode paid: 10,000 blocks).
+  Exact per-chain URL formats are copied from the provider's dashboard, not
+  built by this app (NOT VERIFIED here).

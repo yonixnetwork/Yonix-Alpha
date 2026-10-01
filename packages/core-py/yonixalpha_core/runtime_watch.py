@@ -9,7 +9,7 @@ from yonixalpha_core.solana import rpc_registry
 
 
 async def run_watcher(service: str, settings, session_factory, stop_event: asyncio.Event, rpc=None,
-                      ws_urls: "rpc_registry.WsUrls | None" = None, redis=None) -> None:
+                      ws_urls: "rpc_registry.WsUrls | None" = None, redis=None, evm_rpcs: dict | None = None) -> None:
     own_redis = redis is None
     redis = redis or make_redis(settings)
     reloaders, status = {}, {}
@@ -20,6 +20,11 @@ async def run_watcher(service: str, settings, session_factory, stop_event: async
             rpc.shared = redis
         reloaders = rpc_registry.make_reloaders(service, rpc, settings, session_factory, redis, ws_urls)
         status = {"rpc": lambda: rpc_registry.rpc_status(rpc)}
+    if evm_rpcs:  # BSC / Robinhood endpoints added or changed in the dashboard (chains/evm/rpc_registry)
+        from yonixalpha_core.chains.evm import rpc_registry as evm_rpc_registry
+
+        reloaders = {**reloaders, "evm_rpc": evm_rpc_registry.make_reloader(evm_rpcs, settings, session_factory)}
+        status = {**status, "evm_rpc": lambda: {c: r.health() for c, r in evm_rpcs.items()}}
     watcher = RuntimeConfigWatcher(service, session_factory, redis, reloaders, status)
     try:
         await watcher.run(stop_event)

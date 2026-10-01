@@ -9,7 +9,7 @@ from yonixalpha_core.events import heartbeat_loop, idle_while_disabled
 from yonixalpha_core.db.base import make_engine, make_session_factory
 from yonixalpha_core.db.models import SystemEvent
 from yonixalpha_core.logging import configure_logging, get_logger
-from yonixalpha_core.notify import send_telegram_alert
+from yonixalpha_core.notify import alert_error
 from yonixalpha_core.solana.rpc import RpcManager, get_transaction_params
 from yonixalpha_core.runtime_watch import run_watcher
 from yonixalpha_core.solana.ws import SolanaWsClient
@@ -27,10 +27,10 @@ async def _record_system_event(session_factory, event_type: str, severity: str, 
         session.add(SystemEvent(service="engine-solana-migration", event_type=event_type, severity=severity, detail=detail))
         await session.commit()
     if severity in ("error", "critical"):
-        await send_telegram_alert(
-            get_settings(),
-            f"[engine-solana-migration] {severity.upper()}: {event_type}" + (f"\n{detail}" if detail else ""),
-        )
+        # Throttled per event (notify.ALERT_THROTTLE_SECONDS) with a count of the
+        # suppressed repeats: a 30-second check failing in a loop cannot flood the
+        # chat. Every occurrence is still stored as a SystemEvent above.
+        await alert_error("engine-solana-migration", event_type, detail)
 
 
 async def _health_check_loop(rpc: RpcManager, session_factory, stop_event: asyncio.Event) -> None:
