@@ -5,7 +5,7 @@ no duplicate entry, a stop-loss exit at the executable sell quote, the kill
 switch, and evidence recording. Proves the pipeline logic, not real-chain
 behaviour (NOT VERIFIED on chain)."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from sqlalchemy import func, select
@@ -44,6 +44,7 @@ def fourmeme_node(now: datetime) -> tuple[Node, FourMeme]:
     node.on(lp.helper, "getTokenInfo(address)", enc(
         ["uint256", "address", "address"] + ["uint256"] * 8 + ["bool"],
         [2, mgr, ZERO_ADDRESS, 10 ** 12, 100, 0, 1, 1, 1, 2 * 10 ** 18, 24 * 10 ** 18, False]))
+    node.on(TOKEN, "totalSupply()", enc(["uint256"], [10 ** 27]))  # read by the launch-coordination check
     set_quotes(node, lp, sell_back=Decimal("0.98"))
     return node, lp
 
@@ -146,6 +147,43 @@ async def test_pipeline_discovery_safety_entry_exit(session_factory, redis_clien
         checks = set((await session.execute(select(LaunchpadCheck.check).where(
             LaunchpadCheck.source == "data-evm"))).scalars())
     assert n >= 5 and {"ACTIVE", "DISCOVERY", "EVENTS", "QUOTE", "SAFETY", "LIQUIDITY"} <= checks
+
+
+async def test_a_bundled_launch_is_not_entered_unless_the_operator_says_otherwise(session_factory, redis_client):
+    """Three wallets bought in the launch transaction's own block (master §11):
+    LAUNCH_BLOCK_BUNDLE, NO_TRADE by default. The operator can set that
+    detection to NONE (report only); the finding is still shown."""
+    from yonixalpha_core import launch_coordination as lc
+    from yonixalpha_core.db.models import PlatformSetting
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    node, lp = fourmeme_node(now)
+    ev = EVENTS.by_name
+    for i in range(3):
+        node.logs.append(log_of(ev["TokenPurchase"], {
+            "token": TOKEN, "account": f"0x{0xb0 + i:040x}", "price": 95, "amount": 10 ** 21, "cost": 95 * 10 ** 13,
+            "fee": 10 ** 13, "offers": 1, "funds": 1}, lp.spec.contracts["manager_v2"], 690, 50 + i))  # unique event ids
+    w = ChainWorker("bsc", lp.rpc, [lp], session_factory, redis_client)
+    s = settings()
+    await w.discovery_pass(s, now)
+    await w.safety_pass(s, now)
+    await record_paper_evidence(session_factory, now)
+    assert (await w.entry_pass(s, now))["opened"] == 0
+    async with session_factory() as session:
+        row = await session.get(EvmToken, ("bsc", TOKEN))
+        assert row.coordination["action"] == "NO_TRADE" and row.coordination_at == now
+        assert {f["code"] for f in row.coordination["findings"]} == {"LAUNCH_BLOCK_BUNDLE"}
+        assert row.coordination["window"]["buyers"] == 5
+        blockers = {b["code"] for b in row.extra["entry_decision"]["blockers"]}
+        assert blockers == {"LAUNCH_COORDINATION"}
+        session.add(PlatformSetting(key=lc.SETTINGS_KEY, value={"actions": {"LAUNCH_BLOCK_BUNDLE": "NONE"}}))
+        await session.commit()
+    later = now + timedelta(minutes=3)
+    await w.safety_pass(s, later)
+    assert (await w.entry_pass(s, later))["opened"] == 1
+    async with session_factory() as session:
+        row = await session.get(EvmToken, ("bsc", TOKEN))
+        assert row.coordination["status"] == "COORDINATION_DETECTED" and row.coordination["action"] == "NONE"
 
 
 async def test_kill_switch_and_controls_block_entries(session_factory, redis_client):

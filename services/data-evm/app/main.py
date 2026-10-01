@@ -10,6 +10,8 @@ import asyncio
 import signal
 import time
 
+import httpx
+
 from yonixalpha_core.chains.base import Chain
 from yonixalpha_core.chains.evm import EVM_LAUNCHPADS, adapter_for
 from yonixalpha_core.chains.evm import settings as evm_settings
@@ -95,11 +97,13 @@ async def run() -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
 
+    http = httpx.AsyncClient(timeout=10.0)  # block-explorer lookups (launch coordination)
     workers = []
     for chain in (Chain.BSC, Chain.ROBINHOOD):
         rpc = make_rpc(chain.value, settings)
         adapters = [adapter_for(k, rpc) for k in EVM_LAUNCHPADS if LAUNCHPADS[k].chain == chain]
-        workers.append(ChainWorker(chain.value, rpc, adapters, session_factory, redis))
+        workers.append(ChainWorker(chain.value, rpc, adapters, session_factory, redis,
+                                   etherscan_key=settings.ETHERSCAN_API_KEY, http=http))
     await _system_event(session_factory, "service_started", "info", {"chains": [w.chain for w in workers]})
     log.info("data-evm.started", chains=[w.chain for w in workers])
     try:
@@ -112,6 +116,7 @@ async def run() -> None:
         await _system_event(session_factory, "service_stopped", "info")
         for w in workers:
             await w.rpc.aclose()
+        await http.aclose()
         await redis.aclose()
         await engine.dispose()
 

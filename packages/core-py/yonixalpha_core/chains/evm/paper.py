@@ -4,7 +4,9 @@ Entry: every blocker is explicit and recorded on the token
 (evm_tokens.extra.entry_decision): kill switch, operator controls, the
 launchpad's evidence-based status (paper needs PAPER ONLY or LIVE), the
 token category and its trade signal, a fresh safety PASS, liquidity, and
-account limits. A token that passes is sized by the same plan_trade the
+account limits, and the launch-window coordination check
+(launch_coordination: NO_TRADE / MANUAL_APPROVAL block, REDUCE_SIZE scales
+the size). A token that passes is sized by the same plan_trade the
 Solana gate uses, with the chain's own amounts (BNB / ETH, never SOL) and
 the executable round trip measured on the launchpad's contracts.
 
@@ -33,7 +35,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yonixalpha_core import kill_switch, paper_engine
+from yonixalpha_core import kill_switch, launch_coordination, paper_engine
 from yonixalpha_core.chains import controls, verification
 from yonixalpha_core.chains.base import Quote
 from yonixalpha_core.chains.evm.settings import EvmTradingSettings
@@ -172,11 +174,23 @@ async def evaluate_entry(session: AsyncSession, redis, adapter, row: EvmToken, s
         PaperPosition.entry_at >= now - timedelta(hours=s.reentry_cooldown_hours)))).scalar_one()
     if recent:
         d.block("ALREADY_TRADED", f"a position on this token was opened in the last {s.reentry_cooldown_hours}h")
+    fx = await coordination_effect(session, row, now)
+    d.detail["coordination"] = {"action": (row.coordination or {}).get("action"), "effect": fx.message,
+                                "size_factor": fx.size_factor}
+    if fx.blocker:
+        d.block(fx.blocker, fx.message)
     if d.blockers:
         return d  # no quote is spent on a token that cannot be entered anyway
 
-    await build_plan(session, adapter, row, cs.position_size, acct_state, liq, now, d)
+    await build_plan(session, adapter, row, cs.position_size * fx.size_factor, acct_state, liq, now, d)
     return d
+
+
+async def coordination_effect(session: AsyncSession, row: EvmToken, now: datetime) -> launch_coordination.Effect:
+    """The launch-coordination action for an entry on `row` (also used by copy trading)."""
+    cfg = await launch_coordination.load_config(session)
+    return launch_coordination.entry_effect(row.coordination, row.coordination_at,
+                                            (row.extra or {}).get("coordination_approval"), cfg, now, SAFETY_MAX_AGE)
 
 
 async def build_plan(session: AsyncSession, adapter, row: EvmToken, size: Decimal, acct_state: AccountState,

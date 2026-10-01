@@ -20,7 +20,7 @@ from sqlalchemy.exc import IntegrityError
 
 from yonixalpha_core import copy_outcomes as co
 from yonixalpha_core import copy_trading as ct
-from yonixalpha_core import events, kill_switch, paper_engine, wallet_profiles
+from yonixalpha_core import events, kill_switch, launch_coordination, paper_engine, wallet_profiles
 from yonixalpha_core.chains import controls, verification
 from yonixalpha_core.chains.base import Chain
 from yonixalpha_core.chains.evm import paper, safety, store
@@ -70,8 +70,10 @@ class Outcome:
 
 
 class CopyEngine:
-    def __init__(self, session_factory, redis, evm_adapters: dict[str, dict[str, Any]], now_fn) -> None:
+    def __init__(self, session_factory, redis, evm_adapters: dict[str, dict[str, Any]], now_fn, *,
+                 etherscan_key: str | None = None) -> None:
         self.session_factory = session_factory
+        self.etherscan_key = etherscan_key  # BSC first-funder lookups (launch coordination)
         self.redis = redis
         self.evm_adapters = evm_adapters  # chain -> launchpad key -> adapter
         self.now = now_fn
@@ -219,10 +221,21 @@ class CopyEngine:
             liq = Decimal(str((row.state or {}).get("liquidity_quote") or 0))
             if liq < cs.min_liquidity:
                 return o.skip("LIQUIDITY_TOO_LOW", f"{liq} < {cs.min_liquidity}")
+            # A target buying is not permission: the launch window must pass the coordination check too.
+            ccfg = await launch_coordination.load_config(session)
+            if ccfg.enabled and (row.coordination_at is None or self.now() - row.coordination_at > paper.SAFETY_MAX_AGE):
+                res = await launch_coordination.assess(session, ad, row, self.now(), ccfg,
+                                                       etherscan_key=self.etherscan_key)
+                row.coordination, row.coordination_at = store._js(res), self.now()
+                await session.commit()
+            fx = await paper.coordination_effect(session, row, self.now())
+            if fx.blocker:
+                return o.skip(fx.blocker, fx.message)
             engine = evm_copy_engine(chain)
             acct_state, _ = await paper.account_state(session, self.redis, chain, t.token, self.now(), None, engine=engine)
             d = paper.EntryDecision(chain, t.token, row.launchpad, row.category, self.now())
-            await paper.build_plan(session, ad, row, ct.size_for(s, chain, t_quote), acct_state, liq, self.now(), d)
+            await paper.build_plan(session, ad, row, ct.size_for(s, chain, t_quote) * fx.size_factor, acct_state, liq,
+                                   self.now(), d)
             o.planned_at = self.now()
             o.detail = {"plan_detail": d.detail, "target_price": str(Decimal(t.quote_amount) / Decimal(t.token_amount))}
             if d.blockers:

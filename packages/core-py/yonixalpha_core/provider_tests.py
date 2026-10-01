@@ -46,7 +46,7 @@ class _Result(Exception):
 def _secrets(settings: Any) -> list[str | None]:
     names = ["HELIUS_API_KEY", "SOLANA_RPC_URL", "SOLANA_WS_URL", "SOLANA_RPC_BACKUP_URL", "SOLANA_RPC_BACKUP_URL_2",
              "SOLANA_RPC_BACKUP_URL_3", "SOLANA_WS_BACKUP_URL", "JUPITER_API_KEY", "PUMPPORTAL_API_KEY", "TELEGRAM_BOT_TOKEN",
-             "WALLET_PRIVATE_KEY", "EVM_WALLET_PRIVATE_KEY"]
+             "WALLET_PRIVATE_KEY", "EVM_WALLET_PRIVATE_KEY", "ETHERSCAN_API_KEY"]
     out = []
     for n in names:
         v = getattr(settings, n, None)
@@ -284,8 +284,37 @@ async def test_provider(name: str, settings: Any, client: httpx.AsyncClient) -> 
             raise _Result(UNAVAILABLE, f"Honeypot.is did not answer: {r.get('detail')}")
         return "answered (WBNB probe); enrichment only, never the sole safety check"
 
+    async def etherscan() -> str:
+        from yonixalpha_core.launch_coordination import ETHERSCAN_V2
+
+        _need(settings, "ETHERSCAN_API_KEY")
+        r = await client.get(ETHERSCAN_V2, params={"chainid": 56, "module": "proxy", "action": "eth_blockNumber",
+                                                   "apikey": _secret(settings.ETHERSCAN_API_KEY)})
+        if r.status_code == 429:
+            raise _Result(RATE_LIMITED, "HTTP 429")
+        if r.status_code != 200:
+            raise _Result(UNAVAILABLE, f"HTTP {r.status_code}")
+        body = r.json()
+        res = body.get("result")
+        if isinstance(res, str) and res.startswith("0x"):
+            return f"BSC (chain 56) answered through Etherscan API V2: block {int(res, 16)}"
+        msg = str(res or body.get("message"))[:160]
+        status = AUTH_FAILED if "invalid api key" in msg.lower() or "missing" in msg.lower() else (
+            RATE_LIMITED if "rate limit" in msg.lower() else UNAVAILABLE)
+        raise _Result(status, f"Etherscan refused: {msg}")
+
+    async def robinhood_explorer() -> str:
+        from yonixalpha_core.launch_coordination import BLOCKSCOUT
+
+        r = await client.get(f"{BLOCKSCOUT['robinhood']}/api/v2/stats")
+        if r.status_code != 200:
+            raise _Result(RATE_LIMITED if r.status_code == 429 else UNAVAILABLE, f"HTTP {r.status_code}")
+        blocks = (r.json() or {}).get("total_blocks")
+        return f"Robinhood Chain Blockscout answered (total blocks {blocks}); used for wallet funding lookups"
+
     tests: dict[str, Callable[[], Awaitable[str]]] = {
         "bsc_rpc": evm_rpc("bsc"), "robinhood_rpc": evm_rpc("robinhood"), "honeypot_is": honeypot_is,
+        "etherscan": etherscan, "robinhood_explorer": robinhood_explorer,
         "solana_rpc": solana_rpc, "solana_rpc_backup": solana_rpc_backup,
         "solana_rpc_backup_2": backup_n("SOLANA_RPC_BACKUP_URL_2"), "solana_rpc_backup_3": backup_n("SOLANA_RPC_BACKUP_URL_3"),
         "solana_ws": solana_ws, "helius": helius,
@@ -298,4 +327,4 @@ async def test_provider(name: str, settings: Any, client: httpx.AsyncClient) -> 
     return await _run(name, settings, fn)
 
 
-PROVIDERS = ["bsc_rpc", "robinhood_rpc", "honeypot_is", "solana_rpc", "solana_rpc_backup", "solana_rpc_backup_2", "solana_rpc_backup_3", "solana_ws", "helius", "jupiter", "pumpportal", "telegram"]
+PROVIDERS = ["bsc_rpc", "robinhood_rpc", "honeypot_is", "etherscan", "robinhood_explorer", "solana_rpc", "solana_rpc_backup", "solana_rpc_backup_2", "solana_rpc_backup_3", "solana_ws", "helius", "jupiter", "pumpportal", "telegram"]

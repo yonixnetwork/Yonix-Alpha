@@ -35,6 +35,7 @@ CONFIG_ROUTES = [
     (re.compile(r"^/api/rpc/providers(/env/[^/]+|/[^/]+)?$"), "rpc_providers"),  # not .../test
     (re.compile(r"^/api/rpc/evm/[^/]+$"), "rpc_providers"),  # BSC / Robinhood .env / public endpoint toggles
     (re.compile(r"^/api/evm/settings$"), "evm_trading"),
+    (re.compile(r"^/api/evm/coordination-settings$"), "launch_coordination"),
     (re.compile(r"^/api/copy/targets(/[^/]+)?$"), "copy_targets"),
     (re.compile(r"^/api/wallets/validation-settings$"), "wallet_validation"),
     # Trading switches and launchpad modes (not the close-positions / emergency-exit actions).

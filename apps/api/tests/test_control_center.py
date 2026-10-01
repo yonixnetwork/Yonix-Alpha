@@ -27,7 +27,7 @@ MINT = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
 NEW_ENDPOINTS = ["/api/analytics/performance", "/api/strategies", "/api/summary",
                  "/api/notifications", "/api/notifications/prefs", "/api/system/health", "/api/system/observability",
                  "/api/ml/review", "/api/ml/predictions", "/api/ml/data-quality", "/api/ml/samples", f"/api/tokens/{MINT}",
-                 "/api/paper/orders"]
+                 "/api/paper/orders", "/api/evm/coordination-settings", "/api/evm/coordination/summary"]
 
 
 async def test_new_endpoints_require_auth(client):
@@ -565,3 +565,50 @@ async def test_evm_wallet_endpoint_is_watch_only_and_keyless(app, client, auth_h
     assert "server only" in env_updates.validate("EVM_WALLET_PRIVATE_KEY", "0x" + "1" * 64)  # never editable from the dashboard
     assert env_updates.validate("BSC_RPC_URLS", "https://a.example/k,https://b.example") is None
     assert "https" in env_updates.validate("BSC_RPC_URLS", "https://a.example,http://b.example")
+
+
+async def test_launch_coordination_settings_approval_and_summary(app, client, auth_headers):
+    from yonixalpha_core import launch_coordination as lc
+    from yonixalpha_core.db.models import EvmToken
+
+    g = (await client.get("/api/evm/coordination-settings", headers=auth_headers)).json()
+    assert g["settings"]["actions"]["PRIVILEGED_BUYERS"] == "NO_TRADE" and "MANUAL_APPROVAL" in g["actions"]
+    bad = await client.put("/api/evm/coordination-settings", json={"actions": {"COMMON_FUNDER": "IGNORE"}},
+                           headers=auth_headers)
+    assert bad.status_code == 422
+    ok = await client.put("/api/evm/coordination-settings", json={"actions": {"LAUNCH_BLOCK_BUNDLE": "MANUAL_APPROVAL"}},
+                          headers=auth_headers)
+    assert ok.status_code == 200 and "x-config-revision" in ok.headers
+    s = ok.json()["settings"]
+    assert s["actions"]["LAUNCH_BLOCK_BUNDLE"] == "MANUAL_APPROVAL" and s["actions"]["COMMON_FUNDER"] == "NO_TRADE"
+
+    token, t0 = "0x" + "7" * 40, NOW - timedelta(minutes=10)
+    cfg, _ = lc.parse_config(s)
+    res = lc.analyse({"launchpad": "pons_v2", "launch_seen": True, "created_at": t0, "created_block": 5,
+                      "creator": "0x" + "c" * 40},
+                     [lc.Trade(f"0x{i:040x}", True, 10 ** 22, 10 ** 16, 5, t0) for i in range(1, 4)],
+                     {"supply": 10 ** 27}, cfg)
+    assert res["action"] == "MANUAL_APPROVAL"
+    async with app.state.db_session_factory() as session:
+        session.add(EvmToken(chain="robinhood", token=token, launchpad="pons_v2", created_at=t0, created_block=5,
+                             venue={}, stats={}, extra={"launch_seen": True}, category="FRESH", stage="CURVE",
+                             coordination=json.loads(json.dumps(res, default=str)), coordination_at=NOW))
+        await session.commit()
+    d = (await client.get(f"/api/evm/tokens/robinhood/{token}", headers=auth_headers)).json()["token"]
+    assert d["coordination_action"] == "MANUAL_APPROVAL" and d["coordination"]["findings"][0]["code"] == "LAUNCH_BLOCK_BUNDLE"
+    a = await client.post(f"/api/evm/tokens/robinhood/{token}/coordination-approval", headers=auth_headers)
+    assert a.status_code == 200 and a.json()["approval"]["fingerprint"] == res["fingerprint"]
+    d = (await client.get(f"/api/evm/tokens/robinhood/{token}", headers=auth_headers)).json()["token"]
+    assert d["coordination_approval"]["findings"] == ["LAUNCH_BLOCK_BUNDLE"]
+    assert (await client.delete(f"/api/evm/tokens/robinhood/{token}/coordination-approval",
+                                headers=auth_headers)).json() == {"revoked": True}
+    summary = (await client.get("/api/evm/coordination/summary?chain=robinhood", headers=auth_headers)).json()
+    lp = summary["launchpads"][0]
+    assert lp["launchpad"] == "pons_v2" and lp["detections"] == {"LAUNCH_BLOCK_BUNDLE": 1}
+    assert lp["unknown_checks"]["COMMON_FUNDER"] == 1  # no explorer data: NOT_CONFIGURED, never "no common funder"
+    async with app.state.db_session_factory() as session:  # a NO_TRADE assessment is never approvable
+        row = await session.get(EvmToken, ("robinhood", token))
+        row.coordination = {**row.coordination, "action": "NO_TRADE"}
+        await session.commit()
+    assert (await client.post(f"/api/evm/tokens/robinhood/{token}/coordination-approval",
+                              headers=auth_headers)).status_code == 409

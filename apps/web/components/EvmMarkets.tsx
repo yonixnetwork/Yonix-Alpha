@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { Boxes, CircleSlash, ShieldCheck, ShieldQuestion, ShieldX } from "lucide-react";
+import { CoordinationDetail, CoordinationPanel, CoordinationPill } from "@/components/LaunchCoordination";
 import { Empty, ErrorNotice, Loading, Money, PageHeader, Section } from "@/components/ui";
 import { formatDate } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
@@ -78,12 +79,13 @@ export default function EvmMarkets({ fixedChain, header = true }: { fixedChain?:
   const [chosen, setChain] = useState("bsc");
   const chain = fixedChain ?? chosen;
   const [category, setCategory] = useState("");
+  const [selected, setSelected] = useState<string | null>(null);
   const unit = CHAINS.find((c) => c[0] === chain)?.[2] ?? "";
   const { data, error, loading } = useApi<J>("/api/evm/tokens", { chain, ...(category ? { category } : {}) }, { refreshMs: 15000 });
   return (
     <div>
       {header && <PageHeader title="EVM Markets" icon={<Boxes size={20} aria-hidden />}
-        subtitle="Tokens discovered on BSC and Robinhood Chain launchpads: category, on-chain safety and the last entry decision. Paper only; a launchpad trades on paper only after its evidence is verified." />}
+        subtitle="Tokens discovered on BSC and Robinhood Chain launchpads: category, on-chain safety, launch-window coordination and the last entry decision. Paper only; a launchpad trades on paper only after its evidence is verified." />}
       <div role="tablist" style={{ display: "flex", gap: 8, margin: "12px 0", flexWrap: "wrap" }}>
         {!fixedChain && CHAINS.map(([v, label]) => (
           <button key={v} role="tab" aria-selected={chain === v} className={chain === v ? "btn btn-sm" : "btn btn-ghost btn-sm"} onClick={() => setChain(v)}>{label}</button>
@@ -103,10 +105,11 @@ export default function EvmMarkets({ fixedChain, header = true }: { fixedChain?:
         {data && data.tokens.length > 0 && (
           <div className="table-scroll">
             <table className="data-table">
-              <thead><tr><th>Token</th><th>Launchpad</th><th>Category</th><th>Stage</th><th>Buys / sells (5m)</th><th>Buyers</th><th>Buy volume</th><th>Safety</th><th>Entry decision</th><th>Last trade</th></tr></thead>
+              <thead><tr><th>Token</th><th>Launchpad</th><th>Category</th><th>Stage</th><th>Buys / sells (5m)</th><th>Buyers</th><th>Buy volume</th><th>Safety</th><th>Coordination</th><th>Entry decision</th><th>Last trade</th></tr></thead>
               <tbody>
                 {data.tokens.map((t: J) => (
-                  <tr key={t.token}>
+                  <tr key={t.token} onClick={() => setSelected(selected === t.token ? null : t.token)} style={{ cursor: "pointer" }}
+                    aria-selected={selected === t.token} title="Show the launch-coordination assessment">
                     <td className="mono small" title={t.token}>{t.symbol ?? t.token.slice(0, 10)}</td>
                     <td>{t.launchpad}</td>
                     <td>{t.category}</td>
@@ -115,6 +118,7 @@ export default function EvmMarkets({ fixedChain, header = true }: { fixedChain?:
                     <td>{t.stats?.unique_buyers ?? 0}</td>
                     <td>{t.stats?.buy_volume ? `${Number(t.stats.buy_volume).toFixed(3)} ${unit}` : "—"}</td>
                     <td><Verdict v={t.safety_verdict} /></td>
+                    <td><CoordinationPill action={t.coordination_action} status={t.coordination_status} /></td>
                     <td className="small"><Decision d={t.entry_decision} /></td>
                     <td>{formatDate(t.last_trade_at)}</td>
                   </tr>
@@ -124,6 +128,12 @@ export default function EvmMarkets({ fixedChain, header = true }: { fixedChain?:
           </div>
         )}
       </Section>
+      {selected && (
+        <Section title={`Launch coordination: ${data?.tokens.find((t: J) => t.token === selected)?.symbol ?? selected.slice(0, 10)}`}>
+          <CoordinationDetail chain={chain} token={selected} />
+        </Section>
+      )}
+      <CoordinationPanel chain={chain} />
     </div>
   );
 }

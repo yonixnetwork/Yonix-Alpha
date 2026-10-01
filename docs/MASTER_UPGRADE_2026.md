@@ -47,8 +47,8 @@ Providers), see M7.
 | 8 | BSC: Four.meme, Flap verified; Genius.fun etc. researched | PARTIAL | Four.meme / Flap adapters, discovery live, read-only checks PASS; others not researched | M10 |
 | 9 | BSC mempool wallet copying | MISSING | copy engine reads confirmed trades only; no pending-tx stream | M8 |
 | 10 | Robinhood: Pons, NOXA, Odyssey | PARTIAL | adapters exist; only Pons V2 proven active | M1 |
-| 11 | Pons coordinated-launch safety (privileged / creator-linked / common-funder / simultaneous buyers) | MISSING on EVM (Solana has wallet graph, dump cluster, deployer intel) | | M5 |
-| 12 | Robinhood reference repos inspected | MISSING | | M9 |
+| 11 | Pons coordinated-launch safety (privileged / creator-linked / common-funder / simultaneous buyers) | DONE (paper; on-chain assumptions NOT VERIFIED until coordination_check runs on the server) | launch_coordination: 13 detections, configurable NO_TRADE / REDUCE_SIZE / MANUAL_APPROVAL / NONE, data-evm entries + EVM copy buys; see section 13 | M5 |
+| 12 | Robinhood reference repos inspected | PARTIAL | pons-launch-engine and pons-terminal read for M5 (section 13); the other five still M9 | M9 |
 | 13 | Robinhood sequencer feed (+ delayed feed fallback), latency / gaps measured | MISSING | registry note only | M8 |
 | 14–17 | Observation state machine for every token on all chains, windows T0..T+60, expiry, stored | PARTIAL | Solana: `token_observations`, T+5..T+60 snapshots, outcomes ledger; EVM: tokens are categorised and entered directly, no OBSERVING/QUALIFIED/EXPIRED states | M6 |
 | 18–23 | Wallet performance model: 24H–180D windows, avg/median win and loss, profit factor, drawdown, FIFO ledger, INSUFFICIENT DATA | DONE in code for BSC / Robinhood (M3); Solana PARTIAL | `wallet_pnl.py` (FIFO lots, usually earns / usually loses, profit factor, drawdown, holds, best / worst), windows 24H / 7D (14D+ INSUFFICIENT DATA: 7-day profile history, 14-day trade retention); fees listed not subtracted (NOT VERIFIED per launchpad), gas not included; Solana profiles have no sells (launch_buyers) and say so | M3 |
@@ -335,3 +335,72 @@ database:
 - Rendered locally on profiles built by the real rebuild: a consistent
   wallet VALIDATED and paper-followed, a wallet carried by one 30x trade
   REJECTED. NOT VERIFIED on production data yet.
+
+## 13. M5 — launch-window coordination (2026-10-01)
+
+Master §11: Pons is active, not safe. Every EVM token in an entry category is
+assessed with its safety check (data-evm, every 2 minutes while it trades)
+and again before an EVM copy buy when the assessment is older than 5
+minutes (`launch_coordination`, migration 0027: `evm_tokens.coordination`,
+`evm_wallet_funders`).
+
+| Master §11 item | Detection | Data |
+|---|---|---|
+| anti-sniping exemptions | DECLARED_EXEMPTIONS | Pons V2 launch calldata (four entrypoints below) |
+| privileged wallets / special treatment | PRIVILEGED_BUYERS | declared list, and `curve.currentSnipeTaxBps(buyer)` at the buy's block = 0 while a reference address pays tax |
+| creator-linked wallets | CREATOR_BOUGHT | deployer, fee recipient, launch sender, launchAndBuy opening-buy recipient |
+| creator-funded wallets | CREATOR_FUNDED_BUYERS | first funder from the explorer |
+| common funders | COMMON_FUNDER | same (disperse contracts resolved to their caller; operator ignore list for exchanges / bridges) |
+| wallets buying almost simultaneously | LAUNCH_BLOCK_BUNDLE, NEAR_SIMULTANEOUS_BUYERS | stored trades |
+| abnormal initial ownership | ABNORMAL_INITIAL_OWNERSHIP | Pons V2 mints all supply to the curve: totalSupply - balanceOf(curve) vs net curve buys at the last stored block |
+| supply concentration | WINDOW_SUPPLY_CONCENTRATION, SINGLE_WALLET_CONCENTRATION | curve buys minus sells of window buyers / totalSupply |
+| coordinated exits | COORDINATED_EXIT | window buyers' sells within a span |
+| (extra) fresh wallets | FRESH_WALLET_CLUSTER | eth_getTransactionCount at the window's last block |
+| (extra) unknown launch / failed reads | WINDOW_NOT_OBSERVED, COORDINATION_DATA_UNAVAILABLE | NO_TRADE by default (provider failure is never "safe") |
+
+- Actions per detection are set on EVM Markets → Launch-window coordination
+  (platform setting `launch_coordination`); the strictest applies. NO_TRADE
+  blocks, MANUAL_APPROVAL waits for an operator approval bound to the exact
+  findings (fingerprint) and expiring after `approval_minutes`, REDUCE_SIZE
+  multiplies the paper size, NONE reports only. A NO_TRADE finding cannot be
+  approved. Copy skips count as BLOCKED_BY_SAFETY in the copy outcomes.
+- Thresholds are configurable defaults, not verified thresholds; the
+  per-launchpad summary (24 h: assessed, detected, actions, detections,
+  checks without data) is there to tune them on real launches.
+- Funding: Robinhood Chain uses its public Blockscout; BSC uses Etherscan
+  API V2 with `ETHERSCAN_API_KEY` (Settings → Block explorers, with a
+  connection test). Without a key the funding checks are NOT_CONFIGURED,
+  never read as "no common funder". Holdings follow launchpad trades only.
+
+Research (§12) used here:
+- github.com/ponsdotdev/pons-labs (commit b51431f, 2026-09-29),
+  `PonsV2LaunchFactory`: snipe tax starts at 99 % and decays over 15 s
+  (max 60 s); `launchToken(params, configId, pairToken, address[] exemptions)`
+  is documented as "the sanctioned pathway for organized teams that bundle
+  their opening buys"; up to 32 exemptions; deployer and fee recipient are
+  exempt automatically; `launchTokenFor` is callable only by the launch
+  forwarder. The published `PonsV2BondingCurve` source has no snipe-tax code
+  although the factory calls `exemptFromSnipeTax` on it: the repository is
+  not the complete deployed source.
+- github.com/slightlyuseless/pons-launch-engine: an open-source multi-wallet
+  "launch and buy your own token" engine for Pons. Gives the launchAndBuy
+  router (0xe33E9E479dF8802cb0866d5d05258bEc4cF62948) ABI with its
+  exemption list, the full V2 TokenParams struct (ends with
+  expectedEconomics and a CREATE2 salt) and the curve view
+  `currentSnipeTaxBps(recipient)`. It is exactly the coordinated launch the
+  master prompt warns about; nothing is imported from it.
+- github.com/yesiambroke/pons-terminal: a trading terminal; nothing used.
+- Selectors (from the struct above): launchToken 0xf35abbcf, launchToken
+  with list 0xa72101af, launchTokenFor 0xd6a0eef5, launchAndBuy 0xf85f8e41.
+  NOT VERIFIED against real launches from this sandbox (Robinhood RPC not
+  reachable here): run
+  `python -m yonixalpha_core.tools.coordination_check` in data-evm on the
+  server; an unrecognised selector is reported, never read as "no
+  exemptions".
+- Tests: 10 core (constructed launches, ABI-encoded calldata for each
+  entrypoint, the snipe-tax confirmation on a fake node, approval rules,
+  mocked Blockscout / Etherscan), a data-evm pipeline test (bundle blocked,
+  then reported only after the operator sets NONE), a copy-engine test (a
+  target buying into a bundled launch is not copied), an API test
+  (settings, approval, revoke, summary), provider tests for both explorers.
+
