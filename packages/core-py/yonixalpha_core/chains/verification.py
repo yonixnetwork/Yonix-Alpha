@@ -25,9 +25,10 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yonixalpha_core.chains.base import CHECKS, LIVE_REQUIRED, PAPER_REQUIRED, Chain, LaunchpadSpec, LaunchpadStatus
+from yonixalpha_core.chains.base import CHECKS, LIVE_REQUIRED, PAPER_REQUIRED, LaunchpadSpec, LaunchpadStatus
 from yonixalpha_core.db.models import ExecutionOrder, LaunchpadCheck, OpportunityOutcome, RiskAssessment
 
+SOLANA_PRODUCTION = ("pumpfun", "pumpswap")
 LIVENESS = ("ACTIVE", "DISCOVERY", "EVENTS", "QUOTE", "LIQUIDITY", "SAFETY")
 LIVENESS_HOURS = 24
 
@@ -134,7 +135,10 @@ async def solana_checks(session: AsyncSession, redis, key: str, now: datetime) -
 async def status_for(session: AsyncSession, redis, spec: LaunchpadSpec, operator_mode: str,
                      now: datetime | None = None) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
-    checks = await solana_checks(session, redis, spec.key, now) if spec.chain == Chain.SOLANA \
+    # Pump.fun / PumpSwap evidence comes from the production system; every other
+    # venue (EVM, and the observe-only Solana venues of the activity probe) from
+    # recorded launchpad_checks rows.
+    checks = await solana_checks(session, redis, spec.key, now) if spec.key in SOLANA_PRODUCTION \
         else await recorded_checks(session, spec.key)
     st = compute_status(spec, checks, operator_mode, now)
     st["checks"] = {c: {"status": checks[c]["status"], "at": checks[c]["at"].isoformat() if checks[c].get("at") else None,

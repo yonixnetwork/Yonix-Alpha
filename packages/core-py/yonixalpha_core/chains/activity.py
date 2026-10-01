@@ -27,7 +27,11 @@ Sources:
   Solana  Pump.fun launches from token_observations (every observed fresh
           launch is decided and stored), PumpSwap migrations from
           token_events. Solana per-trade activity is not stored by venue, so
-          its trade counters are None (not 0).
+          its trade counters are None (not 0). Observe-only venues (Raydium
+          LaunchLab, Meteora DBC, Moonshot) from the activity probe
+          (solana/venue_probe.py): last successful transaction, transaction
+          rate and the newest launch / trade / migration SEEN in its samples;
+          7-day counts are not measured (None).
 """
 
 from __future__ import annotations
@@ -138,6 +142,19 @@ def _ago(d: timedelta) -> str:
     return f"{s // 86400} d"
 
 
+def _probe_venues() -> tuple[str, ...]:
+    from yonixalpha_core.solana.venue_probe import VENUES
+
+    return tuple(VENUES)
+
+
+def _dt(v) -> datetime | None:
+    try:
+        return datetime.fromisoformat(v) if v else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _max(*vals):
     vals = [v for v in vals if v is not None]
     return max(vals) if vals else None
@@ -171,6 +188,24 @@ async def _solana(session: AsyncSession, spec: LaunchpadSpec, now: datetime) -> 
         n, last, first = (await session.execute(select(
             func.count().filter(o.decided_at >= since), func.max(o.decided_at), func.min(o.decided_at)))).one()
         out.update(launches_7d=int(n), last_launch=last, rollup_since=first)
+    elif spec.key in _probe_venues():
+        lc = LaunchpadCheck
+        rows = (await session.execute(select(lc.checked_at, lc.evidence).where(
+            lc.launchpad == spec.key, lc.check == "ACTIVE", lc.checked_at >= since)
+            .order_by(lc.checked_at.desc()).limit(2100))).all()  # 7 days of 5-minute probes
+        first = (await session.execute(select(func.min(lc.checked_at)).where(lc.launchpad == spec.key))).scalar_one()
+        seen: dict[str, datetime] = {}
+        last_tx = None
+        for _, ev in rows:
+            ev = ev or {}
+            last_tx = _max(last_tx, _dt(ev.get("last_tx_at")))
+            for k, v in (ev.get("last_seen") or {}).items():
+                seen[k] = _max(seen.get(k), _dt(v))
+        latest = rows[0][1] if rows else {}
+        out.update(last_launch=seen.get("launch"), last_trade=seen.get("trade"), last_migration=seen.get("migration"),
+                   rollup_since=first, monitor_at=rows[0][0] if rows else None, last_tx=last_tx,
+                   probe={k: (latest or {}).get(k) for k in ("rate_per_min", "span_s", "sampled", "sample_kinds",
+                                                             "unknown_instructions", "error", "last_tx_at")})
     elif spec.key == "pumpswap":
         e = TokenEvent
         n, last, first = (await session.execute(select(
@@ -189,7 +224,10 @@ async def launchpad_activity(session: AsyncSession, spec: LaunchpadSpec, operato
         func.min(lc.checked_at),
         func.max(lc.checked_at).filter(lc.status == "PASS", lc.check.in_(("DISCOVERY", "EVENTS"))),
     ).where(lc.launchpad == spec.key))).one()
-    last_activity = _max(data["last_launch"], data["last_trade"], data["last_migration"], last_event)
+    if "last_tx" in data:  # activity probe: the newest transaction itself, not when the probe ran
+        last_event = None
+    last_activity = _max(data["last_launch"], data["last_trade"], data["last_migration"], last_event,
+                         data.get("last_tx"))
     disabled = (spec.inactive_reason or "venue inactive") if not spec.active else (
         "switched off by the operator" if operator_mode == "OFF" else None)
     starts = [x for x in (data["rollup_since"], first_check) if x is not None]
@@ -205,6 +243,6 @@ async def launchpad_activity(session: AsyncSession, spec: LaunchpadSpec, operato
             "last_migration": data["last_migration"], "last_verified_event": last_event,
             "launches_7d": data["launches_7d"], "trades_7d": data["trades_7d"],
             "migrations_7d": data["migrations_7d"], "volume_7d": data["volume_7d"],
-            "monitor_at": data["monitor_at"],
+            "monitor_at": data["monitor_at"], "probe": data.get("probe"), "last_transaction": data.get("last_tx"),
             "event_monitor_verified": passed("EVENTS"), "buy_verified": passed("BUY"),
             "sell_verified": passed("SELL"), "execution_verified": passed("BUY") and passed("SELL")}
