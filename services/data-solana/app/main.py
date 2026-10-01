@@ -14,6 +14,7 @@ from yonixalpha_core.notify import alert_error
 from yonixalpha_core.solana.rpc import RpcManager
 from yonixalpha_core.solana.rpc_registry import WsUrls
 from yonixalpha_core.runtime_watch import run_watcher
+from yonixalpha_core.solana import venue_probe
 from yonixalpha_core.solana.ws import SolanaWsClient
 
 from app.ingest import normalize_logs_notification, normalize_slot_notification
@@ -26,6 +27,10 @@ log = get_logger("data-solana.main")
 WATCHED_ADDRESSES = [a.strip() for a in os.getenv("SOLANA_WATCHED_ADDRESSES", "").split(",") if a.strip()]
 
 HEALTH_CHECK_INTERVAL_SECONDS = 30
+# Activity probe of the observe-only Solana launchpads (Raydium LaunchLab,
+# Meteora DBC, Moonshot): about 30 background RPC calls per venue every 5
+# minutes. SOLANA_VENUE_PROBE=0 switches it off.
+VENUE_PROBE = os.getenv("SOLANA_VENUE_PROBE", "1") != "0"
 
 
 async def _record_system_event(session_factory, event_type: str, severity: str, detail: dict | None = None) -> None:
@@ -134,6 +139,7 @@ async def run() -> None:
                 ws_client.run(stop_event),
                 _health_check_loop(rpc, session_factory, stop_event),
                 run_watcher("data-solana", settings, session_factory, stop_event, rpc=rpc, ws_urls=next_ws_url),
+                *([venue_probe.run(rpc, session_factory, stop_event)] if VENUE_PROBE else []),
             )
         finally:
             await _record_system_event(session_factory, "service_stopped", "info")

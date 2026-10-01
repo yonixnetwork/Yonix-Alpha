@@ -119,11 +119,12 @@ export default function LaunchpadsPage() {
             <span className="muted small">{lp.activity_why}</span>
             <span className={STATUS_CLASS[lp.status] ?? "pill pill-off"} title="verification">{STATUS_LABEL[lp.status] ?? lp.status}</span>
             <span className="muted small">{lp.why}</span>
-            <label className="small">Operator mode{" "}
-              <select value={lp.operator_mode} disabled={!lp.active || !lp.supports_trading} onChange={(e) => setMode(lp.key, e.target.value)}>
-                {["OFF", "PAPER", "LIVE"].map((m) => <option key={m} value={m}>{m}</option>)}
-              </select>
-            </label>
+            {lp.supports_trading ? (
+              <label className="small">Operator mode{" "}
+                <select value={lp.operator_mode} disabled={!lp.active} onChange={(e) => setMode(lp.key, e.target.value)}>
+                  {["OFF", "PAPER", "LIVE"].map((m) => <option key={m} value={m}>{m}</option>)}
+                </select>
+              </label>) : <span className="pill pill-off" title="activity is monitored; nothing is traded or copied here">OBSERVE ONLY</span>}
           </div>
           <div className="table-scroll">
             <table className="data-table">
@@ -136,9 +137,9 @@ export default function LaunchpadsPage() {
             </table>
           </div>
           <div className="stat-grid">
-            <div className="stat"><div className="stat-label">Last launch</div><div className="stat-value small">{lp.last_launch ? formatDate(lp.last_launch) : "none recorded"}</div></div>
-            <div className="stat"><div className="stat-label">Last trade</div><div className="stat-value small">{lp.last_trade ? formatDate(lp.last_trade) : lp.trades_7d === null ? "not tracked" : "none recorded"}</div></div>
-            <div className="stat"><div className="stat-label">Last migration</div><div className="stat-value small">{lp.last_migration ? formatDate(lp.last_migration) : "none recorded"}</div></div>
+            <div className="stat"><div className="stat-label">Last launch{lp.probe ? " (seen in samples)" : ""}</div><div className="stat-value small">{lp.last_launch ? formatDate(lp.last_launch) : lp.probe ? "not seen in samples" : "none recorded"}</div></div>
+            <div className="stat"><div className="stat-label">Last trade{lp.probe ? " (seen in samples)" : ""}</div><div className="stat-value small">{lp.last_trade ? formatDate(lp.last_trade) : lp.probe ? "not seen in samples" : lp.trades_7d === null ? "not tracked" : "none recorded"}</div></div>
+            <div className="stat"><div className="stat-label">Last migration{lp.probe ? " (seen in samples)" : ""}</div><div className="stat-value small">{lp.last_migration ? formatDate(lp.last_migration) : lp.probe ? "not seen in samples" : "none recorded"}</div></div>
             <div className="stat"><div className="stat-label">Launches 7d</div><div className="stat-value small">{n(lp.launches_7d)}</div></div>
             <div className="stat"><div className="stat-label">Trades 7d</div><div className="stat-value small">{n(lp.trades_7d)}</div></div>
             <div className="stat"><div className="stat-label">Migrations 7d</div><div className="stat-value small">{n(lp.migrations_7d)}</div></div>
@@ -146,6 +147,21 @@ export default function LaunchpadsPage() {
             <div className="stat"><div className="stat-label">Event monitor / buy / sell verified</div>
               <div className="stat-value small">{[lp.event_monitor_verified, lp.buy_verified, lp.sell_verified].map((v: boolean) => (v ? "yes" : "no")).join(" / ")}</div></div>
           </div>
+          {lp.probe && (
+            <div className="stat-grid">
+              <div className="stat"><div className="stat-label">Last transaction (any instruction)</div>
+                <div className="stat-value small">{lp.last_transaction ? formatDate(lp.last_transaction) : "none seen"}</div></div>
+              <div className="stat"><div className="stat-label">Transactions / min (newest 1,000)</div>
+                <div className="stat-value small">{lp.probe.rate_per_min ?? "—"}</div></div>
+              <div className="stat"><div className="stat-label">Latest sample ({lp.probe.sampled ?? 0} tx)</div>
+                <div className="stat-value small">{Object.entries(lp.probe.sample_kinds ?? {}).map(([k, v]) => `${k} ${v}`).join(", ") || "none classified"}</div></div>
+              <div className="stat" title="instruction names the probe does not classify (fee claims, config...)">
+                <div className="stat-label">Other instructions</div>
+                <div className="stat-value small mono">{Object.entries(lp.probe.unknown_instructions ?? {}).map(([k, v]) => `${k} ${v}`).join(", ") || "—"}</div></div>
+              {lp.probe.error && <div className="stat"><div className="stat-label">Probe error</div><div className="stat-value small neg">{lp.probe.error}</div></div>}
+            </div>)}
+          {lp.probe && <p className="muted small">Activity probe (observe only): the newest transactions of the program and a
+            sample of 25 classified every 5 minutes. 7-day counts are not measured; launches can be missed by a sample.</p>}
           <div className="stat-grid">
             {Object.entries(lp.checks as Record<string, J>).map(([c, v]) => (
               <div key={c} className="stat" title={v.evidence ? JSON.stringify(v.evidence) : "never run"}>

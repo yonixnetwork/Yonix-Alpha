@@ -43,7 +43,7 @@ Providers), see M7.
 | 4 | Only Solana, BSC, Robinhood in the active UI | DONE | legacy futures/forex/grid removed (archive branch) | — |
 | 5 | Launchpad health: activity status, last launch/trade/migration, 7d counts, verified flags | DONE in code (M1), NOT VERIFIED in production yet | `chains/activity.py`, table `launchpad_activity` (migration 0024), rollup written in `evm/store.persist_scan`, `/api/launchpads`, Launchpads page; `tests/test_launchpad_activity.py`, `test_control_center` | M1 |
 | 6 | 7-day inactivity → INACTIVE, hidden from active filter, adapter kept, auto-reactivation | DONE in code (M1) | INACTIVE needs 7 days without activity AND 7 days of monitoring (else UNVERIFIED); Active / Archived tabs; discovery keeps scanning, so activity returns the venue to ACTIVE; Solana trade counts are "not tracked" (None), never 0 | M1 |
-| 7 | Solana launchpads beyond Pump.fun/PumpSwap (LetsBONK, LaunchLab, Meteora DBC, Bags, Moonshot, Jupiter Studio) | MISSING (Meteora DBC researched, M9) | registry has `pumpfun`, `pumpswap` only; DBC program, events, DAMM v2 migration and Token-2022 transfer-hook support recorded in section 18 | M10 |
+| 7 | Solana launchpads beyond Pump.fun/PumpSwap (LetsBONK, LaunchLab, Meteora DBC, Bags, Moonshot, Jupiter Studio) | PARTIAL: activity monitored, observe only (M10a) | Raydium LaunchLab (LetsBONK runs on it), Meteora DBC (Bags, Jupiter Studio and others run on it) and Moonshot in the registry as OBSERVE ONLY; activity from a 5-minute probe (section 19); per-site split (LetsBONK vs other LaunchLab platforms, DBC configs) and trading NOT IMPLEMENTED; StonkFun not identified | M10 |
 | 8 | BSC: Four.meme, Flap verified; Genius.fun etc. researched | PARTIAL | Four.meme / Flap adapters, discovery live, read-only checks PASS; Four.meme addresses and events match four-meme-ai (M9); X Mode and AntiSniperFeeMode tokens NOT DETECTED (section 18); Genius.fun not researched | M10 |
 | 9 | BSC mempool wallet copying | DONE (measurement) | `evm.streams.PendingTxStream`: eth_subscribe newPendingTransactions (full bodies) over a dashboard WSS endpoint; matches copy targets / launchpads; REFUSED / LIMITED become UPGRADE REQUIRED; copy decisions stay on confirmed trades (§17) | M8 |
 | 10 | Robinhood: Pons, NOXA, Odyssey | PARTIAL | adapters exist; only Pons V2 proven active | M1 |
@@ -881,4 +881,72 @@ NOT VERIFIED here:
   settings;
 - the attribution numbers. `tools.trader_attribution` must run on the
   server.
+
+## 19. M10a — activity of the other Solana launchpads (2026-10-01)
+
+Master §5-7. Before any adapter, the question §7 asks first is which venues
+are actually being used. That question is now answered from the chain for
+three programs. They are in the registry as OBSERVE ONLY: nothing is traded,
+quoted or copied there, the trading status is DISABLED ("observe only"), and
+the Launchpads page shows OBSERVE ONLY instead of a mode selector.
+
+| Venue | Program | Source of id and instruction names |
+|---|---|---|
+| Raydium LaunchLab (LetsBONK / bonk.fun runs on it) | `LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj` | raydium-io/raydium-idl `raydium_launchpad.json` 0.2.0; raydium-sdk-V2 `LAUNCHPAD_PROGRAM` (the `DRay6…` id there is devnet) |
+| Meteora Dynamic Bonding Curve (Bags, Jupiter Studio and others run on it) | `dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN` | MeteoraAg dynamic-bonding-curve-sdk IDL 0.2.1 |
+| Moonshot | `MoonCVVNZFSYkqNXP6bxHLPL6QQJiMagDL3qcqUQTrG` | wen-moon-ser/moonshot-sdk IDL V4 (SDK last changed 2025-04) |
+
+**The probe** (`solana/venue_probe.py`, run by data-solana every 5 minutes;
+`SOLANA_VENUE_PROBE=0` switches it off):
+- `getSignaturesForAddress(program, limit=1000)` gives the last successful
+  transaction and an exact transaction rate over the span those cover.
+- 25 of the newest successful transactions are fetched. Their
+  `Instruction:` log lines, attributed through the invoke stack (an
+  aggregator's CPI into the venue counts for the venue, the aggregator's own
+  instructions do not), are classified as launch / trade / migration.
+- Instruction names it does not know are counted and shown ("other
+  instructions"), so a wrong naming assumption is visible instead of silent.
+- All calls are background priority: about 26 per venue per probe, shed
+  first when providers are limited.
+
+**Why a probe and not a log stream.** A `logsSubscribe` stream on DBC or
+LaunchLab carries every swap. That is a large, continuous load on the
+provider for a question that a few calls every 5 minutes answer.
+
+**What it shows** (Launchpad Health, Launchpads page):
+- ACTIVE / QUIET / INACTIVE from the newest transaction itself (not from the
+  probe time). INACTIVE still needs 7 days of probing (otherwise UNVERIFIED).
+- Last transaction, transactions per minute, the latest sample's kinds and
+  other instructions.
+- Last launch / trade / migration "seen in samples".
+- 7-day counts and volume are NOT measured and show "not tracked", never 0:
+  a sample can miss launches.
+- A probe that fails is recorded as ACTIVE FAIL with the error.
+
+**Also fixed.** Launchpad verification for Solana used the production
+evidence for any key other than `pumpfun`, which would have given these
+venues PumpSwap's evidence. Now only `pumpfun` and `pumpswap` use it; every
+other venue uses recorded checks.
+
+**Not done (M10 continues):**
+- Per-site split: LetsBONK vs other LaunchLab platforms; Bags vs Jupiter
+  Studio vs other DBC configs. This needs the platform-config or DBC-config
+  account of each launch.
+- Event decoding, quotes, safety and paper trading for any of these venues.
+- StonkFun not identified.
+
+**Tests** (`test_venue_probe.py`):
+- invoke-stack attribution and unknown names;
+- rate, last transaction and sample classification against a fake RPC;
+- failed transactions skipped;
+- Launchpad Health from two probes;
+- "not tracked" counts;
+- the trading status stays DISABLED with probe checks.
+
+The first run also caught `launchpad_checks.source` being 48 characters at
+most; the probe label is shorter now.
+
+NOT VERIFIED here: the instruction names as they appear in real logs
+(Anchor UpperCamelCase assumed; the "other instructions" list on the
+server shows any mismatch), and each venue's real activity.
 

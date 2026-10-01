@@ -59,6 +59,39 @@ LAUNCHPADS: dict[str, LaunchpadSpec] = {s.key: s for s in (
         safety_model="as Pump.fun + pool liquidity and migrated-liquidity minimum",
         supported_events=("BuyEvent", "SellEvent"), contracts={"program": "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"},
         quote_asset="SOL", sources=("pump-fun/pump-public-docs",)),
+    # --- Solana, observe only (master §7): activity probe, no trading -----------------------------
+    LaunchpadSpec(
+        "raydium_launchlab", Chain.SOLANA, "Raydium LaunchLab (incl. LetsBONK)", Lifecycle.BONDING_CURVE_TO_DEX,
+        curve_model="LaunchLab bonding curve (platform configs: LetsBONK / bonk.fun and others)",
+        liquidity_model="quote in the curve", migration_model="migrate_to_amm / migrate_to_cpswap",
+        execution_model="not supported (observe only)", safety_model="observe only",
+        supported_events=("PoolCreateEvent", "TradeEvent"),
+        contracts={"program": "LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj"},
+        supports_trading=False, supports_copy_trading=False, quote_asset="SOL (configurable per platform)",
+        sources=("raydium-io/raydium-idl raydium_launchpad.json 0.2.0 (e7e0c96)",
+                 "raydium-io/raydium-sdk-V2 LAUNCHPAD_PROGRAM (cc33ec2)"),
+        notes="Activity from the venue probe (solana/venue_probe.py); per-platform split not measured."),
+    LaunchpadSpec(
+        "meteora_dbc", Chain.SOLANA, "Meteora Dynamic Bonding Curve", Lifecycle.BONDING_CURVE_TO_DEX,
+        curve_model="partner-configured virtual curve (up to 20 price ranges)", liquidity_model="quote in the virtual pool",
+        migration_model="migration_damm_v2 (DAMM v1 deprecated for new configs)",
+        execution_model="not supported (observe only)",
+        safety_model="observe only; Token-2022 transfer hooks possible (sell risk)",
+        supported_events=("EvtInitializePool", "EvtSwap", "EvtSwap2", "EvtCurveComplete"),
+        contracts={"program": "dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN"},
+        supports_trading=False, supports_copy_trading=False, quote_asset="SOL / USDC / other (per config)",
+        sources=("MeteoraAg/dynamic-bonding-curve 0.2.1 (f552f20)", "MeteoraAg/dynamic-bonding-curve-sdk IDL (a07966d)"),
+        notes="One program for many launch sites (configs); per-site split not measured. Program code is under "
+              "a non-commercial licence: events decoded with our own code only."),
+    LaunchpadSpec(
+        "moonshot", Chain.SOLANA, "Moonshot", Lifecycle.BONDING_CURVE_TO_DEX,
+        curve_model="Moonshot bonding curve", liquidity_model="SOL in the curve", migration_model="migrate_funds",
+        execution_model="not supported (observe only)", safety_model="observe only",
+        supported_events=("TokenMint", "Buy", "Sell", "MigrateFunds"),
+        contracts={"program": "MoonCVVNZFSYkqNXP6bxHLPL6QQJiMagDL3qcqUQTrG"},
+        supports_trading=False, supports_copy_trading=False, quote_asset="SOL",
+        sources=("wen-moon-ser/moonshot-sdk IDL V4 (be46cc5, 2025-04)",),
+        notes="SDK last updated 2025-04: current activity is exactly what the probe has to show."),
     # --- BSC --------------------------------------------------------------------------------------
     LaunchpadSpec(
         "fourmeme", Chain.BSC, "Four.meme", Lifecycle.BONDING_CURVE_TO_DEX,
