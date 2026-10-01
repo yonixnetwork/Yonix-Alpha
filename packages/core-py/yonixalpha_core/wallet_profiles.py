@@ -16,6 +16,13 @@ Sources:
 Win rate is shrunk toward a base rate with a Beta prior (the same approach
 as wallet_intel.beta_reputation), so a 2-for-2 wallet does not look better
 than a 60-for-100 one.
+
+EVM profiles also carry (master upgrade §25-28): the validation checks
+(wallet_validation), the market-regime test (market_regimes), the discovery
+stage, and for VALIDATED wallets a paper follow: their recent buys replayed
+with copy_outcomes.evaluate (entry at the first trade after we would have
+seen theirs, exit at their own sell or at the horizon). Nothing here adds a
+copy target.
 """
 
 from __future__ import annotations
@@ -32,8 +39,8 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yonixalpha_core import wallet_pnl
-from yonixalpha_core.db.models import EvmToken, EvmTrade, LaunchBuyer, WalletProfile
+from yonixalpha_core import copy_outcomes, market_regimes, wallet_pnl, wallet_validation
+from yonixalpha_core.db.models import EvmToken, EvmTrade, LaunchBuyer, PlatformSetting, WalletProfile
 
 E18 = Decimal(10) ** 18
 
@@ -83,10 +90,13 @@ def score(m: dict[str, Any], cfg: ScoreConfig) -> tuple[float | None, dict[str, 
 
 
 def evm_metrics(trades: Iterable[Any], launch_at: dict[str, datetime], cfg: ScoreConfig,
-                now: datetime | None = None, history_days: float = 7) -> dict[str, Any]:
+                now: datetime | None = None, history_days: float = 7,
+                vcfg: wallet_validation.ValidationConfig | None = None,
+                regimes: dict[datetime, dict[str, str]] | None = None) -> dict[str, Any]:
     """trades: one wallet's EvmTrade rows (any order). launch_at: token ->
     observed launch time (only tokens whose launch was seen). `pnl` is the
-    FIFO profit/loss profile (wallet_pnl) over the same trades."""
+    FIFO profit/loss profile (wallet_pnl) over the same trades; `validation`
+    and `regimes` are the §26 / §28 tests over its closed trades."""
     rows = sorted(trades, key=lambda t: t.at)
     per: dict[str, dict[str, Any]] = defaultdict(lambda: {"bq": Decimal(0), "bt": Decimal(0), "sq": Decimal(0),
                                                           "st": Decimal(0), "first_buy": None, "last_sell": None})
@@ -120,7 +130,13 @@ def evm_metrics(trades: Iterable[Any], launch_at: dict[str, datetime], cfg: Scor
     pnl = realized
     ledger_in = [wallet_pnl.TradeIn(t.token, t.at, t.is_buy, Decimal(t.token_amount), Decimal(t.quote_amount) / E18,
                                     Decimal(getattr(t, "fee", None) or 0) / E18) for t in rows]
+    closed_trades = wallet_pnl.fifo(ledger_in).closed
+    validation = wallet_validation.validate(closed_trades, trades=len(rows), unique_tokens=len(per),
+                                            trade_times=[t.at for t in rows], cfg=vcfg or wallet_validation.ValidationConfig())
     return {
+        "validation": validation,
+        "regimes": market_regimes.regime_test(closed_trades, regimes or {}),
+        "discovery": wallet_validation.discovery_status(validation, None),
         "pnl": wallet_pnl.profile(ledger_in, now or (rows[-1].at if rows else datetime.now()), history_days),
         "trades": len(rows), "buys": sum(1 for t in rows if t.is_buy), "sells": sum(1 for t in rows if not t.is_buy),
         "tokens": len(per), "closed_tokens": closed, "wins": wins,
@@ -141,7 +157,13 @@ def solana_metrics(rows: Iterable[LaunchBuyer], cfg: ScoreConfig) -> dict[str, A
     wins = sum(1 for r in resolved if r.outcome == "WIN")
     with_launch = [r for r in rows if r.launch_created_at]
     early = sum(1 for r in with_launch if (r.first_buy_at - r.launch_created_at).total_seconds() <= cfg.early_seconds)
+    no_sells = ("Solana profiles come from launch_buyers (first buys only): without the wallet's sells there is no "
+                "closed-trade ledger to validate or to split by market regime")
+    validation = {"status": wallet_validation.INSUFFICIENT, "reason": no_sells, "checks": []}
     return {
+        "validation": validation,
+        "regimes": {"status": "INSUFFICIENT_DATA", "reason": no_sells, "dimensions": {}},
+        "discovery": wallet_validation.discovery_status(validation, None),
         "pnl": {"all": {"status": "INSUFFICIENT_DATA", "closed_trades": None, "reasons": [
             "Solana profiles come from launch_buyers: the first buys of launches this system decided on. "
             "Their sells are not recorded, so per-trade PnL, wins / losses and profit factor cannot be computed; "
@@ -164,6 +186,8 @@ def _js(v: Any) -> Any:
         return v.isoformat()
     if isinstance(v, dict):
         return {k: _js(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_js(x) for x in v]
     return v
 
 
@@ -182,13 +206,60 @@ MAX_WALLETS = 2000  # most active wallets profiled per chain and rebuild
 WALLET_BATCH = 100  # wallets whose trades are loaded at once (bounded memory)
 
 
+PAPER_FOLLOW_BUYS = 20  # most recent first buys per token replayed for a VALIDATED wallet
+PAPER_FOLLOW_REFRESH = timedelta(hours=1)
+ASSUMED_DETECTION = timedelta(seconds=3)  # paper follow: we see a confirmed trade a few seconds after it
+
+
+async def validation_config(session: AsyncSession) -> wallet_validation.ValidationConfig:
+    row = await session.get(PlatformSetting, wallet_validation.SETTINGS_KEY)
+    cfg, _errors = wallet_validation.parse_config(dict(row.value) if row else None)
+    return cfg
+
+
+async def paper_follow(session: AsyncSession, chain: str, wallet: str, rows: list, now: datetime) -> dict[str, Any]:
+    """Replays the wallet's recent first buys per token as paper copies."""
+    first_buys: dict[str, Any] = {}
+    for t in sorted(rows, key=lambda t: t.at):
+        if t.is_buy and t.token not in first_buys and t.at <= now - copy_outcomes.HORIZON - ASSUMED_DETECTION:
+            first_buys[t.token] = t
+    picked = sorted(first_buys.values(), key=lambda t: t.at)[-PAPER_FOLLOW_BUYS:]
+    results = []
+    e = EvmTrade
+    for b in picked:
+        seen = b.at + ASSUMED_DETECTION
+        path_rows = (await session.execute(select(e.at, e.quote_amount, e.token_amount, e.trader, e.is_buy).where(
+            e.chain == chain, e.token == b.token, e.at >= seen, e.at <= seen + copy_outcomes.HORIZON).order_by(e.at))).all()
+        path = [copy_outcomes.Point(at, px) for at, q, tok, _, _ in path_rows
+                if (px := copy_outcomes.unit_price(chain, q, tok)) is not None]
+        sell = next(((at, q, tok) for at, q, tok, trader, is_buy in path_rows
+                     if not is_buy and trader.lower() == wallet.lower()), None)
+        exit_ = None
+        if sell is not None and (px := copy_outcomes.unit_price(chain, sell[1], sell[2])) is not None:
+            exit_ = copy_outcomes.Point(sell[0], px)
+        results.append(copy_outcomes.evaluate(seen, path, exit_))
+    done = [r for r in results if r["status"] == "EVALUATED"]
+    res = sorted(r["result_pct"] for r in done)
+    n = len(res)
+    return {"buys_replayed": len(results), "evaluated": n, "no_price_data": len(results) - n,
+            "won": sum(1 for r in done if r["label"] == "WOULD_HAVE_WON"),
+            "lost": sum(1 for r in done if r["label"] == "WOULD_HAVE_LOST"),
+            "avg_result_pct": round(sum(res) / n, 2) if n else None,
+            "median_result_pct": round(statistics.median(res), 2) if n else None,
+            "assumed_detection_s": ASSUMED_DETECTION.total_seconds(), "horizon_min": copy_outcomes.HORIZON.total_seconds() / 60,
+            "basis": copy_outcomes.BASIS, "at": now.isoformat()}
+
+
 async def rebuild_evm(session: AsyncSession, chain: str, now: datetime, cfg: ScoreConfig = ScoreConfig(),
-                      days: int = 7, min_trades: int = 3, max_wallets: int = MAX_WALLETS) -> int:
-    """Profiles the most active wallets. Trades are loaded per batch of
-    wallets, never the whole chain at once: BSC alone records close to a
-    million launchpad trades a day."""
+                      days: int = 14, min_trades: int = 3, max_wallets: int = MAX_WALLETS) -> int:
+    """Profiles the most active wallets over the retained trade history
+    (14 days). Trades are loaded per batch of wallets, never the whole chain
+    at once: BSC alone records close to a million launchpad trades a day."""
     since = now - timedelta(days=days)
     t = EvmTrade
+    vcfg = await validation_config(session)
+    await market_regimes.update(session, chain, now, timedelta(days=days))
+    regimes = await market_regimes.load_regimes(session, chain, since)
     wallets = [w for w, in (await session.execute(select(t.trader).where(t.chain == chain, t.at >= since)
                                                    .group_by(t.trader).having(func.count() >= min_trades)
                                                    .order_by(func.count().desc()).limit(max_wallets))).all()]
@@ -200,8 +271,16 @@ async def rebuild_evm(session: AsyncSession, chain: str, now: datetime, cfg: Sco
         by_wallet: dict[str, list] = defaultdict(list)
         for row in (await session.execute(select(t).where(t.chain == chain, t.at >= since, t.trader.in_(batch)))).scalars():
             by_wallet[row.trader].append(row)
+        prior = {w: m for w, m in (await session.execute(select(WalletProfile.wallet, WalletProfile.metrics).where(
+            WalletProfile.chain == chain, WalletProfile.wallet.in_(list(by_wallet))))).all()}
         for wallet, rows in by_wallet.items():
-            await _upsert(session, chain, wallet, evm_metrics(rows, launches, cfg, now, days), "evm_trades", cfg, now)
+            m = evm_metrics(rows, launches, cfg, now, days, vcfg, regimes)
+            if m["validation"]["status"] == wallet_validation.VALIDATED:
+                pf = (prior.get(wallet) or {}).get("paper_follow")
+                fresh = pf and pf.get("at") and now - datetime.fromisoformat(pf["at"]) < PAPER_FOLLOW_REFRESH
+                m["paper_follow"] = pf if fresh else await paper_follow(session, chain, wallet, rows, now)
+            m["discovery"] = wallet_validation.discovery_status(m["validation"], m.get("paper_follow"))
+            await _upsert(session, chain, wallet, m, "evm_trades", cfg, now)
             n += 1
         session.expunge_all()
     return n

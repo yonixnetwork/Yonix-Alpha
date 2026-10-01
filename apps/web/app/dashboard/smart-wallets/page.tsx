@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { ChevronDown, ChevronRight, Eye, Fingerprint } from "lucide-react";
 import { Empty, ErrorNotice, Loading, PageHeader, Section } from "@/components/ui";
-import { apiPost } from "@/lib/api";
+import { apiPost, apiPut } from "@/lib/api";
 import { formatDate } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
 
@@ -11,6 +11,75 @@ type J = Record<string, any>;
 const CHAINS: [string, string][] = [["", "All chains"], ["solana", "Solana"], ["bsc", "BSC"], ["robinhood", "Robinhood Chain"]];
 const SORTS: [string, string][] = [["last_seen", "Last seen"], ["trades", "Trades"], ["tokens", "Tokens"], ["score", "Score"]];
 const LABELS = ["", "SNIPER", "SCALPER", "HOLDER", "HIGH_ACTIVITY", "POSSIBLE_BOT"];
+const STAGES: [string, string][] = [["", "Any"], ["COLLECTING_HISTORY", "Collecting history"], ["VALIDATED", "Validated"],
+  ["PAPER_FOLLOWED", "Validated + paper-followed"], ["REJECTED", "Rejected"]];
+const STAGE_CLASS: Record<string, string> = { PAPER_FOLLOWED: "pill pill-ok", VALIDATED: "pill pill-ok", REJECTED: "pill pill-danger", COLLECTING_HISTORY: "pill pill-off" };
+const CHECK_LABEL: Record<string, string> = {
+  min_trades: "Trades", min_closed: "Closed trades", min_active_days: "Active days", min_active_weeks: "Active weeks",
+  min_unique_tokens: "Unique tokens", min_history_days: "History coverage (days)", min_profitable_periods: "Profitable days",
+  min_profitable_period_share: "Share of active days profitable", max_drawdown_pct: "Max drawdown (% of capital in)",
+  min_profit_factor: "Profit factor", max_single_trade_share: "Best trade share of gains", min_median_return_pct: "Median return %",
+};
+
+function Validation({ v, r, pf }: { v: J | undefined; r: J | undefined; pf: J | undefined }) {
+  if (!v) return null;
+  return (
+    <div style={{ marginTop: 10 }}>
+      <h4 className="small">Validation: <span className={v.status === "VALIDATED" ? "pill pill-ok" : v.status === "NOT_VALIDATED" ? "pill pill-danger" : "pill pill-off"}>{v.status === "INSUFFICIENT_DATA" ? "INSUFFICIENT DATA" : v.status.replace("_", " ")}</span> <span className="muted">{v.reason}</span></h4>
+      {(v.checks ?? []).length > 0 && (
+        <div className="table-scroll"><table className="data-table">
+          <thead><tr><th>Check</th><th>Value</th><th>Required</th><th>Result</th></tr></thead>
+          <tbody>{v.checks.map((c: J) => (
+            <tr key={c.check}><td>{CHECK_LABEL[c.check] ?? c.check}</td><td>{c.value ?? "—"}{c.unit && c.value !== null ? ` ${c.unit}` : ""}</td>
+              <td className="muted">{c.check.startsWith("max_") ? "≤ " : "≥ "}{c.required}</td>
+              <td>{c.pass === null ? <span className="muted small">not measurable yet</span> : c.pass ? <span className="pos">pass</span> : <span className="neg">fail</span>}</td></tr>))}
+          </tbody></table></div>)}
+      {r && (
+        <>
+          <h4 className="small">Market regime test: <span className={r.status === "CONSISTENT" ? "pill pill-ok" : r.status === "REGIME_DEPENDENT" ? "pill pill-warn" : "pill pill-off"}>{r.status.replace("_", " ")}</span> <span className="muted">{r.reason}</span></h4>
+          {Object.keys(r.dimensions ?? {}).length > 0 && (
+            <div className="table-scroll"><table className="data-table">
+              <thead><tr><th>Regime</th><th>Closed trades</th><th>Wins</th><th>Net PnL</th><th>Median return</th></tr></thead>
+              <tbody>{Object.values(r.dimensions as Record<string, J>).flatMap((d: J) => Object.entries(d.sides as Record<string, J>).map(([side, st]) => (
+                <tr key={side}><td>{side.replace("_", " ")}</td><td>{st.trades}</td><td>{st.wins}</td>
+                  <td className={signed(st.net_pnl)}>{st.net_pnl === null ? <span className="muted small">no trades</span> : num(st.net_pnl)}</td>
+                  <td>{st.median_return_pct === null ? "—" : `${st.median_return_pct}%`}{st.status !== "OK" && <span className="muted small"> (too few)</span>}</td></tr>)))}
+              </tbody></table></div>)}
+          {r.basis && <p className="muted small">{r.basis}</p>}
+        </>)}
+      {pf && (
+        <p className="small">Paper follow (last {pf.buys_replayed} buys): <span className="pos">{pf.won} would have won</span> · <span className="neg">{pf.lost} would have lost</span>
+          {pf.no_price_data ? ` · ${pf.no_price_data} no price data` : ""} · median {pf.median_result_pct === null ? "—" : `${pf.median_result_pct}%`}
+          <span className="muted"> — {pf.basis}; entry {pf.assumed_detection_s}s after their buy, exit at their sell or {pf.horizon_min} min.</span></p>)}
+    </div>
+  );
+}
+
+function ValidationSettings() {
+  const { data, error, reload } = useApi<J>("/api/wallets/validation-settings");
+  const [draft, setDraft] = useState<J | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  if (error) return <ErrorNotice error={error} />;
+  if (!data) return null;
+  const vals = draft ?? data.settings;
+  const save = async () => {
+    try { await apiPut("/api/wallets/validation-settings", vals); setMsg("Saved. Applied on the next profile rebuild (every 10 minutes)."); setDraft(null); reload(); }
+    catch (e) { setMsg(String((e as Error).message)); }
+  };
+  return (
+    <Section title="Wallet validation rules">
+      <p className="muted small">{data.note}. Trade-count and history checks decide INSUFFICIENT DATA; the others decide VALIDATED or NOT VALIDATED.</p>
+      <div className="form-grid">
+        {Object.keys(data.settings).map((k) => (
+          <label key={k} className="small">{CHECK_LABEL[k] ?? k} ({k.startsWith("max_") ? "maximum" : "minimum"})
+            <input value={vals[k]} inputMode="decimal" onChange={(e) => setDraft({ ...vals, [k]: e.target.value })} /></label>))}
+      </div>
+      <div className="btn-row"><button className="btn btn-sm" disabled={!draft} onClick={save}>Save rules</button>
+        <button className="btn btn-ghost btn-sm" onClick={() => setDraft({ ...data.defaults })}>Reset to defaults</button></div>
+      {msg && <p className="small">{msg}</p>}
+    </Section>
+  );
+}
 const pct = (v: any) => (v === null || v === undefined ? "—" : `${(Number(v) * 100).toFixed(0)}%`);
 const NATIVE: Record<string, string> = { solana: "SOL", bsc: "BNB", robinhood: "ETH" };
 const num = (v: any, d = 4) => (v === null || v === undefined ? "—" : Number(v).toFixed(d));
@@ -72,6 +141,7 @@ function WalletDetail({ p }: { p: J }) {
         </div>
       )}
       {(pnl.notes ?? []).length > 0 && <ul className="muted small">{pnl.notes.map((n: string) => <li key={n}>{n}</li>)}</ul>}
+      <Validation v={p.metrics?.validation} r={p.metrics?.regimes} pf={p.metrics?.paper_follow} />
     </div>
   );
 }
@@ -80,8 +150,9 @@ export default function SmartWalletsPage() {
   const [chain, setChain] = useState("");
   const [sort, setSort] = useState("last_seen");
   const [label, setLabel] = useState("");
+  const [stage, setStage] = useState("");
   const { data, error, loading, reload } = useApi<J>("/api/wallets/profiles",
-    { sort, ...(chain ? { chain } : {}), ...(label ? { label } : {}) }, { refreshMs: 60000 });
+    { sort, ...(chain ? { chain } : {}), ...(label ? { label } : {}), ...(stage ? { stage } : {}) }, { refreshMs: 60000 });
   const [msg, setMsg] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
   const watch = async (p: J) => {
@@ -96,6 +167,7 @@ export default function SmartWalletsPage() {
         <label className="small">Chain <select value={chain} onChange={(e) => setChain(e.target.value)}>{CHAINS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></label>
         <label className="small">Sort by <select value={sort} onChange={(e) => setSort(e.target.value)}>{SORTS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></label>
         <label className="small">Behaviour <select value={label} onChange={(e) => setLabel(e.target.value)}>{LABELS.map((l) => <option key={l} value={l}>{l || "Any"}</option>)}</select></label>
+        <label className="small">Discovery stage <select value={stage} onChange={(e) => setStage(e.target.value)}>{STAGES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></label>
       </div>
       <ErrorNotice error={error ?? msg} />
       <Section title={`Wallet profiles (sorted by ${SORTS.find((s) => s[0] === sort)?.[1].toLowerCase()})`}>
@@ -105,7 +177,7 @@ export default function SmartWalletsPage() {
         {data && data.profiles.length > 0 && (
           <div className="table-scroll">
             <table className="data-table">
-              <thead><tr><th /><th>Chain</th><th>Wallet</th><th>Behaviour</th><th>Trades</th><th>Tokens</th><th>Closed</th><th>Win rate</th><th>Realized</th><th>Early entries</th><th>Avg hold</th><th>Score</th><th>Last seen</th><th /></tr></thead>
+              <thead><tr><th /><th>Chain</th><th>Wallet</th><th>Behaviour</th><th>Trades</th><th>Tokens</th><th>Closed</th><th>Win rate</th><th>Realized</th><th>Early entries</th><th>Avg hold</th><th>Score</th><th>Stage</th><th>Last seen</th><th /></tr></thead>
               <tbody>
                 {data.profiles.map((p: J) => {
                   const k = `${p.chain}:${p.wallet}`;
@@ -123,11 +195,13 @@ export default function SmartWalletsPage() {
                     <td>{pct(p.metrics.early_entry_share)}</td>
                     <td>{p.metrics.avg_hold_s ? `${Math.round(p.metrics.avg_hold_s)} s` : "—"}</td>
                     <td title={JSON.stringify(p.score_detail?.components ?? p.score_detail)}>{p.score ?? <span className="muted small">insufficient data</span>}</td>
+                    <td>{p.metrics.discovery ? <span className={STAGE_CLASS[p.metrics.discovery.stage] ?? "pill pill-off"} title={p.metrics.validation?.reason}>
+                      {p.metrics.discovery.stage.replaceAll("_", " ")}</span> : <span className="muted small">—</span>}</td>
                     <td>{formatDate(p.last_seen)}</td>
                     <td>{p.is_copy_target ? <span className="muted small">target</span> :
                       <button className="btn btn-ghost btn-sm" onClick={() => watch(p)}><Eye size={14} aria-hidden /> Watch</button>}</td>
                   </tr>,
-                  open === k && <tr key={`${k}:detail`}><td colSpan={14}><WalletDetail p={p} /></td></tr>,
+                  open === k && <tr key={`${k}:detail`}><td colSpan={15}><WalletDetail p={p} /></td></tr>,
                   ];
                 })}
               </tbody>
@@ -135,6 +209,7 @@ export default function SmartWalletsPage() {
           </div>
         )}
       </Section>
+      <ValidationSettings />
     </div>
   );
 }

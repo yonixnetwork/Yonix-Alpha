@@ -60,3 +60,36 @@ async def test_rebuild_profiles_the_most_active_wallets_with_their_pnl(db):
     assert pnl["windows"]["30D"]["status"] == "INSUFFICIENT_DATA"
     calm_pnl = got[calm].metrics["pnl"]
     assert calm_pnl["all"]["status"] == "INSUFFICIENT_DATA" and calm_pnl["open_tokens"] == 1
+
+
+async def test_validated_wallet_is_paper_followed_and_never_copied(db):
+    """§25-26: a wallet passing the (operator-lowered) checks is VALIDATED and
+    its recent buys are replayed on paper from the other trades of the same
+    tokens; it is never added as a copy target. The regime test runs over
+    the hours the rebuild summarised."""
+    from yonixalpha_core import wallet_validation
+    from yonixalpha_core.db.models import CopyTarget, MarketRegimeHour, PlatformSetting
+
+    pro, other = "0x" + "e" * 40, "0x" + "f" * 40
+    db.add(PlatformSetting(key=wallet_validation.SETTINGS_KEY, value={
+        "min_trades": 4, "min_closed": 3, "min_active_days": 2, "min_active_weeks": 1, "min_unique_tokens": 3,
+        "min_history_days": 1, "min_profitable_periods": 1, "min_profit_factor": 1.0}))
+    rows, n = [], 0
+    for i, day_min in enumerate((3 * 1440, 2 * 1440, 1440, 300)):  # 4 tokens over 4 days, all profitable
+        tok = f"0xv{i}"
+        rows += [trade(n, pro, tok, True, 1, day_min), trade(n + 1, pro, tok, False, 1.3, day_min - 20)]
+        rows += [trade(n + 2, other, tok, True, 1.1, day_min - 1), trade(n + 3, other, tok, True, 1.2, day_min - 10)]
+        n += 4
+    db.add_all(rows)
+    await db.commit()
+    assert await wallet_profiles.rebuild_evm(db, "bsc", NOW) == 2
+    await db.commit()
+    p = await db.get(WalletProfile, ("bsc", pro))
+    v = p.metrics["validation"]
+    assert v["status"] == "VALIDATED", v["reason"]
+    pf = p.metrics["paper_follow"]
+    assert pf["evaluated"] == 4 and pf["won"] == 4 and pf["buys_replayed"] == 4
+    assert p.metrics["discovery"]["stage"] == "PAPER_FOLLOWED"
+    assert p.metrics["regimes"]["status"] in ("CONSISTENT", "INSUFFICIENT_DATA", "REGIME_DEPENDENT")
+    assert (await db.execute(select(MarketRegimeHour))).scalars().first() is not None
+    assert (await db.execute(select(CopyTarget))).scalars().first() is None  # never copied automatically
