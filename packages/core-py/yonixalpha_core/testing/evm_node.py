@@ -33,6 +33,8 @@ class Node:
         self.head = 1000
         self.genesis_ts = 1_790_000_000
         self.storage: dict[tuple[str, str], str] = {}
+        self.txs: dict[str, dict] = {}  # eth_getTransactionByHash
+        self.nonces: dict[str, int] = {}  # eth_getTransactionCount (any block)
 
     def on(self, to: str, signature: str, result) -> None:
         self.calls[(to.lower(), "0x" + selector(signature).hex())] = result
@@ -66,6 +68,11 @@ class Node:
             if len(f["topics"]) > 1:
                 out = [x for x in out if len(x["topics"]) > 1 and x["topics"][1].lower() == f["topics"][1].lower()]
             return ok(out)
+        if m == "eth_getTransactionByHash":
+            return ok(self.txs.get(p[0].lower()))
+        if m == "eth_getTransactionCount":
+            n = self.nonces.get(p[0].lower())
+            return ok(hex(n)) if n is not None else err("method eth_getTransactionCount not faked for this address")
         if m == "eth_call":
             if len(p) > 2 and self.reject_override:
                 return err("invalid params: too many arguments")

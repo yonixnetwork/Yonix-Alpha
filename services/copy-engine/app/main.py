@@ -87,7 +87,7 @@ async def run() -> None:
     rpcs = {c.value: make_rpc(c.value, settings) for c in (Chain.BSC, Chain.ROBINHOOD)}
     adapters = {c: {k: adapter_for(k, rpc) for k in EVM_LAUNCHPADS if LAUNCHPADS[k].chain.value == c}
                 for c, rpc in rpcs.items()}
-    engine = CopyEngine(session_factory, redis, adapters, utcnow)
+    engine = CopyEngine(session_factory, redis, adapters, utcnow, etherscan_key=settings.ETHERSCAN_API_KEY)
     async with session_factory() as session:
         session.add(SystemEvent(service=SERVICE, event_type="service_started", severity="info", detail={}))
         await session.commit()

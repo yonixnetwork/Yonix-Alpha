@@ -67,6 +67,9 @@ class Settings(BaseSettings):
     # enough (watch-only: balances); the private key is optional, server-only,
     # never logged or returned, and only checked against the address — EVM
     # LIVE execution is not implemented.
+    # Optional Etherscan API V2 key: first-funder lookups of BSC wallets for the
+    # launch-coordination check (Robinhood Chain uses its public Blockscout).
+    ETHERSCAN_API_KEY: Optional[str] = None
     EVM_WALLET_ADDRESS: Optional[str] = None
     EVM_WALLET_PRIVATE_KEY: Optional[SecretStr] = None
     JUPITER_API_KEY: Optional[str] = None

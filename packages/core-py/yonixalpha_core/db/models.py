@@ -1166,7 +1166,28 @@ class EvmToken(Base):
     stats: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     last_trade_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     extra: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    # Launch-window coordination (yonixalpha_core.launch_coordination): the
+    # last assessment and when it was made.
+    coordination: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    coordination_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class EvmWalletFunder(Base):
+    """The first funding of an EVM wallet (who sent it its first native coin),
+    read once from a block explorer and kept: a wallet's first funder never
+    changes. status FOUND / NOT_FOUND / UNAVAILABLE."""
+
+    __tablename__ = "evm_wallet_funders"
+
+    chain: Mapped[str] = mapped_column(String(16), primary_key=True)
+    wallet: Mapped[str] = mapped_column(String(42), primary_key=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    funder: Mapped[str | None] = mapped_column(String(42), nullable=True, index=True)
+    funded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    tx_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
+    detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class EvmTrade(Base):

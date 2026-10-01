@@ -18,7 +18,7 @@ from sqlalchemy import delete, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from yonixalpha_core import copy_trading as ct
-from yonixalpha_core import events
+from yonixalpha_core import events, launch_coordination
 from yonixalpha_core.chains import verification
 from yonixalpha_core.chains.evm import paper, safety, store
 from yonixalpha_core.chains.evm import settings as evm_settings
@@ -56,8 +56,11 @@ class Evidence:
 
 
 class ChainWorker:
-    def __init__(self, chain: str, rpc, adapters: list, session_factory, redis) -> None:
+    def __init__(self, chain: str, rpc, adapters: list, session_factory, redis, *, etherscan_key: str | None = None,
+                 http=None) -> None:
         self.chain = chain
+        self.etherscan_key = etherscan_key
+        self.http = http  # explorer client for launch-coordination funding lookups (None: one per assessment)
         self.rpc = rpc
         self.adapters = {a.spec.key: a for a in adapters}
         self.session_factory = session_factory
@@ -189,6 +192,7 @@ class ChainWorker:
                     row.safety = store._js({"findings": report.findings, "sellable": report.sellable,
                                             "sources": report.sources, "round_trip": rt})
                     row.safety_at = now
+                    await self._coordinate(session, ad, row, now)
                     await session.commit()
                 ev.safety[report.verdict] = ev.safety.get(report.verdict, 0) + 1
                 if rt.get("sellable"):
@@ -205,6 +209,24 @@ class ChainWorker:
                 log.warning("data-evm.safety_failed", chain=self.chain, token=token, error=str(exc)[:160])
                 await alert_error(SERVICE, f"{self.chain}.safety_failed", {"token": token, "error": str(exc)[:300]})
         return done
+
+    async def _coordinate(self, session, ad, row: EvmToken, now: datetime) -> None:
+        """Launch-window coordination (master §11), refreshed with the safety
+        check. A failed assessment leaves the old one to age out: entries are
+        then blocked as COORDINATION_NOT_CHECKED, never let through."""
+        cfg = await launch_coordination.load_config(session)
+        if not cfg.enabled:
+            return
+        try:
+            res = await launch_coordination.assess(session, ad, row, now, cfg, client=self.http,
+                                                   etherscan_key=self.etherscan_key)
+        except EvmRpcUnavailableError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.warning("data-evm.coordination_failed", chain=self.chain, token=row.token, error=str(exc)[:160])
+            await alert_error(SERVICE, f"{self.chain}.coordination_failed", {"token": row.token, "error": str(exc)[:300]})
+            return
+        row.coordination, row.coordination_at = store._js(res), now
 
     # --- entries ------------------------------------------------------------------------------------
 

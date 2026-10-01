@@ -126,3 +126,17 @@ async def test_honeypot_is_is_reported_as_enrichment():
     assert r["status"] == pt.CONNECTED and "enrichment only" in r["detail"]
     r = await run("honeypot_is", settings(), lambda req: httpx.Response(503))
     assert r["status"] == pt.UNAVAILABLE
+
+
+async def test_etherscan_key_and_robinhood_explorer():
+    fake = "NOT-A-REAL-VALUE-000000"
+    ok = await run("etherscan", settings(ETHERSCAN_API_KEY=fake),
+                   lambda req: httpx.Response(200, json={"jsonrpc": "2.0", "id": 83, "result": "0x10"}))
+    assert ok["status"] == pt.CONNECTED and "block 16" in ok["detail"] and fake not in str(ok)
+    bad = await run("etherscan", settings(ETHERSCAN_API_KEY=fake),
+                    lambda req: httpx.Response(200, json={"status": "0", "message": "NOTOK", "result": "Invalid API Key"}))
+    assert bad["status"] == pt.AUTH_FAILED and fake not in str(bad)
+    assert (await run("etherscan", settings(ETHERSCAN_API_KEY=None), lambda req: httpx.Response(200)))["status"] == pt.INVALID
+    bs = await run("robinhood_explorer", settings(), lambda req: httpx.Response(200, json={"total_blocks": "123"}))
+    assert bs["status"] == pt.CONNECTED and "123" in bs["detail"]
+    assert (await run("robinhood_explorer", settings(), lambda req: httpx.Response(503)))["status"] == pt.UNAVAILABLE

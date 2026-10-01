@@ -42,6 +42,8 @@ PROVIDERS = {
     "bsc": ("BSC (BNB Smart Chain)", ["bsc_rpc"], [], [], ["BSC_RPC_URLS"]),
     "robinhood": ("Robinhood Chain", ["robinhood_rpc"], [], [], ["ROBINHOOD_RPC_URLS"]),
     "honeypot": ("Honeypot.is (BSC safety enrichment)", ["honeypot_is"], [], [], []),
+    "explorers": ("Block explorers (launch-coordination funding checks)", ["etherscan", "robinhood_explorer"],
+                  ["ETHERSCAN_API_KEY"], [], []),
     "solana": ("Solana", ["solana_rpc", "solana_ws", "solana_rpc_backup", "solana_rpc_backup_2", "solana_rpc_backup_3"],
                ["HELIUS_API_KEY"], [],
                ["SOLANA_RPC_URL", "SOLANA_WS_URL", "SOLANA_RPC_BACKUP_URL", "SOLANA_RPC_BACKUP_URL_2", "SOLANA_RPC_BACKUP_URL_3",

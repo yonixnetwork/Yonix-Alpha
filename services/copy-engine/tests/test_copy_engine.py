@@ -55,6 +55,7 @@ def fourmeme(sell_back: Decimal = Decimal("0.98")) -> tuple[Node, FourMeme]:
 
     node.on(lp.helper, "tryBuy(address,uint256,uint256)", try_buy)
     node.on(lp.helper, "trySell(address,uint256)", try_sell)
+    node.on(TOKEN, "totalSupply()", enc(["uint256"], [10 ** 27]))  # read by the launch-coordination check
     return node, lp
 
 
@@ -130,6 +131,35 @@ async def test_evm_copy_is_gated_idempotent_and_mirrors_partial_sells(session_fa
     async with session_factory() as s:
         p = (await s.execute(select(PaperPosition))).scalar_one()
         assert p.status == "closed" and p.exit_reason == "copy_sell"
+
+
+async def test_a_target_buying_into_a_bundled_launch_is_not_copied(session_factory, redis_client):
+    """Master §11: a target wallet buying is not permission. Three wallets
+    bought in the launch block, so the copy is skipped as LAUNCH_COORDINATION
+    (counted as blocked by safety in the copy outcomes)."""
+    from yonixalpha_core import copy_outcomes as co
+
+    clock = Clock()
+    node, lp = fourmeme()
+    eng = CopyEngine(session_factory, redis_client, {"bsc": {"fourmeme": lp}}, clock)
+    await seed_evm(session_factory, clock)
+    await evidence(session_factory, clock)
+    async with session_factory() as s:
+        launched = clock() - timedelta(minutes=5)
+        for i in range(3):
+            s.add(EvmTrade(event_id=f"bsc:0x{100 + i:064x}:0", chain="bsc", launchpad="fourmeme", token=TOKEN,
+                           trader=f"0x{0xb0 + i:040x}", is_buy=True, token_amount=Decimal(10 ** 22),
+                           quote_amount=Decimal(10 ** 16), block=1, at=launched))
+        await s.commit()
+    await whale_trade(session_factory, clock, 5, True, 10 ** 24, 10 ** 18)
+    assert await eng.watch_evm("bsc") == 1
+    ev = (await events_of(session_factory))[-1]
+    assert ev.decision == "SKIPPED" and ev.reason.startswith("LAUNCH_COORDINATION"), ev.reason
+    assert "LAUNCH_BLOCK_BUNDLE" in ev.reason and co.skip_class(ev.decision, ev.reason) == "BLOCKED_BY_SAFETY"
+    async with session_factory() as s:
+        row = await s.get(EvmToken, ("bsc", TOKEN))
+        assert row.coordination["action"] == "NO_TRADE" and row.coordination_at == clock()
+        assert not (await s.execute(select(PaperPosition))).scalars().all()
 
 
 async def test_notify_kill_switch_delay_and_pre_target_trades(session_factory, redis_client):

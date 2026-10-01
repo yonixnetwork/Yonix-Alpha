@@ -1,6 +1,7 @@
 """EVM chains (BSC, Robinhood Chain): discovered tokens with category, stats,
-safety and the last entry decision; per-token trades; paper positions; and
-the EVM trading settings (amounts in BNB / ETH)."""
+safety, launch-window coordination and the last entry decision; per-token
+trades; paper positions; the EVM trading settings (amounts in BNB / ETH) and
+the launch-coordination settings and approvals."""
 
 from datetime import datetime, timedelta, timezone
 
@@ -12,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_username, get_db, get_redis, get_settings
 from app.api.util import audit, jsonable
-from yonixalpha_core import events
+from yonixalpha_core import events, launch_coordination
 from yonixalpha_core.chains.evm import settings as evm_settings
 from yonixalpha_core.chains.evm import wallet as evm_wallet
 from yonixalpha_core.chains.evm import rpc_registry as evm_rpc_registry
@@ -28,9 +29,12 @@ def _token(r: EvmToken, full: bool = False) -> dict:
          "creator": r.creator, "created_at": r.created_at, "category": r.category, "stage": r.stage,
          "migrated_at": r.migrated_at, "safety_verdict": r.safety_verdict, "safety_at": r.safety_at,
          "stats": r.stats, "last_trade_at": r.last_trade_at, "launch_seen": bool((r.extra or {}).get("launch_seen")),
-         "entry_decision": (r.extra or {}).get("entry_decision")}
+         "entry_decision": (r.extra or {}).get("entry_decision"),
+         "coordination_status": (r.coordination or {}).get("status"),
+         "coordination_action": (r.coordination or {}).get("action"), "coordination_at": r.coordination_at}
     if full:
-        d.update(venue=r.venue, quote_token=r.quote_token, migration=r.migration, state=r.state, state_at=r.state_at,
+        d.update(coordination=r.coordination, coordination_approval=(r.extra or {}).get("coordination_approval"),
+                 venue=r.venue, quote_token=r.quote_token, migration=r.migration, state=r.state, state_at=r.state_at,
                  safety=r.safety, created_block=r.created_block, created_tx=r.created_tx, extra=r.extra)
     return d
 
@@ -150,3 +154,101 @@ async def wallet(settings: Settings = Depends(get_settings), db: AsyncSession = 
                               "execution": "EVM LIVE execution is not implemented; the address is watch-only"},
                      "paper": [{"name": a.name, "currency": a.quote_currency, "cash": a.cash_balance,
                                 "starting": a.starting_balance} for a in papers]})
+
+
+# --- launch-window coordination (master upgrade §11) ------------------------------------------------
+
+@router.get("/coordination-settings")
+async def get_coordination_settings(db: AsyncSession = Depends(get_db), _: str = Depends(get_current_username)) -> dict:
+    row = await db.get(PlatformSetting, launch_coordination.SETTINGS_KEY)
+    cfg, errors = launch_coordination.parse_config(dict(row.value) if row else None)
+    return {"settings": cfg.to_dict(), "defaults": launch_coordination.CoordinationConfig().to_dict(), "errors": errors,
+            "actions": list(launch_coordination.ACTIONS), "detections": list(launch_coordination.DEFAULT_ACTIONS),
+            "note": "applied on the next safety pass (data-evm) and on every EVM copy buy; the strictest action of "
+                    "the findings applies"}
+
+
+@router.put("/coordination-settings")
+async def put_coordination_settings(body: dict, request: Request, db: AsyncSession = Depends(get_db),
+                                    redis: Redis = Depends(get_redis), username: str = Depends(get_current_username)) -> dict:
+    row = await db.get(PlatformSetting, launch_coordination.SETTINGS_KEY)
+    current = dict(row.value) if row else {}
+    merged = {**current, **body}
+    if isinstance(body.get("actions"), dict):  # actions merge detection by detection
+        merged["actions"] = {**(current.get("actions") or {}), **body["actions"]}
+    cfg, errors = launch_coordination.parse_config(merged)
+    if errors:
+        raise HTTPException(422, {"errors": errors})
+    value = cfg.to_dict()
+    await db.execute(insert(PlatformSetting).values(key=launch_coordination.SETTINGS_KEY, value=value).on_conflict_do_update(
+        index_elements=["key"], set_={"value": value, "updated_at": func.now()}))
+    await audit(db, username, request, "launch_coordination.update", {"changes": body})
+    await db.commit()
+    await events.publish(redis, "settings.updated", {"key": launch_coordination.SETTINGS_KEY}, "api")
+    return {"settings": value}
+
+
+@router.post("/tokens/{chain}/{token}/coordination-approval")
+async def approve_coordination(chain: str, token: str, request: Request, db: AsyncSession = Depends(get_db),
+                               username: str = Depends(get_current_username)) -> dict:
+    """Operator approval of a MANUAL_APPROVAL assessment. It covers exactly the
+    findings shown (fingerprint) until it expires; a NO_TRADE finding is never
+    approvable here."""
+    row = (await db.execute(select(EvmToken).where(EvmToken.chain == chain,
+                                                   func.lower(EvmToken.token) == token.lower()))).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, "token not discovered")
+    res = row.coordination or {}
+    if res.get("action") != launch_coordination.MANUAL:
+        raise HTTPException(409, f"nothing to approve: the current assessment's action is {res.get('action') or 'none'}")
+    cfg = await launch_coordination.load_config(db)
+    now = datetime.now(timezone.utc)
+    approval = {"by": username, "at": now.isoformat(), "fingerprint": res.get("fingerprint"),
+                "expires_at": (now + timedelta(minutes=cfg.approval_minutes)).isoformat(),
+                "findings": [f["code"] for f in res.get("findings", [])]}
+    row.extra = {**(row.extra or {}), "coordination_approval": approval}
+    await audit(db, username, request, "launch_coordination.approve", {"chain": chain, "token": row.token, **approval})
+    await db.commit()
+    return {"approval": approval, "note": "paper entries only; a new or changed finding needs a new approval"}
+
+
+@router.delete("/tokens/{chain}/{token}/coordination-approval")
+async def revoke_coordination(chain: str, token: str, request: Request, db: AsyncSession = Depends(get_db),
+                              username: str = Depends(get_current_username)) -> dict:
+    row = (await db.execute(select(EvmToken).where(EvmToken.chain == chain,
+                                                   func.lower(EvmToken.token) == token.lower()))).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, "token not discovered")
+    extra = dict(row.extra or {})
+    had = extra.pop("coordination_approval", None)
+    row.extra = extra
+    await audit(db, username, request, "launch_coordination.revoke", {"chain": chain, "token": row.token})
+    await db.commit()
+    return {"revoked": had is not None}
+
+
+@router.get("/coordination/summary")
+async def coordination_summary(chain: str | None = Query(None, pattern=CHAIN), hours: int = Query(24, ge=1, le=720),
+                               db: AsyncSession = Depends(get_db), _: str = Depends(get_current_username)) -> dict:
+    """What the check found per launchpad over tokens assessed in the window:
+    how often each detection fired and which action resulted."""
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    q = select(EvmToken.chain, EvmToken.launchpad, EvmToken.coordination).where(EvmToken.coordination_at >= since)
+    if chain:
+        q = q.where(EvmToken.chain == chain)
+    out: dict[str, dict] = {}
+    for c, lp, res in (await db.execute(q)).all():
+        k = f"{c}:{lp}"
+        o = out.setdefault(k, {"chain": c, "launchpad": lp, "assessed": 0, "status": {}, "action": {}, "detections": {},
+                               "unknown_checks": {}})
+        o["assessed"] += 1
+        res = res or {}
+        o["status"][res.get("status")] = o["status"].get(res.get("status"), 0) + 1
+        o["action"][res.get("action")] = o["action"].get(res.get("action"), 0) + 1
+        for f in res.get("findings", []):
+            o["detections"][f["code"]] = o["detections"].get(f["code"], 0) + 1
+        for ch in res.get("checks", []):
+            if ch.get("status") in (launch_coordination.UNKNOWN, launch_coordination.NOT_CONFIGURED):
+                o["unknown_checks"][ch["check"]] = o["unknown_checks"].get(ch["check"], 0) + 1
+    return {"hours": hours, "launchpads": sorted(out.values(), key=lambda o: -o["assessed"]),
+            "note": "tokens assessed by data-evm's safety pass or a copy buy in the window; counts, not verdicts"}

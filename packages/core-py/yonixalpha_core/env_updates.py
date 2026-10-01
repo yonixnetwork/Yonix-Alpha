@@ -43,6 +43,7 @@ EDITABLE_KEYS: dict[str, str] = {
     "TELEGRAM_CHAT_ID": "text",
     "BSC_RPC_URLS": "url_list",
     "ROBINHOOD_RPC_URLS": "url_list",
+    "ETHERSCAN_API_KEY": "secret",
 }
 
 # Never editable from the dashboard, whatever a request says.
