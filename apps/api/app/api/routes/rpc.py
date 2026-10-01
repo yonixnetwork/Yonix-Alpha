@@ -1,6 +1,7 @@
-"""RPC & data providers: add, edit, test, reorder and disable Solana RPC /
-WebSocket endpoints from the dashboard. Services reload the list on the
-configuration revision this write bumps (runtime_config); no restart.
+"""RPC & data providers: add, edit, test, reorder and disable RPC endpoints
+for Solana (RPC + WebSocket), BSC and Robinhood Chain from the dashboard.
+Services reload the list on the configuration revision this write bumps
+(runtime_config); no restart.
 
 URLs (which embed API keys) are encrypted at rest and only ever returned as
 scheme://host. Adding a provider or changing a URL needs the admin password:
@@ -22,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_username, get_db, get_redis, get_settings
 from app.api.util import audit, jsonable, require_password
 from yonixalpha_core import runtime_config, secretbox
+from yonixalpha_core.chains.evm import rpc_registry as evm_registry
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import PlatformSetting, RpcProvider
 from yonixalpha_core.redact import redact_url
@@ -33,8 +35,12 @@ PROVIDER_TYPES = ["helius", "alchemy", "chainstack", "quicknode", "triton", "ank
 RECENT = timedelta(minutes=5)
 
 
+CHAIN_PATTERN = "^(solana|bsc|robinhood)$"
+
+
 class ProviderIn(BaseModel):
     name: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9 _.\-]+$")
+    chain: str = Field("solana", pattern=CHAIN_PATTERN)
     provider_type: str = "custom"
     rpc_url: str = Field(max_length=1024)
     ws_url: str | None = Field(None, max_length=1024)
@@ -203,22 +209,25 @@ async def add_provider(body: ProviderIn, request: Request, db: AsyncSession = De
     requests succeed."""
     _check_type(body.provider_type)
     _check_urls(body.rpc_url, body.ws_url)
-    await require_password(db, redis, username, body.password, request, "rpc", {"action": "add", "name": body.name})
+    if body.chain != "solana" and body.ws_url:
+        raise HTTPException(422, "a WebSocket URL is only used for Solana")
+    await require_password(db, redis, username, body.password, request, "rpc",
+                           {"action": "add", "name": body.name, "chain": body.chain})
     if (await db.execute(select(RpcProvider).where(RpcProvider.name == body.name))).scalar_one_or_none():
         raise HTTPException(409, f"a provider named {body.name!r} already exists")
-    test = await rpc_registry.test_rpc(request.app.state.http, body.rpc_url, float(body.timeout_seconds))
-    p = RpcProvider(name=body.name, chain="solana", provider_type=body.provider_type,
+    test = await _test_url(request, body.chain, body.rpc_url, float(body.timeout_seconds))
+    p = RpcProvider(name=body.name, chain=body.chain, provider_type=body.provider_type,
                     rpc_url_enc=secretbox.encrypt(settings, body.rpc_url), rpc_display=redact_url(body.rpc_url),
                     ws_url_enc=secretbox.encrypt(settings, body.ws_url) if body.ws_url else None,
                     ws_display=redact_url(body.ws_url) if body.ws_url else None, enabled=body.enabled, priority=body.priority,
                     timeout_seconds=body.timeout_seconds, rate_limit_rps=body.rate_limit_rps, notes=body.notes,
                     last_test=test, created_by=username)
     db.add(p)
-    await audit(db, username, request, "rpc.provider_added", {"name": body.name, "type": body.provider_type,
+    await audit(db, username, request, "rpc.provider_added", {"name": body.name, "type": body.provider_type, "chain": body.chain,
                                                               "host": redact_url(body.rpc_url), "test": test["status"]})
     await db.commit()
-    return {"provider": {"id": str(p.id), "name": p.name, "rpc_url": p.rpc_display, "enabled": p.enabled, "priority": p.priority},
-            "test": test}
+    return {"provider": {"id": str(p.id), "name": p.name, "chain": p.chain, "rpc_url": p.rpc_display, "enabled": p.enabled,
+                         "priority": p.priority}, "test": test}
 
 
 @router.patch("/providers/{provider_id}")
@@ -242,7 +251,7 @@ async def edit_provider(provider_id: UUID, body: ProviderPatch, request: Request
         changed.append("name")
     if body.rpc_url is not None:
         p.rpc_url_enc, p.rpc_display = secretbox.encrypt(settings, body.rpc_url), redact_url(body.rpc_url)
-        p.last_test = await rpc_registry.test_rpc(request.app.state.http, body.rpc_url, float(body.timeout_seconds or p.timeout_seconds))
+        p.last_test = await _test_url(request, p.chain, body.rpc_url, float(body.timeout_seconds or p.timeout_seconds))
         changed.append("rpc_url")
     if body.ws_url is not None:
         p.ws_url_enc = secretbox.encrypt(settings, body.ws_url) if body.ws_url else None
@@ -256,9 +265,11 @@ async def edit_provider(provider_id: UUID, body: ProviderPatch, request: Request
     if body.rate_limit_rps is not None:
         p.rate_limit_rps = body.rate_limit_rps or None
         changed.append("rate_limit_rps")
+    if body.ws_url and p.chain != "solana":
+        raise HTTPException(422, "a WebSocket URL is only used for Solana")
     p.updated_at = datetime.now(timezone.utc)
     await db.flush()
-    if await _enabled_count(db, settings) == 0:
+    if p.chain == "solana" and await _enabled_count(db, settings) == 0:
         await db.rollback()
         raise HTTPException(409, "this would leave no enabled RPC endpoint; enable another one first")
     await audit(db, username, request, "rpc.provider_updated", {"name": p.name, "changed": changed})
@@ -272,10 +283,10 @@ async def delete_provider(provider_id: UUID, request: Request, db: AsyncSession 
     p = await db.get(RpcProvider, provider_id)
     if p is None:
         raise HTTPException(404, "provider not found")
-    name = p.name
+    name, chain = p.name, p.chain
     await db.delete(p)
     await db.flush()
-    if await _enabled_count(db, settings) == 0:
+    if chain == "solana" and await _enabled_count(db, settings) == 0:
         await db.rollback()
         raise HTTPException(409, "this would leave no enabled RPC endpoint; add or enable another one first")
     await audit(db, username, request, "rpc.provider_deleted", {"name": name})
@@ -312,6 +323,8 @@ async def test_provider(provider_id: str, request: Request, db: AsyncSession = D
                         settings: Settings = Depends(get_settings), _: str = Depends(get_current_username)) -> dict:
     """TEST CONNECTION for a dashboard provider (id) or a .env endpoint
     (its label, e.g. env:primary). Result only; never the URL."""
+    if provider_id.split(":")[0] in ("env", "public") and provider_id.count(":") == 2:  # env:bsc:0, public:robinhood:0
+        return await _test_evm_builtin(provider_id, request, db, settings)
     if provider_id.startswith("env:"):
         row = next((r for r in await rpc_registry.providers(db, settings) if r["label"] == provider_id), None)
         if row is None:
@@ -332,6 +345,10 @@ async def test_provider(provider_id: str, request: Request, db: AsyncSession = D
         if p is None:
             raise HTTPException(404, "provider not found")
         url = secretbox.decrypt(settings, p.rpc_url_enc)
+        if url and p.chain != "solana":
+            p.last_test = await _test_url(request, p.chain, url, float(p.timeout_seconds))
+            await db.commit()
+            return p.last_test
         result = (await rpc_registry.test_rpc(request.app.state.http, url, float(p.timeout_seconds)) if url else
                   {"status": rpc_registry.INVALID, "detail": "stored URL cannot be decrypted (encryption key changed) — re-enter it",
                    "latency_ms": None, "tested_at": datetime.now(timezone.utc).isoformat()})
@@ -342,3 +359,105 @@ async def test_provider(provider_id: str, request: Request, db: AsyncSession = D
         p.last_test = result
     await db.commit()
     return result
+
+
+# --- BSC / Robinhood Chain ------------------------------------------------------------------------
+
+async def _test_url(request: Request, chain: str, url: str, timeout: float) -> dict:
+    if chain == "solana":
+        return await rpc_registry.test_rpc(request.app.state.http, url, timeout)
+    return await evm_registry.test_evm_rpc(request.app.state.http, url, chain, timeout)
+
+
+async def _save_evm_override(db: AsyncSession, label: str, entry: dict) -> None:
+    ov = await evm_registry.overrides(db)
+    ov[label] = {**(ov.get(label) or {}), **entry}
+    await db.execute(insert(PlatformSetting).values(key=evm_registry.OVERRIDES_KEY, value=ov)
+                     .on_conflict_do_update(index_elements=[PlatformSetting.key], set_={"value": ov}))
+
+
+async def _test_evm_builtin(label: str, request: Request, db: AsyncSession, settings: Settings) -> dict:
+    chain = label.split(":")[1]
+    if chain not in evm_registry.EVM_CHAINS:
+        raise HTTPException(404, "unknown chain")
+    row = next((r for r in await evm_registry.endpoints(db, settings, chain) if r["label"] == label), None)
+    if row is None:
+        raise HTTPException(404, "that endpoint is not configured")
+    result = await evm_registry.test_evm_rpc(request.app.state.http, row["url"], chain)
+    await _save_evm_override(db, label, {"last_test": result})
+    await db.commit()
+    return result
+
+
+GUIDE = {
+    "summary": "Discovery on BSC and Robinhood Chain reads launchpad events with eth_getLogs every few seconds. "
+               "Free tiers limit eth_getLogs to a few blocks per request (Alchemy free: 10 blocks on BNB and "
+               "Robinhood; QuickNode free trial: 5), which works but needs many requests; a paid plan lifts it "
+               "(Alchemy Pay As You Go: no range limit on BNB and Robinhood; QuickNode paid: 10,000 blocks). "
+               "TEST CONNECTION shows the span each endpoint actually serves.",
+    "providers": [
+        {"name": "Alchemy", "chains": ["solana", "bsc", "robinhood"], "where": "https://dashboard.alchemy.com",
+         "steps": "Create an app, enable Solana, BNB Smart Chain and Robinhood Chain mainnet, then copy each "
+                  "network's HTTPS URL (one API key, one URL per chain) into ADD RPC with the matching chain."},
+        {"name": "QuickNode", "chains": ["solana", "bsc", "robinhood"], "where": "https://dashboard.quicknode.com",
+         "steps": "Create an endpoint per chain (Solana mainnet, BNB Smart Chain mainnet, Robinhood Chain mainnet) "
+                  "and copy each HTTPS URL into ADD RPC with the matching chain."},
+    ],
+    "note": "Provider features and limits change; the TEST result on this page is what counts, not this text.",
+}
+
+
+@router.get("/evm")
+async def list_evm(db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
+                   settings: Settings = Depends(get_settings), _: str = Depends(get_current_username)) -> dict:
+    """BSC / Robinhood endpoints in the order data-evm and copy-engine use
+    them, with the live state data-evm reported (keyed by scheme://host)."""
+    out = {}
+    for chain in evm_registry.EVM_CHAINS:
+        raw = await redis.get(f"yx:evm:rpc:{chain}")
+        live = {}
+        if raw:
+            try:
+                h = json.loads(raw)
+                live = {e["url"]: {**e, "reported_at": h.get("at")} for e in h.get("endpoints", [])}
+            except (ValueError, KeyError, TypeError):
+                live = {}
+        rows = []
+        for r in await evm_registry.endpoints(db, settings, chain):
+            host = redact_url(r.get("url"))
+            rows.append({"label": r["label"], "id": r.get("id"), "name": r["name"], "source": r["source"],
+                         "provider_type": r.get("provider_type"), "rpc_url": host, "enabled": r["enabled"],
+                         "priority": r["priority"], "decrypt_failed": r.get("decrypt_failed", False),
+                         "notes": r.get("notes"), "last_test": r.get("last_test"), "live": live.get(host)})
+        out[chain] = {"chain_id": evm_registry.chain_id(chain), "endpoints": rows,
+                      "in_use": [r["rpc_url"] for r in rows if r["enabled"]]}
+    return jsonable({"chains": out, "guide": GUIDE,
+                     "note": "Order = priority (lowest first): dashboard entries default to 150, .env "
+                             "(BSC_RPC_URLS / ROBINHOOD_RPC_URLS) 500+, built-in public 900+. Live state comes from "
+                             "data-evm's last report; a chain with every endpoint disabled falls back to the public ones."})
+
+
+class EvmBuiltinPatch(BaseModel):
+    enabled: bool | None = None
+    priority: int | None = Field(None, ge=1, le=9999)
+
+
+@router.put("/evm/{label}")
+async def edit_evm_builtin(label: str, body: EvmBuiltinPatch, request: Request, db: AsyncSession = Depends(get_db),
+                           settings: Settings = Depends(get_settings), username: str = Depends(get_current_username)) -> dict:
+    """Enable/disable or reorder a .env or built-in public BSC / Robinhood
+    endpoint (its URL stays where it is). The last enabled endpoint of a
+    chain cannot be disabled."""
+    parts = label.split(":")
+    if len(parts) != 3 or parts[0] not in ("env", "public") or parts[1] not in evm_registry.EVM_CHAINS:
+        raise HTTPException(404, "unknown endpoint label")
+    chain = parts[1]
+    rows = await evm_registry.endpoints(db, settings, chain)
+    if not any(r["label"] == label for r in rows):
+        raise HTTPException(404, "that endpoint is not configured")
+    if body.enabled is False and not any(r["enabled"] and r["label"] != label for r in rows):
+        raise HTTPException(409, f"this is the last enabled {chain} endpoint; add or enable another one first")
+    await _save_evm_override(db, label, body.model_dump(exclude_none=True))
+    await audit(db, username, request, "rpc.evm_endpoint_updated", {"label": label, **body.model_dump(exclude_none=True)})
+    await db.commit()
+    return {"label": label, **body.model_dump(exclude_none=True)}

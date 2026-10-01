@@ -170,6 +170,62 @@ async def test_add_test_edit_delete_rpc_from_the_dashboard(app, client, auth_hea
                                headers=auth_headers)).status_code == 422  # URL change needs the password
 
 
+def _mock_evm(app, chain_id=56, logs_limit=None):
+    def handler(request):
+        body = json.loads(request.content)
+        if body["method"] == "eth_chainId":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": hex(chain_id)})
+        if body["method"] == "eth_blockNumber":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": hex(10_000)})
+        f = body["params"][0]
+        if logs_limit and int(f["toBlock"], 16) - int(f["fromBlock"], 16) + 1 > logs_limit:
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "error": {"code": -32600, "message": "range limit"}})
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": []})
+    app.state.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+async def test_bsc_and_robinhood_rpc_from_the_dashboard(app, client, auth_headers):
+    """One place for every chain: a BSC endpoint is added with the chain id
+    and eth_getLogs checked, listed first for BSC (before .env and public),
+    never shown with its key, and .env / public endpoints can be reordered or
+    disabled (never the last one of a chain)."""
+    _mock_evm(app, 56, logs_limit=10)
+    body = {"name": "Alchemy BSC", "provider_type": "alchemy", "chain": "bsc",
+            "rpc_url": "https://bnb-mainnet.alchemy.example/v2/TOPSECRET", "password": TEST_ADMIN_PASSWORD}
+    assert (await client.post("/api/rpc/providers", json={**body, "ws_url": "wss://x.example"},
+                              headers=auth_headers)).status_code == 422  # WebSocket is Solana only
+    r = await client.post("/api/rpc/providers", json=body, headers=auth_headers)
+    assert r.status_code == 200, r.text
+    t = r.json()["test"]
+    assert t["status"] == "CONNECTED" and t["logs_max_span"] == 10 and "slow" in t["detail"] and "x-config-revision" in r.headers
+    evm = await client.get("/api/rpc/evm", headers=auth_headers)
+    assert "TOPSECRET" not in evm.text
+    bsc = evm.json()["chains"]["bsc"]
+    assert bsc["chain_id"] == 56 and bsc["endpoints"][0]["name"] == "Alchemy BSC"
+    assert [e["source"] for e in bsc["endpoints"]][-1] == "public" and evm.json()["guide"]["providers"]
+    # not in the Solana list
+    assert all(p["name"] != "Alchemy BSC" for p in (await client.get("/api/rpc/providers", headers=auth_headers)).json()["providers"])
+    _mock_evm(app, 56)
+    pid = bsc["endpoints"][0]["id"]
+    again = (await client.post(f"/api/rpc/providers/{pid}/test", headers=auth_headers)).json()
+    assert again["status"] == "CONNECTED" and again["logs_max_span"] == 2000
+    _mock_evm(app, 4663)  # a Robinhood URL saved as BSC is caught
+    wrong = await client.post("/api/rpc/providers", json={**body, "name": "Wrong chain"}, headers=auth_headers)
+    assert wrong.json()["test"]["status"] == "INVALID_CONFIGURATION"
+
+    public = next(e for e in (await client.get("/api/rpc/evm", headers=auth_headers)).json()["chains"]["robinhood"]["endpoints"]
+                  if e["source"] == "public")
+    assert (await client.put(f"/api/rpc/evm/{public['label']}", json={"enabled": False},
+                             headers=auth_headers)).status_code == 409  # Robinhood's only endpoint
+    pub_bsc = [e for e in bsc["endpoints"] if e["source"] == "public"][0]
+    r = await client.put(f"/api/rpc/evm/{pub_bsc['label']}", json={"enabled": False, "priority": 950}, headers=auth_headers)
+    assert r.status_code == 200 and "x-config-revision" in r.headers
+    after = (await client.get("/api/rpc/evm", headers=auth_headers)).json()["chains"]["bsc"]["endpoints"]
+    row = next(e for e in after if e["label"] == pub_bsc["label"])
+    assert row["enabled"] is False and row["priority"] == 950
+    assert (await client.delete(f"/api/rpc/providers/{pid}", headers=auth_headers)).status_code == 200  # EVM: public remains
+
+
 async def test_manual_buy_and_sell_endpoints(app, client, auth_headers):
     redis = app.state.redis
     now = datetime.now(timezone.utc)

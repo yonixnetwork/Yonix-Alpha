@@ -106,7 +106,7 @@ async def run() -> None:
         await asyncio.gather(
             *(chain_loop(w, stop) for w in workers),
             heartbeat_loop(settings, SERVICE, stop, lambda: {w.chain: {**w.status, "rpc": w.rpc.health()} for w in workers}),
-            run_watcher(SERVICE, settings, session_factory, stop, redis=redis),
+            run_watcher(SERVICE, settings, session_factory, stop, redis=redis, evm_rpcs={w.chain: w.rpc for w in workers}),
         )
     finally:
         await _system_event(session_factory, "service_stopped", "info")
