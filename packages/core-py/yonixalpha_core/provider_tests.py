@@ -289,7 +289,8 @@ async def test_provider(name: str, settings: Any, client: httpx.AsyncClient) -> 
 
         _need(settings, "ETHERSCAN_API_KEY")
         r = await client.get(ETHERSCAN_V2, params={"chainid": 56, "module": "proxy", "action": "eth_blockNumber",
-                                                   "apikey": _secret(settings.ETHERSCAN_API_KEY)})
+                                                   "apikey": _secret(settings.ETHERSCAN_API_KEY)},
+                             headers={"user-agent": "Mozilla/5.0 (compatible; yonixalpha/1.0)"})
         if r.status_code == 429:
             raise _Result(RATE_LIMITED, "HTTP 429")
         if r.status_code != 200:
@@ -304,11 +305,12 @@ async def test_provider(name: str, settings: Any, client: httpx.AsyncClient) -> 
         raise _Result(status, f"Etherscan refused: {msg}")
 
     async def robinhood_explorer() -> str:
-        from yonixalpha_core.launch_coordination import BLOCKSCOUT
+        from yonixalpha_core.launch_coordination import BLOCKSCOUT, EXPLORER_HEADERS
 
-        r = await client.get(f"{BLOCKSCOUT['robinhood']}/api/v2/stats")
+        r = await client.get(f"{BLOCKSCOUT['robinhood']}/api/v2/stats", headers=EXPLORER_HEADERS)
         if r.status_code != 200:
-            raise _Result(RATE_LIMITED if r.status_code == 429 else UNAVAILABLE, f"HTTP {r.status_code}")
+            raise _Result(RATE_LIMITED if r.status_code == 429 else UNAVAILABLE,
+                          f"HTTP {r.status_code}: {' '.join(r.text.split())[:120]}")
         blocks = (r.json() or {}).get("total_blocks")
         return f"Robinhood Chain Blockscout answered (total blocks {blocks}); used for wallet funding lookups"
 

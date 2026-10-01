@@ -59,6 +59,7 @@ async def chain_loop(worker: ChainWorker, stop: asyncio.Event) -> None:
                 last_safety = time.monotonic()
                 worker.status["safety_checked"] = await worker.safety_pass(s, now)
                 worker.status["entries"] = await worker.entry_pass(s, now)
+                worker.status["observation"] = await worker.observation_pass(now)
             recorded = await worker.evidence_pass(now)
             if recorded:
                 worker.status["evidence_rows"] = recorded

@@ -64,9 +64,12 @@ async def _ensure_token(session: AsyncSession, chain: str, launchpad: str, token
 async def persist_scan(session: AsyncSession, adapter, res: ScanResult, now: datetime) -> dict[str, int]:
     """Stores one scan's launches, trades, migrations and settings events and
     advances the cursor to res.to_block. Caller commits."""
+    from yonixalpha_core.chains.evm import observation
+
     chain, key = adapter.spec.chain.value, adapter.spec.key
     counts = {"launches": 0, "trades": 0, "migrations": 0}
     acc = activity.Accumulator()
+    ocfg = await observation.load_config(session) if res.launches else None
     for ln in res.launches:
         venue = {k: ln.extra[k] for k in VENUE_KEYS if ln.extra.get(k)}
         stmt = insert(EvmToken).values(
@@ -87,6 +90,7 @@ async def persist_scan(session: AsyncSession, adapter, res: ScanResult, now: dat
         counts["launches"] += r.rowcount or 0
         if r.rowcount:
             acc.launch(ln.created_at)
+            await observation.ensure(session, chain, ln.token, "FRESH", ln.created_at, "launch observed", ocfg)
     for t in res.trades:
         await _ensure_token(session, chain, key, t.token, t.at)
         r = await session.execute(insert(EvmTrade).values(
@@ -213,8 +217,11 @@ def categorize(row: EvmToken, stats: dict[str, Any], now: datetime, s: EvmTradin
 async def refresh_stats(session: AsyncSession, chain: str, tokens: set[str], now: datetime,
                         s: EvmTradingSettings) -> int:
     """Recomputes stats + category for tokens that traded in this pass."""
+    from yonixalpha_core.chains.evm import observation
+
     since = now - timedelta(minutes=20)
     n = 0
+    ocfg = await observation.load_config(session) if tokens else None
     for token in tokens:
         row = await session.get(EvmToken, (chain, token))
         if row is None:
@@ -226,5 +233,12 @@ async def refresh_stats(session: AsyncSession, chain: str, tokens: set[str], now
         if trades:
             row.last_trade_at = max(t.at for t in trades)
         row.category = categorize(row, st, now, s).value
+        if row.category == "FRESH":
+            await observation.ensure(session, chain, token, "FRESH", row.created_at, "launch observed", ocfg)
+        elif row.category == "MIGRATED":
+            await observation.ensure(session, chain, token, "MIGRATED", row.migrated_at or now, "migration observed", ocfg)
+        elif row.category == "MOMENTUM":
+            await observation.ensure(session, chain, token, "MOMENTUM", now, f"momentum: {st.get('buys')} buys, "
+                                     f"{st.get('unique_buyers')} buyers in {st.get('window_s')} s", ocfg)
         n += 1
     return n

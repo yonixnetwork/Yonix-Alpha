@@ -1,7 +1,7 @@
 """Later snapshots of every observed fresh token (traded or not):
 
   T0 / T+half / T+window   already in token_observations.report (checkpoints)
-  T+5m, T+10m, T+30m, T+60m after launch   this job, into token_observations.followups
+  T+5m, T+10m, T+20m, T+30m, T+60m after launch   this job, into token_observations.followups
   migration                when the curve completed / a PumpSwap pool appeared
   final                    at T+60m: price change vs the decision, migrated or not
 
@@ -27,7 +27,7 @@ from yonixalpha_core.db.models import TokenObservation
 from yonixalpha_core.solana import pump_stream, pumpswap
 from yonixalpha_core.solana.rpc import RpcRateLimitedError
 
-OFFSETS = (("T+5m", 300), ("T+10m", 600), ("T+30m", 1800), ("T+60m", 3600))
+OFFSETS = (("T+5m", 300), ("T+10m", 600), ("T+20m", 1200), ("T+30m", 1800), ("T+60m", 3600))  # master §16
 LATE_AFTER_SECONDS = 600  # a snapshot taken this long after its mark is flagged late
 POOL_LOOKUPS_PER_RUN = 5  # RPC budget per tick for migrated tokens
 LAMPORTS = Decimal(1_000_000_000)

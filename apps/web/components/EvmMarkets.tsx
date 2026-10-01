@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { Boxes, CircleSlash, ShieldCheck, ShieldQuestion, ShieldX } from "lucide-react";
+import { ObservationPanel, TokenObservations } from "@/components/EvmObservation";
 import { CoordinationDetail, CoordinationPanel, CoordinationPill } from "@/components/LaunchCoordination";
 import { Empty, ErrorNotice, Loading, Money, PageHeader, Section } from "@/components/ui";
 import { formatDate } from "@/lib/format";
@@ -129,10 +130,16 @@ export default function EvmMarkets({ fixedChain, header = true }: { fixedChain?:
         )}
       </Section>
       {selected && (
-        <Section title={`Launch coordination: ${data?.tokens.find((t: J) => t.token === selected)?.symbol ?? selected.slice(0, 10)}`}>
-          <CoordinationDetail chain={chain} token={selected} />
-        </Section>
+        <>
+          <Section title={`Observation: ${data?.tokens.find((t: J) => t.token === selected)?.symbol ?? selected.slice(0, 10)}`}>
+            <TokenObservations chain={chain} token={selected} />
+          </Section>
+          <Section title={`Launch coordination: ${data?.tokens.find((t: J) => t.token === selected)?.symbol ?? selected.slice(0, 10)}`}>
+            <CoordinationDetail chain={chain} token={selected} />
+          </Section>
+        </>
       )}
+      <ObservationPanel chain={chain} onSelect={setSelected} />
       <CoordinationPanel chain={chain} />
     </div>
   );

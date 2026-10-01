@@ -1,4 +1,4 @@
-"""T+5m / T+10m / T+30m / T+60m snapshots, migration and final outcome for
+"""T+5m / T+10m / T+20m / T+30m / T+60m snapshots, migration and final outcome for
 observed tokens (traded or not), from real stream / pool data only."""
 
 import os
@@ -58,7 +58,8 @@ async def test_snapshots_fill_as_they_fall_due_and_finish_at_t60(db, redis):
     assert await track_observation_followups(db, redis, None, NOW) == 1
     row = (await db.execute(TokenObservation.__table__.select())).first()
     f = row.followups
-    assert set(f) == {"T+5m", "T+10m"} and f["T+5m"]["late"] is True  # first run 20 min after launch: 15 min late
+    assert set(f) == {"T+5m", "T+10m", "T+20m"} and f["T+5m"]["late"] is True  # first run 20 min after launch: 15 min late
+    assert f["T+20m"]["late"] is False  # due exactly now
     assert f["T+5m"]["source"] == "pump_stream curve (last trade)" and f["T+5m"]["change_vs_decision_pct"] == "100.00"
     assert f["T+5m"]["migrated"] is False and f["T+5m"]["liquidity_sol"]
 

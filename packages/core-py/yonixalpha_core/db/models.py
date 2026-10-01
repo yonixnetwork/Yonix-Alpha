@@ -1190,6 +1190,35 @@ class EvmWalletFunder(Base):
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class EvmObservation(Base):
+    """One token's observation in one category (master §14-17,
+    chains/evm/observation.py): state, window, snapshots T0..T+60, state
+    history and the expiry reason. Never deleted: training data for ML."""
+
+    __tablename__ = "evm_observations"
+    __table_args__ = (UniqueConstraint("chain", "token", "category", name="uq_evm_observations_token_category"),
+                      Index("ix_evm_observations_chain_state", "chain", "state"))
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    chain: Mapped[str] = mapped_column(String(16), nullable=False)
+    token: Mapped[str] = mapped_column(String(42), nullable=False)
+    category: Mapped[str] = mapped_column(String(16), nullable=False)
+    state: Mapped[str] = mapped_column(String(24), nullable=False)
+    state_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    deadline: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    observation_reason: Mapped[str] = mapped_column(String(200), nullable=False)
+    expiry_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    extensions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    safety_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    safety_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    snapshots: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    history: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    last_decision: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+
 class EvmTrade(Base):
     """One decoded launchpad / pool trade. event_id = chain:tx_hash:log_index,
     so a re-scanned block never stores a trade twice."""

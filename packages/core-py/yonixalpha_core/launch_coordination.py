@@ -114,10 +114,17 @@ PONS_V2_LAUNCH_CALLS: dict[str, tuple[str, list[str], int | None, int | None]] =
     "0x" + selector(f"launchAndBuy({_P},uint256,address,uint256,uint256,address,address[])").hex():
         ("launchAndBuy router", [_P, "uint256", "address", "uint256", "uint256", "address", "address[]"], 6, 5),
 }
+# Seen on real launches (server, 2026-10-01), identified by signature search:
+# a third-party contract that calls the factory; what it passes is not visible.
+PONS_V2_WRAPPERS = {"0x" + selector(f"launch({_P},address)").hex(): "a wrapper contract launch(TokenParams, address)"}
 SNIPE_REFERENCE = dex.SIM_ACCOUNT  # an address no launch exempts: the tax everyone else pays
 BLOCKSCOUT = {"robinhood": "https://robinhoodchain.blockscout.com"}
 ETHERSCAN_V2 = "https://api.etherscan.io/v2/api"
 ETHERSCAN_CHAIN_ID = {"bsc": 56}
+# Explorers behind a bot filter refuse a bare HTTP client (Blockscout answered
+# 403 to the default python-httpx agent on the server, 2026-10-01).
+EXPLORER_HEADERS = {"user-agent": "Mozilla/5.0 (compatible; yonixalpha/1.0; read-only wallet funding lookups)",
+                    "accept": "application/json"}
 
 
 @dataclass(frozen=True)
@@ -496,6 +503,9 @@ def decode_pons_v2_launch(tx_input: str) -> dict[str, Any]:
     Pons V2 launch transaction's calldata."""
     sel = (tx_input or "")[:10].lower()
     spec = PONS_V2_LAUNCH_CALLS.get(sel)
+    if sel in PONS_V2_WRAPPERS:
+        return {"status": UNKNOWN, "selector": sel, "via": PONS_V2_WRAPPERS[sel], "declared": [],
+                "detail": f"launched through {PONS_V2_WRAPPERS[sel]}: the exemption list is not in its calldata"}
     if spec is None:
         return {"status": UNKNOWN, "selector": sel, "detail": f"launch sent through an unrecognised entrypoint "
                 f"(selector {sel}); exemption list not readable", "declared": []}
@@ -563,11 +573,13 @@ async def _blockscout_funding(client, base: str, wallet: str) -> dict[str, Any]:
     best: dict[str, Any] | None = None
     try:
         for kind in ("transactions", "internal-transactions"):
-            r = await client.get(f"{base}/api/v2/addresses/{wallet}/{kind}", params={"filter": "to"})
+            r = await client.get(f"{base}/api/v2/addresses/{wallet}/{kind}", params={"filter": "to"},
+                                 headers=EXPLORER_HEADERS)
             if r.status_code == 404:
                 return {"status": "NOT_FOUND", "source": src}
             if r.status_code != 200:
-                return {"status": "UNAVAILABLE", "source": src, "detail": f"HTTP {r.status_code}"}
+                return {"status": "UNAVAILABLE", "source": src,
+                        "detail": f"HTTP {r.status_code}: {' '.join(r.text.split())[:120]}"}
             body = r.json()
             if body.get("next_page_params"):
                 return {"status": "NOT_FOUND", "source": src, "detail": "more than one page of incoming transfers: "
@@ -579,7 +591,7 @@ async def _blockscout_funding(client, base: str, wallet: str) -> dict[str, Any]:
                 funder = (it.get("from") or {}).get("hash")
                 tx = it.get("hash") or it.get("transaction_hash")
                 if kind == "internal-transactions" and tx:  # a disperse contract: the funder is who called it
-                    tr = await client.get(f"{base}/api/v2/transactions/{tx}")
+                    tr = await client.get(f"{base}/api/v2/transactions/{tx}", headers=EXPLORER_HEADERS)
                     if tr.status_code == 200:
                         funder = ((tr.json() or {}).get("from") or {}).get("hash") or funder
                 if funder and at and (best is None or at < best["funded_at"]):
@@ -597,7 +609,7 @@ async def _etherscan_funding(client, chain_id: int, wallet: str, key: str) -> di
         for action in ("txlist", "txlistinternal"):
             r = await client.get(ETHERSCAN_V2, params={"chainid": chain_id, "module": "account", "action": action,
                                                        "address": wallet, "sort": "asc", "page": 1, "offset": 20,
-                                                       "apikey": key})
+                                                       "apikey": key}, headers=EXPLORER_HEADERS)
             if r.status_code != 200:
                 return {"status": "UNAVAILABLE", "source": src, "detail": f"HTTP {r.status_code}"}
             body = r.json()
@@ -614,7 +626,8 @@ async def _etherscan_funding(client, chain_id: int, wallet: str, key: str) -> di
                     funder = None  # the caller of the disperse contract is resolved below
                     tr = await client.get(ETHERSCAN_V2, params={"chainid": chain_id, "module": "proxy",
                                                                 "action": "eth_getTransactionByHash",
-                                                                "txhash": it.get("hash"), "apikey": key})
+                                                                "txhash": it.get("hash"), "apikey": key},
+                                          headers=EXPLORER_HEADERS)
                     if tr.status_code == 200 and isinstance((tr.json() or {}).get("result"), dict):
                         funder = (tr.json()["result"].get("from") or "").lower() or None
                 if funder and at and (best is None or at < best["funded_at"]):

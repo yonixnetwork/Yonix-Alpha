@@ -50,7 +50,7 @@ Providers), see M7.
 | 11 | Pons coordinated-launch safety (privileged / creator-linked / common-funder / simultaneous buyers) | DONE (paper; on-chain assumptions NOT VERIFIED until coordination_check runs on the server) | launch_coordination: 13 detections, configurable NO_TRADE / REDUCE_SIZE / MANUAL_APPROVAL / NONE, data-evm entries + EVM copy buys; see section 13 | M5 |
 | 12 | Robinhood reference repos inspected | PARTIAL | pons-launch-engine and pons-terminal read for M5 (section 13); the other five still M9 | M9 |
 | 13 | Robinhood sequencer feed (+ delayed feed fallback), latency / gaps measured | MISSING | registry note only | M8 |
-| 14–17 | Observation state machine for every token on all chains, windows T0..T+60, expiry, stored | PARTIAL | Solana: `token_observations`, T+5..T+60 snapshots, outcomes ledger; EVM: tokens are categorised and entered directly, no OBSERVING/QUALIFIED/EXPIRED states | M6 |
+| 14–17 | Observation state machine for every token on all chains, windows T0..T+60, expiry, stored | DONE (EVM, paper); Solana PARTIAL (own state names, see section 15) | EVM: `evm_observations`, full state machine, T0/T+5/T+10/T+20/T+30/T+60 snapshots with the §16 fields, adaptive MIGRATED / MOMENTUM windows, EXPIRED_NO_ENTRY, entries only while observed; Solana: `token_observations` + follow-ups, T+20m added | M6 |
 | 18–23 | Wallet performance model: 24H–180D windows, avg/median win and loss, profit factor, drawdown, FIFO ledger, INSUFFICIENT DATA | DONE in code for BSC / Robinhood (M3); Solana PARTIAL | `wallet_pnl.py` (FIFO lots, usually earns / usually loses, profit factor, drawdown, holds, best / worst), windows 24H / 7D (14D+ INSUFFICIENT DATA: 7-day profile history, 14-day trade retention); fees listed not subtracted (NOT VERIFIED per launchpad), gas not included; Solana profiles have no sells (launch_buyers) and say so | M3 |
 | 24 | Nansen / MadeOnSol enrichment | MISSING | | M11 |
 | 25–28 | Wallet discovery, validation gates, outlier test, regime test | DONE for BSC / Robinhood (M3b); Solana INSUFFICIENT DATA (no sells recorded) | outlier test (M3); `wallet_validation` (12 configurable checks, per-day consistency, INSUFFICIENT DATA vs NOT VALIDATED); `market_regimes` (hourly volume / net flow / price range, migration 0026; CONSISTENT / REGIME_DEPENDENT); discovery stage COLLECTING_HISTORY → VALIDATED → PAPER_FOLLOWED / REJECTED, never auto-copied; Smart Wallets UI + rules editor. External smart-money sources (§24-25 Nansen, MadeOnSol) not connected | M3b |
@@ -403,4 +403,69 @@ Research (§12) used here:
   then reported only after the operator sets NONE), a copy-engine test (a
   target buying into a bundled launch is not copied), an API test
   (settings, approval, revoke, summary), provider tests for both explorers.
+
+## 14. M5 on the server (2026-10-01, deploy a9792a4)
+
+`coordination_check` on production:
+- Pons V2 launches (last 30) by entrypoint: launchAndBuy router 9,
+  factory.launchToken 7, factory.launchToken with an exemption list 6,
+  unrecognised 8. The decoded selectors are now VERIFIED on real launches.
+  Non-empty exemption lists: 3 (sizes 1, 1 and 20 wallets).
+- Unrecognised: 0xa3a3ee69 (x2) is `launch(TokenParams, address)`, a
+  third-party wrapper (found by signature search; named in the report, its
+  exemption list is not in its calldata). 0x89942133 (x1) and 0x0a5f3d53
+  (x5) are not identified yet; the tool now prints the contract they were
+  sent to and checks whether the launch receipt names the exempted wallets
+  (an event per exemption would make the list readable for every
+  entrypoint). Until then those launches show DECLARED_EXEMPTIONS UNKNOWN,
+  never "none"; PRIVILEGED_BUYERS is still checked on chain for them.
+- `currentSnipeTaxBps` answers at a past block (a buyer at the launch block
+  paid 9900 bps, like the reference address): the on-chain exemption check
+  works. VERIFIED.
+- Robinhood Blockscout answered HTTP 403 to the default client; the funding
+  lookups now send a browser-like User-Agent and report the response body
+  when refused. NOT VERIFIED until the next run.
+- One Pons V2 launch assessed: creator-linked buy in the window (REDUCE_SIZE),
+  everything else passed; one Four.meme launch: nothing detected.
+
+## 15. M6 — token observation (2026-10-01)
+
+Master §14-17. Every BSC / Robinhood token enters observation before it can
+be traded (`chains/evm/observation.py`, migration 0028 `evm_observations`,
+one row per token and category, never deleted):
+
+- Opened at the launch (FRESH), the migration (MIGRATED) or the first
+  momentum signal (MOMENTUM), with `observation_started_at`, deadline and
+  reason.
+- States: DISCOVERED → OBSERVING → ANALYZING (signal not met) → QUALIFIED →
+  WAITING_FOR_ENTRY (held by limits, launchpad evidence, a coordination
+  approval…, the blocker recorded) → ENTRY_PENDING → ENTERED; OBSERVING →
+  NO_ENTRY → EXPIRED (`expiry_reason` EXPIRED_NO_ENTRY plus the last
+  blocker); OBSERVING → SAFETY_FAILURE → REJECTED after 3 consecutive
+  safety FAILs (one FAIL is SAFETY_FAILURE only, UNKNOWN never rejects).
+  Every transition is in the state history.
+- data-evm enters a token only while its observation for the current
+  category is open: an expired, rejected or entered observation is not
+  entered again.
+- Snapshots T0, T+5, T+10, T+20, T+30, T+60 (configurable), computed as of
+  that moment from stored trades even when the pass runs late, and kept
+  after an entry through the window (the path after entry is outcome data):
+  price, market cap (native), interval and total volume, buy / sell volume,
+  buyers, sellers, effective buyers (without the wallets the coordination
+  check tagged), holders and holder growth (from launchpad trades),
+  liquidity and its change, curve progress, creator trades, top buyer share,
+  smart-money buyers (wallets the profile rebuild VALIDATED), net flow,
+  organic net flow, coordination (manipulation), safety, decision. ML is
+  None with "no EVM model yet": nothing is invented.
+- Adaptive windows (MIGRATED, MOMENTUM): while the token keeps trading
+  (>= 5 trades in the last 5 minutes) the deadline moves out 10 minutes at a
+  time, up to 180 minutes. All of it is set on EVM Markets → Observation.
+- Solana keeps its own observation (`token_observations`: OBSERVING,
+  PROMOTED / REJECTED / EXPIRED, follow-ups); T+20m was added to its
+  follow-ups. Mapping its outcomes onto the §15 state names is not done.
+- Tests: core (snapshots as of their time, expiry without entry, terminal
+  states, qualified → waiting → entered, adaptive extension, safety
+  rejection, settings), data-evm pipeline (observed from launch, entered
+  through it, snapshots after entry), API (list, counts, held-by, detail,
+  settings).
 

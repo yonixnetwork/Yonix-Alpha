@@ -117,6 +117,11 @@ def test_pons_v2_exemption_lists_are_read_from_every_launch_entrypoint():
     assert r["declared"] == ex and r["opening_recipient"] == w(9) and r["via"] == "launchAndBuy router"
     r = lc.decode_pons_v2_launch(_launch_calldata("launchToken(P,uint256,address)", None))
     assert r["status"] == "READ" and r["declared"] == []
+    params = ("Moon", "MOON", "ipfs://x", "d", ("", "", "", "", ""), CREATOR, 100, True, b"\0" * 32, b"\1" * 32)
+    wsig = f"launch({lc.PONS_V2_TOKEN_PARAMS},address)"  # 0xa3a3ee69, seen on real launches
+    wrapped = lc.decode_pons_v2_launch("0x" + (selector(wsig) + encode([lc.PONS_V2_TOKEN_PARAMS, "address"],
+                                                                        [params, w(5)])).hex())
+    assert wrapped["selector"] == "0xa3a3ee69" and wrapped["status"] == lc.UNKNOWN and "wrapper" in wrapped["via"]
     unknown = lc.decode_pons_v2_launch("0xdeadbeef" + "00" * 64)
     assert unknown["status"] == lc.UNKNOWN and unknown["selector"] == "0xdeadbeef"
 
