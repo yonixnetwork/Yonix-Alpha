@@ -235,6 +235,14 @@ the stack up, and waits for `api` to report healthy before exiting.
 Fails loudly (non-zero exit) rather than silently leaving a broken
 deploy running — see the script for exact behavior.
 
+Images are built one service at a time, each retried up to three times:
+on the 2 vCPU / 2 GB server a parallel build of all ten images ran past
+BuildKit's deadline (`failed to solve: Internal: context deadline
+exceeded`) and nothing was deployed. A build that still fails leaves the
+running stack untouched, and the script says so; the deploy is complete
+only when it prints `==> Deploy complete: <commit>`. On a bigger server,
+`DEPLOY_PARALLEL_BUILD=1 scripts/deploy.sh` builds in parallel again.
+
 ## 4. Rollback
 
 ```

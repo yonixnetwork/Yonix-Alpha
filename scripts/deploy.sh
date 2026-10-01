@@ -31,7 +31,30 @@ git fetch origin "${BRANCH}"
 git merge --ff-only "origin/${BRANCH}"
 
 echo "==> Building images"
-${COMPOSE} build
+df -h / | tail -1 | awk '{print "    disk: " $4 " free of " $2}'
+if [ "${DEPLOY_PARALLEL_BUILD:-0}" = "1" ]; then
+    ${COMPOSE} build
+else
+    # One service at a time, each retried: on the 2 vCPU / 2 GB server, ten
+    # parallel image exports ran past BuildKit's deadline ("failed to solve:
+    # Internal: context deadline exceeded", 2026-10-01) and nothing was
+    # deployed. Cached layers make the sequential build only a little slower.
+    # DEPLOY_PARALLEL_BUILD=1 restores the parallel build on a bigger box.
+    for svc in $(${COMPOSE} config --services); do
+        for attempt in 1 2 3; do
+            if ${COMPOSE} build "${svc}"; then
+                break
+            fi
+            if [ "${attempt}" -eq 3 ]; then
+                echo "Building ${svc} failed 3 times; the running stack was NOT changed." >&2
+                echo "If the disk is nearly full, free build cache with: docker builder prune -f" >&2
+                exit 1
+            fi
+            echo "    building ${svc} failed (attempt ${attempt}); retrying in 15s"
+            sleep 15
+        done
+    done
+fi
 
 echo "==> Starting/updating the stack"
 # --remove-orphans stops containers of services no longer in the compose
