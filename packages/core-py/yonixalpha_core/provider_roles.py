@@ -219,6 +219,12 @@ def stream_findings(chain: str, reports: dict[str, dict[str, Any]]) -> list[dict
                             "copy-target transactions are seen only once confirmed in a block",
                             STREAM_RECOMMEND_PENDING, detail=pending.get("detail")))
     feed = reports.get("sequencer_feed")
+    if feed and (feed.get("unverified") or 0) >= 10 and (feed.get("unverified") or 0) >= (feed.get("messages") or 0):
+        out.append(_finding(CONFIGURATION, chain, feed.get("url") or "sequencer feed", None, "sequencer feed signature",
+                            f"{feed['unverified']} messages failed the sequencer signature check "
+                            f"({feed.get('messages') or 0} accepted)", "failing messages are dropped: the stream "
+                            "sees nothing from them", "check the feed URL; if the sequencer key rotated, the signer "
+                            "list in evm.streams needs the new batch poster (SequencerInbox.isBatchPoster)"))
     if feed:
         if feed.get("state") == "WRONG_CHAIN":
             out.append(_finding(CONFIGURATION, chain, feed.get("url") or "sequencer feed", None, "sequencer feed",

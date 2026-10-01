@@ -52,6 +52,13 @@ and what is verified.
 | PumpPortal data WebSocket | pumpportal.fun docs | service | coverage/migration cross-check; held-mint trades with a key | key only in the connection URL, never logged | ACCEPT |
 | Jupiter Swap API v1 | dev.jup.ag (official) | service | quotes | keyed `api.jup.ag`; keyless lite-api is deprecated | ACCEPT (quotes) |
 | 1chimaruGin/bsc-mempool @212d4463 | github.com/1chimaruGin/bsc-mempool | Apache-2.0 OR MIT | reference for BSC mempool copy trading (full pending bodies, shadow-first rollout) | not a dependency; needs its own bsc-geth node and relay accounts | PARTIALLY USE (ideas only; see MASTER_UPGRADE_2026.md §17) |
+| chainstacklabs/robinhood-chain-sequencer-feed @8ea0972 | github.com/chainstacklabs (Chainstack Labs) | Apache-2.0 | feed measurements (backlog, compression, signatures), 12 real frames as a test fixture | experimental by its own label; no keys | PARTIALLY USE (data and findings; no code; MASTER_UPGRADE_2026.md §18) |
+| ponsdotdev/ponsfamily @44a3db9 | github.com/ponsdotdev (official Pons) | MIT | Pons V1 / V2 Solidity source: event and ABI verification | deployed bytecode not compared from here | ACCEPT (primary source) |
+| pons-launch-engine, pons-terminal, robinhood-trading-tools | github.com (community) | MIT | address cross-checks; router labels; evidence for launch coordination and wash volume | multi-wallet self-buying, 0.5% router skim, roundTrip | REJECT for integration (§18) |
+| nirholas robinhood-chain-sdk / -alerts / -trading-bot | github.com/nirholas | All rights reserved / Apache-2.0 | none | proprietary licence; activity refreshed by empty commits | REJECT (§18) |
+| four-meme-community/four-meme-ai @c81f0ee | github.com/four-meme-community | MIT | Four.meme address / event cross-check; X Mode / AntiSniperFeeMode flags | private key in env | PARTIALLY USE (reference only) |
+| MeteoraAg dynamic-bonding-curve (+sdk) | github.com/MeteoraAg (official) | Non-commercial (program) / MIT (SDK) | Solana DBC research for M10 | Token-2022 transfer hooks possible | research only |
+| coincurve 21.0.0 | PyPI (ofek/coincurve) | MIT OR Apache-2.0 | fast secp256k1 for eth-keys (senders, feed signatures) | prebuilt wheels; pinned | ACCEPT |
 | Arbitrum Nitro sequencer feed format | docs.arbitrum.io (official) / Robinhood Chain feed | service | Robinhood Chain sequencer feed (broadcast messages, L2 message kinds, resume header) | message format only, decoded by our own code; no Nitro code taken | ACCEPT (format) |
 | pyrlp 5.0.0 | PyPI (github.com/ApeWorX/pyrlp) | MIT | decoding signed transactions from the feed | already installed by eth-account; now pinned | ACCEPT |
 

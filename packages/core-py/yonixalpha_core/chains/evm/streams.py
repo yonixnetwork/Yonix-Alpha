@@ -20,9 +20,14 @@ stages can see how much earlier the stream knew about it.
 
 Measured: connection state, reconnects, messages, transactions, sequence
 gaps (and how many messages were missing), duplicates, out-of-order
-messages, the feed delay (now minus the message timestamp, 1 s resolution)
-and matches. On reconnect the client asks for the next sequence number
-(Arbitrum-Requested-Sequence-Number) so a short drop loses nothing. After
+messages, reorgs (a sequence number re-sent with another block hash), the
+feed delay (now minus the message timestamp, 1 s resolution) and matches.
+Every message's sequencer signature (signatureV2, Nitro's feed preimage) is
+checked against the known signer; a failing message is dropped before it
+moves the sequence. On reconnect the client asks for the last sequence
+number seen (Arbitrum-Requested-Sequence-Number; a number past the server's
+tail replays its whole backlog), and the history replayed on the first
+connection is sequenced but not matched or timed. After
 `fallback_after_failures` failed connections to the primary feed it uses
 the delayed feed and retries the primary every `primary_retry_minutes`;
 the delayed feed is labelled as such and never treated as primary-speed.
@@ -70,6 +75,17 @@ CONNECTING, CONNECTED, RECONNECTING, NOT_CONFIGURED, DISABLED, REFUSED, LIMITED,
     "CONNECTING", "CONNECTED", "RECONNECTING", "NOT_CONFIGURED", "DISABLED", "REFUSED", "LIMITED", "WRONG_CHAIN")
 L1_L2_MESSAGE, L2_BATCH, L2_SIGNED_TX, L2_SIGNED_COMPRESSED = 3, 3, 4, 7
 MAX_DEPTH = 16
+# A new client is first replayed recent history (about 1,200 messages / two
+# minutes on Robinhood, measured by chainstacklabs/robinhood-chain-sequencer-feed).
+# Messages older than this during the first DRAIN_SECONDS of the first connection
+# advance the sequence but are not matched or timed.
+BACKLOG_AGE_S, DRAIN_SECONDS = 10, 30
+FEED_PREFIX = b"Arbitrum Nitro Feed:"
+# Key that signs Robinhood mainnet feed messages (signatureV2). Recovered from
+# the feed; chainstacklabs/robinhood-chain-sequencer-feed reports it as the
+# chain's L1 batch poster (SequencerInbox.isBatchPoster, checked 2026-07-27).
+# Not re-checked on L1 from here; a key rotation shows as unverified messages.
+FEED_SIGNERS = {ROBINHOOD_CHAIN_ID: frozenset({"0xdaa526086787d9debe1d7f3ffdb1fe50cf8687f4"})}
 
 
 @dataclass(frozen=True)
@@ -81,6 +97,7 @@ class StreamConfig:
     primary_retry_minutes: int = 10
     bsc_pending_enabled: bool = True
     recover_budget_per_s: int = 30
+    verify_feed_signatures: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -187,7 +204,8 @@ def l2_transactions(l2msg: bytes, depth: int = 0) -> tuple[list[bytes], int]:
 
 
 def parse_broadcast(payload: str | bytes) -> list[dict[str, Any]]:
-    """Feed messages of one broadcast: sequence number, timestamp, raw txs."""
+    """Feed messages of one broadcast: sequence number (= L2 block number),
+    timestamp, block hash, raw txs, and the raw entry (for the signature)."""
     data = json.loads(payload)
     out = []
     for m in data.get("messages") or []:
@@ -198,8 +216,60 @@ def parse_broadcast(payload: str | bytes) -> list[dict[str, Any]]:
         if header.get("kind") == L1_L2_MESSAGE and inner.get("l2Msg"):
             txs, skipped = l2_transactions(base64.b64decode(inner["l2Msg"]))
         out.append({"seq": int(m.get("sequenceNumber")), "timestamp": header.get("timestamp"), "txs": txs,
-                    "compressed_skipped": skipped, "kind": header.get("kind")})
+                    "compressed_skipped": skipped, "kind": header.get("kind"), "block_hash": m.get("blockHash"),
+                    "entry": m})
     return out
+
+
+def _minimal_be(n: int) -> bytes:
+    return n.to_bytes((n.bit_length() + 7) // 8, "big")  # Go big.Int.Bytes(): empty for zero
+
+
+def feed_signature_hash(entry: dict[str, Any], chain_id: int) -> bytes:
+    """keccak of Nitro's BroadcastFeedMessage.SignatureHash preimage:
+    prefix, chain id, sequence number, block hash, block metadata, delayed
+    messages read, header (kind, sender, block number, timestamp, request id
+    and L1 base fee only when present, base fee minimal-length), l2Msg."""
+    wrapper = entry.get("message") or {}
+    inner = wrapper.get("message") or {}
+    header = inner.get("header") or {}
+    out = bytearray(FEED_PREFIX)
+    out += chain_id.to_bytes(8, "big")
+    out += int(entry.get("sequenceNumber") or 0).to_bytes(8, "big")
+    if entry.get("blockHash"):
+        out += bytes.fromhex(entry["blockHash"].removeprefix("0x"))
+    if entry.get("blockMetadata"):
+        out += base64.b64decode(entry["blockMetadata"])
+    out += int(wrapper.get("delayedMessagesRead") or 0).to_bytes(8, "big")
+    out += bytes((int(header.get("kind") or 0),))
+    out += bytes.fromhex((header.get("sender") or "").removeprefix("0x"))
+    out += int(header.get("blockNumber") or 0).to_bytes(8, "big")
+    out += int(header.get("timestamp") or 0).to_bytes(8, "big")
+    if header.get("requestId") is not None:
+        out += bytes.fromhex(header["requestId"].removeprefix("0x"))
+    if header.get("baseFeeL1") is not None:
+        out += _minimal_be(int(header["baseFeeL1"]))
+    if inner.get("l2Msg"):
+        out += base64.b64decode(inner["l2Msg"])
+    return keccak(bytes(out))
+
+
+def feed_signer(entry: dict[str, Any], chain_id: int) -> str | None:
+    """Address that signed a feed message (lower case); None when unsigned or
+    malformed. A forged message recovers some other address."""
+    from eth_keys import keys
+
+    try:
+        sig = base64.b64decode(entry.get("signatureV2") or "")
+        if len(sig) != 65:
+            return None
+        v = sig[64] - 27 if sig[64] >= 27 else sig[64]
+        if v not in (0, 1):
+            return None
+        pub = keys.Signature(sig[:64] + bytes((v,))).recover_public_key_from_msg_hash(feed_signature_hash(entry, chain_id))
+        return pub.to_checksum_address().lower()
+    except Exception:  # noqa: BLE001
+        return None
 
 
 # --- stats ---------------------------------------------------------------------------------------------
@@ -232,7 +302,11 @@ class StreamStats:
     gaps: int = 0
     missing_messages: int = 0
     duplicates: int = 0
-    out_of_order: int = 0
+    out_of_order: int = 0  # older than the last processed (a replay after reconnect, or reordered)
+    reorgs: int = 0  # a sequence number re-sent with a different block hash
+    backlog_skipped: int = 0  # replayed history on the first connection: sequenced, not matched or timed
+    unverified: int = 0  # dropped: missing or wrong sequencer signature
+    verification: str | None = None  # VERIFIED / OFF / NO_KNOWN_SIGNER
     last_message_at: str | None = None
     last_error: str | None = None
     detail: str | None = None
@@ -252,7 +326,6 @@ class StreamStats:
             self.duplicates += 1
             return False
         self.out_of_order += 1  # older than the last one: replayed or reordered
-        self.duplicates += 1
         return False
 
     def report(self) -> dict[str, Any]:
@@ -337,6 +410,9 @@ class SequencerFeed:
         self._primary_failures = 0
         self._fallback_until = 0.0
         self._reload_at = time.monotonic()
+        self._resume_seq: int | None = None  # requested on reconnect; arrives once more and is dropped quietly
+        self._drain_until = 0.0
+        self._hashes: dict[int, str] = {}  # recent sequence number -> block hash (reorg detection)
 
     def _url(self) -> str:
         now = time.monotonic()
@@ -354,14 +430,40 @@ class SequencerFeed:
         now = time.time() if now is None else now
         matches = 0
         await self._refresh_watch()
+        signers = FEED_SIGNERS.get(self.chain_id)
+        verify = self.cfg.verify_feed_signatures and signers is not None
+        self.stats.verification = "VERIFIED" if verify else ("OFF" if signers else "NO_KNOWN_SIGNER")
         for m in parse_broadcast(payload):
-            if not self.stats.sequence(m["seq"]):
+            if verify and feed_signer(m["entry"], self.chain_id) not in signers:
+                self.stats.unverified += 1  # dropped before it can move the sequence watermark
                 continue
+            seq, bh = m["seq"], m.get("block_hash")
+            if self._resume_seq is not None and seq == self._resume_seq and self._hashes.get(seq) in (None, bh):
+                self._resume_seq = None  # the message we asked to resume from: already processed
+                continue
+            known = self._hashes.get(seq)
+            if known is not None and bh and known != bh:
+                self.stats.reorgs += 1
+                self._hashes[seq] = bh
+                continue
+            if not self.stats.sequence(seq):
+                continue
+            if bh:
+                self._hashes[seq] = bh
+                if len(self._hashes) > 2048:
+                    for k in sorted(self._hashes)[:1024]:
+                        del self._hashes[k]
             self.stats.messages += 1
             self.stats.last_message_at = _now_iso()
             self.stats.compressed_skipped += m["compressed_skipped"]
-            if m["timestamp"]:
-                self.stats.delays = (self.stats.delays + [max(0.0, now - float(m["timestamp"]))])[-200:]
+            age = now - float(m["timestamp"]) if m["timestamp"] else None
+            if self._drain_until:
+                if age is not None and age > BACKLOG_AGE_S and time.monotonic() < self._drain_until:
+                    self.stats.backlog_skipped += 1
+                    continue
+                self._drain_until = 0.0  # caught up with the live feed
+            if age is not None:
+                self.stats.delays = (self.stats.delays + [max(0.0, age)])[-200:]
             for raw in m["txs"]:
                 tx = decode_signed_tx(raw)
                 self.stats.transactions += 1
@@ -411,10 +513,18 @@ class SequencerFeed:
             self.stats.url = redact_url(url)
             headers = {"Arbitrum-Feed-Client-Version": "2"}
             if self.stats.last_seq is not None:
-                headers["Arbitrum-Requested-Sequence-Number"] = str(self.stats.last_seq + 1)
+                # The last message already seen, not the next one: a number past the
+                # server's tail makes Nitro replay its whole backlog.
+                headers["Arbitrum-Requested-Sequence-Number"] = str(self.stats.last_seq)
+                self._resume_seq = self.stats.last_seq
+            else:
+                self._drain_until = time.monotonic() + DRAIN_SECONDS
             try:
                 self.stats.state = CONNECTING if self.stats.reconnects == 0 else RECONNECTING
-                async with connect(url, additional_headers=headers, max_size=None, open_timeout=15,
+                # compression="deflate": since 2026-09-17 the Robinhood feed refuses clients
+                # that do not offer permessage-deflate (HTTP 400). websockets offers it by
+                # default; stated so a library default change cannot silently break the feed.
+                async with connect(url, additional_headers=headers, max_size=None, open_timeout=15, compression="deflate",
                                    ping_interval=20, ping_timeout=20) as ws:
                     cid = _response_header(ws, "Arbitrum-Chain-Id")
                     if cid is not None and int(cid) != self.chain_id:

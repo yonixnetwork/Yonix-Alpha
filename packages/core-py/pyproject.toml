@@ -31,6 +31,9 @@ dependencies = [
     # Decodes signed transactions from the Robinhood sequencer feed (already
     # installed by eth-account; pinned because evm.streams imports it).
     "rlp==5.0.0",
+    # Fast secp256k1 for eth-keys (picked up automatically): transaction senders
+    # and feed signatures in ~0.1-2 ms instead of ~10 ms. Prebuilt wheels.
+    "coincurve==21.0.0",
 ]
 
 [project.optional-dependencies]

@@ -140,3 +140,10 @@ def test_stream_findings_only_from_observed_states():
     assert down[0]["severity"] == "CONFIGURATION" and "4 failed connections in a row" in down[0]["observed"]
     rows = [{"label": "public:robinhood:0", "name": "public #1", "url": "https://rpc.example", "source": "public", "enabled": True}]
     assert not any(f["capability"] == "WebSocket / pending transactions" for f in pr.evm_findings("robinhood", rows, None))
+
+
+def test_feed_signature_failures_are_reported():
+    ok = pr.stream_findings("robinhood", {"sequencer_feed": {"state": "CONNECTED", "messages": 500, "unverified": 3}})
+    assert ok == []  # a few forged / odd frames among accepted ones are dropped, not a configuration problem
+    bad = pr.stream_findings("robinhood", {"sequencer_feed": {"state": "CONNECTED", "messages": 0, "unverified": 40}})
+    assert bad[0]["capability"] == "sequencer feed signature" and "40 messages" in bad[0]["observed"]

@@ -30,6 +30,8 @@ function StreamSettings({ data, reload }: { data: J; reload: () => void }) {
       <div className="form-grid">
         <label className="small"><input type="checkbox" checked={!!v.robinhood_feed_enabled}
           onChange={(e) => set("robinhood_feed_enabled", e.target.checked)} /> Robinhood Chain sequencer feed</label>
+        <label className="small"><input type="checkbox" checked={!!v.verify_feed_signatures}
+          onChange={(e) => set("verify_feed_signatures", e.target.checked)} /> Check the sequencer signature on every feed message</label>
         <label className="small"><input type="checkbox" checked={!!v.bsc_pending_enabled}
           onChange={(e) => set("bsc_pending_enabled", e.target.checked)} /> BSC pending transactions (needs a WSS endpoint)</label>
         {[["robinhood_feed_url", "Feed URL (wss://)"], ["robinhood_delayed_url", "Delayed feed URL (wss://)"]].map(([k, label]) => (
@@ -62,7 +64,7 @@ export default function EvmStreams() {
           <div className="table-scroll">
             <table className="data-table">
               <thead><tr><th>Chain</th><th>Stream</th><th>State</th><th>Endpoint</th><th>Messages / transactions</th>
-                <th>Sequence gaps (missing)</th><th>Duplicates</th><th>Delay median / p95</th><th>Matched (targets / launchpads)</th>
+                <th>Sequence gaps (missing)</th><th>Duplicates / reorgs</th><th>Delay median / p95</th><th>Matched (targets / launchpads)</th>
                 <th>Reconnects</th><th>Last message</th></tr></thead>
               <tbody>{Object.entries(data.chains as Record<string, J>).flatMap(([chain, c]) => (c.expected as string[]).map((src) => {
                 const s: J | undefined = c.streams[src];
@@ -76,11 +78,14 @@ export default function EvmStreams() {
                     <td>{CHAIN[chain] ?? chain}</td>
                     <td>{SOURCE[src] ?? src}{s.fallback_active ? <div className="small neg">delayed feed in use</div> : null}</td>
                     <td><span className={STATE_CLASS[s.state] ?? "pill pill-off"}>{String(s.state).replaceAll("_", " ")}</span>
-                      {s.detail ? <div className="small muted">{s.detail}</div> : null}</td>
+                      {s.detail ? <div className="small muted">{s.detail}</div> : null}
+                      {src === "sequencer_feed" && s.verification ? <div className="small muted">signatures: {String(s.verification).replaceAll("_", " ").toLowerCase()}
+                        {s.unverified ? <span className="neg"> ({s.unverified} dropped)</span> : null}</div> : null}</td>
                     <td className="small">{s.url ?? "—"}</td>
                     <td>{dash(s.messages)} / {dash(s.transactions)}</td>
                     <td>{src === "sequencer_feed" ? <>{dash(s.gaps)} ({dash(s.missing_messages)})</> : <span className="muted">n/a</span>}</td>
-                    <td>{src === "sequencer_feed" ? dash(s.duplicates) : <span className="muted">n/a</span>}</td>
+                    <td>{src === "sequencer_feed" ? <>{dash(s.duplicates)}{s.reorgs ? <div className="small neg">reorgs: {s.reorgs}</div> : null}
+                      {s.backlog_skipped ? <div className="small muted" title="history replayed on the first connection: sequenced, not matched or timed">backlog skipped: {Number(s.backlog_skipped).toLocaleString()}</div> : null}</> : <span className="muted">n/a</span>}</td>
                     <td>{src === "sequencer_feed" ? <>{dash(s.delay_s_median, " s")} / {dash(s.delay_s_p95, " s")}</> : <span className="muted">n/a</span>}</td>
                     <td>{dash(s.matched_copy_targets)} / {dash(s.matched_launchpads)}</td>
                     <td>{dash(s.reconnects)}{s.last_error ? <div className="small muted" title={s.last_error}>last error: {String(s.last_error).slice(0, 60)}</div> : null}</td>
