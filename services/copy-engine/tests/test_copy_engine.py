@@ -116,7 +116,7 @@ async def test_evm_copy_is_gated_idempotent_and_mirrors_partial_sells(session_fa
         assert cp.target_tokens == Decimal(10 ** 24)
         start_qty = positions[0].remaining_quantity
     assert ev.decision == "COPIED" and set(ev.latency_ms) >= {"detection", "analysis", "risk", "execution", "total"}
-    assert ev.latency_ms["landing"] == "not applicable (paper)"
+    assert ev.latency_ms["landing"] is None and "landing" in ev.latency_ms["live_only"]  # paper: no landing, never 0
 
     await whale_trade(session_factory, clock, 3, False, 5 * 10 ** 23, 5 * 10 ** 17)  # target sells half
     await eng.watch_evm("bsc")
@@ -293,3 +293,52 @@ async def test_sell_only_on_solana_touches_paper_positions_never_live_ones(sessi
     async with session_factory() as s:
         assert ct.pending_partial_exit((await s.get(PaperPosition, paper_id)).plan) == Decimal("0.25")
         assert ct.pending_partial_exit((await s.get(PaperPosition, live_id)).plan) is None
+
+
+async def test_every_target_buy_gets_a_paper_outcome_after_the_horizon_once(session_factory, redis_client):
+    """§35: a skipped buy (launchpad not yet verified) is still measured: entry
+    at the first trade after we saw it, exit at the target's own sell (MIRROR).
+    Not before the horizon, and only once."""
+    clock = Clock()
+    node, lp = fourmeme()
+    eng = CopyEngine(session_factory, redis_client, {"bsc": {"fourmeme": lp}}, clock)
+    await seed_evm(session_factory, clock)
+    await whale_trade(session_factory, clock, 1, True, 10 ** 24, 10 ** 18)  # price 0.000001
+    await eng.watch_evm("bsc")
+    seen = clock()
+    other = "0x" + "c" * 40
+    async with session_factory() as s:
+        for i, (mins, trader, buy, quote) in enumerate([(5, other, True, 15 * 10 ** 17), (10, WHALE, False, 13 * 10 ** 17),
+                                                       (30, other, False, 8 * 10 ** 17)]):
+            s.add(EvmTrade(event_id=f"bsc:0x{100 + i:064x}:0", chain="bsc", launchpad="fourmeme", token=TOKEN, trader=trader,
+                           is_buy=buy, token_amount=Decimal(10 ** 24), quote_amount=Decimal(quote),
+                           at=seen + timedelta(minutes=mins)))
+        await s.commit()
+    assert await eng.evaluate_outcomes() == {"evaluated": 0, "no_price_data": 0}  # horizon not reached
+    clock.t = seen + timedelta(minutes=61)
+    assert await eng.evaluate_outcomes() == {"evaluated": 1, "no_price_data": 0}
+    ev = await event_for(session_factory, 1)
+    o = ev.outcome
+    assert ev.decision == "SKIPPED" and o["class"] == "BLOCKED_BY_SAFETY" and o["reason_code"] == "LAUNCHPAD_NOT_VERIFIED"
+    assert (o["simulated_entry"], o["exit_by"], o["simulated_exit"]) == ("0.0000015", "TARGET_SELL", "0.0000013")
+    assert o["label"] == "WOULD_HAVE_LOST" and o["min_return_pct"] < -40 and o["mode"] == "MIRROR"
+    assert await eng.evaluate_outcomes() == {"evaluated": 0, "no_price_data": 0}  # evaluated once
+
+
+async def test_a_solana_buy_older_than_the_stream_history_is_no_price_data(session_factory, redis_client):
+    clock = Clock()
+    eng = CopyEngine(session_factory, redis_client, {}, clock)
+    async with session_factory() as s:
+        t = CopyTarget(chain="solana", wallet=SOL_WHALE, mode="NOTIFY", enabled=True, settings={},
+                       created_at=clock() - timedelta(hours=5))
+        s.add(t)
+        await s.flush()
+        s.add(CopyEvent(id=uuid.uuid4(), target_id=t.id, chain="solana", wallet=SOL_WHALE, token=MINT, side="BUY",
+                        source_event_id="solana:x", target_token_amount=Decimal(10 ** 12), target_quote_amount=Decimal(10 ** 9),
+                        target_at=clock() - timedelta(hours=4), detected_at=clock() - timedelta(hours=4),
+                        decision="NOTIFIED", reason="notify-only target"))
+        await s.commit()
+    assert await eng.evaluate_outcomes() == {"evaluated": 0, "no_price_data": 1}
+    async with session_factory() as s:
+        ev = (await s.execute(select(CopyEvent))).scalar_one()
+    assert ev.outcome["status"] == "NO_PRICE_DATA" and ev.outcome["class"] == "NOTIFY_ONLY" and "3 hours" in ev.outcome["reason"]

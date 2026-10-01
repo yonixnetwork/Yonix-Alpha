@@ -32,9 +32,14 @@ Idempotency: (target_id, source_event_id) is unique in copy_events; the
 event row is inserted before anything is decided, so a restart can never
 act on the same target trade twice.
 
-Latency stages (ms): detection (target trade → seen), analysis (→ safety /
-gate checked), risk (→ plan built), execution (→ paper fill), total. Paper
-fills have no network landing; "landing" is reported as not applicable.
+Latency stages (ms, master upgrade §33): detection (target trade → seen),
+analysis (→ safety / gate checked), risk (→ plan built), decision (seen →
+plan built, i.e. analysis + risk), execution (→ paper fill), total (target
+trade → our fill). The target's own submit / land times are not observable
+from a confirmed-trade feed: its trade time is the block time. build, sign,
+submission, landing and confirmation exist only for a signed transaction:
+copy trading is paper only, so they are None (never 0) and listed in
+"live_only".
 """
 
 from __future__ import annotations
@@ -144,8 +149,12 @@ def latency(target_at: datetime, detected_at: datetime, analyzed_at: datetime | 
 
     last = executed_at or planned_at or analyzed_at or detected_at
     return {"detection": ms(target_at, detected_at), "analysis": ms(detected_at, analyzed_at),
-            "risk": ms(analyzed_at, planned_at), "execution": ms(planned_at, executed_at),
-            "landing": "not applicable (paper)", "total": ms(target_at, last)}
+            "risk": ms(analyzed_at, planned_at), "decision": ms(detected_at, planned_at),
+            "execution": ms(planned_at, executed_at), **{k: None for k in LIVE_ONLY_STAGES},
+            "live_only": list(LIVE_ONLY_STAGES), "total": ms(target_at, last)}
+
+
+LIVE_ONLY_STAGES = ("build", "sign", "submission", "landing", "confirmation")
 
 
 # --- Solana partial copy exits ----------------------------------------------------

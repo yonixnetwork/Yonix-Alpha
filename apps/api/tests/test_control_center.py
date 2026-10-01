@@ -467,6 +467,72 @@ async def test_copy_targets_profiles_and_events(app, client, auth_headers):
     assert {"copy_target.create", "copy_target.update", "copy_target.delete"} <= kinds
 
 
+async def test_copy_position_link_latency_and_outcomes(app, client, auth_headers):
+    """§32 link fields of a copied position, §33 latency stages (paper: the
+    live-only stages are None, never 0) and the §35 outcome summary."""
+    import uuid
+
+    from yonixalpha_core.db.models import CopyEvent, CopyPosition, CopyTarget, PaperAccount
+
+    tok, w = "0x" + "2" * 40, "0x" + "c" * 40
+    async with app.state.db_session_factory() as s:
+        t = CopyTarget(chain="bsc", wallet=w, mode="MIRROR", enabled=True, settings={})
+        acct = PaperAccount(name="evm_copy_bsc", quote_currency="BNB", starting_balance=Decimal(1), cash_balance=Decimal(1))
+        s.add_all([t, acct])
+        await s.flush()
+        p = PaperPosition(account_id=acct.id, engine="evm_copy_bsc", symbol="MOON", asset_id=tok, provider="paper", side="LONG",
+                          entry_price=Decimal("0.0000011"), quantity=Decimal(20000), initial_quantity=Decimal(20000),
+                          remaining_quantity=Decimal(10000), entry_cost_quote=Decimal("0.022"),
+                          proceeds_quote=Decimal("0.024"), last_price=Decimal("0.000002"), take_profit=[], status="open",
+                          entry_at=NOW, plan={})
+        s.add(p)
+        await s.flush()
+        s.add(CopyPosition(position_id=p.id, target_id=t.id, chain="bsc", token=tok, target_tokens=Decimal(5 * 10 ** 23)))
+        lat = {"detection": 2000, "analysis": 300, "risk": 100, "decision": 400, "execution": 100, "build": None,
+               "sign": None, "submission": None, "landing": None, "confirmation": None,
+               "live_only": ["build", "sign", "submission", "landing", "confirmation"], "total": 2500}
+        s.add(CopyEvent(id=uuid.uuid4(), target_id=t.id, chain="bsc", wallet=w, token=tok, side="BUY",
+                        source_event_id="bsc:0xfeed:1", target_token_amount=Decimal(10 ** 24),
+                        target_quote_amount=Decimal(10 ** 18), target_at=NOW - timedelta(minutes=1),
+                        detected_at=NOW - timedelta(seconds=58), decision="COPIED", reason="paper entry", latency_ms=lat,
+                        position_id=p.id, outcome={"status": "EVALUATED", "class": "COPIED", "label": "WOULD_HAVE_WON",
+                                                   "result_pct": 12.5}, outcome_at=NOW))
+        s.add(CopyEvent(id=uuid.uuid4(), target_id=t.id, chain="bsc", wallet=w, token=tok, side="SELL",
+                        source_event_id="bsc:0xbeef:2", target_token_amount=Decimal(5 * 10 ** 23),
+                        target_quote_amount=Decimal(6 * 10 ** 17), target_at=NOW, detected_at=NOW, decision="COPIED"))
+        for i, (cls, label, r) in enumerate([("MISSED", "WOULD_HAVE_WON", 40.0), ("MISSED", "WOULD_HAVE_LOST", -10.0)]):
+            s.add(CopyEvent(id=uuid.uuid4(), target_id=t.id, chain="bsc", wallet=w, token="0x" + str(i + 3) * 40, side="BUY",
+                            source_event_id=f"bsc:0x{i}:0", target_token_amount=Decimal(1), target_quote_amount=Decimal(1),
+                            target_at=NOW, detected_at=NOW, decision="SKIPPED", reason="TOO_LATE: 40s",
+                            outcome={"status": "EVALUATED", "class": cls, "label": label, "result_pct": r}, outcome_at=NOW))
+        s.add(CopyEvent(id=uuid.uuid4(), target_id=t.id, chain="bsc", wallet=w, token="0x" + "9" * 40, side="BUY",
+                        source_event_id="bsc:0x9:0", target_token_amount=Decimal(1), target_quote_amount=Decimal(1),
+                        target_at=NOW, detected_at=NOW, decision="SKIPPED", reason="SAFETY_NOT_PASSED",
+                        outcome={"status": "NO_PRICE_DATA", "class": "BLOCKED_BY_SAFETY"}, outcome_at=NOW))
+        await s.commit()
+
+    pos = (await client.get("/api/copy/positions", headers=auth_headers)).json()["positions"]
+    lk = pos[0]["link"]
+    assert lk["source_wallet"] == w and lk["source_transaction"] == "0xfeed" and lk["copy_mode"] == "MIRROR"
+    assert Decimal(lk["copy_ratio"]) == Decimal("0.02") and Decimal(lk["target_entry"]) == Decimal("0.000001")
+    assert Decimal(lk["target_exit"]) == Decimal("0.0000012") and Decimal(lk["our_exit"]) == Decimal("0.0000024")
+    assert lk["price_displacement_pct"] == 10.0 and lk["slippage"] is None and lk["copy_latency"]["total"] == 2500
+    assert Decimal(lk["pnl"]) == Decimal("0.022")
+
+    ev = (await client.get("/api/copy/events?chain=bsc", headers=auth_headers)).json()
+    assert ev["median_latency_ms_copied"]["decision"] == 400 and "landing" in ev["live_only_stages"]
+    assert any(e["outcome"] and e["outcome"]["label"] == "WOULD_HAVE_WON" for e in ev["events"])
+
+    out = (await client.get("/api/copy/outcomes?chain=bsc", headers=auth_headers)).json()
+    by = {g["class"]: g for g in out["summary"]}
+    assert by["MISSED"]["evaluated"] == 2 and by["MISSED"]["won"] == 1 and by["MISSED"]["won_rate"] == 0.5
+    assert by["MISSED"]["avg_result_pct"] == 15.0 and by["MISSED"]["median_result_pct"] == 15.0
+    assert by["COPIED"]["won"] == 1
+    safety = by["BLOCKED_BY_SAFETY"]
+    assert safety["evaluated"] == 0 and safety["no_price_data"] == 1 and safety["won_rate"] is None  # never 0 %
+    assert out["horizon_min"] == 60 and "fees" in out["basis"]
+
+
 async def test_evm_wallet_endpoint_is_watch_only_and_keyless(app, client, auth_headers):
     r = (await client.get("/api/evm/wallet", headers=auth_headers)).json()
     assert r["live"]["status"] == "NOT_CONFIGURED" and r["live"]["balances"] == {}

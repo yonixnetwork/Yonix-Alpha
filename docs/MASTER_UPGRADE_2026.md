@@ -56,9 +56,9 @@ Providers), see M7.
 | 25–28 | Wallet discovery, validation gates, outlier test, regime test | PARTIAL | outlier test DONE (with / without best and top 3 trades, dependence level); validation gates and regime test still MISSING | M3b |
 | 29 | Copy BUY ONLY / SELL ONLY / BUY+SELL | DONE (paper) | modes NOTIFY, BUY_ONLY, MIRROR (buy+sell), SELL_ONLY (M4); SELL ONLY exits PAPER positions only | M4 |
 | 30–31 | Copy buy checks, chase guard; sell 20/50/100 % replication | DONE (paper) | `copy-engine`, partial sells on Solana (queued) and EVM | — |
-| 32 | Copy position link fields | PARTIAL | `copy_positions` has target / token / target_tokens; source tx, displacement, slippage, latency live in `copy_events` | M4 |
-| 33 | Copy latency stages on dashboard | PARTIAL | detection / analysis / risk / execution / total (ms); build / sign / submit / land are live-only (no live copy yet) | M4 |
-| 34–35 | Copy safety never overridden; paper copy with would-have-won / missed | PARTIAL | safety enforced; missed-trade / would-have-won outcome not recorded | M4 |
+| 32 | Copy position link fields | DONE (paper) | `copy_outcomes.link`: source wallet / tx / position, our position, ratio, mode, target vs our entry and exit, latency, displacement, PnL; slippage None for paper (measured on live fills only); on `/api/copy/positions` and the Copy page | M4b |
+| 33 | Copy latency stages on dashboard | DONE (paper) | detection / analysis / risk / decision / execution / total (ms) on the Copy page; build / sign / submission / landing / confirmation are None and labelled live only (no live copy); the target's own submit time is not observable from confirmed trades | M4b |
+| 34–35 | Copy safety never overridden; paper copy with would-have-won / missed | DONE (paper), NOT VERIFIED in production | safety enforced; every target buy (copied, skipped, notify-only) gets a paper outcome after 60 min (`copy_events.outcome`, migration 0025): simulated entry / exit, result, best / worst move, class COPIED / MISSED / BLOCKED_BY_SAFETY / FILTERED_BY_SETTINGS / NOT_COPYABLE / NOTIFY_ONLY; NO_PRICE_DATA instead of 0 % | M4b |
 | 36–44 | ML: wallet behaviour, mistake labels, frozen validation set, staged contribution, champion/challenger, no look-ahead, paper as training data | PARTIAL | Solana ML: multi-target shadow models, champion/challenger, labels, contribution 0 until validated, no-look-ahead audit; missing: wallet-behaviour labels (§37), EVM features, BUY/WAIT/REJECT/SELL/HOLD comparison (§41) | M12 |
 | 45 | Manual BUY/SELL on all chains | PARTIAL | Solana only (`manual_trade.py`); EVM manual paper missing | M13 |
 | 46–47 | Automatic-vs-manual sell diagnosis with stage-level evidence | DONE in code (M2); production result pending the server run | `tools/exit_diagnosis.py` (read-only report from `execution_orders` + position timeline + reconciliation); `tests/test_exit_diagnosis.py` | M2 |
@@ -233,5 +233,31 @@ database:
   log requests, and the client then skipped eth_getLogs on it for 30
   minutes (BSC's only public logs endpoint). A node that already served
   logs now gets a short doubling cooldown instead.
-- Four.meme `LiquidityAdded` (graduation) was not seen in the sampled
-  windows: NOT VERIFIED whether Four.meme still emits it; to recheck.
+- Four.meme graduation: the community integration (four-meme-community/
+  four-meme-ai) lists the same TokenManager2 address and the same
+  `LiquidityAdded(base, offers, quote, funds)` event we decode. On the server
+  none of the 6,392 Four.meme tokens tracked had graduated by its own
+  contract state (stage DEX = 0), so no graduation was missed. Flap: 48
+  graduated tokens, 44 of them found by state polling before the
+  LaunchedToDEX fix (no event time).
+
+## 9. M4b — copy link, latency stages, paper copy outcomes (2026-10-01)
+
+- Link (§32): `copy_outcomes.link` builds each copied position's link from
+  rows already stored (copy_events, copy_positions, paper_positions), so it
+  also covers positions opened before this change. Prices are native per
+  whole token. Displacement = our entry against the target's. Slippage is
+  None for paper (the paper fill is the executable quote at decision time).
+- Latency (§33): `decision` stage added; build / sign / submission /
+  landing / confirmation are None (never 0) and listed as live only.
+- Outcomes (§35): the copy engine evaluates every target BUY 60 minutes
+  after it was seen, from trade prices of the same token (EVM: evm_trades,
+  kept 14 days; Solana: the pump stream, kept 3 hours, so a Solana event
+  not evaluated within ~2h45 becomes NO_PRICE_DATA). Entry: first trade
+  after we saw it. Exit: the target's own sell for MIRROR targets, else the
+  last trade at the horizon. Before our fees, price impact and gas.
+  Evaluated once (`outcome_at`). It never changes a decision.
+- Copy page: open / closed copy positions with link columns and a detail
+  row; "Paper copy outcomes" table per target and per class; outcome column
+  on copy events; full latency stage line. Rendered locally with seeded
+  data (no console errors); NOT VERIFIED with real target wallets.

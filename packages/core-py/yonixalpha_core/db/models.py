@@ -1253,7 +1253,9 @@ class CopyEvent(Base):
 
     __tablename__ = "copy_events"
     __table_args__ = (UniqueConstraint("target_id", "source_event_id", name="uq_copy_events_target_source"),
-                      Index("ix_copy_events_target_at", "target_id", "detected_at"))
+                      Index("ix_copy_events_target_at", "target_id", "detected_at"),
+                      Index("ix_copy_events_outcome_pending", "target_at",
+                            postgresql_where=text("outcome_at IS NULL AND side = 'BUY'")))
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     target_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("copy_targets.id", ondelete="CASCADE"), nullable=False)
@@ -1272,6 +1274,9 @@ class CopyEvent(Base):
     detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     latency_ms: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     position_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("paper_positions.id", ondelete="SET NULL"), nullable=True)
+    # paper outcome after the horizon (yonixalpha_core.copy_outcomes): class, simulated entry / exit, result
+    outcome: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    outcome_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class CopyPosition(Base):

@@ -1,7 +1,8 @@
 """copy-engine: 24/7 paper copy trading on Solana, BSC and Robinhood Chain,
-plus the periodic wallet-profile rebuild. Targets, modes and limits are read
-from the database on every pass (no restart needed). Paper only: nothing is
-signed or sent."""
+plus the periodic wallet-profile rebuild and the paper outcome of every
+target buy (copied or not) once its horizon has passed. Targets, modes and
+limits are read from the database on every pass (no restart needed). Paper
+only: nothing is signed or sent."""
 
 import asyncio
 import signal
@@ -29,6 +30,7 @@ EVM_EVERY = 2.0
 MANAGE_EVERY = 3.0
 ADAPTERS_EVERY = 60.0
 PROFILES_EVERY = 600.0
+OUTCOMES_EVERY = 60.0
 
 
 def utcnow() -> datetime:
@@ -36,7 +38,7 @@ def utcnow() -> datetime:
 
 
 async def loop(engine: CopyEngine, stop: asyncio.Event) -> None:
-    last = {"evm": 0.0, "manage": 0.0, "adapters": 0.0, "profiles": 0.0}
+    last = {"evm": 0.0, "manage": 0.0, "adapters": 0.0, "profiles": 0.0, "outcomes": 0.0}
 
     async def step(name: str, coro):
         try:
@@ -60,6 +62,9 @@ async def loop(engine: CopyEngine, stop: asyncio.Event) -> None:
             last["manage"] = t
             for chain in ("bsc", "robinhood"):
                 await step(f"{chain}_positions", engine.manage_evm(chain))
+        if t - last["outcomes"] >= OUTCOMES_EVERY:
+            last["outcomes"] = t
+            await step("outcomes", engine.evaluate_outcomes())
         if t - last["profiles"] >= PROFILES_EVERY:
             last["profiles"] = t
             await step("profiles", engine.rebuild_profiles())
