@@ -1204,6 +1204,21 @@ class EvmCursor(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
+class MarketRegimeHour(Base):
+    """One completed hour of a chain's launchpad trades, summarised for the
+    wallet market-regime test (yonixalpha_core.market_regimes)."""
+
+    __tablename__ = "market_regime_hours"
+
+    chain: Mapped[str] = mapped_column(String(16), primary_key=True)
+    hour: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    volume: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)  # native units
+    net_flow: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)  # (buys - sells) / volume
+    median_range: Mapped[Decimal | None] = mapped_column(Numeric(30, 10), nullable=True)
+    tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    trades: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
 class WalletProfile(Base):
     """Measured behaviour of one wallet on one chain (yonixalpha_core.
     wallet_profiles). Metrics, descriptive labels and a configurable score

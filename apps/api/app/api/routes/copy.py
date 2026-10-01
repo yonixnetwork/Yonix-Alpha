@@ -18,8 +18,8 @@ from app.api.deps import get_current_username, get_db, get_redis
 from app.api.util import audit, jsonable
 from yonixalpha_core import copy_outcomes as co
 from yonixalpha_core import copy_trading as ct
-from yonixalpha_core import events
-from yonixalpha_core.db.models import CopyEvent, CopyPosition, CopyTarget, PaperPosition, WalletProfile
+from yonixalpha_core import events, wallet_validation
+from yonixalpha_core.db.models import CopyEvent, CopyPosition, CopyTarget, PaperPosition, PlatformSetting, WalletProfile
 
 router = APIRouter(tags=["copy"])
 CHAIN = "^(solana|bsc|robinhood)$"
@@ -64,6 +64,7 @@ def _target(t: CopyTarget, stats: dict | None = None) -> dict:
 
 @router.get("/wallets/profiles")
 async def profiles(chain: str | None = Query(None, pattern=CHAIN), label: str | None = None,
+                   stage: str | None = Query(None, pattern="^(COLLECTING_HISTORY|VALIDATED|PAPER_FOLLOWED|REJECTED)$"),
                    sort: str = Query("last_seen", pattern="^(last_seen|trades|tokens|score)$"),
                    min_trades: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=500),
                    db: AsyncSession = Depends(get_db), _: str = Depends(get_current_username)) -> dict:
@@ -72,6 +73,8 @@ async def profiles(chain: str | None = Query(None, pattern=CHAIN), label: str | 
         q = q.where(WalletProfile.chain == chain)
     if label:
         q = q.where(WalletProfile.labels.contains([label.upper()]))
+    if stage:
+        q = q.where(WalletProfile.metrics["discovery"]["stage"].astext == stage)
     rows = (await db.execute(q.order_by(nulls_last(desc(SORTS[sort]))).limit(limit))).scalars().all()
     targets = {(t.chain, t.wallet.lower()) for t in (await db.execute(select(CopyTarget))).scalars()}
     return jsonable({
@@ -82,6 +85,34 @@ async def profiles(chain: str | None = Query(None, pattern=CHAIN), label: str | 
         "sorted_by": sort,
         "note": "profiles describe observed behaviour; they are not a ranking and no wallet is labelled best. "
                 "A score needs enough closed trades and is shrunk toward a base rate."})
+
+
+@router.get("/wallets/validation-settings")
+async def get_validation_settings(db: AsyncSession = Depends(get_db), _: str = Depends(get_current_username)) -> dict:
+    row = await db.get(PlatformSetting, wallet_validation.SETTINGS_KEY)
+    cfg, errors = wallet_validation.parse_config(dict(row.value) if row else None)
+    return {"settings": cfg.to_dict(), "defaults": wallet_validation.ValidationConfig().to_dict(), "errors": errors,
+            "history_checks": list(wallet_validation.HISTORY_CHECKS),
+            "note": "applied on the next profile rebuild (every 10 minutes); a wallet that passes is VALIDATED and "
+                    "followed on paper, never copied automatically"}
+
+
+@router.put("/wallets/validation-settings")
+async def put_validation_settings(body: dict, request: Request, db: AsyncSession = Depends(get_db),
+                                  username: str = Depends(get_current_username)) -> dict:
+    row = await db.get(PlatformSetting, wallet_validation.SETTINGS_KEY)
+    merged = {**(dict(row.value) if row else {}), **body}
+    cfg, errors = wallet_validation.parse_config(merged)
+    if errors:
+        raise HTTPException(422, {"errors": errors})
+    value = cfg.to_dict()
+    if row is None:
+        db.add(PlatformSetting(key=wallet_validation.SETTINGS_KEY, value=value))
+    else:
+        row.value = value
+    await audit(db, username, request, "wallet_validation.update", {"changes": body})
+    await db.commit()
+    return {"settings": value}
 
 
 @router.get("/copy/targets")

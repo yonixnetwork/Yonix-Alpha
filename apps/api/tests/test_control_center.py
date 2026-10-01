@@ -533,6 +533,26 @@ async def test_copy_position_link_latency_and_outcomes(app, client, auth_headers
     assert out["horizon_min"] == 60 and "fees" in out["basis"]
 
 
+async def test_wallet_validation_settings_and_discovery_stage_filter(app, client, auth_headers):
+    from yonixalpha_core.db.models import WalletProfile
+
+    g = (await client.get("/api/wallets/validation-settings", headers=auth_headers)).json()
+    assert g["settings"]["min_closed"] == 10 and "never copied automatically" in g["note"]
+    bad = await client.put("/api/wallets/validation-settings", json={"max_single_trade_share": 3}, headers=auth_headers)
+    assert bad.status_code == 422
+    ok = await client.put("/api/wallets/validation-settings", json={"min_closed": 25}, headers=auth_headers)
+    assert ok.status_code == 200 and ok.json()["settings"]["min_closed"] == 25 and "x-config-revision" in ok.headers
+    assert (await client.get("/api/wallets/validation-settings", headers=auth_headers)).json()["settings"]["min_closed"] == 25
+    async with app.state.db_session_factory() as s:
+        for w, stage in (("0x" + "1" * 40, "VALIDATED"), ("0x" + "2" * 40, "COLLECTING_HISTORY")):
+            s.add(WalletProfile(chain="bsc", wallet=w, metrics={"discovery": {"stage": stage}}, labels=[], source="evm_trades",
+                                trades=5, tokens=2, last_seen=NOW))
+        await s.commit()
+    got = (await client.get("/api/wallets/profiles?stage=VALIDATED", headers=auth_headers)).json()["profiles"]
+    assert [p["wallet"] for p in got] == ["0x" + "1" * 40]
+    assert (await client.get("/api/wallets/profiles?stage=BEST", headers=auth_headers)).status_code == 422
+
+
 async def test_evm_wallet_endpoint_is_watch_only_and_keyless(app, client, auth_headers):
     r = (await client.get("/api/evm/wallet", headers=auth_headers)).json()
     assert r["live"]["status"] == "NOT_CONFIGURED" and r["live"]["balances"] == {}

@@ -53,7 +53,7 @@ Providers), see M7.
 | 14–17 | Observation state machine for every token on all chains, windows T0..T+60, expiry, stored | PARTIAL | Solana: `token_observations`, T+5..T+60 snapshots, outcomes ledger; EVM: tokens are categorised and entered directly, no OBSERVING/QUALIFIED/EXPIRED states | M6 |
 | 18–23 | Wallet performance model: 24H–180D windows, avg/median win and loss, profit factor, drawdown, FIFO ledger, INSUFFICIENT DATA | DONE in code for BSC / Robinhood (M3); Solana PARTIAL | `wallet_pnl.py` (FIFO lots, usually earns / usually loses, profit factor, drawdown, holds, best / worst), windows 24H / 7D (14D+ INSUFFICIENT DATA: 7-day profile history, 14-day trade retention); fees listed not subtracted (NOT VERIFIED per launchpad), gas not included; Solana profiles have no sells (launch_buyers) and say so | M3 |
 | 24 | Nansen / MadeOnSol enrichment | MISSING | | M11 |
-| 25–28 | Wallet discovery, validation gates, outlier test, regime test | PARTIAL | outlier test DONE (with / without best and top 3 trades, dependence level); validation gates and regime test still MISSING | M3b |
+| 25–28 | Wallet discovery, validation gates, outlier test, regime test | DONE for BSC / Robinhood (M3b); Solana INSUFFICIENT DATA (no sells recorded) | outlier test (M3); `wallet_validation` (12 configurable checks, per-day consistency, INSUFFICIENT DATA vs NOT VALIDATED); `market_regimes` (hourly volume / net flow / price range, migration 0026; CONSISTENT / REGIME_DEPENDENT); discovery stage COLLECTING_HISTORY → VALIDATED → PAPER_FOLLOWED / REJECTED, never auto-copied; Smart Wallets UI + rules editor. External smart-money sources (§24-25 Nansen, MadeOnSol) not connected | M3b |
 | 29 | Copy BUY ONLY / SELL ONLY / BUY+SELL | DONE (paper) | modes NOTIFY, BUY_ONLY, MIRROR (buy+sell), SELL_ONLY (M4); SELL ONLY exits PAPER positions only | M4 |
 | 30–31 | Copy buy checks, chase guard; sell 20/50/100 % replication | DONE (paper) | `copy-engine`, partial sells on Solana (queued) and EVM | — |
 | 32 | Copy position link fields | DONE (paper) | `copy_outcomes.link`: source wallet / tx / position, our position, ratio, mode, target vs our entry and exit, latency, displacement, PnL; slippage None for paper (measured on live fills only); on `/api/copy/positions` and the Copy page | M4b |
@@ -305,3 +305,33 @@ database:
   As You Go: unlimited on BNB and Robinhood; QuickNode paid: 10,000 blocks).
   Exact per-chain URL formats are copied from the provider's dashboard, not
   built by this app (NOT VERIFIED here).
+
+## 12. M3b — wallet validation, market regimes, discovery (2026-10-01)
+
+- Profiles now cover the full 14 days of retained trades (was 7), so the
+  14D window and weekly checks are measured.
+- Validation (§26, `wallet_validation`): trades, closed trades, active days
+  and weeks, unique tokens and history coverage decide whether there is
+  enough history (else INSUFFICIENT DATA, with the missing checks named);
+  profitable days, share of active days profitable (consistency), max
+  drawdown as % of capital put in, profit factor, best-trade share of gains
+  and median return decide VALIDATED / NOT VALIDATED. Every check is shown
+  with value and requirement; thresholds are edited on the Smart Wallets page
+  (platform setting `wallet_validation`).
+- Regimes (§28, `market_regimes`): each completed hour of a chain's
+  launchpad trades is summarised once (`market_regime_hours`, migration
+  0026): volume, net buy/sell flow, median price range. Hours are classified
+  HIGH/LOW volume, BULLISH/BEARISH, HIGH/LOW volatility against the window's
+  medians (launchpad-market regimes, not the BNB / ETH price). A wallet's
+  closed trades are split by the regime of the hour they were opened in:
+  CONSISTENT, REGIME_DEPENDENT (names where it lost) or INSUFFICIENT_DATA.
+  The first run starts at the first traded hour and fills up to a week of
+  hours per profile rebuild.
+- Discovery (§25): COLLECTING_HISTORY → VALIDATED → PAPER_FOLLOWED, or
+  REJECTED. A validated wallet's last 20 first-buys are replayed with the
+  copy outcome evaluator (entry 3 s after their buy at the first trade
+  after it, exit at their sell or 60 min; refreshed hourly). Nothing adds a
+  copy target: that stays the operator's decision.
+- Rendered locally on profiles built by the real rebuild: a consistent
+  wallet VALIDATED and paper-followed, a wallet carried by one 30x trade
+  REJECTED. NOT VERIFIED on production data yet.
