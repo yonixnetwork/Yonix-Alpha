@@ -39,16 +39,16 @@ Providers), see M7.
 | § | Requirement | Status | Evidence / gap | Phase |
 |---|---|---|---|---|
 | 1 | Preserve working Solana / Pump.fun / PumpSwap execution | DONE | no change to `solana/live_exec.py`, PumpSwap or the Solana gate in this upgrade | — |
-| 2–3 | Research Jul–Sep 2026, repository records | PARTIAL | `MULTICHAIN_AUDIT_2026.md` §1, `PUMPFUN_EXECUTION_RESEARCH.md`, `SCANNER_INTELLIGENCE_2026.md`; the new repos in §7–12 not yet recorded | M9 |
+| 2–3 | Research Jul–Sep 2026, repository records | DONE for every repository named in §7–12 (M9) | §3 records in section 18 (and bsc-mempool in section 17), code inspected at a pinned commit; earlier research in `MULTICHAIN_AUDIT_2026.md` §1, `PUMPFUN_EXECUTION_RESEARCH.md`, `SCANNER_INTELLIGENCE_2026.md` | M9 |
 | 4 | Only Solana, BSC, Robinhood in the active UI | DONE | legacy futures/forex/grid removed (archive branch) | — |
 | 5 | Launchpad health: activity status, last launch/trade/migration, 7d counts, verified flags | DONE in code (M1), NOT VERIFIED in production yet | `chains/activity.py`, table `launchpad_activity` (migration 0024), rollup written in `evm/store.persist_scan`, `/api/launchpads`, Launchpads page; `tests/test_launchpad_activity.py`, `test_control_center` | M1 |
 | 6 | 7-day inactivity → INACTIVE, hidden from active filter, adapter kept, auto-reactivation | DONE in code (M1) | INACTIVE needs 7 days without activity AND 7 days of monitoring (else UNVERIFIED); Active / Archived tabs; discovery keeps scanning, so activity returns the venue to ACTIVE; Solana trade counts are "not tracked" (None), never 0 | M1 |
-| 7 | Solana launchpads beyond Pump.fun/PumpSwap (LetsBONK, LaunchLab, Meteora DBC, Bags, Moonshot, Jupiter Studio) | MISSING | registry has `pumpfun`, `pumpswap` only | M10 |
-| 8 | BSC: Four.meme, Flap verified; Genius.fun etc. researched | PARTIAL | Four.meme / Flap adapters, discovery live, read-only checks PASS; others not researched | M10 |
+| 7 | Solana launchpads beyond Pump.fun/PumpSwap (LetsBONK, LaunchLab, Meteora DBC, Bags, Moonshot, Jupiter Studio) | MISSING (Meteora DBC researched, M9) | registry has `pumpfun`, `pumpswap` only; DBC program, events, DAMM v2 migration and Token-2022 transfer-hook support recorded in section 18 | M10 |
+| 8 | BSC: Four.meme, Flap verified; Genius.fun etc. researched | PARTIAL | Four.meme / Flap adapters, discovery live, read-only checks PASS; Four.meme addresses and events match four-meme-ai (M9); X Mode and AntiSniperFeeMode tokens NOT DETECTED (section 18); Genius.fun not researched | M10 |
 | 9 | BSC mempool wallet copying | DONE (measurement) | `evm.streams.PendingTxStream`: eth_subscribe newPendingTransactions (full bodies) over a dashboard WSS endpoint; matches copy targets / launchpads; REFUSED / LIMITED become UPGRADE REQUIRED; copy decisions stay on confirmed trades (§17) | M8 |
 | 10 | Robinhood: Pons, NOXA, Odyssey | PARTIAL | adapters exist; only Pons V2 proven active | M1 |
 | 11 | Pons coordinated-launch safety (privileged / creator-linked / common-funder / simultaneous buyers) | DONE (paper; on-chain assumptions NOT VERIFIED until coordination_check runs on the server) | launch_coordination: 13 detections, configurable NO_TRADE / REDUCE_SIZE / MANUAL_APPROVAL / NONE, data-evm entries + EVM copy buys; see section 13 | M5 |
-| 12 | Robinhood reference repos inspected | PARTIAL | pons-launch-engine and pons-terminal read for M5 (section 13); the other five still M9 | M9 |
+| 12 | Robinhood reference repos inspected | DONE (M9) | all seven inspected plus the official Pons contract source (section 18): Pons events match the official source, sequencer decoder matches 143 real transactions, feed signatures verified, router attribution measured by `tools.trader_attribution` | M9 |
 | 13 | Robinhood sequencer feed (+ delayed feed fallback), latency / gaps measured | DONE | `evm.streams.SequencerFeed` in data-evm: Nitro broadcast decoding, resume by sequence number, delayed-feed fallback, gaps / duplicates / delay / matches, stream lead on copy events (§17). Real feed NOT VERIFIED from this environment | M8 |
 | 14–17 | Observation state machine for every token on all chains, windows T0..T+60, expiry, stored | DONE (EVM, paper); Solana PARTIAL (own state names, see section 15) | EVM: `evm_observations`, full state machine, T0/T+5/T+10/T+20/T+30/T+60 snapshots with the §16 fields, adaptive MIGRATED / MOMENTUM windows, EXPIRED_NO_ENTRY, entries only while observed; Solana: `token_observations` + follow-ups, T+20m added | M6 |
 | 18–23 | Wallet performance model: 24H–180D windows, avg/median win and loss, profit factor, drawdown, FIFO ledger, INSUFFICIENT DATA | DONE in code for BSC / Robinhood (M3); Solana PARTIAL | `wallet_pnl.py` (FIFO lots, usually earns / usually loses, profit factor, drawdown, holds, best / worst), windows 24H / 7D (14D+ INSUFFICIENT DATA: 7-day profile history, 14-day trade retention); fees listed not subtracted (NOT VERIFIED per launchpad), gas not included; Solana profiles have no sells (launch_buyers) and say so | M3 |
@@ -533,8 +533,10 @@ Robinhood Chain sequencer feed (§13):
 - Measured and shown: state, reconnects, messages, transactions, sequence
   gaps and missing messages, duplicates / out-of-order, feed delay median
   and p95 (message timestamp, 1 s resolution), matches.
-- On reconnect the client asks for the next sequence number, so a short
-  drop loses nothing. After `fallback_after_failures` (3) failed
+- On reconnect the client asks for the last sequence number it has seen
+  (that message arrives again and is dropped quietly), so a short drop
+  loses nothing. Changed in M9: asking for the next number, past the
+  server's tail, replays the whole backlog (section 18). After `fallback_after_failures` (3) failed
   connections it uses the delayed feed and retries the primary every
   `primary_retry_minutes` (10). Delayed-feed sightings are labelled
   `delayed_feed`, never as primary-speed.
@@ -588,4 +590,295 @@ against local WebSocket servers), `test_provider_roles.py`
 `/api/evm/streams` and stream settings. The real Robinhood feed and a real
 BSC pending stream are NOT VERIFIED here (no egress from this
 environment); check the panel on the server after deploy.
+
+## 18. M9 — reference repository records (2026-10-01)
+
+Master §3, §7, §8, §12. Every repository named there was cloned and its code
+read at the commit given; nothing was installed into YonixAlpha or run
+against a wallet. "Last update" is the latest commit; "meaningful" is the
+latest commit that changed files (several repositories add empty commits
+that only refresh their activity date, so activity is not evidence of
+quality).
+
+### What changed in YonixAlpha because of it
+
+- **Sequencer feed client (M8), checked against real data.** chainstacklabs'
+  captured mainnet frames: our decoder gives the same hash, to, selector,
+  sender, value and nonce for all 143 transactions in 39 messages.
+  Fixes from their measurements:
+  - Resume asks for the last sequence number seen, not the next one. A
+    number past the server's tail makes Nitro replay its whole backlog of
+    about 1,200 messages.
+  - The first connection's replayed history is sequenced but not matched
+    or timed.
+  - A re-sent sequence number with another block hash counts as a reorg.
+  - permessage-deflate is stated explicitly (the feed refuses clients
+    without it since 2026-09-17).
+- **Feed signature check (on by default).** Every Robinhood feed message
+  carries `signatureV2`. Our own implementation of Nitro's preimage
+  recovers the sequencer key `0xdaa5…87f4` on all 39 real messages and
+  scatters with a wrong chain id. A message that fails is dropped before
+  it moves the sequence. Many failures become a CONFIGURATION plan-health
+  finding (key rotation). The key is the one chainstacklabs found to be
+  the L1 batch poster; it is NOT re-checked on L1 from here.
+- **coincurve pinned.** It makes sender recovery 6 times faster
+  (10.3 to 1.7 ms measured) and feed signatures cheap.
+- **Router attribution, measured before changing anything.** The official
+  Pons source emits `CurveBuy(msg.sender, recipient, ...)` /
+  `CurveSell(msg.sender, ...)`. A trade through a router (pons-terminal's
+  TradeRouters, the launchAndBuy router) is therefore stored with the
+  router as the trader. Wallet profiles, smart-wallet discovery and copy
+  detection would see one busy "wallet" instead of the people behind it.
+  `tools.trader_attribution` (read-only) reports, per launchpad:
+  - the busiest traders, contract or wallet, with a known-router label;
+  - how many Pons curve buys name a different recipient.
+
+  Attribution changes only after that output is seen.
+  `chains/evm/known_routers.py` holds the router addresses found in the
+  code. They are labels only, never trusted.
+- **Pons events verified against the official source.** The Solidity
+  source is ponsdotdev/ponsfamily at 44a3db9, MIT. Every Pons event we
+  decode matches it by topic hash: V1 TokenLaunched, V2 TokenLaunched,
+  CurveBuy, CurveSell, CurveCompleted, PoolGraduated and LaunchSwept.
+  Both factory addresses match the registry.
+
+### Gaps found, not fixed in M9
+
+- **Four.meme X Mode and AntiSniperFeeMode tokens are not detected.**
+  four-meme-ai names the on-chain flags:
+  - X Mode: `_tokenInfos[token].template & 0x10000`. X Mode tokens must
+    be bought with a signed method; a plain buy reverts.
+  - AntiSniperFeeMode: `_tokenInfoEx1s[token].feeSetting > 0`.
+  - TaxToken: `(template >> 10) & 0x3F == 5`; we already detect it via
+    `feeRate()`.
+
+  The struct layouts of those getters are not published there. Decoding
+  a guessed layout could misread every token, so this needs the verified
+  TokenManager2 ABI or an on-chain probe first (M10).
+- **Pons V1 legacy factory** `0x0c37a24F5D23A486FA692d1500881d698B1F77a4`
+  (named by pons-launch-engine and casatrickdev) is not in the registry.
+  It is "legacy" in both, so it is left out until a server scan shows
+  launches there.
+- **Wash-volume tooling exists for Pons.** pons-terminal's V2 router has
+  `roundTrip` (buy and sell in one transaction) and a "Volume" mode of
+  buy-then-sell cycles. Volume on Pons tokens can be manufactured by design.
+  The manufactured-pump detector covers Solana; an EVM equivalent that
+  flags round trips is M10 / M12 work.
+- **Meteora DBC allows Token-2022 base tokens with transfer hooks**
+  (0.2.x). Our Solana safety already parses Token-2022 extensions
+  including transferHook, so a DBC adapter can reuse it.
+
+### Records
+
+**chainstacklabs/robinhood-chain-sequencer-feed**
+- URL: github.com/chainstacklabs/robinhood-chain-sequencer-feed.
+- Commit: 8ea0972 (2026-09-25, also the latest meaningful one).
+- License: Apache-2.0. Language: Python 3.11+. Chain: Robinhood Chain.
+- Purpose: decode the sequencer feed (`rhfeed`), with an optional
+  Offchain Labs relay.
+- Production status: "Experimental. A reference implementation, not for
+  production use".
+- Dependencies: websockets, coincurve, eth-hash, orjson; Docker relay
+  pinned to nitro v3.12.0.
+- Execution: none. Monitoring: yes (filter by to / selector / sender,
+  verify signatures).
+- Latency (theirs, one machine): ~4 µs per transaction for cheap fields,
+  ~70 µs with the sender; the chain does ~71 tx/s.
+- Security:
+  - signature verification is opt-in;
+  - a stock relay verifies nothing (documented by them);
+  - no keys involved.
+- Limitations:
+  - soft confirmations only: a transaction can still revert or be voided
+    by ArbOS compliance filtering;
+  - the relay hides reorgs.
+- Decision: PARTIALLY USE.
+  - Their measurements, the preimage description and 12 captured frames
+    are used: the frames are a test fixture with the Apache-2.0 licence,
+    unmodified.
+  - No code taken; our decoder and signature check are our own and
+    tested against theirs.
+
+**ponsdotdev/ponsfamily (official Pons contracts)**
+- URL: github.com/ponsdotdev/ponsfamily.
+- Commit: 44a3db9 (2026-10-01), 399 commits.
+- License: MIT. Language: Solidity 0.8.26 / 0.8.30. Chain: Robinhood Chain.
+- Purpose: V1 CREATE2 factory with locked Uniswap V3 liquidity; V2
+  bonding curve graduating to a Uniswap V4 pool with hook, creator tax,
+  snipe tax and buyback vault.
+- Production status: deployed; factories `0xA5aA…1feB` (V1) and
+  `0x7eD5…EC7e` (V2), verified on chain according to the README.
+- Execution / monitoring: n/a (contracts).
+- Security: says to verify deployed bytecode against source before
+  trusting an address; NOT VERIFIED from here.
+- Decision: ACCEPT as the primary source for Pons ABIs and event
+  semantics.
+
+**slightlyuseless/pons-launch-engine**
+- URL: github.com/slightlyuseless/pons-launch-engine.
+- Commit: 29205ab (2026-09-01), 2 commits, 1 author.
+- License: MIT. Language: TypeScript (Node 22.5). Chain: Robinhood Chain.
+- Purpose: a creator-side campaign engine:
+  - launch your own Pons token and buy it from up to 32 controlled
+    wallets on the V2 exemption list;
+  - target the V1 restricted blocks N+1 / N+2;
+  - automated exits.
+- Production status: new, single drop.
+- Dependencies: viem, SQLite, Alchemy RPC, Blockscout, Pinata.
+- Execution: yes (multi-wallet). Monitoring: one deployer.
+- Security: keys in a local gitignored file, not printed.
+- Limitations: built for launch-window self-buying, which is exactly what
+  the Pons coordination check (M5) is meant to catch. The server's 31
+  declared + 2 automatic exemptions match its "up to 32 exemption
+  addresses".
+- Decision: REJECT for integration; evidence for §11 safety.
+
+**yesiambroke/pons-terminal**
+- URL: github.com/yesiambroke/pons-terminal.
+- Commit: e678f69 (2026-09-21), 6 commits.
+- License: MIT. Language: TypeScript. Chain: Robinhood Chain.
+- Purpose: multi-wallet Pons trading terminal: ladders, "Volume"
+  buy-then-sell cycles, multi-wallet sell-all.
+- Production status: beta tool.
+- Dependencies: viem, CoinGecko price API, a third-party RPC
+  (arrowrpc).
+- Execution: yes, every trade through its own TradeRouter contracts
+  (V1 `0x0102…E31B`, V2 `0xb8f7…3B06`), which skim 0.5% per leg ("so
+  protocol fees fund the project"). Monitoring: balances and routes only.
+- Security: AES-encrypted local wallet vault.
+- Limitations: router-mediated trades hide the wallet in Pons events
+  (see above); `roundTrip` manufactures volume.
+- Decision: REJECT for integration. Its router addresses are labels in
+  `known_routers.py`.
+
+**casatrickdev/robinhood-trading-tools (pons-sdk)**
+- URL: github.com/casatrickdev/robinhood-trading-tools.
+- Commit: 0715eb6 (2026-09-15), 14 commits.
+- License: MIT. Language: TypeScript. Chain: Robinhood Chain.
+- Purpose: read-only Pons SDK, historical launch indexer, copy-trading
+  research ("no live execution"; sniper and bundler on the roadmap).
+- Production status: early.
+- Dependencies: viem.
+- Execution: none. Monitoring: launches and swaps via eth_getLogs in
+  2,000-block chunks.
+- Security: no keys.
+- Limitations: names the Pons legacy factory and lockers we do not
+  track; public RPC times out on wide log ranges (as we found).
+- Decision: PARTIALLY USE (addresses cross-checked; nothing imported).
+
+**nirholas/robinhood-chain-sdk ("hoodchain")**
+- URL: github.com/nirholas/robinhood-chain-sdk.
+- Commit: c1a76ee (2026-09-15); meaningful fd35d65 (2026-07-29); since
+  then only empty "refresh activity" commits.
+- License: "All rights reserved" (proprietary).
+- Language: TypeScript (viem). Chain: Robinhood Chain (mainnet and
+  testnet addresses).
+- Purpose: Stock Tokens, Chainlink quotes, Uniswap V3, NOXA / Odyssey
+  watchers, sequencer firehose.
+- Production status: library, npm.
+- Execution: swaps. Monitoring: launch watchers, firehose.
+- Security: n/a.
+- Limitations:
+  - no Pons (the most active venue);
+  - the licence forbids reuse.
+- Decision: REJECT (licence). NOXA / Odyssey addresses match our
+  registry; its differing WETH / router addresses are testnet.
+
+**nirholas/robinhood-trading-bot**
+- URL: github.com/nirholas/robinhood-trading-bot.
+- Commit: 7e46f1a (2026-09-15); meaningful 71bb405 (2026-07-22, "Pivot
+  execution venue to Robinhood Chain").
+- License: Apache-2.0, but it depends on the proprietary hoodchain.
+- Language: JavaScript (Node 22.5). Chain: Robinhood Chain.
+- Purpose: rule-based entries on NOXA / Odyssey launches plus copy
+  trading; paper by default; live triple-gated.
+- Dependencies: hoodchain, viem, Blockscout API for launch scanning.
+- Execution: Uniswap V3 SwapRouter02 (curve tokens are signal-only when
+  live). Monitoring: launches, Transfer logs of tracked wallets.
+- Security:
+  - the key comes from .env;
+  - the dashboard token is printed in a URL query string.
+- Limitations:
+  - no Pons;
+  - depends on an explorer API (Blockscout) for discovery;
+  - no launch-window coordination checks.
+- Decision: REJECT. YonixAlpha already does this with on-chain events and
+  stronger safety.
+
+**nirholas/robinhood-chain-alerts ("hood-alerts")**
+- URL: github.com/nirholas/robinhood-chain-alerts.
+- Commit: 1c15c21 (2026-09-15); meaningful a0ce7f9 (2026-07-20).
+- License: "All rights reserved". Language: TypeScript.
+- Chain: Robinhood Chain (NOXA, Odyssey).
+- Purpose: Telegram / Discord alert service with a rule engine and free
+  / premium tiers.
+- Execution: none. Monitoring: launches, curve trades, graduations, whale
+  swaps.
+- Useful idea, already followed: USD values only from on-chain
+  liquidity, unknown stays null and never 0.
+- Limitations: no Pons; proprietary.
+- Decision: REJECT (licence; reference for the null-not-zero rule).
+
+**four-meme-community/four-meme-ai**
+- URL: github.com/four-meme-community/four-meme-ai.
+- Commit: c81f0ee (2026-03-30), 9 commits.
+- License: MIT. Language: TypeScript. Chain: BSC.
+- Purpose: agent "skill" and CLI to create / trade Four.meme tokens,
+  read TokenManager2 events, TaxToken info, EIP-8004 identity.
+- Production status: maintained by the Four.meme community org; six
+  months without changes.
+- Execution: yes (PRIVATE_KEY in env). Monitoring: getLogs over
+  TokenManager2.
+- Security: plain-env key.
+- Limitations: V1 not supported; struct layouts for the mode flags not
+  given.
+- Decision: PARTIALLY USE. Our contract addresses (V1 `0xEC45…bFbC`,
+  V2 `0x5c95…762b`, Helper3 `0xF251…6034`) and the four event signatures
+  match; the X Mode / AntiSniperFeeMode gap comes from here.
+
+**MeteoraAg/dynamic-bonding-curve (+ -sdk, docs)**
+- URLs: github.com/MeteoraAg/dynamic-bonding-curve,
+  …/dynamic-bonding-curve-sdk, …/docs.
+- Commits:
+  - program f552f20 (2026-09-09, release 0.2.1);
+  - SDK a07966d (2026-09-24);
+  - docs 010de62 (2026-09-28).
+- Licenses: the program is under the "Meteora Non-commercial Licence";
+  the SDK is MIT.
+- Languages: Rust (Anchor) / TypeScript. Chain: Solana.
+- Purpose: a launch-pool protocol for partners. Each partner sets the
+  curve, fees and quote mint; tokens graduate to DAMM v2 (DAMM v1
+  deprecated for new configs).
+- Program id: `dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN`.
+- Events: EvtInitializePool, EvtSwap / EvtSwap2, EvtCurveComplete, the
+  migration events, and others.
+- Execution / monitoring: via the SDK.
+- Security / limitations:
+  - SPL and Token-2022 base tokens, including transfer hooks (sell risk);
+  - the rate-limiter fee mode is deprecated;
+  - the program licence forbids commercial reuse of its code.
+- Decision: research only for M10. A DBC adapter would decode events
+  from the published IDL with our own code, and needs launch / trade /
+  migration verification before any paper trading.
+
+**1chimaruGin/bsc-mempool**: see section 17.
+
+### Tests
+
+- `test_evm_streams.py` (12):
+  - real-frame decoding and the signature check (including wrong chain id
+    and tampering);
+  - a forged frame dropped before sequencing;
+  - backlog, reorg and quiet resume;
+  - the attribution report on the real schema.
+- `test_provider_roles.py`: the signature-failure finding.
+
+NOT VERIFIED here:
+- the live feed's behaviour after these changes;
+- whether the delayed feed also signs its messages. If it does not, its
+  messages are dropped while it is in use, and the stream panel and plan
+  health say so; the signature check can be switched off in the stream
+  settings;
+- the attribution numbers. `tools.trader_attribution` must run on the
+  server.
 
