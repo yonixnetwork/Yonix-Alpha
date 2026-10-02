@@ -1,18 +1,21 @@
 import json
+import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from redis.asyncio import Redis
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api import health_state
 from app.api.deps import get_current_username, get_db, get_redis, get_settings
+from app.api.util import audit
 from app.schemas.common import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, Page
 from app.schemas.system import KillSwitchSummary, ServiceStatus, SystemEventOut, SystemStatusOut
-from yonixalpha_core import config_validation, events, kill_switch
+from yonixalpha_core import config_validation, events, kill_switch, update_monitor
 from yonixalpha_core.config import Settings
-from yonixalpha_core.db.models import DataQualityEvent, Notification, RiskAssessment, SystemEvent
+from yonixalpha_core.db.models import (DataQualityEvent, Notification, RiskAssessment, SystemEvent, UpdateEvent,
+                                       UpdateWatch)
 
 router = APIRouter(prefix="/system", tags=["system"])
 
@@ -164,3 +167,71 @@ async def observability(
         "redis_memory": {"used": memory.get("used_memory_human"), "max": memory.get("maxmemory_human"),
                          "policy": memory.get("maxmemory_policy")},
     }
+
+
+def _iso(v: datetime | None) -> str | None:
+    return v.isoformat() if v else None
+
+
+@router.get("/updates")
+async def updates(
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    limit: int = Query(50, ge=1, le=200),
+    _: str = Depends(get_current_username),
+) -> dict:
+    """Update monitor (master §64-66): every watched repository / dependency
+    with its last check and classification, and the recent change events.
+    A watch never checked reads NOT CHECKED, never "up to date"."""
+    rows = {r.key: r for r in (await db.execute(select(UpdateWatch))).scalars()}
+    watches = []
+    for w in update_monitor.WATCHES:
+        r = rows.get(w.key)
+        watches.append({
+            "key": w.key, "kind": w.kind, "target": w.target, "category": w.category, "why": w.why,
+            "used_directly": w.used_directly, "status": "NOT_CHECKED" if r is None or r.last_checked is None else (
+                "ERROR" if r.error else "CHECKED"),
+            "last_checked": _iso(r.last_checked) if r else None, "error": r.error if r else None,
+            "latest_commit": r.latest_commit if r else None, "latest_commit_at": _iso(r.latest_commit_at) if r else None,
+            "latest_release": r.latest_release if r else None, "previous_release": r.previous_release if r else None,
+            "installed_version": r.installed_version if r else None,
+            "classification": r.classification if r else None, "flags": r.flags if r else None,
+            "change_summary": r.change_summary if r else None,
+        })
+    evs = (await db.execute(select(UpdateEvent).order_by(UpdateEvent.detected_at.desc()).limit(limit))).scalars().all()
+    open_counts = dict((await db.execute(select(UpdateEvent.classification, func.count()).where(
+        UpdateEvent.acknowledged_at.is_(None)).group_by(UpdateEvent.classification))).all())
+    return {
+        "watches": watches,
+        "events": [{"id": str(e.id), "key": e.key, "detected_at": _iso(e.detected_at), "classification": e.classification,
+                    "from_ref": e.from_ref, "to_ref": e.to_ref, "summary": e.summary, "notified": e.notified,
+                    "acknowledged_at": _iso(e.acknowledged_at), "acknowledged_by": e.acknowledged_by} for e in evs],
+        "unacknowledged": open_counts,
+        "classes": list(update_monitor.CLASSES),
+        "check_interval_s": update_monitor.CHECK_SECONDS,
+        "github_token": "configured" if settings.GITHUB_TOKEN else "not configured (60 requests per hour)",
+        "note": "Notify only: nothing is upgraded or deployed automatically. Classification is keyword and path based; "
+                "read the change before acting.",
+    }
+
+
+@router.post("/updates/{event_id}/acknowledge")
+async def acknowledge_update(
+    event_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    username: str = Depends(get_current_username),
+) -> dict:
+    try:
+        eid = uuid.UUID(event_id)
+    except ValueError:
+        raise HTTPException(404, "update event not found")
+    ev = await db.get(UpdateEvent, eid)
+    if ev is None:
+        raise HTTPException(404, "update event not found")
+    if ev.acknowledged_at is None:
+        ev.acknowledged_at, ev.acknowledged_by = datetime.now(timezone.utc), username[:64]
+        await audit(db, username, request, "update_event.acknowledge", {"id": event_id, "key": ev.key,
+                                                                        "classification": ev.classification})
+        await db.commit()
+    return {"id": event_id, "acknowledged_at": _iso(ev.acknowledged_at), "acknowledged_by": ev.acknowledged_by}

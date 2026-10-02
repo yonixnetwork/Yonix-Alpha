@@ -40,12 +40,12 @@ EVENT_TYPES = {
 # Which notification kinds go to Telegram when no preference is stored.
 DEFAULT_TELEGRAM_KINDS = {
     "approval_required", "entry", "stop_loss", "trailing_stop", "close", "connection_failure",
-    "provider_failure", "ml_drift", "strategy_disabled",
+    "provider_failure", "ml_drift", "strategy_disabled", "infrastructure_update",
 }
 NOTIFICATION_KINDS = [
     "qualified_token", "liquidity_confirmed", "signal", "approval_required", "entry", "tp1", "tp2", "tp3",
     "stop_loss", "trailing_stop", "close", "risk_rejection", "blacklist_rejection", "connection_failure",
-    "ml_drift", "strategy_disabled", "provider_failure",
+    "ml_drift", "strategy_disabled", "provider_failure", "infrastructure_update",
 ]
 PREFS_KEY = "notification_prefs"
 

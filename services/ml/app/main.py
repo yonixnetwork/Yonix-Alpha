@@ -1,4 +1,5 @@
 import asyncio
+import os
 import signal
 
 from yonixalpha_core.config import get_settings
@@ -8,6 +9,7 @@ from yonixalpha_core.db.models import SystemEvent
 from yonixalpha_core.db.redis import make_redis
 from yonixalpha_core.logging import configure_logging, get_logger
 from yonixalpha_core.notify import send_telegram_alert
+from yonixalpha_core import update_monitor
 
 from app.ablation import run_ablation
 from app.gate_ml import run_cycle
@@ -23,6 +25,9 @@ log = get_logger("ml.main")
 # expected outcome for a long time.
 TRAIN_INTERVAL_SECONDS = 3600
 SERVICE_NAME = "ml"
+# GitHub / PyPI update monitor (master §64-66): notifies, never deploys.
+# UPDATE_MONITOR=0 switches it off.
+UPDATE_MONITOR = os.getenv("UPDATE_MONITOR", "1") != "0"
 
 
 async def _record_system_event(session_factory, event_type: str, severity: str, detail: dict | None = None) -> None:
@@ -105,7 +110,10 @@ async def run() -> None:
     log.info("ml.started")
 
     try:
-        await asyncio.gather(_training_loop(session_factory, redis, settings, stop_event), heartbeat_loop(settings, "ml", stop_event))
+        tasks = [_training_loop(session_factory, redis, settings, stop_event), heartbeat_loop(settings, "ml", stop_event)]
+        if UPDATE_MONITOR:
+            tasks.append(update_monitor.run(session_factory, redis, settings, stop_event))
+        await asyncio.gather(*tasks)
     finally:
         await _record_system_event(session_factory, "service_stopped", "info")
         await redis.aclose()

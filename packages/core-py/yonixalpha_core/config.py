@@ -70,6 +70,9 @@ class Settings(BaseSettings):
     # Optional Etherscan API V2 key: first-funder lookups of BSC wallets for the
     # launch-coordination check (Robinhood Chain uses its public Blockscout).
     ETHERSCAN_API_KEY: Optional[str] = None
+    # Optional GitHub token (read-only, no scopes needed) for the update monitor:
+    # 5,000 API requests per hour instead of 60. Never logged or returned.
+    GITHUB_TOKEN: Optional[SecretStr] = None
     EVM_WALLET_ADDRESS: Optional[str] = None
     EVM_WALLET_PRIVATE_KEY: Optional[SecretStr] = None
     JUPITER_API_KEY: Optional[str] = None
