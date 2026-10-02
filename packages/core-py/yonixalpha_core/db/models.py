@@ -1274,6 +1274,44 @@ class EvmAddressKind(Base):
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class UpdateWatch(Base):
+    """One monitored repository or dependency (update_monitor, master §64-65):
+    what was seen last and how the latest change was classified."""
+
+    __tablename__ = "update_watches"
+
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)  # github:owner/repo | pypi:package
+    category: Mapped[str] = mapped_column(String(32), nullable=False)
+    last_checked: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    latest_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    latest_commit_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    previous_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    latest_release: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    previous_release: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    installed_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    classification: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    flags: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # security / api / breaking / performance
+    change_summary: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    error: Mapped[str | None] = mapped_column(String(300), nullable=True)
+
+
+class UpdateEvent(Base):
+    """A detected change of a watch (history; never overwritten)."""
+
+    __tablename__ = "update_events"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    classification: Mapped[str] = mapped_column(String(24), nullable=False)
+    from_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    to_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    summary: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    notified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    acknowledged_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
 class MarketRegimeHour(Base):
     """One completed hour of a chain's launchpad trades, summarised for the
     wallet market-regime test (yonixalpha_core.market_regimes)."""

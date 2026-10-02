@@ -119,3 +119,48 @@ async def test_list_events_filters_by_severity(app, client, auth_headers):
     body = resp.json()
     assert body["total"] == 1
     assert body["items"][0]["severity"] == "error"
+
+
+async def test_updates_lists_watches_events_and_acknowledges(app, client, auth_headers):
+    """Update monitor (master §64-66): unchecked watches read NOT_CHECKED, never
+    "up to date"; events are listed newest first and acknowledged once, audited."""
+    from datetime import datetime, timezone
+
+    from sqlalchemy import select
+
+    from yonixalpha_core import update_monitor
+    from yonixalpha_core.db.models import AuditLog, UpdateEvent, UpdateWatch
+
+    assert (await client.get("/api/system/updates")).status_code == 401
+    at = datetime(2026, 10, 2, 12, tzinfo=timezone.utc)
+    async with app.state.db_session_factory() as s:
+        s.add(UpdateWatch(key="github:ponsdotdev/ponsfamily", category="robinhood", last_checked=at,
+                          latest_commit="c" * 40, classification="ACTION_REQUIRED", flags={"api": True}))
+        s.add(UpdateWatch(key="pypi:httpx", category="dependency", last_checked=at, error="RateLimited: x"))
+        ev = UpdateEvent(key="github:ponsdotdev/ponsfamily", detected_at=at, classification="ACTION_REQUIRED",
+                         from_ref="b" * 40, to_ref="c" * 40, summary={"why": "Pons", "reasons": ["abi"]}, notified=True)
+        s.add(ev)
+        await s.commit()
+        eid = str(ev.id)
+    body = (await client.get("/api/system/updates", headers=auth_headers)).json()
+    by_key = {w["key"]: w for w in body["watches"]}
+    assert len(body["watches"]) == len(update_monitor.WATCHES)
+    assert by_key["github:ponsdotdev/ponsfamily"]["status"] == "CHECKED"
+    assert by_key["github:ponsdotdev/ponsfamily"]["classification"] == "ACTION_REQUIRED"
+    assert by_key["pypi:httpx"]["status"] == "ERROR"
+    assert by_key["github:anza-xyz/agave"]["status"] == "NOT_CHECKED" and by_key["github:anza-xyz/agave"]["classification"] is None
+    assert body["unacknowledged"] == {"ACTION_REQUIRED": 1} and body["events"][0]["id"] == eid
+    assert body["github_token"] in ("configured", "not configured (60 requests per hour)")  # never the value
+    assert "automatically" in body["note"]
+
+    r = await client.post(f"/api/system/updates/{eid}/acknowledge", headers=auth_headers)
+    assert r.status_code == 200 and r.json()["acknowledged_by"]
+    first = r.json()["acknowledged_at"]
+    assert (await client.post(f"/api/system/updates/{eid}/acknowledge", headers=auth_headers)).json()["acknowledged_at"] == first
+    assert (await client.get("/api/system/updates", headers=auth_headers)).json()["unacknowledged"] == {}
+    assert (await client.post("/api/system/updates/not-a-uuid/acknowledge", headers=auth_headers)).status_code == 404
+    assert (await client.post(f"/api/system/updates/{'0' * 8}-0000-0000-0000-{'0' * 12}/acknowledge",
+                              headers=auth_headers)).status_code == 404
+    async with app.state.db_session_factory() as s:
+        audits = (await s.execute(select(AuditLog).where(AuditLog.event_type == "update_event.acknowledge"))).scalars().all()
+        assert len(audits) == 1

@@ -68,7 +68,7 @@ Providers), see M7.
 | 59–61 | PnL always shown with colour, market cap $K/$M | PARTIAL | Solana positions show PnL; USD market cap done for Solana (G3); EVM positions page not audited | M14 |
 | 60 | NO EMOJIS | DONE (this phase) | alert prefixes and the live page tick mark removed | M0 |
 | 62–63 | 24/7 server-side workers | DONE | all engines are containers; dashboard is a viewer | — |
-| 64–66 | GitHub / provider update monitor with Telegram + System Health | MISSING | | M15 |
+| 64–66 | GitHub / provider update monitor with Telegram + System Health | DONE in code (M15); GitHub path NOT VERIFIED against the real API from the build environment (blocked there), PyPI path checked against pypi.org | `update_monitor.py` in the ml service: 14 repositories + 8 pinned dependencies every 6 h via GitHub REST and PyPI JSON (no HTML); classes INFO / UPGRADE_AVAILABLE / BREAKING_CHANGE / SECURITY_UPDATE / PROVIDER_CHANGE / ACTION_REQUIRED; baseline first check; history in `update_events` (migration 0031); Telegram kind `infrastructure_update`; System Health → Research / Updates with acknowledge; never deploys (section 21) | M15 |
 | 67–70 | Multiple detection methods, source priority, NO_TRADE on provider failure | PARTIAL | NO_TRADE on unavailable data holds on both chains; single detection path per chain | M8 |
 | 71–75 | Paper trading all chains feeding ML | PARTIAL | Solana complete; EVM paper entries exist, not yet ML features | M12 |
 | 76–77 | Safety hierarchy, decision states EXECUTE / REDUCE_SIZE / WAIT / MANUAL_APPROVAL / REJECT / NO_TRADE | PARTIAL | Solana gate implements the hierarchy; decision words differ (PROMOTE/REJECT/...); MANUAL_APPROVAL not implemented | M6 |
@@ -1011,4 +1011,93 @@ profile rebuild.
 - A copy target that trades only through a router is not seen as trading
   (its trades are credited to the router), except Pons buys, which now name
   the target as recipient.
+
+## 21. M15 — update monitor (2026-10-02)
+
+Master §64-66: watch the repositories and dependencies YonixAlpha relies
+on, tell the operator when something changes, never apply it.
+
+**What is watched** (`yonixalpha_core/update_monitor.py`, `WATCHES`):
+
+| Area | Sources | Used directly (a change on our paths is ACTION REQUIRED) |
+|---|---|---|
+| Solana | pump-fun/pump-public-docs, anza-xyz/agave, raydium-io/raydium-idl, MeteoraAg/dynamic-bonding-curve-sdk | Pump IDLs, LaunchLab IDL, DBC IDL |
+| BSC | four-meme-community/four-meme-ai, 1chimaruGin/bsc-mempool | Four.meme addresses / events / errors |
+| Robinhood | ponsdotdev/ponsfamily, chainstacklabs/robinhood-chain-sequencer-feed, OffchainLabs/nitro | Pons V1 / V2 contracts and ABI, feed signer / codec |
+| Providers | helius-labs/helius-sdk, jito-labs/jito-ts, 0xProject/0x-settler, madeonsol/madeonsol-sdk, nansen-ai/nansen-cli | — (API wording changes are PROVIDER CHANGE) |
+| Dependencies (PyPI) | solders, eth-account, eth-abi, websockets, httpx, sqlalchemy, cryptography, coincurve | all (pinned in `packages/core-py/pyproject.toml`) |
+
+Every repository was confirmed to exist (git ls-remote) when the list was
+written.
+
+**How** (official APIs only, no page scraping):
+- GitHub REST: newest commit, latest release, and `compare/{old}...{new}`
+  for the commits and files changed since the last check.
+- PyPI JSON: latest version, and the known vulnerabilities of the
+  installed version (the version the ml container runs).
+- Every 6 hours, from the ml service. `UPDATE_MONITOR=0` switches it off.
+- Unauthenticated GitHub allows 60 requests per hour; one pass uses about
+  30-45. An optional `GITHUB_TOKEN` (no permissions needed) raises the
+  limit to 5,000. On a rate limit the pass stops, the error is shown on
+  the watch, and the next pass continues.
+
+**Classification** (rule based, from commit and release text and the
+changed paths; the panel says "read the change before acting"):
+
+| Class | When | Notification |
+|---|---|---|
+| SECURITY UPDATE | security / vulnerability / CVE / GHSA / exploit / advisory wording, or a known vulnerability in the installed version | critical |
+| BREAKING CHANGE | breaking / deprecation wording, a major version, a removed file on a path we use | warning |
+| PROVIDER CHANGE | a provider repository's change mentions an API / RPC / endpoint / schema | warning |
+| UPGRADE AVAILABLE | a new release, or a newer dependency version | info (in-app only) |
+| INFO | anything else | none (shown on the panel) |
+| ACTION REQUIRED | any of the first three, or any change on a path we read, for a source used directly | critical |
+
+- The first check of each source is a baseline: stored, never notified.
+  The exception is a dependency whose installed version already has a
+  known vulnerability; that is reported at once.
+- Commits that change no files (some repositories refresh their activity
+  date with empty commits) raise nothing.
+- A new dependency version or a new vulnerability is reported once, not on
+  every pass.
+- Each change is a row in `update_events` (history, never overwritten):
+  from / to reference, reasons, the first commit messages, files on our
+  paths, whether it was notified, and who acknowledged it.
+
+**Where it shows:**
+- Notification kind `infrastructure_update`, on Telegram by default
+  (switchable under Notifications). ACTION REQUIRED, SECURITY, BREAKING
+  and PROVIDER changes go to Telegram and the in-app bell; UPGRADE
+  AVAILABLE (routine, e.g. every validator release) to the bell only.
+  Every message ends "Not applied automatically: review and deploy by
+  hand."
+- System Health → Research / Updates: open changes by class, the change
+  list with Acknowledge, and every watched source with its last check,
+  latest commit / release or installed / latest version, and last
+  classification. A source never checked reads NOT CHECKED, never "up to
+  date".
+- API: `GET /api/system/updates`, `POST /api/system/updates/{id}/acknowledge`
+  (audited).
+
+**Never automatic** (§66): nothing is upgraded, pulled or deployed. The
+operator reads the change, updates the pin or adapter in a PR, and deploys
+with `scripts/deploy.sh` as usual.
+
+**Verified:**
+- Classification, baseline, empty commits, one event per change, rate
+  limit and vulnerability handling, notification text and the API are
+  covered by `tests/test_update_monitor.py` and `apps/api/tests/test_system.py`
+  against mocked GitHub / PyPI responses.
+- PyPI: checked against the real pypi.org from the build environment.
+  All 8 dependencies answered.
+- GitHub: NOT VERIFIED from the build environment (its proxy refuses
+  api.github.com). The server's first pass is the first real check. Its
+  result shows on the panel within minutes of the ml service starting.
+
+**Deploy build cache** (seen on the server 2026-10-02: about 30 GB of
+build cache filled the disk). `scripts/deploy.sh` now runs
+`docker builder prune -f --filter until=48h` after a successful deploy.
+Layers used in the last 48 hours stay, so the next build is still fast.
+`BUILD_CACHE_KEEP=168h scripts/deploy.sh` keeps a week. A failed prune
+never fails the deploy.
 

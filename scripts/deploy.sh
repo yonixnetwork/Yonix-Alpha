@@ -77,4 +77,11 @@ echo "    api is healthy."
 echo "==> Pruning dangling images from previous builds"
 docker image prune -f >/dev/null
 
+# Build cache grows by several GB per deploy (one layer set per service and
+# commit) and once filled the disk. Cache not used in the last 48 hours is
+# dropped; recent layers stay, so the next deploy still builds quickly.
+# BUILD_CACHE_KEEP=168h keeps a week; a failed prune never fails the deploy.
+echo "==> Pruning build cache unused for ${BUILD_CACHE_KEEP:-48h}"
+docker builder prune -f --filter "until=${BUILD_CACHE_KEEP:-48h}" >/dev/null || echo "    build cache prune failed (ignored)"
+
 echo "==> Deploy complete: $(git rev-parse --short HEAD)"
