@@ -19,6 +19,14 @@ on the curve:
   5. with ETHERSCAN_API_KEY set, the verified TokenManager2 ABI (via the
      EIP-1967 implementation), which names the fields outright.
 
+Second run (2026-10-02, 40 newest tokens): 13 words; word 0 = the token,
+word 1 = the quote (non-zero exactly for the 32 BEP-20-quoted tokens),
+word 3 = 1e27 (total supply), words 4 / 7 = 8e26 (max offers / offers), so
+the layout looks like base, quote, template, totalSupply, maxOffers, ...;
+but the sample held no TaxToken, X Mode or agent token, so the template
+bits were not tested. This version also samples tokens that safety already
+found X Mode and tokens with a stored tax, and tests word 2 directly.
+
 Then, for every word of _tokenInfos, how often its template bits agree
 with the TaxToken and X Mode evidence, and for _tokenInfoEx1s which words
 are non-zero and whether they follow the API's feePlan. A word that agrees
@@ -90,13 +98,45 @@ def analyse(rows: list[dict[str, Any]]) -> list[str]:
         x_api = [r for r in xknown if r.get("api_version") is not None]
         out.append("four.meme API versions: " + ", ".join(f"{k} {n}" for k, n in v.most_common())
                    + f"; simulation X_MODE agrees with version V8 on {sum(1 for r in x_api if (r['api_version'] == 'V8') == (r['plain_buy'] == 'X_MODE'))}/{len(x_api)}")
+    out += template_lines(rows)
+    return out
+
+
+TEMPLATE_WORD = 2  # hypothesis from the 2026-10-02 run (base, quote, template, ...)
+
+
+def template_lines(rows: list[dict[str, Any]], i: int = TEMPLATE_WORD) -> list[str]:
+    """The hypothesis 'word 2 is the template', tested against the evidence."""
+    have = [r for r in rows if len(r["info_words"]) > i]
+    if not have:
+        return []
+    ct = Counter((r["info_words"][i] >> 10) & 0x3F for r in have)
+    out = [f"template hypothesis (word {i}): creator types " + ", ".join(f"{k}: {v}" for k, v in sorted(ct.items()))]
+    taxed = [r for r in have if (r.get("tax_bps") or 0) > 0]
+    x = [r for r in have if r["plain_buy"] == "X_MODE"]
+    plain = [r for r in have if r["plain_buy"] == "PLAIN_BUY_OK"]
+    out.append(f"    TaxTokens (feeRate > 0): {len(taxed)}; with creator type 5: "
+               f"{sum(1 for r in taxed if ((r['info_words'][i] >> 10) & 0x3F) == TAX_TEMPLATE)}")
+    out.append(f"    X Mode by simulation: {len(x)}; with bit 16: {sum(1 for r in x if r['info_words'][i] & X_MODE_BIT)}; "
+               f"plain buy OK: {len(plain)}; with bit 16: {sum(1 for r in plain if r['info_words'][i] & X_MODE_BIT)}")
+    out.append(f"    agent bit 85 set: {sum(1 for r in have if r['info_words'][i] & AGENT_BIT)} of {len(have)}")
+    quotes = Counter(hex(r["info_words"][1]) if len(r["info_words"]) > 1 else "?" for r in rows)
+    out.append("quote assets (word 1; 0x0 = BNB): " + ", ".join(f"{q} {n}" for q, n in quotes.most_common(8)))
+    errs = Counter(r["api_error"] for r in rows if r.get("api_error"))
+    if errs:
+        out.append("four.meme API errors: " + ", ".join(f"{e} {n}" for e, n in errs.most_common()))
     return out
 
 
 async def _api(client: httpx.AsyncClient, token: str) -> dict[str, Any]:
     try:
         r = await client.get(FOUR_API, params={"address": token}, headers={"accept": "application/json"})
-        d = (r.json() or {}).get("data") or {}
+        if r.status_code != 200:
+            return {"api_error": f"HTTP {r.status_code}"}
+        body = r.json() or {}
+        d = body.get("data") or {}
+        if not d:
+            return {"api_error": f"no data (code {body.get('code')}, msg {str(body.get('msg'))[:40]})"}
         return {"api_version": d.get("version"), "api_fee_plan": d.get("feePlan"), "api_tax": bool(d.get("taxInfo")),
                 "api_ai_creator": d.get("aiCreator")}
     except (httpx.HTTPError, ValueError, AttributeError) as exc:
@@ -134,9 +174,17 @@ async def collect(session, rpc, n: int, probe: int, use_api: bool) -> list[dict[
 
     lp = FourMeme(rpc)
     manager = lp.spec.contracts["manager_v2"]
-    tokens = (await session.execute(select(EvmToken.token).where(
-        EvmToken.chain == "bsc", EvmToken.launchpad == "fourmeme", EvmToken.stage == "CURVE")
-        .order_by(EvmToken.created_at.desc()).limit(n))).scalars().all()
+    base = (EvmToken.chain == "bsc", EvmToken.launchpad == "fourmeme")
+    newest = (await session.execute(select(EvmToken.token).where(*base, EvmToken.stage == "CURVE")
+                                    .order_by(EvmToken.created_at.desc()).limit(n))).scalars().all()
+    # tokens safety already found X Mode, and tokens with a stored tax: the evidence the newest lack
+    x_mode = (await session.execute(select(EvmToken.token).where(
+        *base, EvmToken.safety["findings"].contains([{"code": "FOURMEME_X_MODE"}]))
+        .order_by(EvmToken.safety_at.desc()).limit(n))).scalars().all()
+    taxed = (await session.execute(select(EvmToken.token).where(
+        *base, EvmToken.state["buy_tax_bps"].astext.op("~")("^[1-9][0-9]*$"))
+        .order_by(EvmToken.state_at.desc()).limit(n))).scalars().all()
+    tokens = list(dict.fromkeys([*newest, *x_mode, *taxed]))
     rows: list[dict[str, Any]] = []
     async with httpx.AsyncClient(timeout=10.0) as client:
         for t in tokens:
@@ -164,7 +212,7 @@ async def main() -> int:
     from yonixalpha_core.db.base import make_engine, make_session_factory
 
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--tokens", type=int, default=40)
+    ap.add_argument("--tokens", type=int, default=60, help="per group: newest, X Mode by safety, taxed")
     ap.add_argument("--probe-bnb", type=float, default=0.01)
     ap.add_argument("--api", action="store_true", help="cross-check with four.meme's token API")
     args = ap.parse_args()

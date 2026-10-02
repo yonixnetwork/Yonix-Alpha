@@ -40,7 +40,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yonixalpha_core import copy_outcomes, market_regimes, wallet_pnl, wallet_validation
-from yonixalpha_core.chains.evm import address_kinds
+from yonixalpha_core.chains.evm import address_kinds, store
 from yonixalpha_core.db.models import EvmToken, EvmTrade, LaunchBuyer, PlatformSetting, WalletProfile
 
 E18 = Decimal(10) ** 18
@@ -276,7 +276,8 @@ async def rebuild_evm(session: AsyncSession, chain: str, now: datetime, cfg: Sco
     vcfg = await validation_config(session)
     await market_regimes.update(session, chain, now, timedelta(days=days))
     regimes = await market_regimes.load_regimes(session, chain, since)
-    wallets = [w for w, in (await session.execute(select(t.trader).where(t.chain == chain, t.at >= since)
+    native = store.native_quote_trade(t)  # BNB / ETH amounts only: stock-quoted curves are other units
+    wallets = [w for w, in (await session.execute(select(t.trader).where(t.chain == chain, t.at >= since, native)
                                                    .group_by(t.trader).having(func.count() >= min_trades)
                                                    .order_by(func.count().desc()).limit(max_wallets))).all()]
     kinds = await address_kinds.resolve(session, rpc, chain, wallets, now) if rpc is not None else {}
@@ -286,7 +287,7 @@ async def rebuild_evm(session: AsyncSession, chain: str, now: datetime, cfg: Sco
     for i in range(0, len(wallets), WALLET_BATCH):
         batch = wallets[i:i + WALLET_BATCH]
         by_wallet: dict[str, list] = defaultdict(list)
-        for row in (await session.execute(select(t).where(t.chain == chain, t.at >= since, t.trader.in_(batch)))).scalars():
+        for row in (await session.execute(select(t).where(t.chain == chain, t.at >= since, t.trader.in_(batch), native))).scalars():
             by_wallet[row.trader].append(row)
         prior = {w: m for w, m in (await session.execute(select(WalletProfile.wallet, WalletProfile.metrics).where(
             WalletProfile.chain == chain, WalletProfile.wallet.in_(list(by_wallet))))).all()}
@@ -307,7 +308,26 @@ async def rebuild_evm(session: AsyncSession, chain: str, now: datetime, cfg: Sco
             await _upsert(session, chain, wallet, m, "evm_trades", cfg, now)
             n += 1
         session.expunge_all()
+    await mark_stale(session, chain, now)
     return n
+
+
+STALE_REASON = ("not rebuilt in the latest pass: too few BNB / ETH-quoted trades in the window (trades on curves "
+                "quoted in tokenized stocks or other tokens are not counted) or not among the most active wallets. "
+                "The figures are from the last rebuild")
+
+
+async def mark_stale(session: AsyncSession, chain: str, now: datetime) -> int:
+    """Profiles this rebuild did not refresh keep their old figures, marked
+    stale (a rebuild of the wallet replaces the metrics and clears it)."""
+    from sqlalchemy import update
+
+    stale = func.jsonb_build_object("since", now.isoformat(), "reason", STALE_REASON)
+    r = await session.execute(update(WalletProfile).where(
+        WalletProfile.chain == chain, WalletProfile.source == "evm_trades", WalletProfile.updated_at < now,
+        WalletProfile.metrics["stale"].is_(None)).values(
+        metrics=WalletProfile.metrics.op("||")(func.jsonb_build_object("stale", stale))))
+    return r.rowcount or 0
 
 
 async def rebuild_solana(session: AsyncSession, now: datetime, cfg: ScoreConfig = ScoreConfig(), days: int = 30,

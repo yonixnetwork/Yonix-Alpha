@@ -772,3 +772,29 @@ async def test_genius_fun_reuses_the_pons_v2_decoder_with_two_factories_observe_
     assert [x.token.lower() for x in res.launches] == [TOKEN.lower(), token2.lower()] and res.rejected_foreign == 1
     assert [(t.token.lower(), t.extra["native_quote"]) for t in res.trades] == [(TOKEN.lower(), True), (token2.lower(), False)]
     assert {a.lower() for a in await lp._emitters()} == {f1.lower(), f2.lower(), CURVE.lower(), curve2.lower()}
+
+
+async def test_fourmeme_records_each_tokens_quote_and_flags_stock_quoted_trades():
+    """Since 2026-09-14 most new Four.meme curves are quoted in tokenized stocks
+    (BNCB, NVDAB ...): TokenPurchase.cost is then in the stock's units. Each
+    token's quote is read once (getTokenInfo, cached) and every launch / trade
+    says whether it is native BNB."""
+    node = Node(56)
+    mgr = LAUNCHPADS["fourmeme"].contracts["manager_v2"]
+    lp = FourMeme(rpc_for(node))
+    stock_token, bncb = "0x" + "77" * 20, "0x4902c5EBc598265ed2212B559B042de8A5eeEc3f"
+    infos = {TOKEN.lower(): four_info(), stock_token.lower(): four_info(quote=bncb)}
+    node.on(lp.helper, "getTokenInfo(address)", lambda p: infos["0x" + p[0]["data"][-40:]])
+    ev = FOUR_EVENTS.by_name
+    buy = lambda tok, i: log_of(ev["TokenPurchase"], {  # noqa: E731
+        "token": tok, "account": TRADER, "price": 1, "amount": 10, "cost": 5, "fee": 0, "offers": 0, "funds": 0}, mgr, 11, i)
+    node.logs = [
+        log_of(ev["TokenCreate"], {"creator": TRADER, "token": stock_token, "requestId": 1, "name": "S", "symbol": "S",
+                                   "totalSupply": 10 ** 27, "launchTime": 1, "launchFee": 0}, mgr, 10, 0),
+        buy(TOKEN, 1), buy(stock_token, 2), buy(TOKEN, 3), buy(stock_token, 4)]
+    res = await lp.scan(0, 100)
+    assert res.launches[0].quote_token.lower() == bncb.lower() and res.launches[0].extra["native_quote"] is False
+    assert [t.extra["native_quote"] for t in res.trades] == [True, False, True, False]
+    info_calls = [r for r in node.requests if r["method"] == "eth_call"
+                  and r["params"][0]["data"].startswith("0x" + selector("getTokenInfo(address)").hex())]
+    assert len(info_calls) == 2  # once per token, then cached

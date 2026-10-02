@@ -93,3 +93,48 @@ async def test_validated_wallet_is_paper_followed_and_never_copied(db):
     assert p.metrics["regimes"]["status"] in ("CONSISTENT", "INSUFFICIENT_DATA", "REGIME_DEPENDENT")
     assert (await db.execute(select(MarketRegimeHour))).scalars().first() is not None
     assert (await db.execute(select(CopyTarget))).scalars().first() is None  # never copied automatically
+
+
+async def test_trades_quoted_in_other_tokens_are_left_out_and_unrefreshed_profiles_are_stale(db):
+    """Four.meme curves quoted in tokenized stocks (BNCB ~$6) report `cost` in
+    the stock's units: counted as BNB they made a wallet look like it traded
+    hundreds of BNB. They are excluded by the token's recorded quote or the
+    trade's native_quote flag; WBNB counts as native. A profile no rebuild
+    refreshes is marked stale, and a rebuild clears the mark."""
+    from yonixalpha_core.chains.registry import BSC_WBNB
+    from yonixalpha_core.db.models import EvmToken
+
+    bncb = "0x4902c5ebc598265ed2212b559b042de8a5eeec3f"
+    w = "0x" + "e" * 40
+    db.add_all([EvmToken(chain="bsc", token="0xstock", launchpad="fourmeme", created_at=NOW, quote_token=bncb),
+                EvmToken(chain="bsc", token="0xwbnb", launchpad="fourmeme", created_at=NOW, quote_token=BSC_WBNB)])
+    rows = []
+    for i in range(3):  # real BNB round trips: +1 each
+        rows += [trade(10 * i, w, f"0xn{i}", True, 1, 100 - i), trade(10 * i + 1, w, f"0xn{i}", False, 2, 90 - i)]
+    rows += [trade(50, w, "0xstock", True, 500, 80), trade(51, w, "0xstock", False, 900, 70)]  # BNCB units
+    flagged = [trade(60, w, "0xflag", True, 300, 60), trade(61, w, "0xflag", False, 10, 50)]
+    for t in flagged:
+        t.extra = {"native_quote": False}
+    rows += flagged + [trade(70, w, "0xwbnb", True, 1, 40), trade(71, w, "0xwbnb", False, 1.5, 30)]
+    db.add_all(rows)
+    await db.commit()
+
+    assert await wallet_profiles.rebuild_evm(db, "bsc", NOW) == 1
+    await db.commit()
+    p = (await db.execute(select(WalletProfile))).scalar_one()
+    assert p.trades == 8 and p.tokens == 4  # 3 BNB tokens + the WBNB-quoted one; stock / flagged left out
+    assert Decimal(p.metrics["pnl"]["all"]["realized_pnl"]) == Decimal("3.5")
+    assert "stale" not in p.metrics
+
+    later = NOW + timedelta(days=20)  # nothing in the window any more: not rebuilt, marked stale
+    assert await wallet_profiles.rebuild_evm(db, "bsc", later) == 0
+    await db.commit()
+    p = (await db.execute(select(WalletProfile))).scalar_one()
+    assert p.metrics["stale"]["since"] == later.isoformat() and "tokenized stocks" in p.metrics["stale"]["reason"]
+    assert Decimal(p.metrics["pnl"]["all"]["realized_pnl"]) == Decimal("3.5")  # the old figures are kept, labelled
+
+    assert await wallet_profiles.rebuild_evm(db, "bsc", NOW) == 1  # rebuilt again: the mark is gone
+    await db.commit()
+    db.expunge_all()
+    p = (await db.execute(select(WalletProfile))).scalar_one()
+    assert "stale" not in p.metrics

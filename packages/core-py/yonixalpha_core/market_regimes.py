@@ -35,6 +35,7 @@ from sqlalchemy import Numeric, case, cast, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from yonixalpha_core.chains.evm import store
 from yonixalpha_core.db.models import EvmTrade, MarketRegimeHour
 from yonixalpha_core.wallet_pnl import ClosedTrade
 
@@ -56,7 +57,8 @@ async def summarise_hour(session: AsyncSession, chain: str, start: datetime) -> 
     per_token = (select(e.token, func.count().label("n"), func.max(price).label("hi"), func.min(price).label("lo"),
                         func.sum(e.quote_amount).label("vol"),
                         func.sum(case((e.is_buy, e.quote_amount), else_=-e.quote_amount)).label("net"))
-                 .where(e.chain == chain, e.at >= start, e.at < end, e.token_amount > 0, e.quote_amount > 0)
+                 .where(e.chain == chain, e.at >= start, e.at < end, e.token_amount > 0, e.quote_amount > 0,
+                        store.native_quote_trade(e))
                  .group_by(e.token).subquery())
     rng = per_token.c.hi / per_token.c.lo - 1
     row = (await session.execute(select(

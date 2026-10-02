@@ -14,6 +14,15 @@ override funds the simulation account), so X Mode is detected from the
 contract's own answer, without decoding the undocumented `_tokenInfos`
 struct. YonixAlpha has no X Mode buy, so such a token cannot be entered.
 
+Quote asset per token. Since 2026-09-14 most new Four.meme curves are
+quoted in BEP-20 tokens, mainly tokenized stocks (bStocks: BNCB, NVDAB,
+SPCXB ...; DefiLlama issue #9736; on the server 32 of the 40 newest curve
+tokens, 2026-10-02). TokenPurchase / TokenSale carry no quote address and
+their `cost` is in the quote token's units, so every token's quote is read
+once (Helper3 getTokenInfo, cached) and each launch / trade records whether
+it is native BNB (`native_quote`). BNB volume, wallet profit and loss and
+market regimes leave the other quotes out (store.native_quote_trade).
+
 Units: amounts are in wei (18 decimals for BNB and Four.meme tokens);
 `price` fields in events and getTokenInfo are quote-wei per 1e18 token-wei,
 i.e. BNB per whole token after dividing by 1e18.
@@ -71,10 +80,35 @@ def revert_reason(exc: Exception) -> str | None:
     return None
 
 
+QUOTE_CACHE_MAX = 50_000
+
+
 class FourMeme(EvmLaunchpad):
     spec = LAUNCHPADS["fourmeme"]
     events = EVENTS
     emitter_keys = ("manager_v2",)
+
+    def __init__(self, rpc) -> None:
+        super().__init__(rpc)
+        self.quotes: dict[str, str | None] = {}  # token (lower) -> quote address (ZERO = BNB); None: unreadable
+
+    async def quote_of(self, token: str) -> str | None:
+        """The token's quote asset (cached). A revert (not a Four.meme token)
+        is None; an RPC outage propagates, so the scan retries later."""
+        k = token.lower()
+        if k not in self.quotes:
+            if len(self.quotes) >= QUOTE_CACHE_MAX:
+                for old in list(self.quotes)[:QUOTE_CACHE_MAX // 2]:
+                    del self.quotes[old]
+            try:
+                self.quotes[k] = (await self.token_info(token))["quote"]
+            except EvmRpcError:
+                self.quotes[k] = None
+        return self.quotes[k]
+
+    async def _quote_extra(self, token: str) -> tuple[str | None, dict[str, Any]]:
+        q = await self.quote_of(token)
+        return q, ({} if q is None else {"native_quote": q == ZERO_ADDRESS})
 
     @property
     def helper(self) -> str:
@@ -82,14 +116,17 @@ class FourMeme(EvmLaunchpad):
 
     async def _handle(self, name: str, a: dict[str, Any], log: dict[str, Any], at: datetime, res: ScanResult) -> None:
         if name == "TokenCreate":
+            quote, qx = await self._quote_extra(a["token"])
             res.launches.append(self._launch(log, at, a["token"], a["creator"], name=a["name"], symbol=a["symbol"],
+                                             quote_token=quote,
                                              extra={"request_id": a["requestId"], "total_supply": a["totalSupply"],
-                                                    "launch_time": a["launchTime"], "launch_fee": a["launchFee"]}))
+                                                    "launch_time": a["launchTime"], "launch_fee": a["launchFee"], **qx}))
         elif name in ("TokenPurchase", "TokenSale"):
+            _quote, qx = await self._quote_extra(a["token"])
             res.trades.append(self._trade(
                 log, at, token=a["token"], trader=a["account"], is_buy=name == "TokenPurchase",
                 token_amount=a["amount"], quote_amount=a["cost"], fee=a["fee"], price=Decimal(a["price"]) / E18,
-                extra={"offers_left": a["offers"], "funds": a["funds"]}))
+                extra={"offers_left": a["offers"], "funds": a["funds"], **qx}))
         elif name == "LiquidityAdded":
             res.migrations.append({"token": a["base"], "venue": "pancakeswap", "quote": a["quote"],
                                    "tokens_added": a["offers"], "quote_added": a["funds"],

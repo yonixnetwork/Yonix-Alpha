@@ -329,3 +329,36 @@ async def test_streams_watch_copy_targets_and_launchpad_contracts(session_factor
     assert not rh_wallets and streams.EXTRA_CONTRACTS["robinhood"] <= rh_contracts
     assert await pending.urls() == [] and await pending.enabled() is False
     assert (await feed.reload()).robinhood_feed_enabled
+
+
+async def test_quote_pass_records_the_quote_of_tokens_stored_without_one(session_factory, redis_client):
+    """Four.meme tokens first seen before their quote was read get it from
+    getTokenInfo (so stock-quoted curves leave native-unit sums); a token whose
+    quote cannot be read is marked and not asked again."""
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    node, lp = fourmeme_node(now)
+    stock, bncb = "0x" + "77" * 20, "0x4902c5EBc598265ed2212B559B042de8A5eeEc3f"
+    dead = "0x" + "88" * 20
+    mgr = lp.spec.contracts["manager_v2"]
+    by_token = {TOKEN.lower(): ZERO_ADDRESS, stock.lower(): bncb}
+
+    def info(p):
+        tok = "0x" + p[0]["data"][-40:]
+        if tok not in by_token:
+            raise Exception("execution reverted")
+        return enc(["uint256", "address", "address"] + ["uint256"] * 8 + ["bool"],
+                   [2, mgr, by_token[tok], 10 ** 12, 100, 0, 1, 1, 1, 2 * 10 ** 18, 24 * 10 ** 18, False])
+
+    node.on(lp.helper, "getTokenInfo(address)", info)
+    async with session_factory() as session:
+        for tok in (TOKEN, stock, dead):
+            session.add(EvmToken(chain="bsc", token=tok, launchpad="fourmeme", created_at=now, last_trade_at=now,
+                                 extra={}))
+        await session.commit()
+    w = ChainWorker("bsc", lp.rpc, [lp], session_factory, redis_client)
+    assert await w.quote_pass(now) == 3
+    async with session_factory() as session:
+        got = {t: await session.get(EvmToken, ("bsc", t)) for t in (TOKEN, stock, dead)}
+        assert got[TOKEN].quote_token == ZERO_ADDRESS and got[stock].quote_token.lower() == bncb.lower()
+        assert got[dead].quote_token is None and got[dead].extra["quote_lookup"] == "unreadable"
+    assert await w.quote_pass(now) == 0  # nothing left to ask

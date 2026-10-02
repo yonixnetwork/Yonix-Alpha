@@ -199,7 +199,8 @@ export default function SmartWalletsPage() {
                     <td>{p.metrics.avg_hold_s ? `${Math.round(p.metrics.avg_hold_s)} s` : "—"}</td>
                     <td title={JSON.stringify(p.score_detail?.components ?? p.score_detail)}>{p.score ?? <span className="muted small">insufficient data</span>}</td>
                     <td>{p.metrics.discovery ? <span className={STAGE_CLASS[p.metrics.discovery.stage] ?? "pill pill-off"} title={p.metrics.discovery.reason ?? p.metrics.validation?.reason}>
-                      {p.metrics.discovery.stage.replaceAll("_", " ")}</span> : <span className="muted small">—</span>}</td>
+                      {p.metrics.discovery.stage.replaceAll("_", " ")}</span> : <span className="muted small">—</span>}
+                      {p.metrics.stale && <span className="pill pill-warn" title={p.metrics.stale.reason}> STALE</span>}</td>
                     <td>{formatDate(p.last_seen)}</td>
                     <td>{p.is_copy_target ? <span className="muted small">target</span> :
                       <button className="btn btn-ghost btn-sm" onClick={() => watch(p)}><Eye size={14} aria-hidden /> Watch</button>}</td>
