@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api import health_state
 from app.api.deps import get_current_username, get_db, get_redis, get_settings
-from yonixalpha_core import kill_switch, live_trading
+from yonixalpha_core import kill_switch, live_trading, position_pnl
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import ExecutionOrder, ModelVersion, Notification, PaperPosition, TradingCandidate
 from yonixalpha_core.safety import store
@@ -140,7 +140,8 @@ async def memecoin_summary(db: AsyncSession = Depends(get_db), redis: Redis = De
                   "pnl_sol": str(((p.last_price or p.entry_price) - p.entry_price) * (p.remaining_quantity or Decimal(0))),
                   "pnl_pct": str(((p.last_price / p.entry_price - 1) * 100).quantize(Decimal("0.01"))) if p.last_price and p.entry_price else None,
                   "age_seconds": round((now - p.entry_at).total_seconds()) if p.entry_at else None,
-                  "last_marked_at": p.last_marked_at.isoformat() if p.last_marked_at else None} for p in open_positions]
+                  "last_marked_at": p.last_marked_at.isoformat() if p.last_marked_at else None,
+                  "pnl": position_pnl.view(p, now, 60 if p.execution_mode == "LIVE" else 120)} for p in open_positions]
     await db.commit()
     return {"wallet": wallet, "today": today, "market": market, "system": system, "positions": positions,
             "global_mode": (await store.load_global_mode(db)).value, "kill_switch": await kill_switch.is_engaged(redis),

@@ -9,6 +9,7 @@ from app.api.routes import (
     control,
     copy,
     evm,
+    explorer,
     health,
     live,
     ml,
@@ -24,6 +25,7 @@ from app.api.routes import (
     system,
     tokens,
     trade,
+    wallets,
     ws,
 )
 
@@ -51,4 +53,6 @@ api_router.include_router(settings_center.router)
 api_router.include_router(chains.router)
 api_router.include_router(evm.router)
 api_router.include_router(copy.router)
+api_router.include_router(wallets.router)
+api_router.include_router(explorer.router)
 api_router.include_router(ws.router)

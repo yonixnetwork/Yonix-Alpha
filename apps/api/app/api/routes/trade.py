@@ -225,3 +225,104 @@ async def position_status(position_id: UUID, db: AsyncSession = Depends(get_db),
     decimals = ((p.plan or {}).get("venue") or {}).get("decimals")
     return jsonable({"position": live_smoke.position_view(p, datetime.now(timezone.utc)),
                      "orders": [live_smoke.order_view(o, p.entry_price, decimals) for o in orders]})
+
+
+# --- BSC / Robinhood Chain (master §45): paper only ------------------------------------------------
+
+class EvmBuyIn(BaseModel):
+    chain: str = Field(pattern="^(bsc|robinhood)$")
+    token: str = Field(pattern="^0x[0-9a-fA-F]{40}$")
+    confirm: bool = False
+
+
+@router.get("/evm/preview")
+async def evm_preview(chain: str, token: str, db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
+                      _: str = Depends(get_current_username)) -> dict:
+    """What the confirmation dialog shows for a manual EVM BUY. The worker
+    runs every check again on confirm; its result is what executes."""
+    from yonixalpha_core.chains import controls, verification
+    from yonixalpha_core.chains.evm import manual as evm_manual
+    from yonixalpha_core.chains.evm import native_price
+    from yonixalpha_core.chains.evm import paper as evm_paper
+    from yonixalpha_core.chains.evm import settings as evm_settings
+    from yonixalpha_core.chains.registry import LAUNCHPADS
+
+    if chain not in evm_manual.CHAINS or not evm_manual.ADDRESS.match(token):
+        raise HTTPException(422, "chain must be bsc or robinhood and token a 0x address")
+    now = datetime.now(timezone.utc)
+    row = await evm_manual.find_token(db, chain, token)
+    if row is None:
+        raise HTTPException(404, "token not discovered on this chain")
+    spec = LAUNCHPADS[row.launchpad]
+    cs = (await evm_settings.load(db)).chain(chain)
+    acct = await evm_paper.ensure_account(db, chain)
+    st = await verification.status_for(db, redis, spec, controls.launchpad_mode(await controls.load(db), spec.key,
+                                                                                  spec.chain), now)
+    state = row.state or {}
+    safety = row.safety or {}
+    blocking = [f"{f.get('code')}: {f.get('message')}" for f in safety.get("findings") or []
+                if f.get("level") in ("FAIL", "UNKNOWN")]
+    native = evm_paper.NATIVE[chain]
+    rate = await native_price.usd_rate(redis, chain, now)
+    await db.commit()
+    return jsonable({
+        "chain": chain, "token": row.token, "symbol": row.symbol, "name": row.name, "launchpad": spec.name,
+        "observe_only": not spec.supports_trading, "category": row.category, "stage": row.stage,
+        "route": (safety.get("round_trip") or {}).get("buy", {}).get("source") or
+                 ("launchpad bonding curve" if row.stage == "CURVE" else "DEX after migration"),
+        "quote_token": row.quote_token, "price_native": state.get("price"), "currency": native,
+        "liquidity_native": state.get("liquidity_quote"), "native_usd": rate,
+        "safety": {"verdict": row.safety_verdict, "at": row.safety_at,
+                   "age_seconds": round((now - row.safety_at).total_seconds(), 1) if row.safety_at else None,
+                   "blocking": blocking[:10]},
+        "launchpad_status": {"status": st["status"], "paper_allowed": st["paper_allowed"], "why": st["why"]},
+        "last_automatic_decision": (row.extra or {}).get("entry_decision"),
+        "last_manual_decision": (row.extra or {}).get("manual_decision"),
+        "size": str(cs.position_size), "gas_reserve": str(cs.gas_reserve),
+        "balance": {"kind": "PAPER account", "cash": str(acct.cash_balance), "currency": native},
+        "execution_mode": "PAPER",
+        "note": "Pressing CONFIRM BUY queues the request for the data-evm worker. It re-runs safety if older than 5 "
+                "minutes and every entry check (switches, launchpad status, liquidity, coordination, limits, cooldown, "
+                "gas, risk plan); only the strategy's trade signal is replaced by your decision. If a check blocks, "
+                "nothing is bought and the reasons are shown. EVM LIVE execution is locked: this is a paper buy.",
+    })
+
+
+@router.post("/evm/buy")
+async def evm_buy(body: EvmBuyIn, request: Request, db: AsyncSession = Depends(get_db),
+                  redis: Redis = Depends(get_redis), username: str = Depends(get_current_username)) -> dict:
+    from yonixalpha_core.chains.evm import manual as evm_manual
+
+    if not body.confirm:
+        raise HTTPException(422, "confirmation required (confirm: true)")
+    try:
+        req = await evm_manual.create_request(db, redis, body.chain, body.token, username, datetime.now(timezone.utc))
+    except evm_manual.ManualTradeError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    await audit(db, username, request, "manual_trade.evm_buy_requested",
+                {"chain": body.chain, "token": req["token"], "launchpad": req["launchpad"], "request": req["id"]})
+    await db.commit()
+    return req
+
+
+@router.get("/evm/requests/{request_id}")
+async def evm_request_status(request_id: str, redis: Redis = Depends(get_redis),
+                             _: str = Depends(get_current_username)) -> dict:
+    from yonixalpha_core.chains.evm import manual as evm_manual
+
+    req = await evm_manual.get(redis, request_id)
+    if req is None:
+        raise HTTPException(404, "request not found (requests are kept for 24 h)")
+    return jsonable(req)
+
+
+@router.get("/evm/requests")
+async def evm_recent_requests(redis: Redis = Depends(get_redis), _: str = Depends(get_current_username)) -> list[dict]:
+    from yonixalpha_core.chains.evm import manual as evm_manual
+
+    out = []
+    for rid in await redis.lrange(evm_manual.RECENT, 0, 19):
+        req = await evm_manual.get(redis, rid.decode() if isinstance(rid, bytes) else rid)
+        if req:
+            out.append(req)
+    return jsonable(out)

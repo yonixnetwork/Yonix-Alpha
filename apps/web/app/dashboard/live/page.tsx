@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { CheckCircle2, Send, XCircle } from "lucide-react";
 import LiveWalletsPanel from "@/components/LiveWalletsPanel";
 import SmokeTestPanel from "@/components/SmokeTestPanel";
+import { PnlOutcome, type PnlView } from "@/components/Pnl";
 import { ErrorNotice, fmtDuration, Loading, Money, PageHeader, Section, Stat } from "@/components/ui";
 import { apiPut, ApiError } from "@/lib/api";
 import type { ExecutionOrderRow } from "@/lib/cc";
@@ -66,6 +67,7 @@ interface LivePosition {
   execution_provider: string | null;
   entry_signature: string | null;
   smoke_test_run: string | null;
+  pnl: PnlView | null;
 }
 
 interface ReconEvent {
@@ -284,7 +286,7 @@ export default function LiveExecutionPage() {
                 <th>Entry → current</th>
                 <th>Remaining</th>
                 <th>Cost → value (SOL)</th>
-                <th>Unrealized</th>
+                <th>PnL</th>
                 <th>Realized</th>
                 <th>Stop / TPs / trailing</th>
                 <th>Opened</th>
@@ -319,15 +321,10 @@ export default function LiveExecutionPage() {
                     {p.proceeds_sol && p.proceeds_sol !== "0" && <div className="muted">proceeds {formatDecimal(p.proceeds_sol, 6)}</div>}
                   </td>
                   <td>
-                    {p.status === "open" ? (
-                      <>
-                        <Money value={p.unrealized_pnl} currency="SOL" digits={6} />
-                        <div className={Number(p.unrealized_pnl_pct) >= 0 ? "pos" : "neg"}>
-                          {p.unrealized_pnl_pct !== null ? `${Number(p.unrealized_pnl_pct) >= 0 ? "+" : ""}${p.unrealized_pnl_pct}%` : "—"}
-                          {p.price_status !== "LIVE" && " (STALE)"}
-                        </div>
-                      </>
-                    ) : "—"}
+                    <PnlOutcome pnl={p.pnl} currency="SOL" />
+                    {p.status === "open" && p.unrealized_pnl !== null && (
+                      <div className="muted small">unrealized <Money value={p.unrealized_pnl} currency="SOL" digits={6} /></div>
+                    )}
                   </td>
                   <td>
                     <Money value={p.realized_pnl} currency="SOL" digits={6} />

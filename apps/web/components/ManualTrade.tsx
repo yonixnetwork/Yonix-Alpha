@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useId, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import Link from "next/link";
 import MarketCap from "@/components/MarketCap";
 import { apiGet, apiPost, ApiError } from "@/lib/api";
@@ -154,7 +155,11 @@ interface OrderView { side: string; status: string; signature: string | null; er
 /** SELL the whole open position through the normal exit path (current
  * route, slippage limit, transaction guard), even when no automatic exit
  * is triggering. Status follows the real SELL order. */
-export function SellButton({ positionId, symbol, mode, route }: { positionId: string; symbol: string | null; mode: string; route: string | null }) {
+export function SellButton({ positionId, symbol, mode, route, description }: {
+  positionId: string; symbol: string | null; mode: string; route: string | null;
+  /** Replaces the Solana route text (e.g. for an EVM paper position). */
+  description?: ReactNode;
+}) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   const [state, setState] = useState<"confirm" | "tracking">("confirm");
@@ -199,7 +204,7 @@ export function SellButton({ positionId, symbol, mode, route }: { positionId: st
         <h2 id={titleId} className="dialog-title">{state === "confirm" ? "Confirm Sell" : "Sell status"}</h2>
         <div className="dialog-body">
           {err && <div className="error" role="alert">{err}</div>}
-          {state === "confirm" ? (
+          {state === "confirm" ? (description ? <p>{description}</p> :
             <p>Sell the whole remaining <b>{symbol ?? "position"}</b> ({mode}) through route <b>{route ?? "—"}</b>. The route is the
               position&apos;s current one (switched to PumpSwap automatically after a migration); the exit slippage limit and the
               transaction guard apply.</p>

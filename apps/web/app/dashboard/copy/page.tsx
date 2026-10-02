@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { ChevronDown, ChevronRight, Copy, Plus, Power, Timer, Trash2 } from "lucide-react";
+import { PnlOutcome } from "@/components/Pnl";
 import { Empty, ErrorNotice, Loading, Money, PageHeader, Section } from "@/components/ui";
 import { apiDelete, apiPatch, apiPost } from "@/lib/api";
 import { formatDate } from "@/lib/format";
@@ -163,7 +164,7 @@ function Positions() {
                     <td className={paidMore(l.price_displacement_pct)}>{pctv(l.price_displacement_pct, 2)}</td>
                     <td>{px(l.target_exit)}</td><td>{px(l.our_exit)}</td>
                     <td>{l.copy_latency?.total ?? "—"}{l.copy_latency?.total !== undefined ? " ms" : ""}</td>
-                    <td><Money value={l.pnl ?? p.realized_pnl} currency={p.currency} digits={6} /></td>
+                    <td><PnlOutcome pnl={p.pnl} currency={p.currency} /></td>
                   </tr>,
                   open === p.id && <tr key={`${p.id}:link`}><td colSpan={13}><LinkDetail l={l} currency={p.currency} /></td></tr>,
                 ];

@@ -26,7 +26,7 @@ from yonixalpha_core.logging import configure_logging, get_logger
 from yonixalpha_core.notify import alert_error
 from yonixalpha_core.runtime_watch import run_watcher
 
-from app.worker import RPC_OUTAGE_ALERT_SECONDS, SERVICE, ChainWorker, utcnow
+from app.worker import RPC_OUTAGE_ALERT_SECONDS, SERVICE, WALLET_SECONDS, ChainWorker, utcnow
 
 log = get_logger("data-evm.main")
 DISCOVERY_SECONDS = 3.0
@@ -46,7 +46,7 @@ async def chain_loop(worker: ChainWorker, stop: asyncio.Event) -> None:
     """Discovery + management every few seconds; safety and entries less
     often; evidence every 30 minutes; old trades pruned every 6 hours."""
     await worker.restore()
-    last_safety = last_prune = 0.0
+    last_safety = last_prune = last_wallet = 0.0
     rpc_down_since: float | None = None
     while not stop.is_set():
         now = utcnow()
@@ -55,6 +55,9 @@ async def chain_loop(worker: ChainWorker, stop: asyncio.Event) -> None:
                 s = await evm_settings.load(session)
             worker.status["discovery"] = await worker.discovery_pass(s, now)
             worker.status["positions"] = await worker.manage_pass(now)
+            manual_out = await worker.manual_pass(s, now)
+            if manual_out["processed"]:
+                worker.status["manual"] = manual_out
             if time.monotonic() - last_safety >= SAFETY_SECONDS:
                 last_safety = time.monotonic()
                 worker.status["safety_checked"] = await worker.safety_pass(s, now)
@@ -64,6 +67,9 @@ async def chain_loop(worker: ChainWorker, stop: asyncio.Event) -> None:
             recorded = await worker.evidence_pass(now)
             if recorded:
                 worker.status["evidence_rows"] = recorded
+            if time.monotonic() - last_wallet >= WALLET_SECONDS:
+                last_wallet = time.monotonic()
+                worker.status["wallet"] = await worker.wallet_pass(now)
             if time.monotonic() - last_prune >= PRUNE_SECONDS:
                 last_prune = time.monotonic()
                 worker.status["pruned_trades"] = await worker.prune(now)
@@ -136,12 +142,17 @@ async def run() -> None:
         loop.add_signal_handler(sig, stop.set)
 
     http = httpx.AsyncClient(timeout=10.0)  # block-explorer lookups (launch coordination)
+    from yonixalpha_core.chains.evm import wallet as evm_wallet
+
+    acct = evm_wallet.account(settings)  # public address only; the key never leaves wallet.py
+    wallet_address = acct.get("address") if acct.get("status") in ("OK", "WATCH_ONLY") else None
     workers = []
     for chain in (Chain.BSC, Chain.ROBINHOOD):
         rpc = make_rpc(chain.value, settings)
         adapters = [adapter_for(k, rpc) for k in EVM_LAUNCHPADS if LAUNCHPADS[k].chain == chain]
         workers.append(ChainWorker(chain.value, rpc, adapters, session_factory, redis,
-                                   etherscan_key=settings.ETHERSCAN_API_KEY, http=http))
+                                   etherscan_key=settings.ETHERSCAN_API_KEY, http=http,
+                                   wallet_address=wallet_address))
     stream_tasks = _streams(settings, session_factory, redis, {w.chain: w for w in workers})
     await _system_event(session_factory, "service_started", "info", {"chains": [w.chain for w in workers]})
     log.info("data-evm.started", chains=[w.chain for w in workers])

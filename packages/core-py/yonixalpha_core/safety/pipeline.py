@@ -104,7 +104,15 @@ async def load_controls(session: AsyncSession, redis: Redis, app_settings: Any, 
     if live and not live_venue:
         from yonixalpha_core.live_trading import fixed_trade_costs, load_live_settings
 
-        fixed_cost, fixed_detail = fixed_trade_costs(await load_live_settings(session))
+        live_settings = await load_live_settings(session)
+        fixed_cost, fixed_detail = fixed_trade_costs(live_settings)
+        # Master §57: verified before trading, never discovered after signing.
+        wallet = account.cash_balance
+        need = live_settings.min_sol_reserve + fixed_cost
+        if wallet is not None and wallet < need:
+            state = replace(state, insufficient_gas=(
+                f"wallet {wallet} SOL < fee reserve {live_settings.min_sol_reserve} SOL + this round trip's fixed "
+                f"costs {fixed_cost} SOL"))
     controls = Controls(
         settings=safety,
         account=state,

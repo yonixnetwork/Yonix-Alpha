@@ -1,3 +1,5 @@
+import type { PnlView } from "@/components/Pnl";
+
 export interface Page<T> {
   items: T[];
   total: number;
@@ -151,6 +153,8 @@ export interface PaperPositionOut {
   exit_requested?: boolean;
   account_id?: string | null;
   plan?: Record<string, any> | null;
+  /** Real-time PnL view (PROFIT / LOSS), see components/Pnl. */
+  pnl?: PnlView | null;
 }
 
 export interface ServiceStatus {

@@ -1,11 +1,14 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
 import { Boxes, CircleSlash, ShieldCheck, ShieldQuestion, ShieldX } from "lucide-react";
 import { ObservationPanel, TokenObservations } from "@/components/EvmObservation";
 import { CoordinationDetail, CoordinationPanel, CoordinationPill } from "@/components/LaunchCoordination";
-import { Empty, ErrorNotice, Loading, Money, PageHeader, Section } from "@/components/ui";
-import { formatDate } from "@/lib/format";
+import { SellButton } from "@/components/ManualTrade";
+import { PnlOutcome } from "@/components/Pnl";
+import { Empty, ErrorNotice, Loading, PageHeader, Section } from "@/components/ui";
+import { formatDate, formatUsdCompact } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
 
 type J = Record<string, any>;
@@ -54,17 +57,29 @@ function Positions({ chain, unit }: { chain: string; unit: string }) {
       {data && data.positions.length > 0 && (
         <div className="table-scroll">
           <table className="data-table">
-            <thead><tr><th>Token</th><th>Category</th><th>Opened</th><th>Cost</th><th>Unrealized</th><th>Stop</th><th>Venue</th></tr></thead>
+            <thead><tr><th>Token</th><th>Category</th><th>Opened</th><th>Cost</th><th>Value</th><th>PnL</th><th>Peak / drawdown</th><th>Stop</th><th>Venue</th><th /></tr></thead>
             <tbody>
               {data.positions.map((p: J) => (
                 <tr key={p.id}>
-                  <td className="mono small">{p.symbol}</td>
+                  <td className="mono small">
+                    <Link className="link" href={`/dashboard/explorer/${p.chain}/${p.token}`}>{p.symbol}</Link>
+                    {p.entry_source === "manual" && <span className="pill pill-off"> manual</span>}
+                    {p.exit_requested && <span className="pill pill-warn"> exit pending</span>}
+                  </td>
                   <td>{p.category ?? "—"}</td>
                   <td>{formatDate(p.entry_at)}</td>
                   <td>{Number(p.entry_cost).toFixed(4)} <span className="unit">{unit}</span></td>
-                  <td><Money value={p.unrealized_pnl} currency={unit} digits={6} /></td>
+                  <td>{p.pnl?.value ? <>{price(p.pnl.value)} <span className="unit">{unit}</span></> : "—"}</td>
+                  <td><PnlOutcome pnl={p.pnl} currency={unit} /></td>
+                  <td className="small">{p.pnl?.peak_pct != null ? `+${p.pnl.peak_pct}%` : "—"} / <span className={Number(p.pnl?.drawdown_pct) < 0 ? "neg" : ""}>{p.pnl?.drawdown_pct != null ? `${p.pnl.drawdown_pct}%` : "—"}</span></td>
                   <td className="mono small">{price(p.trailing_stop ?? p.stop_loss)}</td>
                   <td className="small">{p.venue?.launchpad} · {p.venue?.route}</td>
+                  <td>{p.status === "open" && !p.exit_requested && (
+                    <SellButton positionId={p.id} symbol={p.symbol} mode="PAPER" route={p.venue?.route ?? null}
+                      description={<>Paper sell of the whole remaining <b>{p.symbol}</b> at the executable sell quote of the position&apos;s
+                        current venue (the launchpad curve, or the DEX after migration), with its fees and token taxes, on the next
+                        cycle of the {unit === "BNB" ? "BSC" : "Robinhood Chain"} position manager. EVM live execution is locked: nothing is sent on chain.</>} />
+                  )}</td>
                 </tr>
               ))}
             </tbody>
@@ -106,18 +121,21 @@ export default function EvmMarkets({ fixedChain, header = true }: { fixedChain?:
         {data && data.tokens.length > 0 && (
           <div className="table-scroll">
             <table className="data-table">
-              <thead><tr><th>Token</th><th>Launchpad</th><th>Category</th><th>Stage</th><th>Buys / sells (5m)</th><th>Buyers</th><th>Buy volume</th><th>Safety</th><th>Coordination</th><th>Entry decision</th><th>Last trade</th></tr></thead>
+              <thead><tr><th>Token</th><th>Launchpad</th><th>Category</th><th>Stage</th><th>Buys / sells (5m)</th><th>Buyers</th><th>Buy volume</th><th>Market cap</th><th>Safety</th><th>Coordination</th><th>Entry decision</th><th>Last trade</th></tr></thead>
               <tbody>
                 {data.tokens.map((t: J) => (
                   <tr key={t.token} onClick={() => setSelected(selected === t.token ? null : t.token)} style={{ cursor: "pointer" }}
                     aria-selected={selected === t.token} title="Show the launch-coordination assessment">
-                    <td className="mono small" title={t.token}>{t.symbol ?? t.token.slice(0, 10)}</td>
+                    <td className="mono small" title={t.token}>
+                      <Link className="link" href={`/dashboard/explorer/${t.chain}/${t.token}`} onClick={(e) => e.stopPropagation()}>{t.symbol ?? t.token.slice(0, 10)}</Link>
+                    </td>
                     <td>{t.launchpad}</td>
                     <td>{t.category}</td>
                     <td>{t.stage}</td>
                     <td>{t.stats?.buys ?? 0} / {t.stats?.sells ?? 0}</td>
                     <td>{t.stats?.unique_buyers ?? 0}</td>
                     <td>{t.stats?.buy_volume ? `${Number(t.stats.buy_volume).toFixed(3)} ${unit}` : "—"}</td>
+                    <td title={(t.market?.reasons ?? []).join("; ") || "price x total supply, in USD"}>{t.market?.market_cap_usd ? formatUsdCompact(t.market.market_cap_usd) : <span className="muted">—</span>}</td>
                     <td><Verdict v={t.safety_verdict} /></td>
                     <td><CoordinationPill action={t.coordination_action} status={t.coordination_status} /></td>
                     <td className="small"><Decision d={t.entry_decision} /></td>

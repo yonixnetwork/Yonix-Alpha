@@ -58,3 +58,5 @@ class PaperPositionOut(BaseModel):
     feature_version: str | None = None
     pending_order_id: UUID | None = None
     exit_failures: int = 0
+    # Real-time PnL view (yonixalpha_core.position_pnl, master §59): PROFIT / LOSS, never a bare OPEN
+    pnl: dict[str, Any] | None = None

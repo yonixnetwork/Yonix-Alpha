@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import TokenIntel from "@/components/TokenIntel";
 import TokenTerminal from "@/components/TokenTerminal";
+import { PnlOutcome } from "@/components/Pnl";
 import { Empty, ErrorNotice, Loading, Money, Section, Stat } from "@/components/ui";
 import { formatDate, formatDecimal, formatState, gateDecisionPillClass } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
@@ -83,7 +84,8 @@ export default function TokenDetailPage() {
                 <Link className="link" href={`/dashboard/trades/${p.id}`}>
                   {p.side} {p.status}
                 </Link>{" "}
-                entry {formatDecimal(p.entry_price, 10)} · PnL <Money value={p.realized_pnl} currency="SOL" digits={6} /> · {p.exit_reason ?? ""}
+                entry {formatDecimal(p.entry_price, 10)} · <PnlOutcome pnl={p.pnl} currency="SOL" showAmount={false} />{" "}
+                {p.pnl?.net != null && <Money value={p.pnl.net} currency="SOL" digits={6} />} {p.exit_reason ? `· ${p.exit_reason}` : ""}
               </li>
             ))}
           </ul>

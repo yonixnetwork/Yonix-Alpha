@@ -76,3 +76,14 @@ def test_gate_refuses_new_entries_when_a_switch_is_off():
     a = assess(inp, SafetySettings())
     f = next(f for f in a.findings if f.code == "TRADING_CONTROL_OFF")
     assert f.action == FinalDecision.NO_TRADE and "SOLANA OFF" in f.message and not a.executable
+
+
+def test_gate_refuses_an_entry_the_wallet_cannot_pay_gas_for():
+    """Master §57: verified before trading, shown as INSUFFICIENT GAS."""
+    from dataclasses import replace
+
+    inp = healthy()
+    inp.account = replace(inp.account, insufficient_gas="wallet 0.004 SOL < fee reserve 0.01 SOL + ...")
+    a = assess(inp, SafetySettings())
+    f = next(f for f in a.findings if f.code == "INSUFFICIENT_GAS")
+    assert f.action == FinalDecision.NO_TRADE and f.message.startswith("INSUFFICIENT GAS:") and not a.executable
