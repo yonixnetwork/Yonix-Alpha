@@ -592,7 +592,8 @@ class CopyEngine:
         out = {}
         async with self.session_factory() as session:
             for chain in ("bsc", "robinhood"):
-                out[chain] = await wallet_profiles.rebuild_evm(session, chain, now)
+                rpc = next((getattr(ad, "rpc", None) for ad in (self.evm_adapters.get(chain) or {}).values()), None)
+                out[chain] = await wallet_profiles.rebuild_evm(session, chain, now, rpc=rpc)
             out["solana"] = await wallet_profiles.rebuild_solana(session, now)
             await session.commit()
         return out

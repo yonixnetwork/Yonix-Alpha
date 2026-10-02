@@ -40,6 +40,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yonixalpha_core import copy_outcomes, market_regimes, wallet_pnl, wallet_validation
+from yonixalpha_core.chains.evm import address_kinds
 from yonixalpha_core.db.models import EvmToken, EvmTrade, LaunchBuyer, PlatformSetting, WalletProfile
 
 E18 = Decimal(10) ** 18
@@ -60,6 +61,9 @@ class ScoreConfig:
 
 def _labels(m: dict[str, Any]) -> list[str]:
     out = []
+    kind = (m.get("account") or {}).get("kind")
+    if kind in (address_kinds.CONTRACT, address_kinds.DELEGATED):
+        out.append(kind)
     if m["tokens_with_launch"] >= 5 and (m["early_entry_share"] or 0) >= 0.5:
         out.append("SNIPER")
     if m["avg_hold_s"] is not None and m["avg_hold_s"] < 300:
@@ -191,9 +195,15 @@ def _js(v: Any) -> Any:
     return v
 
 
+CONTRACT_REASON = ("contract address (router or bot): it cannot sign, so the trades credited to it belong to the "
+                   "wallets that called it; never a wallet to follow or copy")
+
+
 async def _upsert(session: AsyncSession, chain: str, wallet: str, m: dict[str, Any], source: str, cfg: ScoreConfig,
                   now: datetime) -> None:
     sc, detail = score(m, cfg)
+    if (m.get("account") or {}).get("kind") == address_kinds.CONTRACT:
+        sc, detail = None, {"reason": CONTRACT_REASON}
     values = dict(chain=chain, wallet=wallet, metrics=_js(m), labels=_labels(m) if source != "launch_buyers" else
                   [x for x in _labels(m) if x == "SNIPER"], score=sc, score_detail=_js(detail), source=source,
                   trades=m["trades"], tokens=m["tokens"], first_seen=m["first_seen"], last_seen=m["last_seen"], updated_at=now)
@@ -251,10 +261,16 @@ async def paper_follow(session: AsyncSession, chain: str, wallet: str, rows: lis
 
 
 async def rebuild_evm(session: AsyncSession, chain: str, now: datetime, cfg: ScoreConfig = ScoreConfig(),
-                      days: int = 14, min_trades: int = 3, max_wallets: int = MAX_WALLETS) -> int:
+                      days: int = 14, min_trades: int = 3, max_wallets: int = MAX_WALLETS, rpc=None) -> int:
     """Profiles the most active wallets over the retained trade history
     (14 days). Trades are loaded per batch of wallets, never the whole chain
-    at once: BSC alone records close to a million launchpad trades a day."""
+    at once: BSC alone records close to a million launchpad trades a day.
+
+    With `rpc`, every profiled address is classified (address_kinds): a
+    CONTRACT keeps its metrics but gets no score, the CONTRACT label and the
+    discovery stage REJECTED, so a router or bot never becomes a smart-wallet
+    candidate. Without it (or before an address is looked up) the kind is
+    UNKNOWN and the profile says so."""
     since = now - timedelta(days=days)
     t = EvmTrade
     vcfg = await validation_config(session)
@@ -263,6 +279,7 @@ async def rebuild_evm(session: AsyncSession, chain: str, now: datetime, cfg: Sco
     wallets = [w for w, in (await session.execute(select(t.trader).where(t.chain == chain, t.at >= since)
                                                    .group_by(t.trader).having(func.count() >= min_trades)
                                                    .order_by(func.count().desc()).limit(max_wallets))).all()]
+    kinds = await address_kinds.resolve(session, rpc, chain, wallets, now) if rpc is not None else {}
     launches = dict((await session.execute(select(EvmToken.token, EvmToken.created_at).where(
         EvmToken.chain == chain, EvmToken.created_block.is_not(None)))).all())
     n = 0
@@ -275,6 +292,13 @@ async def rebuild_evm(session: AsyncSession, chain: str, now: datetime, cfg: Sco
             WalletProfile.chain == chain, WalletProfile.wallet.in_(list(by_wallet))))).all()}
         for wallet, rows in by_wallet.items():
             m = evm_metrics(rows, launches, cfg, now, days, vcfg, regimes)
+            m["account"] = {"kind": kinds.get(wallet.lower(), "UNKNOWN")}
+            if m["account"]["kind"] == address_kinds.CONTRACT:
+                m["discovery"] = {"stage": "REJECTED", "validation": m["validation"].get("status"),
+                                  "reason": CONTRACT_REASON}
+                await _upsert(session, chain, wallet, m, "evm_trades", cfg, now)
+                n += 1
+                continue
             if m["validation"]["status"] == wallet_validation.VALIDATED:
                 pf = (prior.get(wallet) or {}).get("paper_follow")
                 fresh = pf and pf.get("at") and now - datetime.fromisoformat(pf["at"]) < PAPER_FOLLOW_REFRESH

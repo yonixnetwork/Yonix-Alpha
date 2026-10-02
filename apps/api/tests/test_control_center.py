@@ -414,13 +414,31 @@ async def test_evm_tokens_positions_and_settings(app, client, auth_headers):
     assert (await client.get("/api/evm/tokens", headers={})).status_code == 401
 
 
-async def test_copy_targets_profiles_and_events(app, client, auth_headers):
+async def test_copy_targets_profiles_and_events(app, client, auth_headers, monkeypatch):
     from datetime import datetime, timezone
     from decimal import Decimal
 
-    from yonixalpha_core.db.models import AuditLog, CopyEvent, WalletProfile
+    from yonixalpha_core.chains.evm import rpc_registry as evm_registry
+    from yonixalpha_core.db.models import AuditLog, CopyEvent, EvmAddressKind, WalletProfile
 
     evm = "0x" + "a" * 40
+    router = "0x" + "b" * 40
+
+    class FakeNode:  # eth_getCode: the router is a contract, the wallet has no code
+        async def get_code(self, address):
+            return "0x6080604052" if address == router else "0x"
+
+        async def aclose(self):
+            pass
+
+    async def fake_rpc_for(session, settings, chain):
+        return FakeNode()
+
+    monkeypatch.setattr(evm_registry, "rpc_for", fake_rpc_for)
+    refused = await client.post("/api/copy/targets", json={"chain": "bsc", "wallet": router}, headers=auth_headers)
+    assert refused.status_code == 422 and "contract" in refused.json()["detail"]
+    async with app.state.db_session_factory() as s:
+        assert (await s.get(EvmAddressKind, ("bsc", router))).kind == "CONTRACT"
     bad = await client.post("/api/copy/targets", json={"chain": "bsc", "wallet": "not-an-address-at-all-xxxxxxxxxxxx"},
                             headers=auth_headers)
     assert bad.status_code == 422
@@ -433,6 +451,7 @@ async def test_copy_targets_profiles_and_events(app, client, auth_headers):
     assert r.status_code == 200 and r.headers.get("x-config-revision")
     t = r.json()
     assert t["mode"] == "MIRROR" and t["settings"]["fixed_size"] == "0.01" and t["settings"]["max_delay_seconds"] == 30
+    assert t["account_kind"] == "WALLET" and t["warning"] is None
     assert (await client.post("/api/copy/targets", json={"chain": "bsc", "wallet": evm.upper().replace("0X", "0x")},
                               headers=auth_headers)).status_code == 409
     p = await client.patch(f"/api/copy/targets/{t['id']}", json={"mode": "NOTIFY", "settings": {"max_open_positions": 1}},
@@ -683,3 +702,22 @@ async def test_evm_streams_state_lead_and_settings(app, client, auth_headers):
     ph = (await client.get("/api/rpc/plan-health", headers=auth_headers)).json()
     mem = [f for f in ph["findings"] if f["capability"] == "mempool / pending transactions"]
     assert mem and mem[0]["severity"] == "UPGRADE_REQUIRED" and mem[0]["chain"] == "bsc"
+
+
+async def test_contract_profiles_are_hidden_unless_asked_for(app, client, auth_headers):
+    """M10b: a router or bot credited with trades is not a wallet: its profile
+    is hidden from Smart Wallets unless include_contracts is set."""
+    from yonixalpha_core.db.models import WalletProfile
+
+    async with app.state.db_session_factory() as s:
+        for addr, kind in (("0x" + "c1" * 20, "CONTRACT"), ("0x" + "c2" * 20, "WALLET"), ("0x" + "c3" * 20, None)):
+            m = {"discovery": {"stage": "REJECTED" if kind == "CONTRACT" else "COLLECTING_HISTORY"}}
+            if kind:
+                m["account"] = {"kind": kind}
+            s.add(WalletProfile(chain="bsc", wallet=addr, metrics=m, labels=["CONTRACT"] if kind == "CONTRACT" else [],
+                                source="evm_trades", trades=10, tokens=2))
+        await s.commit()
+    shown = (await client.get("/api/wallets/profiles?chain=bsc", headers=auth_headers)).json()["profiles"]
+    assert sorted(p["wallet"][2:4] for p in shown) == ["c2", "c3"]  # unknown kind (older profiles) still shown
+    every = (await client.get("/api/wallets/profiles?chain=bsc&include_contracts=true", headers=auth_headers)).json()
+    assert len(every["profiles"]) == 3 and "routers" in every["note"]

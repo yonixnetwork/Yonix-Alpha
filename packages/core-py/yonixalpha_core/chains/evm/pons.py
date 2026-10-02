@@ -117,11 +117,21 @@ class PonsV2(EvmLaunchpad):
             res.other.append({"event": name, "token": token, "tx_hash": log.get("transactionHash")})
             return
         is_buy = name == "CurveBuy"
+        # CurveBuy / CurveSell name msg.sender (the official PonsV2BondingCurve
+        # emits CurveBuy(msg.sender, recipient, ...)): through a router that is
+        # the router. The recipient gets the tokens (buy) or the quote (sell), so
+        # it is the trader whenever it differs from the caller (server, 2026-10-02:
+        # 33% of curve buys came through routers). A router sell that pays the
+        # router stays credited to the router: the wallet behind it is not in the
+        # event (tools.trader_attribution).
+        caller, recipient = (a["buyer"] if is_buy else a["seller"]), a["recipient"]
+        trader = recipient if recipient and int(recipient, 16) and recipient.lower() != caller.lower() else caller
         res.trades.append(self._trade(
-            log, at, token=token, trader=a["buyer"] if is_buy else a["seller"], is_buy=is_buy,
+            log, at, token=token, trader=trader, is_buy=is_buy,
             token_amount=a["tokensOut"] if is_buy else a["tokensIn"],
             quote_amount=a["quoteIn"] if is_buy else a["quoteOut"], fee=a["fee"] + a["tax"],
-            price=None, extra={"recipient": a["recipient"], "fee": a["fee"], "creator_tax": a["tax"], "curve": emitter}))
+            price=None, extra={"recipient": recipient, "caller": caller, "fee": a["fee"], "creator_tax": a["tax"],
+                               "curve": emitter}))
 
     async def _curve_state(self, token: str) -> dict[str, Any]:
         lt = await self.launched(token)
