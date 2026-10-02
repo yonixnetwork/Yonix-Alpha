@@ -85,7 +85,12 @@ class Node:
                 return err("execution reverted")
             if isinstance(r, Exception):
                 return err(str(r))
-            return ok(r(p) if callable(r) else r)
+            if callable(r):
+                try:
+                    return ok(r(p))
+                except Exception as exc:  # noqa: BLE001 - a callable answer may revert
+                    return err(str(exc))
+            return ok(r)
         return err(f"method {m} not faked")
 
     def transport(self) -> httpx.MockTransport:

@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, exists, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,7 +22,24 @@ from yonixalpha_core.chains import activity
 from yonixalpha_core.chains.base import TokenCategory
 from yonixalpha_core.chains.evm.launchpad import ScanResult
 from yonixalpha_core.chains.evm.settings import EvmTradingSettings
+from yonixalpha_core.chains.evm.abi import ZERO_ADDRESS
+from yonixalpha_core.chains.registry import BSC_WBNB, ROBINHOOD_WETH
 from yonixalpha_core.db.models import EvmCursor, EvmToken, EvmTrade
+
+# Quote assets measured in the chain's native unit (wrapped native is 1:1).
+NATIVE_QUOTES = tuple(a.lower() for a in (ZERO_ADDRESS, BSC_WBNB, ROBINHOOD_WETH))
+
+
+def native_quote_trade(e=EvmTrade):
+    """SQL condition: the trade's quote_amount is in the chain's native unit,
+    or nothing says otherwise. A trade flagged native_quote = false, or on a
+    token whose recorded quote is an ERC-20 (Four.meme / Genius.fun curves
+    quoted in tokenized stocks), is excluded from native-unit sums: wallet
+    profit and loss, market regimes, volume."""
+    other_quote = exists().where(EvmToken.chain == e.chain, EvmToken.token == e.token,
+                                 EvmToken.quote_token.is_not(None),
+                                 func.lower(EvmToken.quote_token).not_in(NATIVE_QUOTES))
+    return and_(func.coalesce(e.extra["native_quote"].astext, "true") != "false", ~other_quote)
 
 VENUE_KEYS = ("curve", "pool", "factory")
 

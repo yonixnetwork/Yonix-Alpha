@@ -34,6 +34,8 @@ SAFETY_RECHECK = timedelta(minutes=2)
 SAFETY_PER_PASS = 8
 EVIDENCE_EVERY = timedelta(minutes=30)
 TRADE_RETENTION = timedelta(days=14)
+QUOTE_LOOKUPS_PER_PASS = 200  # Four.meme tokens without a recorded quote, per safety pass
+QUOTE_LOOKBACK = timedelta(days=14)  # the trade retention
 RPC_OUTAGE_ALERT_SECONDS = 120  # discovery failing on an unavailable RPC this long is alerted
 E18 = Decimal(10) ** 18
 
@@ -380,6 +382,31 @@ class ChainWorker:
             await session.commit()
         self.last_evidence_at = now
         return n
+
+    async def quote_pass(self, now: datetime, limit: int = QUOTE_LOOKUPS_PER_PASS) -> int:
+        """Records the quote asset of tokens stored without one (Four.meme
+        tokens first seen before their quote was read), most recently traded
+        first, so native-unit sums can leave stock-quoted curves out. A token
+        whose quote cannot be read is marked and not asked again."""
+        done = 0
+        for key, ad in self.adapters.items():
+            if not hasattr(ad, "quote_of"):
+                continue
+            async with self.session_factory() as session:
+                rows = (await session.execute(select(EvmToken).where(
+                    EvmToken.chain == self.chain, EvmToken.launchpad == key, EvmToken.quote_token.is_(None),
+                    EvmToken.last_trade_at >= now - QUOTE_LOOKBACK,
+                    EvmToken.extra["quote_lookup"].astext.is_(None)).order_by(EvmToken.last_trade_at.desc())
+                    .limit(limit))).scalars().all()
+                for row in rows:
+                    q = await ad.quote_of(row.token)  # an RPC outage propagates: the pass stops, nothing is marked
+                    if q is None:
+                        row.extra = {**(row.extra or {}), "quote_lookup": "unreadable"}
+                    else:
+                        row.quote_token = q
+                    done += 1
+                await session.commit()
+        return done
 
     async def prune(self, now: datetime) -> int:
         async with self.session_factory() as session:

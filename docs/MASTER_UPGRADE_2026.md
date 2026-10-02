@@ -44,7 +44,7 @@ Providers), see M7.
 | 5 | Launchpad health: activity status, last launch/trade/migration, 7d counts, verified flags | DONE in code (M1), NOT VERIFIED in production yet | `chains/activity.py`, table `launchpad_activity` (migration 0024), rollup written in `evm/store.persist_scan`, `/api/launchpads`, Launchpads page; `tests/test_launchpad_activity.py`, `test_control_center` | M1 |
 | 6 | 7-day inactivity → INACTIVE, hidden from active filter, adapter kept, auto-reactivation | DONE in code (M1) | INACTIVE needs 7 days without activity AND 7 days of monitoring (else UNVERIFIED); Active / Archived tabs; discovery keeps scanning, so activity returns the venue to ACTIVE; Solana trade counts are "not tracked" (None), never 0 | M1 |
 | 7 | Solana launchpads beyond Pump.fun/PumpSwap (LetsBONK, LaunchLab, Meteora DBC, Bags, Moonshot, Jupiter Studio) | PARTIAL: activity monitored, observe only (M10a); launch sites split by on-chain config (M10c) | Raydium LaunchLab, Meteora DBC and Moonshot in the registry as OBSERVE ONLY; activity from a 5-minute probe (section 19); per-site split from each sampled instruction's platform / pool config, LaunchLab sites named from their own PlatformConfig (section 22); StonkFun identified: it runs on LaunchLab (seen as one of its platform configs); trading NOT IMPLEMENTED | M10 |
-| 8 | BSC: Four.meme, Flap verified; Genius.fun etc. researched | PARTIAL | Four.meme / Flap adapters, discovery live, read-only checks PASS; Four.meme X Mode detected by a plain-buy simulation (revert "A") and FAILS safety; AntiSniperFeeMode / template layout pending `tools.fourmeme_modes` on the server (section 22); Genius.fun researched and added OBSERVE ONLY (Pons V2 event decoder, two factories) | M10 |
+| 8 | BSC: Four.meme, Flap verified; Genius.fun etc. researched | PARTIAL | Four.meme / Flap adapters, discovery live, read-only checks PASS; Four.meme X Mode detected by a plain-buy simulation (revert "A") and FAILS safety; AntiSniperFeeMode / template layout pending `tools.fourmeme_modes` on the server (section 22); Genius.fun researched and added OBSERVE ONLY (Pons V2 event decoder, two factories); Four.meme curves quoted in tokenized stocks (32 of 40 newest) kept out of BNB volume, wallet P/L and regimes (section 23) | M10 |
 | 9 | BSC mempool wallet copying | DONE (measurement) | `evm.streams.PendingTxStream`: eth_subscribe newPendingTransactions (full bodies) over a dashboard WSS endpoint; matches copy targets / launchpads; REFUSED / LIMITED become UPGRADE REQUIRED; copy decisions stay on confirmed trades (§17) | M8 |
 | 10 | Robinhood: Pons, NOXA, Odyssey | PARTIAL | adapters exist; only Pons V2 proven active | M1 |
 | 11 | Pons coordinated-launch safety (privileged / creator-linked / common-funder / simultaneous buyers) | DONE (paper; on-chain assumptions NOT VERIFIED until coordination_check runs on the server) | launch_coordination: 13 detections, configurable NO_TRADE / REDUCE_SIZE / MANUAL_APPROVAL / NONE, data-evm entries + EVM copy buys; see section 13 | M5 |
@@ -1178,7 +1178,8 @@ docker compose --env-file .env -f infra/docker/docker-compose.yml -f infra/docke
 other ERC-20 pair is counted as a trade, not added to BNB volume. The same
 rule now applies to Pons V2 curves with an ERC-20 pair. Four.meme tokens
 quoted in a BEP-20 (e.g. USD1) are still summed into volume: the scan does
-not know the quote per token. That is a known gap.
+not know the quote per token. That is a known gap. (Closed in M10d,
+section 23.)
 
 **Curve launches:** only curves launched inside the backfill window are
 known. Trades on older Genius curves are rejected as foreign until they
@@ -1212,4 +1213,92 @@ reach the window.
 **On the page:** the Launchpads page lists the top 10 sites with their
 share of the sampled instructions. It is a sample of 25 transactions, so
 small sites can be missing.
+
+## 23. M10d — Four.meme curves quoted in tokenized stocks (2026-10-02)
+
+### Server evidence
+
+`tools.fourmeme_modes`, 40 newest Four.meme curve tokens:
+- 32 of the 40 are quoted in a BEP-20, not BNB. In the sample that is
+  BNCB, a bStocks tokenized share of CEA Industries worth about $6
+  (`0x4902c5EB…eEc3f`).
+- Only the 8 BNB-quoted tokens could be simulated (all plain-buy OK).
+
+DefiLlama dimension-adapters issue #9736 found the same thing:
+- Since 2026-09-14, Four.meme curves have been quoted in tokenized stocks
+  (BNCB, SPCXB, NVDAB, FORM ...).
+- Pricing their trades as BNB inflated Four.meme volume 10–30x.
+
+`TokenPurchase.cost` is in the quote token's units. We stored it as BNB,
+so the following summed stock units as BNB:
+- the launchpad's 7-day volume;
+- wallet profit and loss, profiles and smart-wallet scores;
+- market regimes.
+
+Paper entries were never affected: safety already fails a non-BNB quote
+(NON_NATIVE_QUOTE).
+
+### Fix
+
+**Quote per token.**
+- The Four.meme adapter reads each token's quote once from Helper3
+  `getTokenInfo` (documented ABI; cached, 50,000 tokens) when it sees the
+  launch or the token's first trade.
+- The launch stores it as the token's quote. Every launch and trade
+  records `native_quote`.
+- A revert (not a Four.meme token) leaves it unknown. An RPC outage stops
+  the scan, which resumes later.
+
+**Older tokens.**
+- The data-evm safety cadence reads the quote of up to 200 stored
+  Four.meme tokens per pass that have none, traded in the last 14 days,
+  most recently traded first.
+- An unreadable token is marked and not asked again.
+
+**Native-unit sums** (`store.native_quote_trade`) leave out a trade that
+is flagged non-native, or whose token has a recorded ERC-20 quote:
+- wallet profiles / profit and loss;
+- market regimes;
+- launchpad volume.
+
+BNB / ETH and their wrapped forms (WBNB, Robinhood WETH) count as native.
+Trades on stock-quoted curves still count as trades, not as volume.
+
+**Stale profiles.**
+- A wallet whose trades were mostly on stock-quoted curves can drop below
+  the rebuild threshold. Its old profile (with figures in stock units) is
+  kept but marked stale with the reason.
+- The Smart Wallets page shows a STALE label.
+- The next rebuild of that wallet clears it.
+
+### Four.meme struct layout (from the same run)
+
+`_tokenInfos` returns 13 words:
+- word 0 = the token;
+- word 1 = the quote (non-zero exactly for the 32 BEP-20-quoted tokens);
+- word 3 = 1e27 (total supply);
+- words 4 and 7 = 8e26 (max offers, and offers while nothing is sold).
+
+That fits base, quote, template, totalSupply, maxOffers, maxRaising, ...
+with word 2 the template:
+- its low bits read creator type 9 (`0x…241b`);
+- bit 16 is clear on every plain-buy-OK token.
+
+**Not settled.** The sample held no TaxToken, no X Mode token and no agent
+token, so the template bits are still untested. X Mode detection
+therefore stays on the buy simulation (section 22). The tool now also
+samples:
+- tokens safety has found X Mode;
+- tokens with a stored tax;
+and tests word 2 directly.
+
+`_tokenInfoEx1s` returns 5 words:
+- word 3 is non-zero on every token (about 125.3M, close to the current
+  BSC block);
+- the others were zero.
+
+So AntiSniperFeeMode (`feeSetting`) is not located yet.
+
+The four.meme API cross-check returned nothing on the server. The tool
+now prints why (HTTP status or the API's error).
 
