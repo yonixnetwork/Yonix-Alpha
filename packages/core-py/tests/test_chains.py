@@ -19,7 +19,8 @@ def passed(*names, at=NOW):
 def test_registry_has_exactly_the_three_chains_and_honest_lifecycles():
     assert set(CHAINS) == {Chain.SOLANA, Chain.BSC, Chain.ROBINHOOD}
     assert CHAINS[Chain.ROBINHOOD].evm_chain_id == 4663 and CHAINS[Chain.BSC].evm_chain_id == 56
-    assert {s.key for s in launchpads_for(Chain.BSC)} == {"fourmeme", "flap"}
+    assert {s.key for s in launchpads_for(Chain.BSC)} == {"fourmeme", "flap", "genius_fun"}
+    assert not LAUNCHPADS["genius_fun"].supports_trading  # observe only (M10c)
     assert LAUNCHPADS["noxa"].lifecycle == Lifecycle.INSTANT_POOL and not LAUNCHPADS["noxa"].active
     assert LAUNCHPADS["odyssey_curve"].lifecycle == Lifecycle.BONDING_CURVE_TO_DEX
     assert LAUNCHPADS["pons_v1"].migration_model.startswith("none")  # no invented graduation event

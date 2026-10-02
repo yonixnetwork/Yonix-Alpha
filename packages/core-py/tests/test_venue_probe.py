@@ -110,3 +110,82 @@ async def test_probe_drives_health_but_venue_stays_observe_only():
         assert lab["activity_status"] == "UNVERIFIED" and lab["last_transaction"] is None  # never probed yet
     finally:
         await engine.dispose()
+
+
+LAB = vp.VENUES["raydium_launchlab"]["program"]
+
+
+def _tx(program, ix_name, accounts, inner=False, extra_keys=()):
+    """A getTransaction(json) result with one `program` instruction (outer,
+    or as a CPI from Jupiter) whose account list is `accounts`."""
+    keys = [JUP, program, *accounts, *extra_keys]
+    ix = {"programIdIndex": 1, "accounts": list(range(2, 2 + len(accounts))),
+          "data": vp.b58encode(vp.disc(ix_name) + b"\x01" * 16)}
+    outer = [{"programIdIndex": 0, "accounts": [], "data": vp.b58encode(b"route")}]
+    msg = {"accountKeys": keys, "instructions": outer if inner else [ix]}
+    meta = {"logMessages": [], "innerInstructions": [{"index": 0, "instructions": [ix]}] if inner else []}
+    return {"transaction": {"message": msg}, "meta": meta}
+
+
+def test_site_accounts_follow_the_idl_positions_outer_and_cpi():
+    """LaunchLab: platform_config is account 3 of buys / sells / initialize;
+    DBC: config is account 1 of swaps and 0 of initialize_*. Discriminators
+    are Anchor's sha256("global:<name>")[:8] and match the IDLs."""
+    assert list(vp.disc("buy_exact_in")) == [250, 234, 13, 123, 213, 156, 19, 236]  # raydium_launchpad IDL
+    assert list(vp.disc("swap2")) == [65, 75, 63, 76, 235, 91, 91, 136]  # DBC IDL 0.2.1
+    plat = "PLATbonk1111111111111111111111111111111111"
+    lab = vp.VENUES["raydium_launchlab"]["site"]["index"]
+    acc = ["payer", "auth", "global", plat, "pool"]
+    assert vp.site_accounts(LAB, _tx(LAB, "buy_exact_in", acc), lab) == {plat: 1}
+    assert vp.site_accounts(LAB, _tx(LAB, "sell_exact_out", acc, inner=True), lab) == {plat: 1}  # via Jupiter CPI
+    assert vp.site_accounts(LAB, _tx(LAB, "claim_platform_fee", acc), lab) == {}  # not a trade / launch
+    assert vp.site_accounts(LAB, _tx(LAB, "buy_exact_in", acc[:2]), lab) == {}  # too few accounts: skipped
+    dbc = vp.VENUES["meteora_dbc"]["site"]["index"]
+    assert vp.site_accounts(DBC, _tx(DBC, "swap2", ["auth", "cfgA", "pool"]), dbc) == {"cfgA": 1}
+    assert vp.site_accounts(DBC, _tx(DBC, "initialize_virtual_pool_with_token2022", ["cfgB", "x"]), dbc) == {"cfgB": 1}
+
+
+def test_platform_config_name_and_dbc_quote_mint_are_decoded():
+    data = bytearray(vp.PLATFORM_CONFIG_DISC + b"\x00" * 600)
+    data[112:112 + 7] = b"StonkFn"
+    data[176:176 + 15] = b"https://x.test/"
+    assert vp.decode_site("raydium_launchlab", bytes(data)) == {"name": "StonkFn", "web": "https://x.test/"}
+    assert "error" in vp.decode_site("raydium_launchlab", b"\x00" * 500)  # wrong account type: not labelled
+    mint = bytes(range(32))
+    assert vp.decode_site("meteora_dbc", b"\x00" * 8 + mint + b"\x00" * 100) == {"quote_mint": vp.b58encode(mint)}
+
+
+async def test_probe_reports_sites_with_on_chain_names():
+    import base64
+
+    vp._SITE_INFO.clear()
+    t = int((NOW - timedelta(minutes=5)).timestamp())
+    p1, p2 = "PLAT1111111111111111111111111111111111111", "PLAT2222222222222222222222222222222222222"
+    sigs = [{"signature": f"s{i}", "err": None, "blockTime": t - i} for i in range(4)]
+    acc = lambda p: ["payer", "auth", "global", p, "pool"]  # noqa: E731
+    txs = {"s0": _tx(LAB, "buy_exact_in", acc(p1)), "s1": _tx(LAB, "sell_exact_in", acc(p1), inner=True),
+           "s2": _tx(LAB, "buy_exact_in", acc(p2)), "s3": _tx(LAB, "initialize_v2", acc(p1))}
+    name = bytearray(vp.PLATFORM_CONFIG_DISC + b"\x00" * 600)
+    name[112:120] = b"LetsBONK"
+
+    class Rpc:
+        calls = []
+
+        async def call(self, method, params=None, priority="normal"):
+            self.calls.append(method)
+            if method == "getSignaturesForAddress":
+                return sigs
+            if method == "getMultipleAccounts":
+                return {"context": {}, "value": [{"data": [base64.b64encode(bytes(name)).decode(), "base64"]}
+                                                 if a == p1 else None for a in params[0]]}
+            return txs[params[0]]
+
+    rpc = Rpc()
+    res = await vp.probe(rpc, "raydium_launchlab", sample=4)
+    ev = res.evidence()
+    assert ev["sites"] == [{"address": p1, "instructions": 3, "name": "LetsBONK", "web": None},
+                           {"address": p2, "instructions": 1, "error": "account not found"}]
+    assert ev["sites_total"] == 2
+    await vp.probe(rpc, "raydium_launchlab", sample=4)
+    assert rpc.calls.count("getMultipleAccounts") == 1  # names are cached
+    assert "sites" not in (await vp.probe(FakeRpc(*sigs_and_txs()), "moonshot", sample=2)).evidence()

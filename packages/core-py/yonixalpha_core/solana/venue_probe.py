@@ -31,11 +31,23 @@ Program ids and instruction names come from the venues' own sources:
                      wen-moon-ser/moonshot-sdk IDL V4 (be46cc5, 2025-04).
 Anchor logs instruction names in UpperCamelCase ("swap2" -> "Swap2"); that
 convention is assumed and the unknown-name report shows it if wrong.
+
+Launch sites (M10c). One program serves many sites: on LaunchLab each site
+is a platform_config (LetsBONK, StonkFun and others), on DBC a pool config.
+For every sampled LaunchLab / DBC instruction (outer or CPI) whose Anchor
+discriminator is a trade or launch, the probe takes that account (IDL
+position: LaunchLab platform_config 3; DBC config 1 in swaps, 0 in
+initialize_*) and counts it. LaunchLab platform configs store their own
+name and web address (PlatformConfig.name at byte 112, web at 176), read
+once with getMultipleAccounts; DBC configs have no name, so they are shown
+with their quote mint. The split is the share of the SAMPLED instructions,
+not of all traffic.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -43,6 +55,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from yonixalpha_core.logging import get_logger
+from yonixalpha_core.solana.codec import b58decode, b58encode
 
 log = get_logger("solana.venue_probe")
 
@@ -85,6 +98,87 @@ VENUES: dict[str, dict[str, Any]] = {
     },
 }
 
+def disc(name: str) -> bytes:
+    """Anchor instruction discriminator: sha256("global:<name>")[:8]."""
+    return hashlib.sha256(f"global:{name}".encode()).digest()[:8]
+
+
+def _site_index(*groups: tuple[int, tuple[str, ...]]) -> dict[bytes, int]:
+    return {disc(n): idx for idx, names in groups for n in names}
+
+
+VENUES["raydium_launchlab"]["site"] = {
+    "account": "platform_config",
+    "index": _site_index((3, ("buy_exact_in", "buy_exact_out", "sell_exact_in", "sell_exact_out", "initialize",
+                              "initialize_v2", "initialize_with_token_2022")))}
+VENUES["meteora_dbc"]["site"] = {
+    "account": "config",
+    "index": _site_index((1, ("swap", "swap2", "swap2_with_transfer_hook")),
+                         (0, ("initialize_virtual_pool_with_spl_token", "initialize_virtual_pool_with_token2022",
+                              "initialize_virtual_pool_with_token2022_transfer_hook")))}
+PLATFORM_CONFIG_DISC = bytes([160, 78, 128, 0, 248, 83, 230, 160])  # raydium_launchpad IDL, PlatformConfig
+SITE_NAMES_MAX = 10
+_SITE_INFO: dict[str, dict[str, Any]] = {}  # address -> name / web / quote mint (process cache)
+
+
+def site_accounts(program: str, tx: dict[str, Any], index: dict[bytes, int]) -> Counter:
+    """Site account of every `program` instruction (outer and inner) whose
+    discriminator is in `index`, from a getTransaction(json) result."""
+    out: Counter = Counter()
+    t = (tx or {}).get("transaction") or {}
+    msg = t.get("message") or {}
+    meta = (tx or {}).get("meta") or {}
+    loaded = meta.get("loadedAddresses") or {}
+    keys = list(msg.get("accountKeys") or []) + list(loaded.get("writable") or []) + list(loaded.get("readonly") or [])
+    ixs = list(msg.get("instructions") or [])
+    for inner in meta.get("innerInstructions") or []:
+        ixs += inner.get("instructions") or []
+    for ix in ixs:
+        try:
+            if keys[ix["programIdIndex"]] != program:
+                continue
+            pos = index.get(b58decode(ix.get("data") or "")[:8])
+            if pos is not None and pos < len(ix.get("accounts") or []):
+                out[keys[ix["accounts"][pos]]] += 1
+        except (IndexError, KeyError, TypeError, ValueError):
+            continue  # a malformed instruction is skipped, never guessed
+    return out
+
+
+def _cstr(raw: bytes) -> str | None:
+    text = raw.split(b"\x00", 1)[0].decode("utf-8", "replace").strip()
+    return text or None
+
+
+def decode_site(venue: str, data: bytes) -> dict[str, Any]:
+    if venue == "raydium_launchlab":
+        if data[:8] != PLATFORM_CONFIG_DISC or len(data) < 432:
+            return {"error": "not a PlatformConfig account"}
+        return {"name": _cstr(data[112:176]), "web": _cstr(data[176:432])}
+    if venue == "meteora_dbc" and len(data) >= 40:
+        return {"quote_mint": b58encode(data[8:40])}
+    return {}
+
+
+async def site_info(rpc, venue: str, addresses: list[str]) -> dict[str, dict[str, Any]]:
+    """Name / web (LaunchLab) or quote mint (DBC) per site account, cached."""
+    import base64
+
+    todo = [a for a in addresses if a not in _SITE_INFO]
+    if todo:
+        try:
+            res = await rpc.call("getMultipleAccounts", [todo, {"encoding": "base64"}], priority="background")
+            values = (res or {}).get("value") if isinstance(res, dict) else res
+            for addr, acc in zip(todo, values or []):
+                if acc and isinstance(acc.get("data"), list):
+                    _SITE_INFO[addr] = decode_site(venue, base64.b64decode(acc["data"][0]))
+                elif acc is None:
+                    _SITE_INFO[addr] = {"error": "account not found"}
+        except Exception as exc:  # noqa: BLE001 - names are labels; the counts stand without them
+            log.info("venue_probe.site_info_failed", venue=venue, error=type(exc).__name__)
+    return {a: _SITE_INFO.get(a, {}) for a in addresses}
+
+
 _INVOKE = re.compile(r"^Program (\w+) invoke \[\d+\]")
 _EXIT = re.compile(r"^Program (\w+) (success|failed)")
 _IX = re.compile(r"^Program log: Instruction: (\w+)")
@@ -125,13 +219,18 @@ class ProbeResult:
     kinds: Counter = field(default_factory=Counter)
     unknown: Counter = field(default_factory=Counter)
     last_seen: dict[str, datetime] = field(default_factory=dict)  # kind -> newest sampled tx of that kind
+    sites: Counter = field(default_factory=Counter)  # site account -> sampled instructions
+    site_labels: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def evidence(self) -> dict[str, Any]:
         return {"program": self.program, "signatures": self.signatures, "successful": self.successful,
                 "last_tx_at": self.last_tx_at.isoformat() if self.last_tx_at else None,
                 "span_s": self.span_s, "rate_per_min": self.rate_per_min, "sampled": self.sampled,
                 "sample_kinds": dict(self.kinds), "unknown_instructions": dict(self.unknown.most_common(10)),
-                "last_seen": {k: v.isoformat() for k, v in self.last_seen.items()}, "error": self.error}
+                "last_seen": {k: v.isoformat() for k, v in self.last_seen.items()}, "error": self.error,
+                **({"sites": [{"address": a, "instructions": n, **self.site_labels.get(a, {})}
+                              for a, n in self.sites.most_common(SITE_NAMES_MAX)],
+                    "sites_total": len(self.sites)} if self.sites else {})}
 
 
 def _ts(t) -> datetime | None:
@@ -169,10 +268,14 @@ async def probe(rpc, venue: str, sample: int = SAMPLE) -> ProbeResult:
         found, unknown = classify_logs(spec["program"], logs, spec["kinds"])
         res.kinds.update(found)
         res.unknown.update(unknown)
+        if "site" in spec:
+            res.sites.update(site_accounts(spec["program"], tx, spec["site"]["index"]))
         at = _ts(s.get("blockTime"))
         for k in found:
             if at and (k not in res.last_seen or at > res.last_seen[k]):
                 res.last_seen[k] = at
+    if res.sites:
+        res.site_labels = await site_info(rpc, venue, [a for a, _ in res.sites.most_common(SITE_NAMES_MAX)])
     return res
 
 

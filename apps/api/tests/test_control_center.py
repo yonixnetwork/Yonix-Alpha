@@ -345,7 +345,7 @@ async def test_launchpads_status_is_evidence_based_and_controls_are_audited(app,
     assert lp["fourmeme"]["activity_status"] == "UNVERIFIED" and lp["fourmeme"]["listed"] is False
     assert lp["fourmeme"]["trades_7d"] == 0 and lp["pumpfun"]["trades_7d"] is None  # Solana trades: not tracked, not 0
     assert lp["noxa"]["activity_status"] == "DISABLED" and "INACTIVE" in r["activity_statuses"]
-    assert {x["key"] for x in (await client.get("/api/launchpads?chain=bsc", headers=auth_headers)).json()["launchpads"]} == {"fourmeme", "flap"}
+    assert {x["key"] for x in (await client.get("/api/launchpads?chain=bsc", headers=auth_headers)).json()["launchpads"]} == {"fourmeme", "flap", "genius_fun"}
     # an unverified launchpad cannot be switched LIVE
     bad = await client.put("/api/controls/launchpad:fourmeme", json={"mode": "LIVE"}, headers=auth_headers)
     assert bad.status_code == 409 and "cannot be set LIVE" in bad.json()["detail"]

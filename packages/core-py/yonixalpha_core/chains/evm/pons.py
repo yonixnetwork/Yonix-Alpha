@@ -71,14 +71,20 @@ class PonsV2(EvmLaunchpad):
     def __init__(self, rpc) -> None:
         super().__init__(rpc)
         self.curves: dict[str, str] = {}  # curve (lower) -> token
+        self.curve_quote: dict[str, str] = {}  # curve (lower) -> pair token, when known
         self.rejected_curves: set[str] = set()
 
     @property
     def factory(self) -> str:
         return self.spec.contracts["factory"]
 
-    def register_curve(self, curve: str, token: str) -> None:
+    def register_curve(self, curve: str, token: str, quote: str | None = None) -> None:
         self.curves[curve.lower()] = token
+        if quote:
+            self.curve_quote[curve.lower()] = quote
+
+    def _is_factory(self, emitter: str) -> bool:
+        return emitter == self.factory.lower()
 
     async def _emitters(self) -> list[str] | None:
         return [self.factory, *(c for c in self.curves)]
@@ -89,12 +95,12 @@ class PonsV2(EvmLaunchpad):
 
     async def _handle(self, name: str, a: dict[str, Any], log: dict[str, Any], at: datetime, res: ScanResult) -> None:
         emitter = (log.get("address") or "").lower()
-        from_factory = emitter == self.factory.lower()
+        from_factory = self._is_factory(emitter)
         if name in ("TokenLaunched", "PoolGraduated", "LaunchSwept") and not from_factory:
             res.rejected_foreign += 1
             return
         if name == "TokenLaunched":
-            self.register_curve(a["curve"], a["token"])
+            self.register_curve(a["curve"], a["token"], a["pairToken"])
             res.launches.append(self._launch(log, at, a["token"], a["deployer"], quote_token=a["pairToken"],
                                              extra={"curve": a["curve"], "launch_config_id": a["launchConfigId"],
                                                     "graduation_threshold": str(a["graduationThreshold"]),
@@ -131,14 +137,15 @@ class PonsV2(EvmLaunchpad):
             token_amount=a["tokensOut"] if is_buy else a["tokensIn"],
             quote_amount=a["quoteIn"] if is_buy else a["quoteOut"], fee=a["fee"] + a["tax"],
             price=None, extra={"recipient": recipient, "caller": caller, "fee": a["fee"], "creator_tax": a["tax"],
-                               "curve": emitter}))
+                               "curve": emitter, **({"native_quote": self.curve_quote[emitter] == ZERO_ADDRESS}
+                                                    if emitter in self.curve_quote else {})}))
 
     async def _curve_state(self, token: str) -> dict[str, Any]:
         lt = await self.launched(token)
         if not lt["exists"]:
             raise LookupError("not a Pons V2 launch")
         curve = lt["curve"]
-        self.register_curve(curve, token)
+        self.register_curve(curve, token, lt["pair_token"])
         q_res, t_res = await dex.call(self.rpc, curve, "getReserves()", ["uint256", "uint256"])
         fee_bps = (await dex.call(self.rpc, curve, "feeBps()", ["uint256"]))[0]
         tax_bps = (await dex.call(self.rpc, curve, "creatorTaxBps()", ["uint256"]))[0]
@@ -228,6 +235,32 @@ V3_LAUNCH_EVENTS = EventSet(
           ("positionId", "uint256"), ("restrictionsEndBlock", "uint256"), ("initialBuyAmount", "uint256")),
     dex.V3_SWAP,
 )
+
+
+class GeniusFun(PonsV2):
+    """Genius.fun (BSC), observe only. Its factories emit Pons V2's
+    TokenLaunched and its curves Pons V2's CurveBuy / CurveSell, field for
+    field (DefiLlama dimension-adapters helpers/genius-fun.ts, 59c6c55), so
+    the Pons V2 decoder and its curve bookkeeping apply as they are, with two
+    factories. Per-token reads (getLaunchedToken, reserves) are Pons's and are
+    NOT VERIFIED on Genius; nothing here quotes or trades: the venue only
+    feeds launches, trades and activity."""
+
+    spec = LAUNCHPADS["genius_fun"]
+
+    @property
+    def factories(self) -> list[str]:
+        return [a for k, a in self.spec.contracts.items() if k.startswith("factory")]
+
+    @property
+    def factory(self) -> str:
+        return self.factories[-1]
+
+    def _is_factory(self, emitter: str) -> bool:
+        return emitter in {f.lower() for f in self.factories}
+
+    async def _emitters(self) -> list[str] | None:
+        return [*self.factories, *(c for c in self.curves)]
 
 
 class V3LaunchFactory(V3PoolsMixin, EvmLaunchpad):

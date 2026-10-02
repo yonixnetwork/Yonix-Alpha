@@ -61,6 +61,7 @@ def set_quotes(node: Node, lp: FourMeme, sell_back: Decimal) -> None:
                    [TOKEN, ZERO_ADDRESS, int(Decimal(amount) / 10 ** 6 * sell_back), 0])
 
     node.on(lp.helper, "tryBuy(address,uint256,uint256)", try_buy)
+    node.on(lp.spec.contracts["manager_v2"], "buyTokenAMAP(address,uint256,uint256)", "0x")  # not X Mode
     node.on(lp.helper, "trySell(address,uint256)", try_sell)
 
 

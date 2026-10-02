@@ -43,8 +43,8 @@ Providers), see M7.
 | 4 | Only Solana, BSC, Robinhood in the active UI | DONE | legacy futures/forex/grid removed (archive branch) | — |
 | 5 | Launchpad health: activity status, last launch/trade/migration, 7d counts, verified flags | DONE in code (M1), NOT VERIFIED in production yet | `chains/activity.py`, table `launchpad_activity` (migration 0024), rollup written in `evm/store.persist_scan`, `/api/launchpads`, Launchpads page; `tests/test_launchpad_activity.py`, `test_control_center` | M1 |
 | 6 | 7-day inactivity → INACTIVE, hidden from active filter, adapter kept, auto-reactivation | DONE in code (M1) | INACTIVE needs 7 days without activity AND 7 days of monitoring (else UNVERIFIED); Active / Archived tabs; discovery keeps scanning, so activity returns the venue to ACTIVE; Solana trade counts are "not tracked" (None), never 0 | M1 |
-| 7 | Solana launchpads beyond Pump.fun/PumpSwap (LetsBONK, LaunchLab, Meteora DBC, Bags, Moonshot, Jupiter Studio) | PARTIAL: activity monitored, observe only (M10a) | Raydium LaunchLab (LetsBONK runs on it), Meteora DBC (Bags, Jupiter Studio and others run on it) and Moonshot in the registry as OBSERVE ONLY; activity from a 5-minute probe (section 19); per-site split (LetsBONK vs other LaunchLab platforms, DBC configs) and trading NOT IMPLEMENTED; StonkFun not identified | M10 |
-| 8 | BSC: Four.meme, Flap verified; Genius.fun etc. researched | PARTIAL | Four.meme / Flap adapters, discovery live, read-only checks PASS; Four.meme addresses and events match four-meme-ai (M9); X Mode and AntiSniperFeeMode tokens NOT DETECTED (section 18); Genius.fun not researched | M10 |
+| 7 | Solana launchpads beyond Pump.fun/PumpSwap (LetsBONK, LaunchLab, Meteora DBC, Bags, Moonshot, Jupiter Studio) | PARTIAL: activity monitored, observe only (M10a); launch sites split by on-chain config (M10c) | Raydium LaunchLab, Meteora DBC and Moonshot in the registry as OBSERVE ONLY; activity from a 5-minute probe (section 19); per-site split from each sampled instruction's platform / pool config, LaunchLab sites named from their own PlatformConfig (section 22); StonkFun identified: it runs on LaunchLab (seen as one of its platform configs); trading NOT IMPLEMENTED | M10 |
+| 8 | BSC: Four.meme, Flap verified; Genius.fun etc. researched | PARTIAL | Four.meme / Flap adapters, discovery live, read-only checks PASS; Four.meme X Mode detected by a plain-buy simulation (revert "A") and FAILS safety; AntiSniperFeeMode / template layout pending `tools.fourmeme_modes` on the server (section 22); Genius.fun researched and added OBSERVE ONLY (Pons V2 event decoder, two factories) | M10 |
 | 9 | BSC mempool wallet copying | DONE (measurement) | `evm.streams.PendingTxStream`: eth_subscribe newPendingTransactions (full bodies) over a dashboard WSS endpoint; matches copy targets / launchpads; REFUSED / LIMITED become UPGRADE REQUIRED; copy decisions stay on confirmed trades (§17) | M8 |
 | 10 | Robinhood: Pons, NOXA, Odyssey | PARTIAL | adapters exist; only Pons V2 proven active | M1 |
 | 11 | Pons coordinated-launch safety (privileged / creator-linked / common-funder / simultaneous buyers) | DONE (paper; on-chain assumptions NOT VERIFIED until coordination_check runs on the server) | launch_coordination: 13 detections, configurable NO_TRADE / REDUCE_SIZE / MANUAL_APPROVAL / NONE, data-evm entries + EVM copy buys; see section 13 | M5 |
@@ -1100,4 +1100,116 @@ build cache filled the disk). `scripts/deploy.sh` now runs
 Layers used in the last 48 hours stay, so the next build is still fast.
 `BUILD_CACHE_KEEP=168h scripts/deploy.sh` keeps a week. A failed prune
 never fails the deploy.
+
+## 22. M10c — Four.meme modes, Genius.fun, launch sites (2026-10-02)
+
+### Four.meme X Mode
+
+four-meme-ai names the on-chain flags but not the layout of the getters
+that hold them (section 18).
+
+- **X Mode is detected without the layout.** An X Mode token can only be
+  bought with the signed `buyToken(bytes,uint256,bytes)`; a plain
+  `buyTokenAMAP` reverts with "A" (four-meme-ai errors.md). The safety
+  check now simulates that plain buy:
+  - eth_call to TokenManager2;
+  - msg.value from Helper3 `tryBuy`;
+  - funds rounded down to GWEI;
+  - a state override funds the simulation account.
+- **Results:**
+
+| Result | Finding | Effect |
+|---|---|---|
+| reverted "A" | FOURMEME_X_MODE | FAIL: YonixAlpha has no X Mode buy, so the token cannot be entered |
+| reverted, other reason | PLAIN_BUY_REVERTS (reason shown) | WARN, until server evidence shows the simulation matches real buys |
+| goes through | PLAIN_BUY_SIMULATED | INFO |
+| node refuses state overrides | PLAIN_BUY_NOT_SIMULATED | INFO, stated: X Mode not ruled out |
+| no RPC | PLAIN_BUY_UNAVAILABLE | UNKNOWN (never safe) |
+
+- The buy and sell quotes alone pass on an X Mode token. Before this
+  change, X Mode tokens could become paper entries that a real buy could
+  never make.
+- It applies to V2 tokens on the curve with a BNB quote.
+
+### AntiSniperFeeMode and the template bits
+
+These still need the struct layout. `tools.fourmeme_modes` (read-only)
+collects the evidence that fixes it. For the newest 40 curve tokens it
+records:
+- the plain-buy result;
+- TaxToken from `feeRate()`;
+- the raw words of `_tokenInfos` and `_tokenInfoEx1s`;
+- with `--api`, four.meme's own token API (version V8 = X Mode,
+  feePlan = AntiSniperFeeMode);
+- with `ETHERSCAN_API_KEY`, the verified TokenManager2 ABI.
+
+It reports, per word, how often the template bits agree with the TaxToken
+and X Mode evidence. Nothing is decoded until that output has been read.
+
+```
+docker compose --env-file .env -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.prod.yml \
+  exec -T data-evm python -m yonixalpha_core.tools.fourmeme_modes --api
+```
+
+### Genius.fun (BSC)
+
+**Research:**
+- Launched 2026-09-16/17. Most launches pair with tokenized stocks
+  (bStocks, xStocks, 4Stocks, Ondo).
+- Production factories `0x78EAE9537C0ef90DFe9B7ae964682Fe8138afe31` (still
+  open) and `0x37eE8AeE29C5efd3C1A7edA6dF3F510779928a37`.
+- Graduation goes to PancakeSwap Infinity pools with a Genius hook.
+- Source: DefiLlama dimension-adapters PR #9598 (helpers/genius-fun.ts,
+  59c6c55). Its own manifest, genius.fun/contracts/manifest.json, is not
+  reachable from the build environment: NOT VERIFIED against it.
+
+**Same events as Pons V2:**
+- TokenLaunched, CurveBuy and CurveSell are field for field the Pons V2
+  events (same names, types, indexing), so the topics are identical.
+- Genius.fun is therefore decoded by the Pons V2 decoder with its curve
+  bookkeeping and router attribution (recipient as trader).
+
+**OBSERVE ONLY:**
+- No quotes, safety reads, entries or copies.
+- Graduation (Infinity) is not decoded.
+- The data-evm safety pass now skips every observe-only venue.
+
+**Volume** counts native-quote trades only. A trade against a stock or any
+other ERC-20 pair is counted as a trade, not added to BNB volume. The same
+rule now applies to Pons V2 curves with an ERC-20 pair. Four.meme tokens
+quoted in a BEP-20 (e.g. USD1) are still summed into volume: the scan does
+not know the quote per token. That is a known gap.
+
+**Curve launches:** only curves launched inside the backfill window are
+known. Trades on older Genius curves are rejected as foreign until they
+reach the window.
+
+### StonkFun
+
+- StonkFun (Solana, launched 2026-08-03) pairs launches with tokenized
+  stocks and moved to Raydium LaunchLab (The Block / CoinGecko,
+  September 2026).
+- It is therefore one of LaunchLab's platform configs, not a separate
+  program. The site split below shows it once a sample contains its
+  trades.
+
+### Launch sites on LaunchLab and Meteora DBC
+
+**From each sampled transaction:**
+- Every LaunchLab / DBC instruction, outer or CPI, whose Anchor
+  discriminator (`sha256("global:<name>")[:8]`, checked against the IDLs)
+  is a trade or launch gives its site account:
+  - LaunchLab: platform_config, account 3;
+  - DBC: config, account 1 in swaps and 0 in initialize_*.
+
+**How sites are labelled:**
+- LaunchLab platform configs store their own name and web address
+  (PlatformConfig.name at byte 112, web at 176). They are read once with
+  getMultipleAccounts and cached, so a site is named by the chain, not by
+  a list we keep.
+- DBC configs have no name and are shown with their quote mint.
+
+**On the page:** the Launchpads page lists the top 10 sites with their
+share of the sampled instructions. It is a sample of 25 transactions, so
+small sites can be missing.
 
