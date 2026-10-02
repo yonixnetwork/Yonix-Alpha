@@ -7,6 +7,7 @@ trade is a candidate that still passes every gate and safety check.
 """
 
 import re
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -18,7 +19,7 @@ from app.api.deps import get_current_username, get_db, get_redis, get_settings
 from app.api.util import audit, jsonable
 from yonixalpha_core import copy_outcomes as co
 from yonixalpha_core import copy_trading as ct
-from yonixalpha_core import events, wallet_validation
+from yonixalpha_core import events, position_pnl, wallet_validation
 from yonixalpha_core.chains.evm import address_kinds
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import CopyEvent, CopyPosition, CopyTarget, PaperPosition, PlatformSetting, WalletProfile
@@ -140,8 +141,6 @@ async def targets(db: AsyncSession = Depends(get_db), _: str = Depends(get_curre
 async def _evm_account_kind(db: AsyncSession, settings: Settings, chain: str, wallet: str) -> tuple[str | None, str | None]:
     """(kind, warning). A contract cannot sign: the trades credited to it are the
     trades of whoever called it (a router or bot), so it is never a copy target."""
-    from datetime import datetime, timezone
-
     from yonixalpha_core.chains.evm import rpc_registry as evm_registry
 
     try:
@@ -261,6 +260,7 @@ async def copy_positions(status: str = Query("open", pattern="^(open|closed)$"),
         CopyPosition, CopyPosition.position_id == PaperPosition.id).join(CopyTarget, CopyTarget.id == CopyPosition.target_id)
         .where(PaperPosition.status == status).order_by(desc(PaperPosition.entry_at)).limit(limit))).all()
     pids = [p.id for p, _, _ in rows]
+    now = datetime.now(timezone.utc)
     entries = {e.position_id: e for e in (await db.execute(select(CopyEvent).where(
         CopyEvent.position_id.in_(pids), CopyEvent.side == "BUY", CopyEvent.decision == "COPIED"))).scalars()} if pids else {}
     sells: dict = {}
@@ -284,7 +284,7 @@ async def copy_positions(status: str = Query("open", pattern="^(open|closed)$"),
                     "entry_cost": p.entry_cost_quote, "quantity": rem, "last_price": p.last_price, "stop_loss": p.stop_loss,
                     "unrealized_pnl": ((p.last_price or p.entry_price) * rem - cost_open) if p.status == "open" else None,
                     "realized_pnl": p.realized_pnl, "exit_reason": p.exit_reason, "currency": ct.NATIVE.get(cp.chain),
-                    "link": link})
+                    "link": link, "pnl": position_pnl.view(p, now)})
     return jsonable({"positions": out, "mode": "PAPER"})
 
 

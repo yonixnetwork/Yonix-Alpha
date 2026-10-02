@@ -137,6 +137,12 @@ class Token(Base):
     events: Mapped[list["TokenEvent"]] = relationship(back_populates="token", cascade="all, delete-orphan")
 
 
+# Token Explorer name / symbol prefix search (lower(x) LIKE 'abc%'), migration 0032.
+for _col in ("symbol", "name"):
+    Index(f"ix_tokens_lower_{_col}", func.lower(getattr(Token, _col)).label(f"lower_{_col}"),
+          postgresql_ops={f"lower_{_col}": "text_pattern_ops"})
+
+
 class TokenEvent(Base):
     """Append-only log of every Solana on-chain event ingestion observes for
     a token: mint/creation, trade (buy/sell), migration/graduation,
@@ -1175,6 +1181,11 @@ class EvmToken(Base):
     coordination: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     coordination_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+for _col in ("symbol", "name"):  # Token Explorer prefix search, migration 0032
+    Index(f"ix_evm_tokens_lower_{_col}", func.lower(getattr(EvmToken, _col)).label(f"lower_{_col}"),
+          postgresql_ops={f"lower_{_col}": "text_pattern_ops"})
 
 
 class EvmWalletFunder(Base):

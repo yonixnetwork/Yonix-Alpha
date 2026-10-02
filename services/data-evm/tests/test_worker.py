@@ -8,13 +8,14 @@ behaviour (NOT VERIFIED on chain)."""
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import func, select
 
 from yonixalpha_core import kill_switch
 from yonixalpha_core.chains import verification
 from yonixalpha_core.chains.base import PAPER_REQUIRED
 from yonixalpha_core.chains.evm import settings as evm_settings
-from yonixalpha_core.chains.evm import store
+from yonixalpha_core.chains.evm import paper, store
 from yonixalpha_core.chains.evm.abi import ZERO_ADDRESS
 from yonixalpha_core.chains.evm.fourmeme import EVENTS, FourMeme
 from yonixalpha_core.db.models import EvmToken, EvmTrade, LaunchpadCheck, PaperAccount, PaperPosition
@@ -362,3 +363,138 @@ async def test_quote_pass_records_the_quote_of_tokens_stored_without_one(session
         assert got[TOKEN].quote_token == ZERO_ADDRESS and got[stock].quote_token.lower() == bncb.lower()
         assert got[dead].quote_token is None and got[dead].extra["quote_lookup"] == "unreadable"
     assert await w.quote_pass(now) == 0  # nothing left to ask
+
+
+async def _ready_for_entry(session_factory, redis_client, now):
+    node, lp = fourmeme_node(now)
+    w = ChainWorker("bsc", lp.rpc, [lp], session_factory, redis_client)
+    s = settings()
+    await w.discovery_pass(s, now)
+    assert await w.safety_pass(s, now) == 1
+    await record_paper_evidence(session_factory, now)
+    return node, w, s
+
+
+async def test_an_entry_needs_gas_for_both_swaps_and_the_gas_reserve(session_factory, redis_client):
+    """Master §57: gas is verified before the entry. The paper book must pay
+    the buy's and the sell's gas at the current gas price plus the chain's gas
+    reserve, or the entry is NO_TRADE: INSUFFICIENT GAS. An unreadable gas
+    price is never assumed affordable."""
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    node, w, s = await _ready_for_entry(session_factory, redis_client, now)
+    async with session_factory() as session:
+        acct = await paper.ensure_account(session, "bsc")
+        acct.cash_balance = Decimal("0.0015")  # less than 0.0006 gas (2 x 300k x 1 gwei) + 0.002 reserve
+        await session.commit()
+    assert (await w.entry_pass(s, now))["opened"] == 0
+    d = await _decision(session_factory)
+    blockers = {b["code"]: b["message"] for b in d["blockers"]}
+    assert set(blockers) == {"INSUFFICIENT_GAS"} and blockers["INSUFFICIENT_GAS"].startswith("INSUFFICIENT GAS: 0.0015 BNB")
+    assert d["detail"]["gas"]["round_trip_gas"] == "0.0006" and d["detail"]["gas"]["gas_price_gwei"] == "1"
+
+    node.gas_price = None  # the node does not answer eth_gasPrice
+    async with session_factory() as session:
+        (await paper.ensure_account(session, "bsc")).cash_balance = Decimal("1")
+        await session.commit()
+    assert (await w.entry_pass(s, now))["opened"] == 0
+    assert {b["code"] for b in (await _decision(session_factory))["blockers"]} == {"GAS_PRICE_UNAVAILABLE"}
+
+    node.gas_price = 10 ** 9
+    assert (await w.entry_pass(s, now))["opened"] == 1
+    async with session_factory() as session:
+        p = (await session.execute(select(PaperPosition))).scalar_one()
+        assert (await session.get(PaperAccount, p.account_id)).cash_balance >= Decimal("0.0026")  # gas money kept
+
+
+async def test_wallet_pass_syncs_the_evm_balance_and_native_usd_rates(session_factory, redis_client):
+    """Master §56: the EVM account's balance is read every minute; on BSC the
+    BNB / ETH USD rates come from PancakeSwap V2 quotes (executable, not an
+    index); an implausible quote is not stored."""
+    import json
+
+    from yonixalpha_core.chains.evm import native_price
+    from yonixalpha_core.chains.registry import BSC_PANCAKE_V2
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    node, lp = fourmeme_node(now)
+    addr = "0x" + "ab" * 20
+
+    async def bal(*_a):
+        return 2 * 10 ** 18
+
+    lp.rpc.get_balance = bal
+    prices = {native_price.PAIRS["BNB"].lower(): 600, native_price.PAIRS["ETH"].lower(): 5}  # ETH 5 USD: not sane
+
+    def amounts(p):
+        data = p[0]["data"]
+        token_in = "0x" + data[2 + 8 + 64 * 3 + 24: 2 + 8 + 64 * 4]  # amountIn, offset, length, path[0]
+        return enc(["uint256[]"], [[10 ** 18, prices[token_in] * 10 ** 18]])
+
+    node.on(BSC_PANCAKE_V2["router"], "getAmountsOut(uint256,address[])", amounts)
+    w = ChainWorker("bsc", lp.rpc, [lp], session_factory, redis_client, wallet_address=addr)
+    out = await w.wallet_pass(now)
+    assert out["balance"] == "2" and out["native_usd"]["BNB"] == {"price": "600"} and "error" in out["native_usd"]["ETH"]
+    assert json.loads(await redis_client.get("yx:evm:wallet:bsc"))["address"] == addr
+    assert (await native_price.usd_rate(redis_client, "bsc", now))["price"] == "600"
+    assert (await native_price.usd_rate(redis_client, "robinhood", now))["price"] is None  # ETH quote rejected
+
+
+async def test_manual_buy_runs_every_entry_check_but_replaces_the_signal(session_factory, redis_client):
+    """Master §45: a manual BUY on BSC is queued, re-checked (safety re-run
+    when stale) and executed by the same entry code as automatic trading. The
+    operator's decision replaces only the trade signal: a token with too few
+    buys can be bought by hand, a launchpad without verified evidence still
+    cannot. EVM is paper only."""
+    from yonixalpha_core.chains.evm import manual
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    node, lp = fourmeme_node(now)
+    w = ChainWorker("bsc", lp.rpc, [lp], session_factory, redis_client)
+    s, _ = evm_settings.parse({"bsc": {"confirmations": 0}, "fresh_min_buys": 50})  # the strategy would never buy
+    await w.discovery_pass(s, now)
+
+    async with session_factory() as session:
+        with pytest.raises(manual.ManualTradeError):
+            await manual.create_request(session, redis_client, "bsc", "0x" + "12" * 20, "op", now)  # not discovered
+        req = await manual.create_request(session, redis_client, "bsc", TOKEN.lower(), "op", now)
+    assert req["status"] == "QUEUED" and req["mode"] == "PAPER" and req["token"] == TOKEN
+
+    out = await w.manual_pass(s, now)  # safety never ran: it runs now; the launchpad has no evidence yet
+    got = await manual.get(redis_client, req["id"])
+    assert out == {"processed": 1, "opened": 0} and got["status"] == "BLOCKED"
+    assert {b["code"] for b in got["blockers"]} == {"LAUNCHPAD_NOT_VERIFIED"}  # not TOO_FEW_BUYS: signal replaced
+    async with session_factory() as session:
+        row = await session.get(EvmToken, ("bsc", TOKEN))
+        assert row.safety_verdict == "PASS" and row.safety_at == now  # re-run for the request
+        assert row.extra["manual_decision"]["source"] == "manual"
+
+    await record_paper_evidence(session_factory, now)
+    async with session_factory() as session:
+        req2 = await manual.create_request(session, redis_client, "bsc", TOKEN, "op", now)
+    assert (await w.manual_pass(s, now))["opened"] == 1
+    got = await manual.get(redis_client, req2["id"])
+    assert got["status"] == "PAPER_POSITION_OPEN" and got["detail"]["signal"].startswith("replaced by the operator")
+    async with session_factory() as session:
+        p = (await session.execute(select(PaperPosition))).scalar_one()
+        assert str(p.id) == got["position_id"] and p.plan["entry_source"] == "manual" and p.engine == "evm_bsc"
+
+    async with session_factory() as session:  # a second manual buy: the re-entry cooldown still applies
+        req3 = await manual.create_request(session, redis_client, "bsc", TOKEN, "op", now)
+    await w.manual_pass(s, now)
+    assert "ALREADY_TRADED" in {b["code"] for b in (await manual.get(redis_client, req3["id"]))["blockers"]}
+
+    async with session_factory() as session:  # not taken within 10 minutes: never executed late
+        req4 = await manual.create_request(session, redis_client, "bsc", TOKEN, "op", now - timedelta(minutes=11))
+    await w.manual_pass(s, now)
+    assert (await manual.get(redis_client, req4["id"]))["status"] == "EXPIRED"
+
+
+async def test_manual_buy_is_refused_on_an_observe_only_venue(session_factory, redis_client):
+    from yonixalpha_core.chains.evm import manual
+
+    now = datetime.now(timezone.utc)
+    async with session_factory() as session:
+        session.add(EvmToken(chain="bsc", token="0x" + "aa" * 20, launchpad="genius_fun", created_at=now))
+        await session.commit()
+        with pytest.raises(manual.ManualTradeError, match="observe only"):
+            await manual.create_request(session, redis_client, "bsc", "0x" + "aa" * 20, "op", now)

@@ -13,7 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_username, get_db, get_redis, get_settings
 from app.api.util import audit, jsonable
-from yonixalpha_core import events, launch_coordination
+from yonixalpha_core import events, launch_coordination, position_pnl
+from yonixalpha_core.chains.evm import native_price, token_view
 from yonixalpha_core.chains.evm import observation as evm_observation
 from yonixalpha_core.chains.evm import settings as evm_settings
 from yonixalpha_core.chains.evm import streams as evm_streams
@@ -27,14 +28,15 @@ router = APIRouter(prefix="/evm", tags=["evm"])
 CHAIN = "^(bsc|robinhood)$"
 
 
-def _token(r: EvmToken, full: bool = False) -> dict:
+def _token(r: EvmToken, full: bool = False, native_usd: str | None = None) -> dict:
     d = {"chain": r.chain, "token": r.token, "launchpad": r.launchpad, "name": r.name, "symbol": r.symbol,
          "creator": r.creator, "created_at": r.created_at, "category": r.category, "stage": r.stage,
          "migrated_at": r.migrated_at, "safety_verdict": r.safety_verdict, "safety_at": r.safety_at,
          "stats": r.stats, "last_trade_at": r.last_trade_at, "launch_seen": bool((r.extra or {}).get("launch_seen")),
          "entry_decision": (r.extra or {}).get("entry_decision"),
          "coordination_status": (r.coordination or {}).get("status"),
-         "coordination_action": (r.coordination or {}).get("action"), "coordination_at": r.coordination_at}
+         "coordination_action": (r.coordination or {}).get("action"), "coordination_at": r.coordination_at,
+         "market": token_view.market(r.chain, r.state, r.extra, r.quote_token, native_usd)}
     if full:
         d.update(coordination=r.coordination, coordination_approval=(r.extra or {}).get("coordination_approval"),
                  venue=r.venue, quote_token=r.quote_token, migration=r.migration, state=r.state, state_at=r.state_at,
@@ -46,8 +48,9 @@ def _token(r: EvmToken, full: bool = False) -> dict:
 async def tokens(chain: str | None = Query(None, pattern=CHAIN), category: str | None = Query(None),
                  launchpad: str | None = None, active_minutes: int = Query(60, ge=1, le=10080),
                  limit: int = Query(100, ge=1, le=500), db: AsyncSession = Depends(get_db),
-                 _: str = Depends(get_current_username)) -> dict:
-    since = datetime.now(timezone.utc) - timedelta(minutes=active_minutes)
+                 redis: Redis = Depends(get_redis), _: str = Depends(get_current_username)) -> dict:
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(minutes=active_minutes)
     q = select(EvmToken).where(func.coalesce(EvmToken.last_trade_at, EvmToken.created_at) >= since)
     if chain:
         q = q.where(EvmToken.chain == chain)
@@ -59,12 +62,14 @@ async def tokens(chain: str | None = Query(None, pattern=CHAIN), category: str |
     counts = dict((await db.execute(select(EvmToken.category, func.count()).where(
         func.coalesce(EvmToken.last_trade_at, EvmToken.created_at) >= since,
         *([EvmToken.chain == chain] if chain else [])).group_by(EvmToken.category))).all())
-    return jsonable({"tokens": [_token(r) for r in rows], "categories": counts,
+    rates = {c: (await native_price.usd_rate(redis, c, now))["price"] for c in ("bsc", "robinhood")}
+    return jsonable({"tokens": [_token(r, native_usd=rates[r.chain]) for r in rows], "categories": counts,
+                     "native_usd": rates,
                      "note": "EVM discovery, quotes and safety run on the real chains; paper only (no EVM live execution)"})
 
 
 @router.get("/tokens/{chain}/{token}")
-async def token_detail(chain: str, token: str, db: AsyncSession = Depends(get_db),
+async def token_detail(chain: str, token: str, db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
                        _: str = Depends(get_current_username)) -> dict:
     row = (await db.execute(select(EvmToken).where(EvmToken.chain == chain,
                                                    func.lower(EvmToken.token) == token.lower()))).scalar_one_or_none()
@@ -77,14 +82,16 @@ async def token_detail(chain: str, token: str, db: AsyncSession = Depends(get_db
         .order_by(desc(PaperPosition.entry_at)))).scalars().all()
     observations = (await db.execute(select(EvmObservation).where(
         EvmObservation.chain == chain, EvmObservation.token == row.token).order_by(EvmObservation.started_at))).scalars().all()
-    return jsonable({"token": _token(row, full=True), "observations": [_observation(o) for o in observations],
+    rate = (await native_price.usd_rate(redis, chain, datetime.now(timezone.utc)))["price"]
+    return jsonable({"token": _token(row, full=True, native_usd=rate), "observations": [_observation(o) for o in observations],
                      "trades": [{"event_id": t.event_id, "trader": t.trader, "side": "BUY" if t.is_buy else "SELL",
                                  "token_amount": str(t.token_amount), "quote_amount": str(t.quote_amount / 10 ** 18),
                                  "at": t.at, "block": t.block, "tx_hash": t.tx_hash} for t in trades],
                      "positions": [{"id": p.id, "status": p.status, "entry_at": p.entry_at, "entry_price": p.entry_price,
                                     "quantity": p.remaining_quantity, "stop_loss": p.stop_loss, "last_price": p.last_price,
                                     "realized_pnl": p.realized_pnl, "exit_reason": p.exit_reason,
-                                    "venue": (p.plan or {}).get("venue")} for p in positions]})
+                                    "venue": (p.plan or {}).get("venue"),
+                                    "pnl": position_pnl.view(p, datetime.now(timezone.utc))} for p in positions]})
 
 
 @router.get("/positions")
@@ -95,6 +102,7 @@ async def positions(chain: str | None = Query(None, pattern=CHAIN), status: str 
     rows = (await db.execute(select(PaperPosition).where(PaperPosition.engine.in_(engines), PaperPosition.status == status)
                              .order_by(desc(PaperPosition.entry_at)).limit(limit))).scalars().all()
     accounts = (await db.execute(select(PaperAccount).where(PaperAccount.name.in_(engines)))).scalars().all()
+    now = datetime.now(timezone.utc)
     out = []
     for p in rows:
         rem = p.remaining_quantity if p.remaining_quantity is not None else p.quantity
@@ -107,7 +115,9 @@ async def positions(chain: str | None = Query(None, pattern=CHAIN), status: str 
                     "unrealized_pnl": (value - cost_open) if p.status == "open" else None,
                     "realized_pnl": p.realized_pnl, "exit_reason": p.exit_reason, "exit_at": p.exit_at,
                     "venue": (p.plan or {}).get("venue"), "category": (p.plan or {}).get("category"),
-                    "pnl_basis": "marked at the executable sell quote of the remaining tokens (fees and taxes included)"})
+                    "pnl_basis": "marked at the executable sell quote of the remaining tokens (fees and taxes included)",
+                    "exit_requested": bool(p.exit_requested), "entry_source": (p.plan or {}).get("entry_source"),
+                    "pnl": position_pnl.view(p, now)})
     return jsonable({"positions": out, "accounts": [{"name": a.name, "currency": a.quote_currency, "cash": a.cash_balance,
                                                      "starting": a.starting_balance} for a in accounts],
                      "mode": "PAPER"})

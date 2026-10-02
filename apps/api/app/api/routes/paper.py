@@ -10,7 +10,7 @@ from app.api.deps import get_current_username, get_db, get_redis
 from app.api.util import audit, jsonable
 from app.schemas.common import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, Page
 from app.schemas.paper import PaperPositionOut
-from yonixalpha_core import execution_analysis, events, paper_execution
+from yonixalpha_core import execution_analysis, events, paper_execution, position_pnl
 from yonixalpha_core.db.models import (
     ExecutionOrder, PaperAccount, PaperOrder, PaperPosition, PlatformSetting, RiskAssessment, TradeTimelineEvent,
 )
@@ -43,7 +43,9 @@ async def list_positions(
     total = (await db.execute(select(func.count()).select_from(PaperPosition).where(*filters))).scalar_one()
     result = await db.execute(select(PaperPosition).where(*filters).order_by(PaperPosition.created_at.desc()).limit(limit).offset(offset))
     positions = result.scalars().all()
-    return Page(items=[PaperPositionOut.model_validate(p) for p in positions], total=total, limit=limit, offset=offset)
+    now = datetime.now(timezone.utc)
+    return Page(items=[PaperPositionOut.model_validate(p).model_copy(update={"pnl": position_pnl.view(p, now)})
+                       for p in positions], total=total, limit=limit, offset=offset)
 
 
 def _diagnostics(o: ExecutionOrder) -> dict:
@@ -74,7 +76,7 @@ async def get_position(position_id: UUID, db: AsyncSession = Depends(get_db), _:
     orders = (await db.execute(select(ExecutionOrder).where(ExecutionOrder.position_id == p.id)
                                .order_by(ExecutionOrder.created_at))).scalars().all()
     return jsonable({
-        "position": PaperPositionOut.model_validate(p).model_dump(),
+        "position": {**PaperPositionOut.model_validate(p).model_dump(), "pnl": position_pnl.view(p, datetime.now(timezone.utc))},
         "account": {"name": acct.name, "currency": acct.quote_currency} if acct else None,
         "strategy": a.strategy if a else p.engine,
         "assessment": {"id": a.id, "decision": a.decision, "status_label": a.status_label, "overall_risk": a.overall_risk,

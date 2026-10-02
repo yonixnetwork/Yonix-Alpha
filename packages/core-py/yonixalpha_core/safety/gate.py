@@ -801,6 +801,9 @@ def _check_account(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) 
         out.append(_finding(RiskCategory.ACCOUNT, "TRADING_CONTROL_OFF", RiskLevel.CRITICAL,
                             f"operator control: {a.trading_blocked_by} (new entries blocked; exits unaffected)",
                             FinalDecision.NO_TRADE, True))
+    if a.insufficient_gas:
+        out.append(_finding(RiskCategory.ACCOUNT, "INSUFFICIENT_GAS", RiskLevel.CRITICAL,
+                            f"INSUFFICIENT GAS: {a.insufficient_gas}", FinalDecision.NO_TRADE, True))
     if a.open_positions >= s.max_open_positions:
         out.append(_finding(RiskCategory.ACCOUNT, "MAX_OPEN_POSITIONS", RiskLevel.HIGH,
                             f"{a.open_positions} open positions (max {s.max_open_positions})", FinalDecision.NO_TRADE, True))

@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_username, get_db, get_redis, get_settings
 from app.api.util import audit, jsonable, require_password
-from yonixalpha_core import live_smoke, live_trading
+from yonixalpha_core import live_smoke, live_trading, position_pnl
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import ExecutionOrder, LiveSmokeTest, PaperPosition, PlatformSetting, ReconciliationEvent
 from yonixalpha_core.safety import store
@@ -161,7 +161,7 @@ async def live_positions(status: str | None = None, limit: int = Query(100, ge=1
                       "route": p.execution_route, "pool": p.pool, "remaining": p.remaining_quantity,
                       "entry_cost_sol": p.entry_cost_quote, "proceeds_sol": p.proceeds_quote, "last_price": p.last_price,
                       "pending_order_id": p.pending_order_id, "exit_failures": p.exit_failures,
-                      "entry_signature": sigs.get(p.id)} for p in rows])
+                      "entry_signature": sigs.get(p.id), "pnl": position_pnl.view(p, now, 60)} for p in rows])
 
 
 def _short(addr: str | None) -> str | None:

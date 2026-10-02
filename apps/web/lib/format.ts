@@ -57,14 +57,17 @@ export function formatBps(value: string | null | undefined): string {
 }
 
 /** USD in compact form for market caps and liquidity: $950, $9.5K, $95.3K,
- * $953K, $1.2M, $3.4B. "—" when the value is missing or not a number. */
+ * $953K, $1.2M, $12.4M, $1.05B. "—" when the value is missing or not a number. */
 export function formatUsdCompact(value: number | string | null | undefined): string {
   if (value === null || value === undefined || value === "") return "—";
   const n = Number(value);
   if (!Number.isFinite(n)) return "—";
   const sign = n < 0 ? "-" : "";
   const a = Math.abs(n);
-  const unit = (v: number, suffix: string) => `${sign}$${v < 100 ? v.toFixed(1).replace(/\.0$/, "") : v.toFixed(0)}${suffix}`;
+  // master §61: $950, $9.5K, $300K, $1.2M, $12.4M, $1.05B
+  const trim = (t: string) => (t.includes(".") ? t.replace(/0+$/, "").replace(/\.$/, "") : t);
+  const unit = (v: number, suffix: string) =>
+    `${sign}$${v < 10 ? trim(v.toFixed(2)) : v < 100 ? trim(v.toFixed(1)) : v.toFixed(0)}${suffix}`;
   if (a >= 1e9) return unit(a / 1e9, "B");
   if (a >= 1e6) return unit(a / 1e6, "M");
   if (a >= 1e3) return unit(a / 1e3, "K");

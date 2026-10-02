@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { LayoutDashboard } from "lucide-react";
 import { SellButton } from "@/components/ManualTrade";
+import { PnlOutcome, type PnlView } from "@/components/Pnl";
 import { ErrorNotice, Loading, PageHeader, Section, StatePill, fmtDuration, modeClass } from "@/components/ui";
 import { formatDecimal } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
@@ -10,7 +11,8 @@ import { useApi } from "@/lib/useApi";
 interface Today { realized_pnl_sol: string; unrealized_pnl_sol: string; trades: number; closed: number; wins: number; losses: number;
   open_positions: number; avg_decision_to_confirm_ms?: number | null }
 interface Pos { id: string; symbol: string; mint: string | null; mode: string; status: string; route: string | null; entry_price: string;
-  last_price: string | null; pnl_sol: string; pnl_pct: string | null; age_seconds: number | null; last_marked_at: string | null }
+  last_price: string | null; pnl_sol: string; pnl_pct: string | null; age_seconds: number | null; last_marked_at: string | null;
+  pnl: PnlView | null }
 interface Summary {
   wallet: null | { sol: string | null; at: string | null; token_holdings: number | null; available_sol: string | null; reserve_sol: string };
   today: { LIVE: Today; PAPER: Today };
@@ -110,7 +112,7 @@ export default function DashboardPage() {
                   <td><span className={p.mode === "LIVE" ? "pill pill-danger" : "pill pill-off"}>{p.mode}</span>{p.status !== "open" && <span className="pill pill-warn"> {p.status}</span>}</td>
                   <td className="mono">{formatDecimal(p.entry_price, 12)}</td>
                   <td className="mono">{formatDecimal(p.last_price, 12)}</td>
-                  <td className={`mono ${tone(p.pnl_sol)}`}>{formatDecimal(p.pnl_sol, 5)} SOL {p.pnl_pct && <span>({p.pnl_pct}%)</span>}</td>
+                  <td><PnlOutcome pnl={p.pnl} currency="SOL" /></td>
                   <td>{p.route ?? "—"}</td>
                   <td>{fmtDuration(p.age_seconds)}</td>
                   <td>{p.status === "open" && <SellButton positionId={p.id} symbol={p.symbol} mode={p.mode} route={p.route} />}</td>

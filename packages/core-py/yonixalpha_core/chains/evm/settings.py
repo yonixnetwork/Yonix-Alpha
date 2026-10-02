@@ -43,11 +43,18 @@ class ChainTradingSettings:
     # events: a real-time pipeline trades nothing on a stale view. The
     # skipped block range is logged and alerted, never silent. 0 = never skip.
     max_lag_minutes: int = 60
+    # Master §56-57: native coin kept back for transaction fees (never
+    # traded), and the gas one swap is budgeted at. Before an entry the
+    # wallet (paper or live) must cover the buy's and the sell's estimated
+    # gas (eth_gasPrice x gas_units_per_swap each) plus this reserve, or the
+    # entry is NO_TRADE: INSUFFICIENT GAS.
+    gas_reserve: Decimal = Decimal("0.002")
+    gas_units_per_swap: int = 300_000
 
 
 ROBINHOOD_DEFAULTS = ChainTradingSettings(position_size=Decimal("0.005"), max_total_exposure=Decimal("0.03"),
                                           max_daily_loss=Decimal("0.015"), min_liquidity=Decimal("0.2"),
-                                          confirmations=1, max_blocks_per_pass=10000)
+                                          confirmations=1, max_blocks_per_pass=10000, gas_reserve=Decimal("0.0005"))
 
 
 @dataclass(frozen=True)
@@ -129,6 +136,8 @@ def parse(data: dict[str, Any] | None) -> tuple[EvmTradingSettings, list[str]]:
             errors.append(f"{c}.position_size must not exceed max_total_exposure")
         if cs.max_round_trip_loss_bps > 9000:
             errors.append(f"{c}.max_round_trip_loss_bps must be at most 9000")
+        if not 21_000 <= cs.gas_units_per_swap <= 5_000_000:
+            errors.append(f"{c}.gas_units_per_swap must be between 21000 and 5000000")
     if s.min_net_buy_ratio > 1:
         errors.append("min_net_buy_ratio must be at most 1")
     return s, errors

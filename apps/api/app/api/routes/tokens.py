@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_username, get_db, get_redis
 from app.api.util import jsonable
+from yonixalpha_core import position_pnl
 from yonixalpha_core.db.models import PaperPosition, RiskAssessment, Token, TokenEvent, TradingCandidate
 from yonixalpha_core.solana import pump_stream, sol_price
 from yonixalpha_core.token_market import market_view as token_market_view
@@ -76,7 +77,8 @@ async def token_details(mint: str = MINT, db: AsyncSession = Depends(get_db), re
                          "approval_state": a.approval_state, "evaluated_at": a.evaluated_at} for a in assessments],
         "positions": [{"id": p.id, "engine": p.engine, "side": p.side, "status": p.status, "entry_price": p.entry_price,
                        "exit_price": p.exit_price, "realized_pnl": p.realized_pnl, "exit_reason": p.exit_reason,
-                       "entry_at": p.entry_at, "exit_at": p.exit_at} for p in positions],
+                       "entry_at": p.entry_at, "exit_at": p.exit_at,
+                       "pnl": position_pnl.view(p, datetime.now(timezone.utc))} for p in positions],
         "events": [{"type": e.event_type, "source": e.source, "at": e.occurred_at, "trader": e.trader_address,
                     "sol": e.sol_amount, "is_buy": e.is_buy} for e in events_],
     })

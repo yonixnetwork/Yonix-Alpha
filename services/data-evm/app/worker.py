@@ -20,7 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from yonixalpha_core import copy_trading as ct
 from yonixalpha_core import events, launch_coordination
 from yonixalpha_core.chains import verification
-from yonixalpha_core.chains.evm import observation, paper, safety, store
+from yonixalpha_core.chains.evm import dex, manual, native_price, observation, paper, safety, store
 from yonixalpha_core.chains.evm import settings as evm_settings
 from yonixalpha_core.chains.evm.rpc import EvmRpcUnavailableError
 from yonixalpha_core.db.models import EvmObservation, EvmToken, EvmTrade, PaperPosition
@@ -34,6 +34,9 @@ SAFETY_RECHECK = timedelta(minutes=2)
 SAFETY_PER_PASS = 8
 EVIDENCE_EVERY = timedelta(minutes=30)
 TRADE_RETENTION = timedelta(days=14)
+WALLET_KEY = "yx:evm:wallet:{chain}"
+WALLET_TTL = 600
+WALLET_SECONDS = 60
 QUOTE_LOOKUPS_PER_PASS = 200  # Four.meme tokens without a recorded quote, per safety pass
 QUOTE_LOOKBACK = timedelta(days=14)  # the trade retention
 RPC_OUTAGE_ALERT_SECONDS = 120  # discovery failing on an unavailable RPC this long is alerted
@@ -59,8 +62,9 @@ class Evidence:
 
 class ChainWorker:
     def __init__(self, chain: str, rpc, adapters: list, session_factory, redis, *, etherscan_key: str | None = None,
-                 http=None) -> None:
+                 http=None, wallet_address: str | None = None) -> None:
         self.chain = chain
+        self.wallet_address = wallet_address  # the EVM trading account (watch-only): balance synced every minute
         self.etherscan_key = etherscan_key
         self.http = http  # explorer client for launch-coordination funding lookups (None: one per assessment)
         self.rpc = rpc
@@ -158,7 +162,6 @@ class ChainWorker:
     # --- safety -------------------------------------------------------------------------------------
 
     async def safety_pass(self, s: evm_settings.EvmTradingSettings, now: datetime) -> int:
-        cs = s.chain(self.chain)
         async with self.session_factory() as session:
             rows = (await session.execute(select(EvmToken).where(
                 EvmToken.chain == self.chain, EvmToken.category.in_(s.entry_categories),
@@ -173,30 +176,10 @@ class ChainWorker:
             ad = self.adapters[key]
             ev = self.evidence[key]
             try:
-                try:
-                    state = await ad.get_token_state(token)
-                except EvmRpcUnavailableError:
-                    raise
-                except Exception:  # noqa: BLE001 - safety.check records the unreadable state itself
-                    state = None
-                report, rt = await safety.check(ad, token, int(cs.position_size * E18), s, state)
-                async with self.session_factory() as session:
-                    row = await session.get(EvmToken, (self.chain, token))
-                    if row is None:
-                        continue
-                    if state is not None:
-                        row.state = store._js({k: v for k, v in vars(state).items() if k not in ("chain", "category")})
-                        row.state_at = now
-                        if state.stage in ("CURVE", "DEX", "GRADUATING", "KILLED"):
-                            row.stage = state.stage
-                        if state.liquidity_quote and state.liquidity_quote > 0:
-                            ev.liquidity_seen.append({"token": token, "liquidity": str(state.liquidity_quote)})
-                    row.safety_verdict = report.verdict
-                    row.safety = store._js({"findings": report.findings, "sellable": report.sellable,
-                                            "sources": report.sources, "round_trip": rt})
-                    row.safety_at = now
-                    await self._coordinate(session, ad, row, now)
-                    await session.commit()
+                checked = await self.check_token(ad, token, s, now)
+                if checked is None:
+                    continue
+                report, rt = checked
                 ev.safety[report.verdict] = ev.safety.get(report.verdict, 0) + 1
                 if rt.get("sellable"):
                     ev.quotes_ok += 1
@@ -212,6 +195,112 @@ class ChainWorker:
                 log.warning("data-evm.safety_failed", chain=self.chain, token=token, error=str(exc)[:160])
                 await alert_error(SERVICE, f"{self.chain}.safety_failed", {"token": token, "error": str(exc)[:300]})
         return done
+
+    async def check_token(self, ad, token: str, s: evm_settings.EvmTradingSettings, now: datetime):
+        """One token's safety check (state, round trip, contract, plain buy,
+        coordination), stored on the token. Returns (report, round trip) or
+        None when the token row is gone. An RPC outage propagates."""
+        cs = s.chain(self.chain)
+        ev = self.evidence[ad.spec.key]
+        try:
+            state = await ad.get_token_state(token)
+        except EvmRpcUnavailableError:
+            raise
+        except Exception:  # noqa: BLE001 - safety.check records the unreadable state itself
+            state = None
+        report, rt = await safety.check(ad, token, int(cs.position_size * E18), s, state)
+        async with self.session_factory() as session:
+            row = await session.get(EvmToken, (self.chain, token))
+            if row is None:
+                return None
+            if "decimals" not in (row.extra or {}):
+                # Master §61: market cap = price x supply; read once (never assumed).
+                meta = await dex.erc20_meta(ad.rpc, token)
+                if meta.get("decimals") is not None and meta.get("total_supply") is not None:
+                    row.extra = {**(row.extra or {}), "decimals": meta["decimals"],
+                                 "total_supply": str(meta["total_supply"])}
+            if state is not None:
+                row.state = store._js({k: v for k, v in vars(state).items() if k not in ("chain", "category")})
+                row.state_at = now
+                if state.stage in ("CURVE", "DEX", "GRADUATING", "KILLED"):
+                    row.stage = state.stage
+                if state.liquidity_quote and state.liquidity_quote > 0:
+                    ev.liquidity_seen.append({"token": token, "liquidity": str(state.liquidity_quote)})
+            row.safety_verdict = report.verdict
+            row.safety = store._js({"findings": report.findings, "sellable": report.sellable,
+                                    "sources": report.sources, "round_trip": rt})
+            row.safety_at = now
+            await self._coordinate(session, ad, row, now)
+            await session.commit()
+        return report, rt
+
+    # --- manual BUY (master §45) --------------------------------------------------------------------
+
+    async def manual_pass(self, s: evm_settings.EvmTradingSettings, now: datetime, limit: int = 5) -> dict[str, int]:
+        """Executes queued manual BUY requests for this chain (chains.evm.manual)
+        through the automatic entry code with the operator's decision in place
+        of the trade signal. Safety older than paper.SAFETY_MAX_AGE is re-run
+        first. An RPC outage marks the request FAILED (never retried late)."""
+        out = {"processed": 0, "opened": 0}
+        for _ in range(limit):
+            rid = await manual.next_request(self.redis, self.chain)
+            if rid is None:
+                break
+            req = await manual.get(self.redis, rid)
+            if req is None or req.get("status") != "QUEUED":
+                continue
+            out["processed"] += 1
+            if manual.expired(req, now):
+                await manual.update(self.redis, rid, "EXPIRED", now, error="not taken within 10 minutes")
+                continue
+            await manual.update(self.redis, rid, "EVALUATING", now)
+            ad = self.adapters.get(req["launchpad"])
+            try:
+                if ad is None or not ad.spec.supports_trading:
+                    raise ValueError(f"{req['launchpad']} is not traded on {self.chain}")
+                async with self.session_factory() as session:
+                    row = await session.get(EvmToken, (self.chain, req["token"]))
+                    stale = row is None or row.safety_at is None or now - row.safety_at > paper.SAFETY_MAX_AGE
+                if row is None:
+                    raise ValueError("token no longer stored")
+                if stale:
+                    await self.check_token(ad, row.token, s, now)
+                async with self.session_factory() as session:
+                    row = await session.get(EvmToken, (self.chain, req["token"]))
+                    d = await paper.evaluate_entry(session, self.redis, ad, row, s, now, source="manual", operator=True)
+                    decision = {**d.to_dict(), "source": "manual", "requested_by": req.get("requested_by"),
+                                "request_id": rid}
+                    row.extra = {**(row.extra or {}), "manual_decision": store._js(decision)}
+                    if not d.ok:
+                        await session.commit()
+                        await manual.update(self.redis, rid, "BLOCKED", now, blockers=d.blockers,
+                                            detail=store._js(d.to_dict()["detail"]))
+                        continue
+                    try:
+                        p = await paper.open_position(session, d, row, now)
+                    except IntegrityError:
+                        await session.rollback()
+                        await manual.update(self.redis, rid, "BLOCKED", now,
+                                            blockers=[{"code": "POSITION_ALREADY_OPEN",
+                                                       "message": "an open paper position on this token exists"}])
+                        continue
+                    p.plan = {**(p.plan or {}), "entry_source": "manual", "requested_by": req.get("requested_by")}
+                    await add_timeline_event(session, "operator_entry", now, {
+                        "by": req.get("requested_by"), "request": rid, "note": "manual BUY from the dashboard"},
+                        position_id=p.id)
+                    await session.commit()
+                    pid = str(p.id)
+                out["opened"] += 1
+                await manual.update(self.redis, rid, "PAPER_POSITION_OPEN", now, position_id=pid,
+                                    detail=store._js(d.to_dict()["detail"]))
+                await events.publish(self.redis, "position.updated", {"position_id": pid, "action": "opened",
+                                                                      "source": "manual"}, SERVICE)
+            except Exception as exc:  # noqa: BLE001 - one request never stops the loop; the operator sees why
+                log.warning("data-evm.manual_failed", chain=self.chain, request=rid, error=str(exc)[:160])
+                await manual.update(self.redis, rid, "FAILED", now, error=f"{type(exc).__name__}: {str(exc)[:200]}")
+                await alert_error(SERVICE, f"{self.chain}.manual_buy_failed",
+                                  {"request": rid, "token": req.get("token"), "error": str(exc)[:300]})
+        return out
 
     async def _coordinate(self, session, ad, row: EvmToken, now: datetime) -> None:
         """Launch-window coordination (master §11), refreshed with the safety
@@ -382,6 +471,33 @@ class ChainWorker:
             await session.commit()
         self.last_evidence_at = now
         return n
+
+    async def wallet_pass(self, now: datetime) -> dict[str, Any]:
+        """Master §56: the EVM account's native balance on this chain, synced
+        continuously (yx:evm:wallet:<chain>), and on BSC the BNB / ETH USD
+        rates. Failures are recorded, never raised: they must not stop
+        discovery."""
+        out: dict[str, Any] = {}
+        if self.wallet_address:
+            try:
+                wei = await self.rpc.get_balance(self.wallet_address)
+                rec = {"address": self.wallet_address, "balance": str(Decimal(wei) / Decimal(10) ** 18),
+                       "at": now.isoformat()}
+                await self.redis.set(WALLET_KEY.format(chain=self.chain), json.dumps(rec), ex=WALLET_TTL)
+                out["balance"] = rec["balance"]
+            except Exception as exc:  # noqa: BLE001
+                out["balance_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+                await alert_error(SERVICE, f"{self.chain}.wallet_balance_failed", out["balance_error"])
+        if self.chain == "bsc":
+            try:
+                out["native_usd"] = await native_price.refresh(self.rpc, self.redis, now)
+                failed = {k: v["error"] for k, v in out["native_usd"].items() if "error" in v}
+                if failed:  # USD figures go blank (never stale) until a quote succeeds
+                    await alert_error(SERVICE, f"{self.chain}.native_usd_failed", failed)
+            except Exception as exc:  # noqa: BLE001
+                out["native_usd_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+                await alert_error(SERVICE, f"{self.chain}.native_usd_failed", out["native_usd_error"])
+        return out
 
     async def quote_pass(self, now: datetime, limit: int = QUOTE_LOOKUPS_PER_PASS) -> int:
         """Records the quote asset of tokens stored without one (Four.meme

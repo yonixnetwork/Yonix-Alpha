@@ -5,12 +5,20 @@ import { useState } from "react";
 import { DoorOpen, Pause, Play } from "lucide-react";
 import ConfirmButton from "@/components/ConfirmDialog";
 import Pagination from "@/components/Pagination";
-import { Empty, ErrorNotice, Money } from "@/components/ui";
+import { PnlOutcome } from "@/components/Pnl";
+import { Empty, ErrorNotice } from "@/components/ui";
 import { apiPost } from "@/lib/api";
 import { formatDate, formatDecimal, formatPct } from "@/lib/format";
 import { usePagedList } from "@/lib/usePagedList";
 import { useEvents } from "@/lib/events";
 import type { PaperPositionOut } from "@/lib/types";
+
+/** Quote coin of a position's engine (evm_bsc -> BNB, evm_robinhood -> ETH, solana_* -> SOL). */
+function currencyOf(engine: string | null | undefined): string | undefined {
+  if (!engine) return undefined;
+  if (engine.startsWith("evm_")) return engine.endsWith("bsc") ? "BNB" : engine.endsWith("robinhood") ? "ETH" : undefined;
+  return engine.startsWith("solana") ? "SOL" : undefined;
+}
 
 /** Paper positions with operator controls (exit now, pause/resume
  * management). Every control asks for confirmation; the stop loss keeps
@@ -85,14 +93,8 @@ export default function PositionsTable({ engine, account, strategy, status: init
                   <td>{formatDecimal(p.stop_loss, 8)}</td>
                   <td>{p.initial_quantity ? formatPct(Number(p.remaining_quantity ?? 0) / Number(p.initial_quantity), 0) : "—"}</td>
                   <td>
-                    {p.status === "closed" ? (
-                      <>
-                        <Money value={p.realized_pnl} /> <span className="muted">{formatPct(p.realized_pnl_pct)}</span>
-                        <div className="form-hint">{p.exit_reason}</div>
-                      </>
-                    ) : (
-                      <span className="muted">open</span>
-                    )}
+                    <PnlOutcome pnl={p.pnl} currency={currencyOf(p.engine)} />
+                    {p.status === "closed" && p.exit_reason && <div className="form-hint">{p.exit_reason}</div>}
                   </td>
                   <td className="muted">{formatDate(p.entry_at)}</td>
                   <td>

@@ -46,6 +46,7 @@ from yonixalpha_core.safety.planning import plan_trade
 from yonixalpha_core.safety.store import add_timeline_event, load_settings, settings_block_reason
 
 NATIVE = {"bsc": "BNB", "robinhood": "ETH"}
+CATEGORY_SWITCHES = ("FRESH", "MIGRATED", "MOMENTUM")  # categories the operator can switch off (settings.CATEGORIES)
 STARTING_BALANCE = {"bsc": Decimal("1"), "robinhood": Decimal("0.3")}
 SAFETY_MAX_AGE = timedelta(minutes=5)
 E18 = Decimal(10) ** 18
@@ -134,7 +135,9 @@ async def account_state(session: AsyncSession, redis, chain: str, token: str, no
 
 
 async def evaluate_entry(session: AsyncSession, redis, adapter, row: EvmToken, s: EvmTradingSettings, now: datetime,
-                         source: str = "sniper") -> EntryDecision:
+                         source: str = "sniper", operator: bool = False) -> EntryDecision:
+    """`operator`: a manual BUY (chains.evm.manual). The operator's decision
+    replaces the strategy's trade signal; every other check still applies."""
     spec, chain = adapter.spec, adapter.spec.chain.value
     cs = s.chain(chain)
     d = EntryDecision(chain, row.token, spec.key, row.category, now)
@@ -152,9 +155,12 @@ async def evaluate_entry(session: AsyncSession, redis, adapter, row: EvmToken, s
         d.block("LAUNCHPAD_NOT_VERIFIED", f"{spec.name} is {st['status']}: {st['why']}")
     if not cs.paper_entries_enabled:
         d.block("PAPER_ENTRIES_OFF", f"paper entries disabled for {chain}")
-    if row.category not in s.entry_categories:
+    if row.category not in s.entry_categories and (not operator or row.category in CATEGORY_SWITCHES):
         d.block("CATEGORY_DISABLED", f"entries for {row.category} are switched off")
-    _signal(d, row, s)
+    if operator:
+        d.detail["signal"] = "replaced by the operator's decision (manual BUY)"
+    else:
+        _signal(d, row, s)
     ok_verdicts = ("PASS", "WARN") if s.allow_safety_warn else ("PASS",)
     if row.safety_verdict not in ok_verdicts:
         d.block("SAFETY_NOT_PASSED", f"safety verdict {row.safety_verdict or 'not checked'}")
@@ -193,13 +199,55 @@ async def coordination_effect(session: AsyncSession, row: EvmToken, now: datetim
                                             (row.extra or {}).get("coordination_approval"), cfg, now, SAFETY_MAX_AGE)
 
 
+async def gas_estimate(rpc, cs) -> tuple[Decimal | None, dict[str, Any]]:
+    """Estimated native cost of one round trip (buy + sell) at the node's
+    current gas price: (None, detail) when the price cannot be read."""
+    try:
+        price = int(await rpc.call("eth_gasPrice"), 16)
+    except Exception as exc:  # noqa: BLE001 - an unknown gas price is never assumed affordable
+        return None, {"error": f"eth_gasPrice: {type(exc).__name__}: {str(exc)[:120]}"}
+    fee = Decimal(price * cs.gas_units_per_swap * 2) / E18
+    return fee, {"gas_price_gwei": str(Decimal(price) / Decimal(10 ** 9)), "units_per_swap": cs.gas_units_per_swap,
+                 "round_trip_gas": str(fee), "gas_reserve": str(cs.gas_reserve)}
+
+
+def gas_shortfall(available: Decimal | None, gas_fee: Decimal, cs, currency: str) -> str | None:
+    """Master §57: the message when `available` cannot pay the round trip's
+    gas and keep the gas reserve, else None."""
+    need = gas_fee + cs.gas_reserve
+    if available is None or available >= need:
+        return None
+
+    def n(v: Decimal) -> str:
+        return f"{v.normalize():f}"
+
+    return (f"{n(available)} {currency} available < {n(gas_fee)} {currency} estimated gas for the buy and the sell + "
+            f"{n(cs.gas_reserve)} {currency} gas reserve")
+
+
 async def build_plan(session: AsyncSession, adapter, row: EvmToken, size: Decimal, acct_state: AccountState,
                      liq: Decimal, now: datetime, d: EntryDecision, max_total_exposure: Decimal | None = None) -> None:
     """Quotes the executable round trip at `size` (native units) and sizes
     the trade with the shared plan_trade. Fills d.plan / d.buy, or adds
-    blockers. Shared by automatic entries and copy trading."""
+    blockers. Shared by automatic, manual and copy entries.
+
+    Gas first (master §57): the round trip's gas at the current gas price
+    plus the chain's gas reserve must be payable from the account, and the
+    position is sized from what remains, so a filled entry can always be
+    sold."""
     chain = adapter.spec.chain.value
     cs = (await evm_settings_load(session)).chain(chain)
+    gas_fee, gas_detail = await gas_estimate(adapter.rpc, cs)
+    d.detail["gas"] = gas_detail
+    if gas_fee is None:
+        d.block("GAS_PRICE_UNAVAILABLE", f"gas cannot be verified: {gas_detail['error']}")
+        return
+    short = gas_shortfall(acct_state.available_balance, gas_fee, cs, NATIVE[chain])
+    if short:
+        d.block("INSUFFICIENT_GAS", f"INSUFFICIENT GAS: {short}")
+        return
+    if acct_state.available_balance is not None:
+        acct_state = replace(acct_state, available_balance=acct_state.available_balance - gas_fee - cs.gas_reserve)
     size_wei = int(size * E18)
     buy = await adapter.quote_buy(row.token, size_wei)
     sell = await adapter.quote_sell(row.token, buy.amount_out) if buy.ok and buy.amount_out else None

@@ -60,12 +60,12 @@ Providers), see M7.
 | 33 | Copy latency stages on dashboard | DONE (paper) | detection / analysis / risk / decision / execution / total (ms) on the Copy page; build / sign / submission / landing / confirmation are None and labelled live only (no live copy); the target's own submit time is not observable from confirmed trades | M4b |
 | 34–35 | Copy safety never overridden; paper copy with would-have-won / missed | DONE (paper), NOT VERIFIED in production | safety enforced; every target buy (copied, skipped, notify-only) gets a paper outcome after 60 min (`copy_events.outcome`, migration 0025): simulated entry / exit, result, best / worst move, class COPIED / MISSED / BLOCKED_BY_SAFETY / FILTERED_BY_SETTINGS / NOT_COPYABLE / NOTIFY_ONLY; NO_PRICE_DATA instead of 0 % | M4b |
 | 36–44 | ML: wallet behaviour, mistake labels, frozen validation set, staged contribution, champion/challenger, no look-ahead, paper as training data | PARTIAL | Solana ML: multi-target shadow models, champion/challenger, labels, contribution 0 until validated, no-look-ahead audit; missing: wallet-behaviour labels (§37), EVM features, BUY/WAIT/REJECT/SELL/HOLD comparison (§41) | M12 |
-| 45 | Manual BUY/SELL on all chains | PARTIAL | Solana only (`manual_trade.py`); EVM manual paper missing | M13 |
+| 45 | Manual BUY/SELL on all chains | DONE (EVM paper; Solana unchanged), NOT VERIFIED on the server yet | Solana: `manual_trade.py` (unchanged). BSC / Robinhood: Manual BUY queues a request for the chain's data-evm worker, which runs `evaluate_entry(operator=True)`: every entry check except the strategy signal (switches, launchpad status, fresh safety, liquidity, coordination, limits, cooldown, gas, risk plan); BLOCKED lists every reason; observe-only venues refused; paper only (EVM live locked). Manual SELL: the existing operator exit, now with a SELL button on EVM positions (section 24) | M13 |
 | 46–47 | Automatic-vs-manual sell diagnosis with stage-level evidence | DONE in code (M2); production result pending the server run | `tools/exit_diagnosis.py` (read-only report from `execution_orders` + position timeline + reconciliation); `tests/test_exit_diagnosis.py` | M2 |
 | 48–53 | Provider dashboard, roles, plan health / UPGRADE REQUIRED | DONE (routing + reporting); mempool / sequencer streaming is M8 | roles per endpoint (dashboard, .env and public), role-preferred routing on Solana and EVM with counted fallbacks, operator-stated plan, WSS stored for BSC / Robinhood, plan health from observed limits on RPC / Data Providers and System Health; see section 16 | M7 |
-| 54–55 | Token explorer all chains, explorer links per chain | PARTIAL | Solana token pages; EVM page lists tokens; link builder per chain not audited | M14 |
-| 56–58 | Balances, gas reserve, INSUFFICIENT GAS, unified wallet (Solana + EVM accounts) | PARTIAL | Solana live wallet panel; EVM wallet module (`chains/evm/wallet.py`) read-only; gas-reserve NO_TRADE not wired for EVM paper | M13 |
-| 59–61 | PnL always shown with colour, market cap $K/$M | PARTIAL | Solana positions show PnL; USD market cap done for Solana (G3); EVM positions page not audited | M14 |
+| 54–55 | Token explorer all chains, explorer links per chain | DONE in code (M14) | one search across Solana / BSC / Robinhood (name / symbol prefix, mint / contract, creator, wallet; migration 0032 indexes); EVM token page with every §54 field (holders: not tracked on EVM, stated, never 0; ML: NOT_AVAILABLE until M12); `explorer_links` builds every link for the token's own chain from confirmed URL formats only; Robinhood has no confirmed DEX page, shown unavailable with the reason (section 24) | M14 |
+| 56–58 | Balances, gas reserve, INSUFFICIENT GAS, unified wallet (Solana + EVM accounts) | DONE in code (M13); EVM live balance NOT VERIFIED on the server yet | YonixAlpha Trading Wallet (`/api/wallets/overview`, Wallets page): Total / Available / Reserved / Gas reserve / Trading balance per chain, LIVE and PAPER separate, USD from SOL / BNB / ETH rates; EVM entries need gas for the buy and the sell plus the gas reserve (INSUFFICIENT_GAS / GAS_PRICE_UNAVAILABLE, NO_TRADE); Solana LIVE entries need the fee reserve (INSUFFICIENT GAS in the gate); Solana paper unchanged (section 24) | M13 |
+| 59–61 | PnL always shown with colour, market cap $K/$M | DONE in code (M14) | `position_pnl.view` on every positions list (paper, live, copy, EVM, overview, token pages): PROFIT / LOSS / BREAKEVEN with %, PNL_UNAVAILABLE with the reason when there is no mark (never a bare OPEN, never 0); entry, current, quantity, value, unrealized, realized, fees, net, peak, drawdown; green / red / neutral with TrendingUp / TrendingDown / Minus icons; EVM market cap in USD ($950 / $9.5K / $1.05B) on the token list and token page (section 24) | M14 |
 | 60 | NO EMOJIS | DONE (this phase) | alert prefixes and the live page tick mark removed | M0 |
 | 62–63 | 24/7 server-side workers | DONE | all engines are containers; dashboard is a viewer | — |
 | 64–66 | GitHub / provider update monitor with Telegram + System Health | DONE in code (M15); GitHub path NOT VERIFIED against the real API from the build environment (blocked there), PyPI path checked against pypi.org | `update_monitor.py` in the ml service: 14 repositories + 8 pinned dependencies every 6 h via GitHub REST and PyPI JSON (no HTML); classes INFO / UPGRADE_AVAILABLE / BREAKING_CHANGE / SECURITY_UPDATE / PROVIDER_CHANGE / ACTION_REQUIRED; baseline first check; history in `update_events` (migration 0031); Telegram kind `infrastructure_update`; System Health → Research / Updates with acknowledge; never deploys (section 21) | M15 |
@@ -1302,3 +1302,188 @@ So AntiSniperFeeMode (`feeSetting`) is not located yet.
 The four.meme API cross-check returned nothing on the server. The tool
 now prints why (HTTP status or the API's error).
 
+
+## 24. M13 + M14 — manual EVM trading, balances and gas, explorer, PnL (2026-10-02)
+
+### M10d server result (deploy c64ab13)
+
+`tools.fourmeme_modes` v2 sampled 60 tokens:
+- quote assets: BNCB `0x4902…eec3f` (39), BNB (19), `0x2058…efc7` (2);
+- no TaxToken, X Mode or agent token was in the sample, and the database
+  holds 0 FOURMEME_X_MODE findings, so the template bits stay untested;
+- the four.meme API answered HTTP 403 from the server for all 60.
+
+Nothing changes: X Mode detection stays on the buy simulation, and the
+stock-quoted curves stay out of BNB sums (section 23).
+
+### Manual BUY / SELL on BSC and Robinhood Chain (§45)
+
+Not a second trading path. `POST /api/trade/evm/buy` (confirmation
+required, audited) records the request in Redis and queues it for that
+chain's data-evm worker. The worker:
+1. expires a request no worker took within 10 minutes (never executed late);
+2. re-runs the safety check when the stored one is missing or older than
+   5 minutes;
+3. runs the automatic entry code, `paper.evaluate_entry(operator=True)`.
+
+Only the strategy's trade signal (buy counts, distinct buyers, buy share)
+is replaced by the operator's decision. Everything else still applies:
+- kill switch and the trading switches (a category switch only for
+  FRESH / MIGRATED / MOMENTUM);
+- the launchpad's verified status;
+- safety PASS;
+- liquidity;
+- launch-window coordination;
+- account limits and the re-entry cooldown;
+- gas (below) and the risk plan.
+
+A blocked request is BLOCKED with every reason. An observe-only venue
+(Genius.fun, the Solana observe-only launchpads) is refused before
+queueing. A token with an open position gets POSITION_ALREADY_OPEN.
+There is no override control (task #138 stays blocked).
+
+Status: QUEUED → EVALUATING → BLOCKED | PAPER_POSITION_OPEN | FAILED |
+EXPIRED, kept 24 h, shown live in the Confirm Purchase dialog.
+
+Manual SELL is the existing operator exit (`POST /api/trade/sell/<id>`,
+`exit_requested`). The data-evm position manager executes it at the
+executable sell quote of the position's current venue. EVM positions now
+have a SELL button (EVM Markets, token page).
+
+**Paper only.** EVM LIVE execution is locked (task #178).
+
+### Balances, gas reserve, INSUFFICIENT GAS, unified wallet (§56-58)
+
+**YonixAlpha Trading Wallet** (`GET /api/wallets/overview`, top of the
+Wallets page). It has one row per chain and mode: Solana, BSC and
+Robinhood, each LIVE and PAPER, never mixed. Each row shows:
+- Total;
+- Reserved (LIVE: pending buy orders; PAPER: open positions);
+- Available = total - reserved;
+- Gas reserve;
+- Trading balance = available - gas reserve;
+- USD values from the SOL / BNB / ETH rate.
+
+The rules behind those rows:
+- A LIVE balance older than 3 minutes is STALE. One that was never read is
+  UNAVAILABLE, with no numbers (never 0).
+- The Solana and EVM accounts have separate keys; neither is derived from
+  the other. Only public addresses are returned.
+- data-evm reads the EVM wallet balance every 60 s (watch-only;
+  `yx:evm:wallet:<chain>`).
+- data-evm also refreshes BNB/USD and ETH/USD every 60 s from the
+  PancakeSwap V2 router quote against USDT (`chains.evm.native_price`).
+  Rates are used for 5 minutes, and only inside a sanity range.
+
+**INSUFFICIENT GAS (§57).** It is checked before the entry, never
+discovered after signing.
+- **EVM paper entries:**
+  - `build_plan` reads `eth_gasPrice` and estimates gas for the buy and
+    the sell (price x `gas_units_per_swap`, default 300 000, x 2);
+  - it needs that plus the chain's `gas_reserve` (BSC 0.002 BNB,
+    Robinhood 0.0005 ETH; API settings);
+  - otherwise the result is NO_TRADE INSUFFICIENT_GAS; no gas price gives
+    NO_TRADE GAS_PRICE_UNAVAILABLE;
+  - the size is planned from what remains;
+  - paper does not charge the gas; the estimate is shown in the decision
+    detail.
+- **Solana LIVE entries:**
+  - the gate adds INSUFFICIENT_GAS (CRITICAL, NO_TRADE) when the wallet
+    holds less than the fee reserve (`min_sol_reserve`) plus the round
+    trip's fixed costs.
+- **Solana paper:** unchanged. No fee reserve is held back, and the
+  Wallets page says so.
+
+### Token Explorer (§54-55)
+
+**Search.** The Token Explorer page searches Solana, BSC and Robinhood
+Chain together, with an optional chain filter
+(`GET /api/explorer/search`):
+- name or symbol from the start: LIKE wildcards match literally, and
+  migration 0032 adds the expression indexes, built CONCURRENTLY;
+- mint / contract address, in any case;
+- creator;
+- wallet (profile, copy target, trades in the last 14 days).
+
+A Solana address only searches Solana; a 0x address only searches BSC
+and Robinhood Chain.
+
+**EVM token page** (`/dashboard/explorer/<chain>/<address>`,
+`GET /api/explorer/token/...`):
+- price (native and USD) and USD market cap;
+- liquidity and volume;
+- buyers and sellers (stats window and 14-day retained trades);
+- safety findings, launchpad, migration, status;
+- last automatic and manual decision;
+- smart money (copy targets and validated wallets that traded it,
+  labelled "not a reason to buy");
+- manipulation (launch-window coordination);
+- ML;
+- positions with full PnL, Manual BUY and SELL.
+
+Holder counts are not tracked on EVM. The page says so instead of showing
+0. ML is NOT_AVAILABLE until the EVM features of M12 exist.
+
+**Explorer actions** (`yonixalpha_core.explorer_links`): OPEN TOKEN,
+TRANSACTION, CREATOR, WALLET, LAUNCHPAD, DEX and EXPLORER.
+- Each one is built for the token's own chain, and an address invalid for
+  that chain gets no link. A Solana link is never built for an EVM token.
+- Only confirmed URL formats are used:
+  - Solscan, BscScan, Robinhood Chain Blockscout;
+  - pump.fun/coin, four.meme/token, flap.sh/bnb,
+    ponsfamily.com/launchpad;
+  - DexScreener for Solana and BSC.
+- Robinhood Chain has no confirmed DEX page. That action is shown disabled
+  with the reason, never a guessed URL.
+
+### Real-time PnL, colours, USD market cap (§59-61)
+
+`yonixalpha_core.position_pnl.view` is the one PnL view used by:
+- paper positions;
+- live positions;
+- copy positions;
+- EVM positions;
+- the dashboard overview;
+- the Solana and EVM token pages;
+- trade details.
+
+**Fields:** outcome PROFIT / LOSS / BREAKEVEN with net %, entry, current,
+quantity, value, unrealized, realized, fees, net, peak and drawdown from
+peak.
+
+**How each value is computed:**
+- Realized includes partial take-profits on an open position (proceeds -
+  the sold share of the entry cost).
+- Net = realized + unrealized, after the entry fees (the entry cost
+  includes them).
+- The mark basis is stated per engine:
+  - EVM: executable sell quote, fees and taxes included;
+  - Solana: curve / pool price, exit costs not deducted.
+- A mark older than 2 minutes (live: 60 s) is flagged stale. With no mark
+  the outcome is PNL_UNAVAILABLE with the reason: never a bare "open",
+  never 0.
+
+**Display:** green / red / neutral with TrendingUp / TrendingDown / Minus
+icons; no emojis.
+
+**Market cap.** EVM market cap = launchpad price x total supply (read
+once from the token contract) x BNB/USD or ETH/USD. It is shown as $950 /
+$9.5K / $1.2M / $1.05B on the EVM token list and token page; native
+amounts come second. A curve quoted in a tokenized stock gets no BNB or
+USD figure (section 23).
+
+### Tests
+
+- core: `test_balances`, `test_explorer_links`, `test_evm_token_view`,
+  `test_position_pnl`, `test_chains::test_gate_refuses_an_entry_the_wallet_cannot_pay_gas_for`.
+- data-evm: gas for both swaps and the reserve; wallet / USD-rate sync;
+  manual BUY runs every entry check but replaces the signal; manual BUY
+  refused on an observe-only venue.
+- api: `test_explorer_wallets_api` (search, links per chain, LIKE
+  escaping, the token view, PnL on the lists, the unified wallet, the
+  manual BUY queue, audit, observe-only refusal).
+
+**NOT VERIFIED until the server runs it:**
+- the EVM wallet balance read;
+- the BNB/ETH USD rate from the real router;
+- a manual BUY taken by the real worker.

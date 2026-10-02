@@ -273,6 +273,9 @@ class AccountState:
     # An operator switch below the kill switch (chains.controls): NEW ENTRIES
     # OFF, <CHAIN> OFF, SNIPER OFF, COPY TRADING OFF. None = not blocked.
     trading_blocked_by: str | None = None
+    # Master §57: the wallet cannot pay the fees of this trade (and keep its
+    # fee reserve). NO_TRADE, shown as INSUFFICIENT GAS. None = enough.
+    insufficient_gas: str | None = None
 
 
 @dataclass

@@ -36,6 +36,7 @@ class Node:
         self.txs: dict[str, dict] = {}  # eth_getTransactionByHash
         self.receipts: dict[str, dict] = {}  # eth_getTransactionReceipt
         self.nonces: dict[str, int] = {}  # eth_getTransactionCount (any block)
+        self.gas_price = 10 ** 9  # eth_gasPrice (1 gwei); None: the node refuses it
 
     def on(self, to: str, signature: str, result) -> None:
         self.calls[(to.lower(), "0x" + selector(signature).hex())] = result
@@ -49,6 +50,8 @@ class Node:
             return ok(hex(self.chain_id))
         if m == "eth_getCode":
             return ok("0x" if p[0].lower() in self.no_code else "0x6080604052")
+        if m == "eth_gasPrice":
+            return ok(hex(self.gas_price)) if self.gas_price is not None else err("method eth_gasPrice not faked")
         if m == "eth_blockNumber":
             return ok(hex(self.head))
         if m == "eth_getBlockByNumber":  # one block per second
