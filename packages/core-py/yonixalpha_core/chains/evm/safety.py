@@ -138,6 +138,32 @@ async def _round_trip(adapter, token: str, probe: int, cs: ChainTradingSettings,
     return rt
 
 
+# Four.meme plain-buy simulation (X Mode) -> finding level. X Mode is the
+# documented revert "A"; another revert is a WARN until server evidence shows
+# the simulation matches real buys; a node without state overrides cannot
+# simulate (INFO, stated); no RPC is UNKNOWN as everywhere else.
+PLAIN_BUY_FINDINGS = {
+    "X_MODE": (FAIL, "FOURMEME_X_MODE", "X Mode token: only the signed X Mode buy works and YonixAlpha does not "
+               "implement it, so it cannot be entered"),
+    "PLAIN_BUY_REVERTS": (WARN, "PLAIN_BUY_REVERTS", "a simulated plain buy of the probe reverts"),
+    "NOT_SIMULATED": ("INFO", "PLAIN_BUY_NOT_SIMULATED", "the node refused the buy simulation (no eth_call state "
+                      "override?); X Mode is not ruled out"),
+    "UNAVAILABLE": (UNKNOWN, "PLAIN_BUY_UNAVAILABLE", "no RPC endpoint answered the buy simulation"),
+    "PLAIN_BUY_OK": ("INFO", "PLAIN_BUY_SIMULATED", "a plain buy of the probe goes through (not X Mode)"),
+}
+
+
+async def _plain_buy(adapter, token: str, probe: int, out: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not hasattr(adapter, "plain_buy"):
+        return None
+    res = await adapter.plain_buy(token, probe)
+    if res["status"] in PLAIN_BUY_FINDINGS:
+        level, code, message = PLAIN_BUY_FINDINGS[res["status"]]
+        out.append(_f(level, code, message + (f": {res['reason']}" if res.get("reason") else ""), res["source"],
+                      plain_buy=res["status"]))
+    return res
+
+
 async def honeypot_is(token: str, client: httpx.AsyncClient | None = None) -> dict[str, Any]:
     """Honeypot.is (BSC). Returns {"available": bool, "is_honeypot": bool|None, ...}."""
     own = client is None
@@ -183,6 +209,10 @@ async def check(adapter, token: str, probe: int, settings: EvmTradingSettings, s
         _state_checks(adapter, state, cs, settings, findings, head)
     await _contract_checks(adapter, token, findings)
     rt = await _round_trip(adapter, token, probe, cs, findings) if adapter.spec.supports_trading else {}
+    if adapter.spec.supports_trading and state is not None and state.stage == "CURVE":
+        pb = await _plain_buy(adapter, token, probe, findings)
+        if pb is not None:
+            rt["plain_buy"] = pb
     if chain == "bsc" and settings.honeypot_is_enabled:
         hp = await honeypot_is(token, http)
         sources.append("honeypot.is")

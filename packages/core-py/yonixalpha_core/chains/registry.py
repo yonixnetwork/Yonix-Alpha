@@ -120,6 +120,21 @@ LAUNCHPADS: dict[str, LaunchpadSpec] = {s.key: s for s in (
                           "TokenExtensionEnabled", "TokenBought", "TokenSold"),
         contracts={"portal": "0xe2cE6ab80874Fa9Fa2aAE65D277Dd6B8e65C9De0"}, quote_asset="BNB (other quotes skipped)",
         sources=_FLAP, notes="Only native-BNB quote tokens on the curve are supported in this phase."),
+    LaunchpadSpec(
+        "genius_fun", Chain.BSC, "Genius.fun", Lifecycle.BONDING_CURVE_TO_DEX,
+        curve_model="Pons V2 bonding curve per token (same TokenLaunched / CurveBuy / CurveSell events)",
+        liquidity_model="pair token per launch (mostly tokenized stocks: bStocks, xStocks, 4Stocks, Ondo), "
+                        "then a PancakeSwap Infinity pool with the Genius hook",
+        migration_model="Pons V2 events; graduation to PancakeSwap Infinity is not decoded",
+        execution_model="not supported (observe only)", safety_model="observe only",
+        supported_events=("TokenLaunched", "CurveBuy", "CurveSell", "CurveCompleted"),
+        contracts={"factory_1": "0x78EAE9537C0ef90DFe9B7ae964682Fe8138afe31",
+                   "factory_2": "0x37eE8AeE29C5efd3C1A7edA6dF3F510779928a37"},
+        supports_trading=False, supports_copy_trading=False, quote_asset="pair token per launch (mostly tokenized stocks)",
+        sources=("DefiLlama/dimension-adapters PR #9598, helpers/genius-fun.ts (59c6c55, 2026-09-20)",
+                 "genius.fun/contracts/manifest.json (named there; not reachable from the build environment)"),
+        notes="Launched 2026-09-16/17. Both factories are production (the first is still open). Volume counts "
+              "native-BNB-paired trades only: stock-paired amounts are in the stock token's units."),
     # --- Robinhood Chain --------------------------------------------------------------------------
     LaunchpadSpec(
         "pons_v2", Chain.ROBINHOOD, "Pons (V2)", Lifecycle.BONDING_CURVE_TO_DEX,

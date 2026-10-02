@@ -29,6 +29,7 @@ def four_node(sell_funds=9 * 10 ** 15):
             enc(["address", "address"] + ["uint256"] * 6, [TOKEN, ZERO_ADDRESS, 10 ** 22, 10 ** 16, 10 ** 14, 0, 0, 0]))
     node.on(lp.helper, "trySell(address,uint256)",
             enc(["address", "address", "uint256", "uint256"], [TOKEN, ZERO_ADDRESS, sell_funds, 10 ** 14]))
+    node.on(lp.spec.contracts["manager_v2"], "buyTokenAMAP(address,uint256,uint256)", "0x")  # plain buy goes through
     return node, lp
 
 
@@ -135,3 +136,48 @@ def test_evm_wallet_never_exposes_the_key_and_checks_it_matches():
     s = SimpleNamespace(EVM_WALLET_ADDRESS=None, EVM_WALLET_PRIVATE_KEY="not-a-key")
     r = wallet.account(s)
     assert r["status"] == "INVALID" and "not-a-key" not in str(r)
+
+
+async def test_fourmeme_x_mode_is_detected_by_the_plain_buy_simulation():
+    """X Mode: a plain buyTokenAMAP reverts "A" (four-meme-ai errors.md); the
+    quote round trip still passes, so only the simulation catches it."""
+    from yonixalpha_core.chains.evm import fourmeme
+
+    node, lp = four_node()
+    _, rt = await safety.check(lp, TOKEN, 10 ** 16 + 123, S)
+    assert rt["plain_buy"]["status"] == fourmeme.PLAIN_BUY_OK
+    buy = [r for r in node.requests if r["method"] == "eth_call" and r["params"][0]["data"].startswith(
+        "0x" + selector("buyTokenAMAP(address,uint256,uint256)").hex())][-1]
+    tx, _, override = buy["params"]
+    assert tx["from"] == fourmeme.dex.SIM_ACCOUNT and tx["to"].lower() == lp.spec.contracts["manager_v2"].lower()
+    assert int(tx["data"][74:138], 16) == 10 ** 16  # funds rounded down to GWEI ("GW")
+    assert fourmeme.dex.SIM_ACCOUNT in override
+
+    node.on(lp.spec.contracts["manager_v2"], "buyTokenAMAP(address,uint256,uint256)", Exception("execution reverted: A"))
+    report, rt = await safety.check(lp, TOKEN, 10 ** 16, S)
+    codes = {f["code"]: f for f in report.findings}
+    assert report.verdict == "FAIL" and codes["FOURMEME_X_MODE"]["level"] == "FAIL"
+    assert rt["sellable"] is True and rt["plain_buy"]["status"] == fourmeme.X_MODE  # the quotes alone pass
+
+    node.on(lp.spec.contracts["manager_v2"], "buyTokenAMAP(address,uint256,uint256)", Exception("execution reverted: More BNB"))
+    report, rt = await safety.check(lp, TOKEN, 10 ** 16, S)
+    assert report.verdict == "WARN" and "More BNB" in {f["code"]: f for f in report.findings}["PLAIN_BUY_REVERTS"]["message"]
+
+    node.reject_override = True  # a node without eth_call state overrides: stated, not blocking
+    report, rt = await safety.check(lp, TOKEN, 10 ** 16, S)
+    assert rt["plain_buy"]["status"] == fourmeme.NOT_SIMULATED and report.verdict == "PASS"
+    assert "PLAIN_BUY_NOT_SIMULATED" in {f["code"] for f in report.findings}
+
+
+def test_revert_reason_reads_error_string_data_and_messages():
+    from eth_abi import encode
+
+    from yonixalpha_core.chains.evm.fourmeme import revert_reason
+    from yonixalpha_core.chains.evm.rpc import EvmRpcError
+
+    data = "0x08c379a0" + encode(["string"], ["A"]).hex()
+    assert revert_reason(EvmRpcError("execution reverted", 3, data)) == "A"
+    assert revert_reason(EvmRpcError("execution reverted", 3, {"data": data})) == "A"
+    assert revert_reason(EvmRpcError("execution reverted: GW", 3)) == "GW"
+    assert revert_reason(EvmRpcError("execution reverted", 3)) == ""
+    assert revert_reason(EvmRpcError("invalid params: too many arguments", -32602)) is None

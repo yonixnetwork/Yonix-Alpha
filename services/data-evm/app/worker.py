@@ -161,7 +161,8 @@ class ChainWorker:
             rows = (await session.execute(select(EvmToken).where(
                 EvmToken.chain == self.chain, EvmToken.category.in_(s.entry_categories),
                 EvmToken.last_trade_at >= now - timedelta(minutes=5),
-                EvmToken.launchpad.in_(list(self.adapters)),
+                # observe-only venues (e.g. Genius.fun) are never entered: no safety reads for them
+                EvmToken.launchpad.in_([k for k, a in self.adapters.items() if a.spec.supports_trading]),
                 or_(EvmToken.safety_at.is_(None), EvmToken.safety_at < now - SAFETY_RECHECK),
             ).order_by(EvmToken.last_trade_at.desc()).limit(SAFETY_PER_PASS))).scalars().all()
             tokens = [(r.token, r.launchpad) for r in rows]

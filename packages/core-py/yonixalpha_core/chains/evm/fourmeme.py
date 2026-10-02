@@ -7,6 +7,13 @@ pre-calculation for both versions); after liquidity is added the token
 trades on PancakeSwap and is quoted through the PancakeSwap V2 router.
 Tokens whose quote asset is a BEP-20 (not BNB) are reported, not quoted.
 
+X Mode (four-meme-ai errors.md): an X Mode token can only be bought with
+the signed `buyToken(bytes,uint256,bytes)`; a plain buyTokenAMAP reverts
+with "A". `plain_buy` simulates that plain buy with eth_call (a state
+override funds the simulation account), so X Mode is detected from the
+contract's own answer, without decoding the undocumented `_tokenInfos`
+struct. YonixAlpha has no X Mode buy, so such a token cannot be entered.
+
 Units: amounts are in wei (18 decimals for BNB and Four.meme tokens);
 `price` fields in events and getTokenInfo are quote-wei per 1e18 token-wei,
 i.e. BNB per whole token after dividing by 1e18.
@@ -20,9 +27,9 @@ from typing import Any
 
 from yonixalpha_core.chains.base import Quote, TokenCategory, TokenState
 from yonixalpha_core.chains.evm import dex
-from yonixalpha_core.chains.evm.abi import ZERO_ADDRESS, EventSet, event
+from yonixalpha_core.chains.evm.abi import ZERO_ADDRESS, EventSet, decode_output, encode_call, event
 from yonixalpha_core.chains.evm.launchpad import EvmLaunchpad, ScanResult
-from yonixalpha_core.chains.evm.rpc import EvmRpcError
+from yonixalpha_core.chains.evm.rpc import EvmRpcError, EvmRpcUnavailableError
 from yonixalpha_core.chains.registry import BSC_PANCAKE_V2, BSC_WBNB, LAUNCHPADS
 
 E18 = Decimal(10) ** 18
@@ -39,6 +46,29 @@ TOKEN_INFO_TYPES = ["uint256", "address", "address", "uint256", "uint256", "uint
                     "uint256", "uint256", "uint256", "bool"]
 TOKEN_INFO_KEYS = ("version", "token_manager", "quote", "last_price", "trading_fee_rate", "min_trading_fee",
                    "launch_time", "offers", "max_offers", "funds", "max_funds", "liquidity_added")
+GWEI = 10 ** 9
+X_MODE_REVERT = "A"
+# plain_buy statuses
+PLAIN_BUY_OK, X_MODE, PLAIN_BUY_REVERTS = "PLAIN_BUY_OK", "X_MODE", "PLAIN_BUY_REVERTS"
+NOT_SIMULATED, UNAVAILABLE, NOT_APPLICABLE = "NOT_SIMULATED", "UNAVAILABLE", "NOT_APPLICABLE"
+ERROR_STRING = "0x08c379a0"  # Error(string)
+
+
+def revert_reason(exc: Exception) -> str | None:
+    """The revert string of a failed eth_call, or None when the error is not a
+    revert (e.g. the node refused the request)."""
+    data = getattr(exc, "data", None)
+    if isinstance(data, dict):
+        data = data.get("data")
+    if isinstance(data, str) and data.startswith(ERROR_STRING):
+        try:
+            return decode_output(["string"], "0x" + data[len(ERROR_STRING):])[0]
+        except Exception:  # noqa: BLE001 - malformed: fall back to the message
+            pass
+    msg = str(exc)
+    if "execution reverted" in msg.lower():
+        return msg[msg.lower().index("execution reverted") + len("execution reverted"):].lstrip(": ").strip()
+    return None
 
 
 class FourMeme(EvmLaunchpad):
@@ -127,8 +157,45 @@ class FourMeme(EvmLaunchpad):
         return Quote(ok=funds > 0, amount_in=tokens_in, amount_out=funds, fee=fee, route="fourmeme_curve",
                      source=src, at=dex.now(), error=None if funds > 0 else "zero output")
 
+    async def plain_buy(self, token: str, funds: int) -> dict[str, Any]:
+        """Simulates TokenManager2.buyTokenAMAP(token, funds, 0) with the
+        msg.value tryBuy asks for. Returns {"status", "reason", "source"}:
+          PLAIN_BUY_OK       the plain buy goes through now
+          X_MODE             reverted "A": X Mode, only the signed buy works
+          PLAIN_BUY_REVERTS  reverted for another reason (given)
+          NOT_SIMULATED      the node refused the request (e.g. no state override)
+          UNAVAILABLE        no RPC endpoint answered
+          NOT_APPLICABLE     V1 token, on PancakeSwap, or a BEP-20 quote"""
+        src = "TokenManager2.buyTokenAMAP (eth_call simulation)"
+        funds = funds - funds % GWEI  # amounts must be GWEI-aligned ("GW")
+        try:
+            info = await self.token_info(token)
+            if info["version"] != 2 or info["liquidity_added"] or info["quote"] != ZERO_ADDRESS:
+                return {"status": NOT_APPLICABLE, "reason": f"version {info['version']}, liquidity added "
+                        f"{info['liquidity_added']}, quote {info['quote']}", "source": "getTokenInfo"}
+            *_, msg_value, _approval, _funds = await dex.call(
+                self.rpc, self.helper, "tryBuy(address,uint256,uint256)",
+                ["address", "address", "uint256", "uint256", "uint256", "uint256", "uint256", "uint256"], token, 0, funds)
+            await self.rpc.eth_call(
+                info["token_manager"], encode_buy_amap(token, funds), from_=dex.SIM_ACCOUNT, value=msg_value,
+                state_override={dex.SIM_ACCOUNT: {"balance": hex(msg_value + 10 ** 18)}})
+        except EvmRpcUnavailableError as exc:
+            return {"status": UNAVAILABLE, "reason": str(exc)[:200], "source": src}
+        except EvmRpcError as exc:
+            reason = revert_reason(exc)
+            if reason is None:
+                return {"status": NOT_SIMULATED, "reason": str(exc)[:200], "source": src}
+            if reason == X_MODE_REVERT:
+                return {"status": X_MODE, "reason": "reverted \"A\": X Mode token, a plain buy is refused", "source": src}
+            return {"status": PLAIN_BUY_REVERTS, "reason": reason or "reverted without a message", "source": src}
+        return {"status": PLAIN_BUY_OK, "reason": None, "source": src}
+
     async def detect_migration(self, token: str) -> dict[str, Any] | None:
         info = await self.token_info(token)
         if not info["liquidity_added"]:
             return None
         return {"token": token, "venue": "pancakeswap", "evidence": "getTokenInfo.liquidityAdded"}
+
+
+def encode_buy_amap(token: str, funds: int, min_amount: int = 0) -> str:
+    return encode_call("buyTokenAMAP(address,uint256,uint256)", token, funds, min_amount)

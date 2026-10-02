@@ -117,3 +117,19 @@ async def test_a_venue_never_seen_active_is_unverified_until_seven_days_of_monit
     assert a["activity_status"] == "UNVERIFIED" and not a["listed"] and a["last_launch"] is None
     a = await activity.launchpad_activity(db, spec, "PAPER", None, NOW + timedelta(days=7))
     assert a["activity_status"] == "INACTIVE"
+
+
+async def test_volume_counts_native_quote_trades_only(db):
+    """Genius.fun pairs most launches with tokenized stocks: those amounts are
+    in the stock token's units, so they count as trades but not as volume."""
+    tok = "0x" + "b" * 40
+    ad = _Adapter("genius_fun")
+    stock = _Trade("g1", tok, NOW - timedelta(hours=1), 7 * 10 ** 18)
+    stock.extra = {"native_quote": False}
+    native = _Trade("g2", tok, NOW - timedelta(hours=1), 10 ** 18)
+    native.extra = {"native_quote": True}
+    unknown = _Trade("g3", tok, NOW - timedelta(hours=1), 2 * 10 ** 18)  # pair not known: counted as before
+    await store.persist_scan(db, ad, _Res(10, trades=[stock, native, unknown]), NOW)
+    await db.commit()
+    row = (await db.execute(select(LaunchpadActivity))).scalar_one()
+    assert (row.chain, row.trades, row.volume) == ("bsc", 3, 3 * 10 ** 18)

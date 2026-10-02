@@ -160,6 +160,26 @@ export default function LaunchpadsPage() {
                 <div className="stat-value small mono">{Object.entries(lp.probe.unknown_instructions ?? {}).map(([k, v]) => `${k} ${v}`).join(", ") || "—"}</div></div>
               {lp.probe.error && <div className="stat"><div className="stat-label">Probe error</div><div className="stat-value small neg">{lp.probe.error}</div></div>}
             </div>)}
+          {lp.probe?.sites?.length > 0 && (
+            <div className="table-scroll">
+              <table className="data-table">
+                <thead><tr><th>Launch site ({lp.key === "raydium_launchlab" ? "platform config" : "pool config"})</th>
+                  <th>Name (on-chain)</th><th>{lp.key === "meteora_dbc" ? "Quote mint" : "Web"}</th>
+                  <th>Share of sampled trades / launches</th></tr></thead>
+                <tbody>{(lp.probe.sites as J[]).map((st) => {
+                  const total = (lp.probe.sites as J[]).reduce((a: number, x: J) => a + x.instructions, 0);
+                  return (
+                    <tr key={st.address}>
+                      <td className="mono small">{st.address}</td>
+                      <td>{st.name ?? <span className="muted">{lp.key === "meteora_dbc" ? "configs have no name" : st.error ?? "not read"}</span>}</td>
+                      <td className="small mono">{(lp.key === "meteora_dbc" ? st.quote_mint : st.web) ?? "—"}</td>
+                      <td className="small">{st.instructions} ({Math.round((st.instructions / total) * 100)}%)</td>
+                    </tr>);
+                })}</tbody>
+              </table>
+              <p className="muted small">{lp.probe.sites_total} site(s) seen in the latest sample. A sample of 25 transactions,
+                not all traffic: small sites can be missing.</p>
+            </div>)}
           {lp.probe && <p className="muted small">Activity probe (observe only): the newest transactions of the program and a
             sample of 25 classified every 5 minutes. 7-day counts are not measured; launches can be missed by a sample.</p>}
           <div className="stat-grid">

@@ -741,3 +741,34 @@ async def test_pons_v2_router_trades_are_credited_to_the_recipient():
     got = [(t.is_buy, t.trader.lower(), (t.extra or {}).get("caller", "").lower()) for t in res.trades]
     assert got == [(True, wallet, router), (True, TRADER.lower(), TRADER.lower()), (False, router, router),
                    (False, wallet, router)]
+
+
+async def test_genius_fun_reuses_the_pons_v2_decoder_with_two_factories_observe_only():
+    """Genius.fun (BSC) emits Pons V2's TokenLaunched / CurveBuy / CurveSell
+    (DefiLlama helpers/genius-fun.ts): both production factories are
+    accepted, a look-alike factory is not, and trades on stock-paired curves
+    are marked non-native. The venue is observe only."""
+    from yonixalpha_core.chains.evm.pons import GeniusFun
+
+    node = Node(56)
+    lp = adapter_for("genius_fun", rpc_for(node))
+    assert isinstance(lp, GeniusFun) and not lp.spec.supports_trading and not lp.spec.supports_copy_trading
+    f1, f2 = lp.factories
+    stock, curve2, token2 = "0x" + "5b" * 20, "0x" + "c2" * 20, "0x" + "d2" * 20
+    ev = V2_EVENTS.by_name
+    buy = {"buyer": TRADER, "recipient": TRADER, "quoteIn": 10 ** 16, "tokensOut": 10 ** 22, "fee": 1, "tax": 2}
+    node.logs = [
+        log_of(ev["TokenLaunched"], {"token": TOKEN, "curve": CURVE, "deployer": TRADER, "pairToken": ZERO_ADDRESS,
+                                     "launchConfigId": 1, "graduationThreshold": 1}, f1, 10, 0),
+        log_of(ev["TokenLaunched"], {"token": token2, "curve": curve2, "deployer": TRADER, "pairToken": stock,
+                                     "launchConfigId": 2, "graduationThreshold": 1}, f2, 10, 1),
+        log_of(ev["TokenLaunched"], {"token": FOREIGN, "curve": FOREIGN, "deployer": TRADER, "pairToken": ZERO_ADDRESS,
+                                     "launchConfigId": 1, "graduationThreshold": 1}, FOREIGN, 10, 2),
+        log_of(ev["CurveBuy"], buy, CURVE, 11, 0),
+        log_of(ev["CurveBuy"], buy, curve2, 11, 1),
+    ]
+    node.honor_address = False
+    res = await lp.scan(0, 100)
+    assert [x.token.lower() for x in res.launches] == [TOKEN.lower(), token2.lower()] and res.rejected_foreign == 1
+    assert [(t.token.lower(), t.extra["native_quote"]) for t in res.trades] == [(TOKEN.lower(), True), (token2.lower(), False)]
+    assert {a.lower() for a in await lp._emitters()} == {f1.lower(), f2.lower(), CURVE.lower(), curve2.lower()}

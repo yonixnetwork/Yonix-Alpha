@@ -99,7 +99,9 @@ async def persist_scan(session: AsyncSession, adapter, res: ScanResult, now: dat
             at=t.at, extra=_js(t.extra) or None).on_conflict_do_nothing(index_elements=["event_id"]))
         counts["trades"] += r.rowcount or 0
         if r.rowcount:
-            acc.trade(t.at, t.quote_amount)
+            # Volume is in native units: a trade against an ERC-20 pair token
+            # (e.g. Genius.fun's tokenized stocks) counts as a trade, not as volume.
+            acc.trade(t.at, 0 if (t.extra or {}).get("native_quote") is False else t.quote_amount)
     for m in res.migrations:
         await _ensure_token(session, chain, key, m["token"], m.get("at") or now)
         row = await session.get(EvmToken, (chain, m["token"]))
@@ -144,7 +146,7 @@ async def restore_adapter(session: AsyncSession, adapter) -> int:
     for token, venue, quote in rows:
         venue = venue or {}
         if venue.get("curve") and hasattr(adapter, "register_curve"):
-            adapter.register_curve(venue["curve"], token)
+            adapter.register_curve(venue["curve"], token, quote)
             n += 1
         if venue.get("pool") and hasattr(adapter, "register_pool"):
             adapter.register_pool(venue["pool"], token, quote)

@@ -11,7 +11,7 @@ def adapter_for(key: str, rpc: EvmRpc):
     from yonixalpha_core.chains.evm import flap, fourmeme, odyssey, pons
 
     factories = {
-        "fourmeme": fourmeme.FourMeme, "flap": flap.Flap, "pons_v2": pons.PonsV2, "pons_v1": pons.pons_v1,
+        "fourmeme": fourmeme.FourMeme, "flap": flap.Flap, "pons_v2": pons.PonsV2, "genius_fun": pons.GeniusFun, "pons_v1": pons.pons_v1,
         "noxa": pons.noxa, "odyssey_curve": odyssey.OdysseyCurve, "odyssey_instant": odyssey.OdysseyInstant,
         "odyssey_reflection": odyssey.OdysseyReflection,
     }
@@ -20,5 +20,5 @@ def adapter_for(key: str, rpc: EvmRpc):
     return factories[key](rpc)
 
 
-EVM_LAUNCHPADS = ("fourmeme", "flap", "pons_v2", "pons_v1", "noxa", "odyssey_curve", "odyssey_instant",
+EVM_LAUNCHPADS = ("fourmeme", "flap", "genius_fun", "pons_v2", "pons_v1", "noxa", "odyssey_curve", "odyssey_instant",
                   "odyssey_reflection")
