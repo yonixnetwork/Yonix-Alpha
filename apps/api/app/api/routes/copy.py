@@ -14,11 +14,13 @@ from redis.asyncio import Redis
 from sqlalchemy import desc, func, nulls_last, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_username, get_db, get_redis
+from app.api.deps import get_current_username, get_db, get_redis, get_settings
 from app.api.util import audit, jsonable
 from yonixalpha_core import copy_outcomes as co
 from yonixalpha_core import copy_trading as ct
 from yonixalpha_core import events, wallet_validation
+from yonixalpha_core.chains.evm import address_kinds
+from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import CopyEvent, CopyPosition, CopyTarget, PaperPosition, PlatformSetting, WalletProfile
 
 router = APIRouter(tags=["copy"])
@@ -67,8 +69,11 @@ async def profiles(chain: str | None = Query(None, pattern=CHAIN), label: str | 
                    stage: str | None = Query(None, pattern="^(COLLECTING_HISTORY|VALIDATED|PAPER_FOLLOWED|REJECTED)$"),
                    sort: str = Query("last_seen", pattern="^(last_seen|trades|tokens|score)$"),
                    min_trades: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=500),
+                   include_contracts: bool = False,
                    db: AsyncSession = Depends(get_db), _: str = Depends(get_current_username)) -> dict:
     q = select(WalletProfile).where(WalletProfile.trades >= min_trades)
+    if not include_contracts:  # routers and bots credited with trades are not wallets (address_kinds)
+        q = q.where(func.coalesce(WalletProfile.metrics["account"]["kind"].astext, "") != address_kinds.CONTRACT)
     if chain:
         q = q.where(WalletProfile.chain == chain)
     if label:
@@ -84,7 +89,8 @@ async def profiles(chain: str | None = Query(None, pattern=CHAIN), label: str | 
                       "is_copy_target": (r.chain, r.wallet.lower()) in targets} for r in rows],
         "sorted_by": sort,
         "note": "profiles describe observed behaviour; they are not a ranking and no wallet is labelled best. "
-                "A score needs enough closed trades and is shrunk toward a base rate."})
+                "A score needs enough closed trades and is shrunk toward a base rate. Contract addresses (routers, "
+                "bots) are hidden unless asked for: the trades credited to them belong to the wallets that call them."})
 
 
 @router.get("/wallets/validation-settings")
@@ -131,13 +137,40 @@ async def targets(db: AsyncSession = Depends(get_db), _: str = Depends(get_curre
                      "note": "paper only; every copied buy still passes the gate / safety checks and the COPY TRADING switch"})
 
 
+async def _evm_account_kind(db: AsyncSession, settings: Settings, chain: str, wallet: str) -> tuple[str | None, str | None]:
+    """(kind, warning). A contract cannot sign: the trades credited to it are the
+    trades of whoever called it (a router or bot), so it is never a copy target."""
+    from datetime import datetime, timezone
+
+    from yonixalpha_core.chains.evm import rpc_registry as evm_registry
+
+    try:
+        rpc = await evm_registry.rpc_for(db, settings, chain)
+        try:
+            kinds = await address_kinds.resolve(db, rpc, chain, [wallet], datetime.now(timezone.utc), max_lookups=1)
+        finally:
+            await rpc.aclose()
+    except Exception as exc:  # noqa: BLE001 - the check is advisory when the RPC is down
+        return None, f"could not check whether this address is a contract ({type(exc).__name__}); added anyway"
+    kind = kinds.get(wallet.lower())
+    return kind, None if kind else "could not check whether this address is a contract; added anyway"
+
+
 @router.post("/copy/targets")
 async def add_target(body: TargetIn, request: Request, db: AsyncSession = Depends(get_db),
-                     redis: Redis = Depends(get_redis), username: str = Depends(get_current_username)) -> dict:
+                     redis: Redis = Depends(get_redis), settings: Settings = Depends(get_settings),
+                     username: str = Depends(get_current_username)) -> dict:
     wallet = _valid_wallet(body.chain, body.wallet)
     s, errors = ct.parse_settings(body.settings)
     if errors:
         raise HTTPException(422, {"errors": errors})
+    kind, warning = (None, None)
+    if body.chain in ("bsc", "robinhood"):
+        kind, warning = await _evm_account_kind(db, settings, body.chain, wallet)
+        if kind == address_kinds.CONTRACT:
+            await db.commit()  # keeps the classification (nothing else has been written yet)
+            raise HTTPException(422, "this address is a contract (a router or bot), not a wallet: the trades credited "
+                                     "to it belong to the wallets that call it. Copy one of those wallets instead.")
     exists = (await db.execute(select(CopyTarget).where(CopyTarget.chain == body.chain,
                                                         func.lower(CopyTarget.wallet) == wallet.lower()))).scalar_one_or_none()
     if exists:
@@ -149,7 +182,7 @@ async def add_target(body: TargetIn, request: Request, db: AsyncSession = Depend
     await audit(db, username, request, "copy_target.create", {"chain": t.chain, "wallet": wallet, "mode": t.mode})
     await db.commit()
     await events.publish(redis, "copy.targets.updated", {"id": str(t.id)}, "api")
-    return jsonable(_target(t))
+    return jsonable({**_target(t), "account_kind": kind, "warning": warning})
 
 
 @router.patch("/copy/targets/{target_id}")

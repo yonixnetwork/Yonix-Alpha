@@ -712,3 +712,32 @@ async def test_a_null_block_from_a_load_balanced_node_is_asked_again_then_an_exp
     assert (await rpc.get_block(5))["timestamp"] == hex(100)
     with pytest.raises(EvmRpcUnavailableError, match="block 6 not available yet"):
         await rpc.get_block(6)
+
+
+async def test_pons_v2_router_trades_are_credited_to_the_recipient():
+    """M10b (server evidence: 33% of Pons curve buys came through routers).
+    CurveBuy names msg.sender; when a router calls the curve for a wallet,
+    the recipient (who gets the tokens) is the trader and the router is kept
+    as the caller. A direct trade is unchanged; a router sell that pays the
+    router stays with the router (the wallet is not in the event)."""
+    node = Node(4663)
+    lp = PonsV2(rpc_for(node, "robinhood"))
+    ev = V2_EVENTS.by_name
+    router, wallet = "0x" + "e3" * 20, "0x" + "a1" * 20
+    node.logs = [
+        log_of(ev["TokenLaunched"], {"token": TOKEN, "curve": CURVE, "deployer": TRADER, "pairToken": ZERO_ADDRESS,
+                                     "launchConfigId": 1, "graduationThreshold": 4 * 10 ** 18}, lp.factory, 10, 0),
+        log_of(ev["CurveBuy"], {"buyer": router, "recipient": wallet, "quoteIn": 10 ** 16, "tokensOut": 10 ** 22,
+                                "fee": 0, "tax": 0}, CURVE, 11, 1),
+        log_of(ev["CurveBuy"], {"buyer": TRADER, "recipient": TRADER, "quoteIn": 10 ** 16, "tokensOut": 10 ** 22,
+                                "fee": 0, "tax": 0}, CURVE, 11, 2),
+        log_of(ev["CurveSell"], {"seller": router, "recipient": router, "tokensIn": 10 ** 22, "quoteOut": 10 ** 16,
+                                 "fee": 0, "tax": 0}, CURVE, 12, 1),
+        log_of(ev["CurveSell"], {"seller": router, "recipient": wallet, "tokensIn": 10 ** 22, "quoteOut": 10 ** 16,
+                                 "fee": 0, "tax": 0}, CURVE, 12, 2),
+    ]
+    node.honor_address = False  # the curve is only known once its launch is read in the same scan
+    res = await lp.scan(0, 100)
+    got = [(t.is_buy, t.trader.lower(), (t.extra or {}).get("caller", "").lower()) for t in res.trades]
+    assert got == [(True, wallet, router), (True, TRADER.lower(), TRADER.lower()), (False, router, router),
+                   (False, wallet, router)]

@@ -51,7 +51,7 @@ Providers), see M7.
 | 12 | Robinhood reference repos inspected | DONE (M9) | all seven inspected plus the official Pons contract source (section 18): Pons events match the official source, sequencer decoder matches 143 real transactions, feed signatures verified, router attribution measured by `tools.trader_attribution` | M9 |
 | 13 | Robinhood sequencer feed (+ delayed feed fallback), latency / gaps measured | DONE | `evm.streams.SequencerFeed` in data-evm: Nitro broadcast decoding, resume by sequence number, delayed-feed fallback, gaps / duplicates / delay / matches, stream lead on copy events (§17). Real feed NOT VERIFIED from this environment | M8 |
 | 14–17 | Observation state machine for every token on all chains, windows T0..T+60, expiry, stored | DONE (EVM, paper); Solana PARTIAL (own state names, see section 15) | EVM: `evm_observations`, full state machine, T0/T+5/T+10/T+20/T+30/T+60 snapshots with the §16 fields, adaptive MIGRATED / MOMENTUM windows, EXPIRED_NO_ENTRY, entries only while observed; Solana: `token_observations` + follow-ups, T+20m added | M6 |
-| 18–23 | Wallet performance model: 24H–180D windows, avg/median win and loss, profit factor, drawdown, FIFO ledger, INSUFFICIENT DATA | DONE in code for BSC / Robinhood (M3); Solana PARTIAL | `wallet_pnl.py` (FIFO lots, usually earns / usually loses, profit factor, drawdown, holds, best / worst), windows 24H / 7D (14D+ INSUFFICIENT DATA: 7-day profile history, 14-day trade retention); fees listed not subtracted (NOT VERIFIED per launchpad), gas not included; Solana profiles have no sells (launch_buyers) and say so | M3 |
+| 18–23 | Wallet performance model: 24H–180D windows, avg/median win and loss, profit factor, drawdown, FIFO ledger, INSUFFICIENT DATA | DONE in code for BSC / Robinhood (M3; router / bot contracts excluded since M10b, section 20); Solana PARTIAL | `wallet_pnl.py` (FIFO lots, usually earns / usually loses, profit factor, drawdown, holds, best / worst), windows 24H / 7D (14D+ INSUFFICIENT DATA: 7-day profile history, 14-day trade retention); fees listed not subtracted (NOT VERIFIED per launchpad), gas not included; Solana profiles have no sells (launch_buyers) and say so | M3 |
 | 24 | Nansen / MadeOnSol enrichment | MISSING | | M11 |
 | 25–28 | Wallet discovery, validation gates, outlier test, regime test | DONE for BSC / Robinhood (M3b); Solana INSUFFICIENT DATA (no sells recorded) | outlier test (M3); `wallet_validation` (12 configurable checks, per-day consistency, INSUFFICIENT DATA vs NOT VALIDATED); `market_regimes` (hourly volume / net flow / price range, migration 0026; CONSISTENT / REGIME_DEPENDENT); discovery stage COLLECTING_HISTORY → VALIDATED → PAPER_FOLLOWED / REJECTED, never auto-copied; Smart Wallets UI + rules editor. External smart-money sources (§24-25 Nansen, MadeOnSol) not connected | M3b |
 | 29 | Copy BUY ONLY / SELL ONLY / BUY+SELL | DONE (paper) | modes NOTIFY, BUY_ONLY, MIRROR (buy+sell), SELL_ONLY (M4); SELL ONLY exits PAPER positions only | M4 |
@@ -949,4 +949,66 @@ most; the probe label is shorter now.
 NOT VERIFIED here: the instruction names as they appear in real logs
 (Anchor UpperCamelCase assumed; the "other instructions" list on the
 server shows any mismatch), and each venue's real activity.
+
+## 20. M10b — who a trade belongs to (2026-10-02)
+
+Server evidence (`tools.trader_attribution --days 3`, 2026-10-02):
+
+| Venue | Trades (3 days) | Distinct traders | Busiest traders |
+|---|---|---|---|
+| BSC Flap | 871,944 | 9,837 | 9 of the 12 busiest are contracts; the busiest alone has 40.8% of all trades |
+| BSC Four.meme | 72,340 | 8,745 | 11 of 12 are wallets; the busiest contract has 1.2% |
+| Robinhood Pons V2 | 614,178 | 34,785 | all 12 busiest are contracts; 110,661 of 333,484 curve buys (33.2%) name a recipient other than the caller |
+
+Launchpad events name whoever called the launchpad. When a wallet trades
+through a router or bot contract, the event names that contract. Wallet
+profiles, smart-wallet discovery, copy detection and buyer counts all read
+the stored trader, so they saw one very busy "wallet" instead of the people
+behind it.
+
+**Pons: credited to the recipient.**
+- The official PonsV2BondingCurve emits `CurveBuy(msg.sender, recipient, …)`
+  and `CurveSell(msg.sender, recipient, …)`.
+- The recipient gets the tokens (buy) or the quote (sell). So when it
+  differs from the caller, it is now the stored trader, and the caller is
+  kept in `extra.caller`.
+- A router sell that pays the router stays credited to the router: the
+  wallet behind it is not in the event.
+- Launch coordination already read the recipient as the holder, so it is
+  unchanged.
+- Trades stored before this change keep their old trader.
+
+**Address kinds** (`chains/evm/address_kinds.py`, table `evm_address_kinds`,
+migration 0030), from `eth_getCode`:
+- WALLET: no code.
+- DELEGATED_WALLET: EIP-7702 designator `0xef0100 || delegate`. Still a
+  wallet that signs its own transactions. The M9 tool counted these as
+  contracts and now shows them as wallets.
+- CONTRACT: any other code.
+
+Contracts are never re-checked; wallets are re-checked after 7 days (they
+can gain a delegation). A failed lookup leaves the address unknown, never
+"wallet". Lookups are bounded: 300 new addresses per chain per 10-minute
+profile rebuild.
+
+**What uses it:**
+- **Wallet profiles:** a CONTRACT keeps its metrics but gets no score, the
+  CONTRACT label and the discovery stage REJECTED with the reason. A router
+  or bot can never become a smart-wallet candidate or get a paper follow.
+- **Smart Wallets:** contract profiles are hidden unless "show contract
+  addresses" is ticked; CONTRACT and DELEGATED_WALLET are label filters.
+- **Copy targets:** adding a contract on BSC / Robinhood is refused (422,
+  with the reason). If the check cannot run (RPC down), the target is
+  added with a warning.
+
+**Not solved, stated:**
+- Flap's events carry only `trader`, the caller. For the roughly 75% of
+  Flap trades made through contracts, the wallet behind them would need
+  each transaction's sender: about 290k extra RPC calls a day at the
+  current volume, so not fetched.
+- Those trades still count toward per-token buyer counts and concentration
+  as one buyer per contract.
+- A copy target that trades only through a router is not seen as trading
+  (its trades are credited to the router), except Pons buys, which now name
+  the target as recipient.
 

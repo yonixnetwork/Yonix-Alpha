@@ -10,7 +10,7 @@ import { useApi } from "@/lib/useApi";
 type J = Record<string, any>;
 const CHAINS: [string, string][] = [["", "All chains"], ["solana", "Solana"], ["bsc", "BSC"], ["robinhood", "Robinhood Chain"]];
 const SORTS: [string, string][] = [["last_seen", "Last seen"], ["trades", "Trades"], ["tokens", "Tokens"], ["score", "Score"]];
-const LABELS = ["", "SNIPER", "SCALPER", "HOLDER", "HIGH_ACTIVITY", "POSSIBLE_BOT"];
+const LABELS = ["", "SNIPER", "SCALPER", "HOLDER", "HIGH_ACTIVITY", "POSSIBLE_BOT", "DELEGATED_WALLET", "CONTRACT"];
 const STAGES: [string, string][] = [["", "Any"], ["COLLECTING_HISTORY", "Collecting history"], ["VALIDATED", "Validated"],
   ["PAPER_FOLLOWED", "Validated + paper-followed"], ["REJECTED", "Rejected"]];
 const STAGE_CLASS: Record<string, string> = { PAPER_FOLLOWED: "pill pill-ok", VALIDATED: "pill pill-ok", REJECTED: "pill pill-danger", COLLECTING_HISTORY: "pill pill-off" };
@@ -151,8 +151,9 @@ export default function SmartWalletsPage() {
   const [sort, setSort] = useState("last_seen");
   const [label, setLabel] = useState("");
   const [stage, setStage] = useState("");
+  const [contracts, setContracts] = useState(false);
   const { data, error, loading, reload } = useApi<J>("/api/wallets/profiles",
-    { sort, ...(chain ? { chain } : {}), ...(label ? { label } : {}), ...(stage ? { stage } : {}) }, { refreshMs: 60000 });
+    { sort, ...(chain ? { chain } : {}), ...(label ? { label } : {}), ...(stage ? { stage } : {}), ...(contracts ? { include_contracts: true } : {}) }, { refreshMs: 60000 });
   const [msg, setMsg] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
   const watch = async (p: J) => {
@@ -168,6 +169,8 @@ export default function SmartWalletsPage() {
         <label className="small">Sort by <select value={sort} onChange={(e) => setSort(e.target.value)}>{SORTS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></label>
         <label className="small">Behaviour <select value={label} onChange={(e) => setLabel(e.target.value)}>{LABELS.map((l) => <option key={l} value={l}>{l || "Any"}</option>)}</select></label>
         <label className="small">Discovery stage <select value={stage} onChange={(e) => setStage(e.target.value)}>{STAGES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></label>
+        <label className="small" title="routers and bots credited with trades: not wallets, never candidates">
+          <input type="checkbox" checked={contracts} onChange={(e) => setContracts(e.target.checked)} /> show contract addresses</label>
       </div>
       <ErrorNotice error={error ?? msg} />
       <Section title={`Wallet profiles (sorted by ${SORTS.find((s) => s[0] === sort)?.[1].toLowerCase()})`}>
@@ -195,7 +198,7 @@ export default function SmartWalletsPage() {
                     <td>{pct(p.metrics.early_entry_share)}</td>
                     <td>{p.metrics.avg_hold_s ? `${Math.round(p.metrics.avg_hold_s)} s` : "—"}</td>
                     <td title={JSON.stringify(p.score_detail?.components ?? p.score_detail)}>{p.score ?? <span className="muted small">insufficient data</span>}</td>
-                    <td>{p.metrics.discovery ? <span className={STAGE_CLASS[p.metrics.discovery.stage] ?? "pill pill-off"} title={p.metrics.validation?.reason}>
+                    <td>{p.metrics.discovery ? <span className={STAGE_CLASS[p.metrics.discovery.stage] ?? "pill pill-off"} title={p.metrics.discovery.reason ?? p.metrics.validation?.reason}>
                       {p.metrics.discovery.stage.replaceAll("_", " ")}</span> : <span className="muted small">—</span>}</td>
                     <td>{formatDate(p.last_seen)}</td>
                     <td>{p.is_copy_target ? <span className="muted small">target</span> :

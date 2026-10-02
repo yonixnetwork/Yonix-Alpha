@@ -30,6 +30,7 @@ from sqlalchemy import func, select
 
 async def report(session, get_code, days: float, top_n: int, now: datetime | None = None) -> list[str]:
     """Report lines. `get_code(chain, address)` returns the address's code."""
+    from yonixalpha_core.chains.evm.address_kinds import classify_code
     from yonixalpha_core.chains.evm.known_routers import router_label
     from yonixalpha_core.db.models import EvmTrade
 
@@ -49,8 +50,8 @@ async def report(session, get_code, days: float, top_n: int, now: datetime | Non
                                      .group_by(EvmTrade.trader).order_by(func.count().desc()).limit(top_n))).all()
         for trader, k in top:
             try:
-                code = await get_code(chain, trader)
-                kind = "CONTRACT" if code and code not in ("0x", "0x0") else "wallet"
+                kind, delegate, _ = classify_code(await get_code(chain, trader))
+                kind = {"WALLET": "wallet", "DELEGATED_WALLET": f"wallet (EIP-7702 -> {delegate})"}.get(kind, kind)
             except Exception as exc:  # noqa: BLE001 - reported, the report goes on
                 kind = f"unknown ({type(exc).__name__})"
             label = router_label(chain, trader)
