@@ -57,7 +57,7 @@ def test_message_says_nothing_is_applied():
     title, body = um.message({"classification": um.ACTION, "key": PONS.key, "why": PONS.why,
                               "summary": {"reasons": ["1 changed file(s) on paths we use"], "messages": ["update curve"]}})
     assert title == "ACTION REQUIRED: ponsdotdev/ponsfamily"
-    assert body.endswith("Not applied automatically: review and deploy by hand.")
+    assert "What to do (INTEGRATION CHECK)" in body and body.endswith("Never applied automatically.")
 
 
 class FakeGitHub:
@@ -202,7 +202,7 @@ async def test_vulnerable_dependency_is_reported_at_baseline_and_run_notifies(mo
         kind, title, body, severity, data, telegram = sent[0]
         assert kind == "infrastructure_update" and severity == "critical" and title == "ACTION REQUIRED: httpx"
         assert telegram  # ACTION REQUIRED goes to Telegram; UPGRADE AVAILABLE only in-app (below)
-        assert "1 known vulnerabilities" in body and body.endswith("review and deploy by hand.")
+        assert "1 known vulnerabilities" in body and "PIN BUMP" in body and body.endswith("Never applied automatically.")
         async with sf() as s:
             ev = (await s.execute(select(models.UpdateEvent))).scalar_one()
             assert ev.notified and str(ev.id) == data["event_id"]
@@ -221,3 +221,18 @@ async def test_vulnerable_dependency_is_reported_at_baseline_and_run_notifies(mo
         assert "infrastructure_update" in DEFAULT_TELEGRAM_KINDS and "infrastructure_update" in NOTIFICATION_KINDS
     finally:
         await engine.dispose()
+
+
+def test_apply_guide_says_how_each_update_reaches_the_server():
+    dep = next(w for w in um.WATCHES if w.key == "pypi:websockets")
+    g = um.apply_guide(dep, um.UPGRADE, "14.1", "17.1")
+    assert g["action"] == um.PIN_BUMP and um.PIN_FILE in g["steps"] and "deploying again keeps" in g["steps"]
+    assert um.apply_guide(dep, um.UPGRADE, "17.1", "17.1")["action"] == um.APPLIED
+    idl = next(w for w in um.WATCHES if w.key == "github:pump-fun/pump-public-docs")
+    assert um.apply_guide(idl, um.ACTION, None, "abc")["action"] == um.INTEGRATION_CHECK
+    assert um.apply_guide(idl, um.INFO, None, "abc")["action"] == um.REVIEW_ONLY
+    ref = next(w for w in um.WATCHES if w.key == "github:anza-xyz/agave")
+    assert um.apply_guide(ref, um.BREAKING, None, "v3")["action"] == um.REVIEW_ONLY  # not used directly
+    title, body = um.message({"key": "pypi:websockets", "classification": um.BREAKING, "why": dep.why,
+                              "summary": {"version": {"installed": "14.1", "latest": "17.1"}}})
+    assert "PIN BUMP" in body and "Never applied automatically" in body

@@ -72,8 +72,9 @@ class Outcome:
 
 class CopyEngine:
     def __init__(self, session_factory, redis, evm_adapters: dict[str, dict[str, Any]], now_fn, *,
-                 etherscan_key: str | None = None) -> None:
+                 etherscan_key: str | None = None, settings: Any = None) -> None:
         self.session_factory = session_factory
+        self.settings = settings  # provider keys for wallet enrichment (Nansen, MadeOnSol)
         self.etherscan_key = etherscan_key  # BSC first-funder lookups (launch coordination)
         self.redis = redis
         self.evm_adapters = evm_adapters  # chain -> launchpad key -> adapter
@@ -586,6 +587,28 @@ class CopyEngine:
         return co.evaluate(ev.detected_at, path, exit_)
 
     # --- wallet profiles --------------------------------------------------------------------------
+
+    async def enrich(self) -> dict[str, Any]:
+        """External wallet intelligence (master §24-25): enrichment of the
+        wallets that matter most, and provider candidates for discovery. Off
+        unless switched on; failures are recorded per wallet, never raised."""
+        if self.settings is None:
+            return {"status": "NOT_CONFIGURED"}
+        import httpx
+
+        from yonixalpha_core import enrichment
+
+        now = self.now()
+        async with httpx.AsyncClient() as client:
+            out = {"profiles": await enrichment.enrich_pass(self.session_factory, self.redis, self.settings, client, now),
+                   "discovery": await enrichment.discovery_pass(self.session_factory, self.redis, self.settings, client, now)}
+        problems = {p: v for p, v in out["profiles"].items() if isinstance(v, dict) and
+                    (v.get("errors") or v.get("stopped") not in (None, enrichment.BUDGET_EXHAUSTED))}
+        problems.update({k: v for k, v in out["discovery"].items() if isinstance(v, str) and k != "status"
+                         and v not in (enrichment.NOT_CONFIGURED, enrichment.BUDGET_EXHAUSTED)})
+        if problems:  # throttled per event name by notify.alert_error
+            await alert_error(SERVICE, "enrichment_errors", problems)
+        return out
 
     async def rebuild_profiles(self) -> dict[str, int]:
         now = self.now()

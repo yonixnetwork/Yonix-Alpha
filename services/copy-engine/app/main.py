@@ -30,6 +30,7 @@ EVM_EVERY = 2.0
 MANAGE_EVERY = 3.0
 ADAPTERS_EVERY = 60.0
 PROFILES_EVERY = 600.0
+ENRICH_EVERY = 600.0  # Nansen / MadeOnSol (off unless switched on, inside a daily call budget)
 OUTCOMES_EVERY = 60.0
 
 
@@ -38,7 +39,7 @@ def utcnow() -> datetime:
 
 
 async def loop(engine: CopyEngine, stop: asyncio.Event) -> None:
-    last = {"evm": 0.0, "manage": 0.0, "adapters": 0.0, "profiles": 0.0, "outcomes": 0.0}
+    last = {"evm": 0.0, "manage": 0.0, "adapters": 0.0, "profiles": 0.0, "outcomes": 0.0, "enrich": 0.0}
 
     async def step(name: str, coro):
         try:
@@ -68,6 +69,9 @@ async def loop(engine: CopyEngine, stop: asyncio.Event) -> None:
         if t - last["profiles"] >= PROFILES_EVERY:
             last["profiles"] = t
             await step("profiles", engine.rebuild_profiles())
+        if t - last["enrich"] >= ENRICH_EVERY:
+            last["enrich"] = t
+            await step("enrichment", engine.enrich())
         engine.status["ok_at"] = utcnow().isoformat()
         try:
             await asyncio.wait_for(stop.wait(), timeout=TICK_SECONDS)
@@ -87,7 +91,7 @@ async def run() -> None:
     rpcs = {c.value: make_rpc(c.value, settings) for c in (Chain.BSC, Chain.ROBINHOOD)}
     adapters = {c: {k: adapter_for(k, rpc) for k in EVM_LAUNCHPADS if LAUNCHPADS[k].chain.value == c}
                 for c, rpc in rpcs.items()}
-    engine = CopyEngine(session_factory, redis, adapters, utcnow, etherscan_key=settings.ETHERSCAN_API_KEY)
+    engine = CopyEngine(session_factory, redis, adapters, utcnow, etherscan_key=settings.ETHERSCAN_API_KEY, settings=settings)
     async with session_factory() as session:
         session.add(SystemEvent(service=SERVICE, event_type="service_started", severity="info", detail={}))
         await session.commit()

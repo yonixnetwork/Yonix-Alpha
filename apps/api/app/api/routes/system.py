@@ -197,7 +197,11 @@ async def updates(
             "installed_version": r.installed_version if r else None,
             "classification": r.classification if r else None, "flags": r.flags if r else None,
             "change_summary": r.change_summary if r else None,
+            "how_to_apply": update_monitor.apply_guide(w, r.classification if r else None,
+                                                       r.installed_version if r else None,
+                                                       r.latest_release if r else None),
         })
+    by_key = {w.key: w for w in update_monitor.WATCHES}
     evs = (await db.execute(select(UpdateEvent).order_by(UpdateEvent.detected_at.desc()).limit(limit))).scalars().all()
     open_counts = dict((await db.execute(select(UpdateEvent.classification, func.count()).where(
         UpdateEvent.acknowledged_at.is_(None)).group_by(UpdateEvent.classification))).all())
@@ -205,13 +209,22 @@ async def updates(
         "watches": watches,
         "events": [{"id": str(e.id), "key": e.key, "detected_at": _iso(e.detected_at), "classification": e.classification,
                     "from_ref": e.from_ref, "to_ref": e.to_ref, "summary": e.summary, "notified": e.notified,
-                    "acknowledged_at": _iso(e.acknowledged_at), "acknowledged_by": e.acknowledged_by} for e in evs],
+                    "acknowledged_at": _iso(e.acknowledged_at), "acknowledged_by": e.acknowledged_by,
+                    "how_to_apply": update_monitor.apply_guide(
+                        by_key[e.key], e.classification, rows[e.key].installed_version if e.key in rows else None,
+                        e.to_ref) if e.key in by_key else None} for e in evs],
         "unacknowledged": open_counts,
         "classes": list(update_monitor.CLASSES),
         "check_interval_s": update_monitor.CHECK_SECONDS,
         "github_token": "configured" if settings.GITHUB_TOKEN else "not configured (60 requests per hour)",
         "note": "Notify only: nothing is upgraded or deployed automatically. Classification is keyword and path based; "
                 "read the change before acting.",
+        "routine": ["Dependency releases (PyPI) reach the server only through a pin-update pull request that passes "
+                    "every test; then deploy. Deploying alone keeps the pinned versions.",
+                    "Repository changes (GitHub) are read and acknowledged; YonixAlpha does not install them. An "
+                    "INTEGRATION CHECK means a file we read changed: it is reviewed in code first.",
+                    "Base images (Python, Node, nginx, Postgres 16, Redis 7) receive operating-system security "
+                    "patches upstream: deploy with DEPLOY_PULL=1 once a month to pull them."],
     }
 
 

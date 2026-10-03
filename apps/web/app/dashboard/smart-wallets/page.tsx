@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { ChevronDown, ChevronRight, Eye, Fingerprint } from "lucide-react";
+import { ExternalBadges, ExternalDetail, ExternalPanel } from "@/components/ExternalIntel";
 import { Empty, ErrorNotice, Loading, PageHeader, Section } from "@/components/ui";
 import { apiPost, apiPut } from "@/lib/api";
 import { formatDate } from "@/lib/format";
@@ -112,10 +113,11 @@ function PnlBlock({ st, unit }: { st: J; unit: string }) {
   );
 }
 
-function WalletDetail({ p }: { p: J }) {
+function WalletDetail({ p, onRefreshed }: { p: J; onRefreshed?: () => void }) {
   const pnl = p.metrics?.pnl;
   const unit = NATIVE[p.chain] ?? "";
-  if (!pnl) return <p className="muted small">No P/L profile yet (rebuilt every 10 minutes).</p>;
+  const external = <ExternalDetail chain={p.chain} wallet={p.wallet} ext={p.external} onRefreshed={onRefreshed} />;
+  if (!pnl) return <><p className="muted small">No P/L profile yet (rebuilt every 10 minutes).</p>{external}</>;
   const windows = Object.entries((pnl.windows ?? {}) as Record<string, J>);
   return (
     <div style={{ padding: "8px 0" }}>
@@ -142,6 +144,7 @@ function WalletDetail({ p }: { p: J }) {
       )}
       {(pnl.notes ?? []).length > 0 && <ul className="muted small">{pnl.notes.map((n: string) => <li key={n}>{n}</li>)}</ul>}
       <Validation v={p.metrics?.validation} r={p.metrics?.regimes} pf={p.metrics?.paper_follow} />
+      {external}
     </div>
   );
 }
@@ -156,7 +159,7 @@ export default function SmartWalletsPage() {
     { sort, ...(chain ? { chain } : {}), ...(label ? { label } : {}), ...(stage ? { stage } : {}), ...(contracts ? { include_contracts: true } : {}) }, { refreshMs: 60000 });
   const [msg, setMsg] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
-  const watch = async (p: J) => {
+  const watch = async (p: { chain: string; wallet: string }) => {
     try { await apiPost("/api/copy/targets", { chain: p.chain, wallet: p.wallet, mode: "NOTIFY" }); setMsg(`${p.wallet} added as a NOTIFY copy target`); reload(); }
     catch (e) { setMsg(String((e as Error).message)); }
   };
@@ -180,7 +183,7 @@ export default function SmartWalletsPage() {
         {data && data.profiles.length > 0 && (
           <div className="table-scroll">
             <table className="data-table">
-              <thead><tr><th /><th>Chain</th><th>Wallet</th><th>Behaviour</th><th>Trades</th><th>Tokens</th><th>Closed</th><th>Win rate</th><th>Realized</th><th>Early entries</th><th>Avg hold</th><th>Score</th><th>Stage</th><th>Last seen</th><th /></tr></thead>
+              <thead><tr><th /><th>Chain</th><th>Wallet</th><th>Behaviour</th><th>Trades</th><th>Tokens</th><th>Closed</th><th>Win rate</th><th>Realized</th><th>Early entries</th><th>Avg hold</th><th>Score</th><th>Stage</th><th>External</th><th>Last seen</th><th /></tr></thead>
               <tbody>
                 {data.profiles.map((p: J) => {
                   const k = `${p.chain}:${p.wallet}`;
@@ -201,11 +204,12 @@ export default function SmartWalletsPage() {
                     <td>{p.metrics.discovery ? <span className={STAGE_CLASS[p.metrics.discovery.stage] ?? "pill pill-off"} title={p.metrics.discovery.reason ?? p.metrics.validation?.reason}>
                       {p.metrics.discovery.stage.replaceAll("_", " ")}</span> : <span className="muted small">—</span>}
                       {p.metrics.stale && <span className="pill pill-warn" title={p.metrics.stale.reason}> STALE</span>}</td>
+                    <td><ExternalBadges ext={p.external} /></td>
                     <td>{formatDate(p.last_seen)}</td>
                     <td>{p.is_copy_target ? <span className="muted small">target</span> :
-                      <button className="btn btn-ghost btn-sm" onClick={() => watch(p)}><Eye size={14} aria-hidden /> Watch</button>}</td>
+                      <button className="btn btn-ghost btn-sm" onClick={() => watch({ chain: p.chain, wallet: p.wallet })}><Eye size={14} aria-hidden /> Watch</button>}</td>
                   </tr>,
-                  open === k && <tr key={`${k}:detail`}><td colSpan={15}><WalletDetail p={p} /></td></tr>,
+                  open === k && <tr key={`${k}:detail`}><td colSpan={16}><WalletDetail p={p} onRefreshed={reload} /></td></tr>,
                   ];
                 })}
               </tbody>
@@ -213,6 +217,7 @@ export default function SmartWalletsPage() {
           </div>
         )}
       </Section>
+      <ExternalPanel onWatch={(chain, wallet) => watch({ chain, wallet })} />
       <ValidationSettings />
     </div>
   );

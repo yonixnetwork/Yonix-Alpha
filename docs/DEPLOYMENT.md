@@ -243,6 +243,45 @@ running stack untouched, and the script says so; the deploy is complete
 only when it prints `==> Deploy complete: <commit>`. On a bigger server,
 `DEPLOY_PARALLEL_BUILD=1 scripts/deploy.sh` builds in parallel again.
 
+### 3.1 Keeping up to date (update notifications)
+
+The update monitor (System Health -> Research / Updates, and Telegram)
+only reports. A deploy installs exactly what the repository pins, so
+running `scripts/deploy.sh` again does **not** pick up a newer release.
+The "What to do" column of each update tells which of four cases it is:
+
+| What to do | Meaning | How it reaches the server |
+|---|---|---|
+| APPLIED | the server already runs that version | nothing; acknowledge |
+| PIN BUMP | a newer release of a pinned Python dependency | a dependency-update pull request (the pin changes and every test runs against the new version), merged after CI is green, then `scripts/deploy.sh` |
+| INTEGRATION CHECK | a repository whose IDL / ABI / API YonixAlpha reads changed a file it uses | the change is reviewed against the integration; a code change, if needed, comes as a pull request, then a deploy |
+| REVIEW ONLY | a repository YonixAlpha does not install | read and acknowledge; nothing to deploy |
+
+Operating-system security patches in the base images (Python, Node,
+nginx, Postgres 16, Redis 7) are picked up with:
+
+```
+DEPLOY_PULL=1 scripts/deploy.sh
+```
+
+It pulls the newest image of the same major version and rebuilds without
+the cached base layers. Once a month is enough; it changes no Python or
+npm dependency.
+
+A routine that works:
+- **When a notification arrives:** open Research / Updates and read its
+  "What to do". SECURITY UPDATE or ACTION REQUIRED goes first: ask for
+  the pull request the same day.
+- **Once a week:** ask for a dependency-update pull request covering every
+  open PIN BUMP. Major versions are trialled against the whole test suite
+  first and held back, with the reason, when a behaviour change cannot
+  be cleared in tests (SQLAlchemy 2.1 was held back on 2026-10-03 for this
+  reason).
+- **After merging:** deploy. The update's watch then reads UP TO DATE.
+- **Once a month:** `DEPLOY_PULL=1 scripts/deploy.sh`.
+
+Nothing is ever upgraded or deployed automatically (master §66).
+
 ## 4. Rollback
 
 ```

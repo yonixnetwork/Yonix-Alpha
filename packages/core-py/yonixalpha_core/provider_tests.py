@@ -46,7 +46,8 @@ class _Result(Exception):
 def _secrets(settings: Any) -> list[str | None]:
     names = ["HELIUS_API_KEY", "SOLANA_RPC_URL", "SOLANA_WS_URL", "SOLANA_RPC_BACKUP_URL", "SOLANA_RPC_BACKUP_URL_2",
              "SOLANA_RPC_BACKUP_URL_3", "SOLANA_WS_BACKUP_URL", "JUPITER_API_KEY", "PUMPPORTAL_API_KEY", "TELEGRAM_BOT_TOKEN",
-             "WALLET_PRIVATE_KEY", "EVM_WALLET_PRIVATE_KEY", "ETHERSCAN_API_KEY"]
+             "WALLET_PRIVATE_KEY", "EVM_WALLET_PRIVATE_KEY", "ETHERSCAN_API_KEY", "GITHUB_TOKEN",
+             "NANSEN_API_KEY", "MADEONSOL_API_KEY"]
     out = []
     for n in names:
         v = getattr(settings, n, None)
@@ -314,6 +315,18 @@ async def test_provider(name: str, settings: Any, client: httpx.AsyncClient) -> 
         blocks = (r.json() or {}).get("total_blocks")
         return f"Robinhood Chain Blockscout answered (total blocks {blocks}); used for wallet funding lookups"
 
+    def enrichment(provider: str) -> Callable[[], Awaitable[str]]:
+        async def test() -> str:
+            from yonixalpha_core import enrichment as en
+
+            _need(settings, en.KEY_SETTING[provider])
+            try:
+                return await en.test_connection(client, provider, en.key_of(settings, provider))
+            except en.ProviderError as exc:
+                raise _Result({en.UNAUTHORIZED: AUTH_FAILED, en.PAYMENT_REQUIRED: AUTH_FAILED, en.RATE_LIMITED: RATE_LIMITED,
+                               en.NOT_CONFIGURED: INVALID}.get(exc.status, UNAVAILABLE), exc.detail) from exc
+        return test
+
     tests: dict[str, Callable[[], Awaitable[str]]] = {
         "bsc_rpc": evm_rpc("bsc"), "robinhood_rpc": evm_rpc("robinhood"), "honeypot_is": honeypot_is,
         "etherscan": etherscan, "robinhood_explorer": robinhood_explorer,
@@ -321,6 +334,7 @@ async def test_provider(name: str, settings: Any, client: httpx.AsyncClient) -> 
         "solana_rpc_backup_2": backup_n("SOLANA_RPC_BACKUP_URL_2"), "solana_rpc_backup_3": backup_n("SOLANA_RPC_BACKUP_URL_3"),
         "solana_ws": solana_ws, "helius": helius,
         "jupiter": jupiter, "pumpportal": pumpportal, "telegram": telegram,
+        "nansen": enrichment("nansen"), "madeonsol": enrichment("madeonsol"),
     }
     fn = tests.get(name)
     if fn is None:
@@ -329,4 +343,4 @@ async def test_provider(name: str, settings: Any, client: httpx.AsyncClient) -> 
     return await _run(name, settings, fn)
 
 
-PROVIDERS = ["bsc_rpc", "robinhood_rpc", "honeypot_is", "etherscan", "robinhood_explorer", "solana_rpc", "solana_rpc_backup", "solana_rpc_backup_2", "solana_rpc_backup_3", "solana_ws", "helius", "jupiter", "pumpportal", "telegram"]
+PROVIDERS = ["bsc_rpc", "robinhood_rpc", "honeypot_is", "etherscan", "robinhood_explorer", "solana_rpc", "solana_rpc_backup", "solana_rpc_backup_2", "solana_rpc_backup_3", "solana_ws", "helius", "jupiter", "pumpportal", "telegram", "nansen", "madeonsol"]

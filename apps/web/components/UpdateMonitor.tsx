@@ -14,6 +14,14 @@ const CLASS_PILL: Record<string, string> = {
 };
 const STATUS_PILL: Record<string, string> = { CHECKED: "pill pill-ok", ERROR: "pill pill-danger", NOT_CHECKED: "pill pill-off" };
 const label = (s: string | null | undefined) => (s ? s.replaceAll("_", " ") : "");
+const ACTION_PILL: Record<string, string> = {
+  APPLIED: "pill pill-ok", PIN_BUMP: "pill pill-warn", INTEGRATION_CHECK: "pill pill-danger", REVIEW_ONLY: "pill pill-off",
+};
+
+function HowTo({ h }: { h: J | null | undefined }) {
+  if (!h) return <span className="muted">—</span>;
+  return <><span className={ACTION_PILL[h.action] ?? "pill pill-off"}>{label(h.action)}</span><div className="small">{h.steps}</div></>;
+}
 const short = (sha: string | null | undefined) => (sha ? sha.slice(0, 10) : null);
 
 function Ref({ w }: { w: J }) {
@@ -48,6 +56,9 @@ export default function UpdateMonitor() {
             {data.note} Checked every {Math.round(data.check_interval_s / 3600)} h · GitHub token: {data.github_token}.
             The first check of each watch is a baseline and raises no notification.
           </p>
+          {(data.routine ?? []).length > 0 && (
+            <ul className="small">{(data.routine as string[]).map((t, i) => <li key={i}>{t}</li>)}</ul>
+          )}
           {Object.keys(data.unacknowledged).length > 0 && (
             <div className="notice">
               Open (not acknowledged):{" "}
@@ -62,7 +73,7 @@ export default function UpdateMonitor() {
           ) : (
             <div className="table-scroll">
               <table className="data-table">
-                <thead><tr><th>Detected</th><th>Source</th><th>Class</th><th>From → to</th><th>Why it matters / reasons</th><th>Notified</th><th></th></tr></thead>
+                <thead><tr><th>Detected</th><th>Source</th><th>Class</th><th>From → to</th><th>Why it matters / reasons</th><th>What to do</th><th>Notified</th><th></th></tr></thead>
                 <tbody>{(data.events as J[]).map((e) => (
                   <tr key={e.id}>
                     <td className="small">{formatDate(e.detected_at)}</td>
@@ -77,6 +88,7 @@ export default function UpdateMonitor() {
                         <div className="neg">{e.summary.vulnerabilities.map((v: J) => `${v.id}${v.fixed_in?.length ? ` (fixed in ${v.fixed_in.join(", ")})` : ""}`).join(", ")}</div>
                       )}
                     </td>
+                    <td><HowTo h={e.how_to_apply} /></td>
                     <td className="small">{e.notified ? "yes" : "no"}</td>
                     <td>{e.acknowledged_at
                       ? <span className="muted small">acknowledged by {e.acknowledged_by}</span>
@@ -89,7 +101,7 @@ export default function UpdateMonitor() {
           <h4>Watched sources</h4>
           <div className="table-scroll">
             <table className="data-table">
-              <thead><tr><th>Source</th><th>Area</th><th>Why it is watched</th><th>Check</th><th>Latest seen</th><th>Last classification</th></tr></thead>
+              <thead><tr><th>Source</th><th>Area</th><th>Why it is watched</th><th>Check</th><th>Latest seen</th><th>Last classification</th><th>What to do</th></tr></thead>
               <tbody>{(data.watches as J[]).map((w) => (
                 <tr key={w.key}>
                   <td>{w.target}<div className="muted small">{w.kind === "pypi" ? "PyPI" : "GitHub"}{w.used_directly ? " · used directly" : ""}</div></td>
@@ -102,6 +114,10 @@ export default function UpdateMonitor() {
                   <td>{w.classification
                     ? <span className={CLASS_PILL[w.classification] ?? "pill pill-off"}>{label(w.classification)}</span>
                     : <span className="muted small">{w.status === "NOT_CHECKED" ? "—" : "baseline / no change"}</span>}</td>
+                  <td>{w.kind === "pypi" && w.latest_release && w.installed_version !== w.latest_release
+                    ? <HowTo h={w.how_to_apply} />
+                    : w.kind === "pypi" && w.installed_version ? <span className="pill pill-ok">UP TO DATE</span>
+                    : w.classification ? <HowTo h={w.how_to_apply} /> : <span className="muted small">—</span>}</td>
                 </tr>
               ))}</tbody>
             </table>

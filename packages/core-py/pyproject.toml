@@ -10,24 +10,24 @@ requires-python = ">=3.11"
 dependencies = [
     "pydantic==2.10.4",
     "pydantic-settings==2.7.0",
-    "sqlalchemy==2.0.36",
+    "sqlalchemy==2.0.54",
     "asyncpg==0.30.0",
     "redis==5.2.1",
-    "pyjwt==2.15.0",
+    "pyjwt==2.15.1",
     "passlib[argon2]==1.7.4",
     "argon2-cffi==23.1.0",
     "structlog==24.4.0",
     "httpx==0.28.1",
-    "websockets==14.1",
+    "websockets==17.1",
     # Keypairs, PDAs and versioned transactions for PumpSwap pool derivation
     # and local signing of live orders.
     "solders==0.29.0",
     # Encrypts dashboard-managed provider URLs (they embed API keys) at rest.
-    "cryptography==50.0.1",
+    "cryptography==50.0.2",
     # EVM chains (BSC, Robinhood Chain): ABI encoding / log decoding and
     # server-side transaction signing.
-    "eth-abi==5.2.0",
-    "eth-account==0.13.7",
+    "eth-abi==6.0.0",
+    "eth-account==0.14.0",
     # Decodes signed transactions from the Robinhood sequencer feed (already
     # installed by eth-account; pinned because evm.streams imports it).
     "rlp==5.0.0",
