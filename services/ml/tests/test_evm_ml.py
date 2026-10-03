@@ -54,3 +54,55 @@ async def test_evm_cycle_trains_shadow_models_and_marks_in_sample_scores(db_sess
     assert "P_FAST_DUMP" in rows[-1].ml_shadow["scores"]
     again = await run_evm_cycle(sf, now=T + timedelta(days=30))  # nothing new: no retraining, no history overwritten
     assert again["evm_models"]["P_UPSIDE_50"] == "skipped_no_new_samples" and again["scored"] == 0
+
+
+@pytest.mark.asyncio
+async def test_training_reads_only_the_newest_rows_and_retrains_at_most_daily(db_session, monkeypatch):
+    import app.evm_ml as m
+
+    rng = random.Random(11)
+    db_session.add_all([_row(i, rng) for i in range(300)])
+    unknown = _row(999, rng)
+    unknown.labels, unknown.features = {"unknown": "no T+5 snapshot was taken"}, {}
+    db_session.add(unknown)
+    await db_session.commit()
+    monkeypatch.setattr(m, "MAX_TRAIN_ROWS", 250)
+    sf = make_session_factory(create_async_engine(os.environ["DATABASE_URL"]))
+    out = await run_evm_cycle(sf, now=T + timedelta(days=30))
+    assert out["evm_models"]["samples"] == 250 and out["scored"] == 300  # the unknown row is never scored
+    mv = (await db_session.execute(select(ModelVersion).where(ModelVersion.name == "shadow_evm_p_upside_50"))).scalar_one()
+    assert mv.metrics["dataset_end"] == (T + timedelta(minutes=10 * 299)).isoformat()
+    assert mv.metrics["split"]["holdout_start"] > (T + timedelta(minutes=10 * 50)).isoformat()  # oldest 50 left out
+    db_session.add_all([_row(i, rng) for i in range(300, 320)])
+    await db_session.commit()
+    again = await run_evm_cycle(sf, now=datetime.now(timezone.utc))
+    assert again["evm_models"]["P_UPSIDE_50"] == "skipped_retrained_within_24h"
+
+
+@pytest.mark.asyncio
+async def test_drain_runs_batches_until_short_or_out_of_time():
+    import time as _time
+
+    from app.evm_ml import _drain
+
+    class _S:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def commit(self):
+            pass
+
+    sizes = iter([5, 5, 2])
+
+    async def build(session, now, batch):
+        return {"built": next(sizes), "skipped_other_quote": 1}
+    out = await _drain(lambda: _S(), build, T, 5, "built", _time.monotonic() + 60)
+    assert out == {"batches": 3, "built": 12, "skipped_other_quote": 3, "drained": True}
+
+    async def full(session, now, batch):
+        return {"built": batch}
+    out = await _drain(lambda: _S(), full, T, 5, "built", _time.monotonic() - 1)
+    assert out == {"batches": 1, "built": 5, "drained": False}

@@ -1393,6 +1393,7 @@ class WalletTradeLabel(Base):
     or NONE (a token no profiled wallet traded: a processed marker)."""
 
     __tablename__ = "wallet_trade_labels"
+    __table_args__ = (Index("ix_wallet_trade_labels_chain_token", "chain", "token"),)
 
     chain: Mapped[str] = mapped_column(String(16), primary_key=True)
     wallet: Mapped[str] = mapped_column(String(64), primary_key=True)

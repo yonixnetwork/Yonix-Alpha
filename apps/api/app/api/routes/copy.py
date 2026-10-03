@@ -128,18 +128,20 @@ async def _behaviour(db: AsyncSession, keys: list[tuple[str, str]]) -> dict[tupl
     evm = [(c, w.lower()) for c, w in keys if c in ("bsc", "robinhood")]
     if not evm:
         return {}
-    out: dict[tuple[str, str], dict] = {}
-    rows = (await db.execute(select(WalletTradeLabel.chain, WalletTradeLabel.wallet, WalletTradeLabel.kind,
-                                    WalletTradeLabel.labels).where(
-        WalletTradeLabel.wallet.in_({w for _, w in evm}), WalletTradeLabel.kind.in_(("EPISODE", "MISSED"))))).all()
     wanted = set(evm)
-    for chain, wallet, kind, labels in rows:
-        if (chain, wallet) not in wanted:
-            continue
-        d = out.setdefault((chain, wallet), {"episodes": 0, "labels": {}})
-        d["episodes"] += 1 if kind == "EPISODE" else 0
-        for x in labels or []:
-            d["labels"][x] = d["labels"].get(x, 0) + 1
+    w = WalletTradeLabel
+    scope = (w.chain.in_({c for c, _ in evm}), w.wallet.in_({x for _, x in evm}), w.kind.in_(("EPISODE", "MISSED")))
+    out: dict[tuple[str, str], dict] = {}
+    # counted in the database: an active wallet has thousands of labelled entries
+    for chain, wallet, n in (await db.execute(select(w.chain, w.wallet, func.count()).where(*scope, w.kind == "EPISODE")
+                                              .group_by(w.chain, w.wallet))).all():
+        if (chain, wallet) in wanted:
+            out.setdefault((chain, wallet), {"episodes": 0, "labels": {}})["episodes"] = n
+    each = select(w.chain, w.wallet, func.jsonb_array_elements_text(w.labels).label("l")).where(*scope).subquery()
+    for chain, wallet, label, n in (await db.execute(select(each.c.chain, each.c.wallet, each.c.l, func.count())
+                                                     .group_by(each.c.chain, each.c.wallet, each.c.l))).all():
+        if (chain, wallet) in wanted:
+            out.setdefault((chain, wallet), {"episodes": 0, "labels": {}})["labels"][label] = n
     return out
 
 

@@ -29,6 +29,7 @@ is read by the entry code: samples feed SHADOW models only (review data).
 
 from __future__ import annotations
 
+import statistics
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -160,27 +161,83 @@ def compare(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 "upside_50_rate": round(sum(x["upside_50"] for x in lab) / len(lab), 4),
                 "upside_100_rate": round(sum(x["upside_100"] for x in lab) / len(lab), 4),
                 "fast_dump_rate": round(sum(x["fast_dump"] for x in lab) / len(lab), 4),
-                "mean_return_60m_pct": round(sum(rets) / len(rets), 4), "median_return_60m_pct": rets[len(rets) // 2],
+                "mean_return_60m_pct": round(sum(rets) / len(rets), 4), "median_return_60m_pct": round(statistics.median(rets), 4),
                 "executable": {"n": len(ex), "mean_pct": round(sum(ex) / len(ex), 4)} if ex else None}
 
     out: dict[str, Any] = {}
     for who in ("deterministic", "risk", "final", "ml"):
         groups: dict[str, list] = {}
         for r in rows:
-            groups.setdefault(r["verdicts"][who], []).append(r)
+            groups.setdefault(r["verdicts"].get(who) or "NOT_AVAILABLE", []).append(r)
         out[who] = {k: stats(v) for k, v in sorted(groups.items())}
     lab = [r for r in rows if r.get("labels") and "unknown" not in r["labels"]]
     out["final_missed_winners"] = sum(1 for r in lab if r["verdicts"]["final"] != BUY and r["labels"]["upside_100"])
     out["final_bad_entries"] = sum(1 for r in lab if r["verdicts"]["final"] == BUY and r["labels"]["fast_dump"])
-    scored = [r for r in lab if r["verdicts"]["ml"] != "NOT_AVAILABLE"]
+    scored = [r for r in lab if (r["verdicts"].get("ml") or "NOT_AVAILABLE") != "NOT_AVAILABLE"]
     agree: dict[str, int] = {}
     for r in scored:
         k = f"final {r['verdicts']['final']} / ml {r['verdicts']['ml']}"
         agree[k] = agree.get(k, 0) + 1
     out["final_vs_ml"] = agree
-    out["note"] = ("BUY / WAIT / REJECT at the decision point (T+5); outcome = the hour after it. SELL / HOLD (exits) "
-                   "are not compared yet. ML is a shadow recommendation: it never changes a decision.")
+    out["note"] = NOTE
     return out
+
+
+NOTE = ("BUY / WAIT / REJECT at the decision point (T+5); outcome = the hour after it. SELL / HOLD (exits) "
+        "are not compared yet. ML is a shadow recommendation: it never changes a decision.")
+_LAB = "(labels <> '{}'::jsonb AND labels -> 'unknown' IS NULL)"
+
+
+async def knowledge(session, since: datetime) -> dict[str, Any]:
+    """The counts and the compare() result computed in the database (one
+    row per observation adds up to ~20k rows a day on BSC: never loaded into
+    memory). Same numbers as compare() on the same rows."""
+    from sqlalchemy import text
+
+    base = f"FROM (SELECT *, {_LAB} AS lab FROM evm_ml_samples WHERE decided_at >= :since) s"
+    p = {"since": since}
+    c = (await session.execute(text(
+        "SELECT count(*), count(*) FILTER (WHERE lab), count(*) FILTER (WHERE traded), "
+        "count(*) FILTER (WHERE observation_state = 'REJECTED'), count(*) FILTER (WHERE observation_state = 'EXPIRED'), "
+        "count(*) FILTER (WHERE traded AND executable_return_pct > 0), "
+        "count(*) FILTER (WHERE traded AND executable_return_pct < 0), "
+        "count(*) FILTER (WHERE jsonb_typeof(ml_shadow) = 'object'), "
+        "count(*) FILTER (WHERE (ml_shadow ->> 'out_of_sample')::boolean) " + base), p)).one()
+    by_cat = {k: v for k, v in (await session.execute(text(f"SELECT category, count(*) {base} GROUP BY 1"), p)).all()}
+    cmp: dict[str, Any] = {}
+    for who in ("deterministic", "risk", "final", "ml"):
+        q = (f"SELECT coalesce(verdicts ->> '{who}', 'NOT_AVAILABLE'), count(*), count(*) FILTER (WHERE lab), "
+             "avg(CASE WHEN (labels ->> 'upside_50')::boolean THEN 1.0 ELSE 0.0 END) FILTER (WHERE lab), "
+             "avg(CASE WHEN (labels ->> 'upside_100')::boolean THEN 1.0 ELSE 0.0 END) FILTER (WHERE lab), "
+             "avg(CASE WHEN (labels ->> 'fast_dump')::boolean THEN 1.0 ELSE 0.0 END) FILTER (WHERE lab), "
+             "avg((labels ->> 'return_60m_pct')::float8) FILTER (WHERE lab), "
+             "percentile_cont(0.5) WITHIN GROUP (ORDER BY (labels ->> 'return_60m_pct')::float8) FILTER (WHERE lab), "
+             f"count(executable_return_pct), avg(executable_return_pct) {base} GROUP BY 1 ORDER BY 1")
+        groups: dict[str, Any] = {}
+        for v, n, nl, u50, u100, fd, mean, med, ex_n, ex_mean in (await session.execute(text(q), p)).all():
+            if not nl:
+                groups[v] = {"n": n, "labelled": 0}
+                continue
+            groups[v] = {"n": n, "labelled": nl, "upside_50_rate": round(float(u50), 4),
+                         "upside_100_rate": round(float(u100), 4), "fast_dump_rate": round(float(fd), 4),
+                         "mean_return_60m_pct": round(float(mean), 4), "median_return_60m_pct": round(float(med), 4),
+                         "executable": {"n": ex_n, "mean_pct": round(float(ex_mean), 4)} if ex_n else None}
+        cmp[who] = groups
+    missed, bad = (await session.execute(text(
+        "SELECT count(*) FILTER (WHERE lab AND coalesce(verdicts ->> 'final', '') <> 'BUY' "
+        "AND (labels ->> 'upside_100')::boolean), "
+        "count(*) FILTER (WHERE lab AND verdicts ->> 'final' = 'BUY' AND (labels ->> 'fast_dump')::boolean) " + base),
+        p)).one()
+    cmp["final_missed_winners"], cmp["final_bad_entries"] = missed, bad
+    cmp["final_vs_ml"] = {f"final {f} / ml {m}": n for f, m, n in (await session.execute(text(
+        "SELECT verdicts ->> 'final', verdicts ->> 'ml', count(*) " + base +
+        " WHERE lab AND coalesce(verdicts ->> 'ml', 'NOT_AVAILABLE') <> 'NOT_AVAILABLE' GROUP BY 1, 2 ORDER BY 1, 2"),
+        p)).all()}
+    cmp["note"] = NOTE
+    return {"samples": {"evm_total": c[0], "evm_labelled": c[1], "by_category": by_cat, "traded": c[2],
+                        "rejected": c[3], "expired_no_entry": c[4], "missed_winners": missed, "wins": c[5],
+                        "losses": c[6], "scored": c[7], "scored_out_of_sample": c[8]},
+            "comparison": cmp}
 
 
 # --- builder (ml service) ------------------------------------------------------------------------
