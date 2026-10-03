@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import and_, delete, exists, or_, select
+from sqlalchemy import and_, delete, exists, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from yonixalpha_core import copy_trading as ct
@@ -23,7 +23,7 @@ from yonixalpha_core.chains import verification
 from yonixalpha_core.chains.evm import dex, manual, native_price, observation, paper, safety, store
 from yonixalpha_core.chains.evm import settings as evm_settings
 from yonixalpha_core.chains.evm.rpc import EvmRpcUnavailableError
-from yonixalpha_core.db.models import EvmObservation, EvmToken, EvmTrade, PaperPosition
+from yonixalpha_core.db.models import EvmObservation, EvmScanGap, EvmToken, EvmTrade, PaperPosition
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.notify import alert_error
 from yonixalpha_core.safety.store import add_timeline_event
@@ -40,6 +40,8 @@ WALLET_SECONDS = 60
 QUOTE_LOOKUPS_PER_PASS = 200  # Four.meme tokens without a recorded quote, per safety pass
 QUOTE_LOOKBACK = timedelta(days=14)  # the trade retention
 RPC_OUTAGE_ALERT_SECONDS = 120  # discovery failing on an unavailable RPC this long is alerted
+GAP_MAX_AGE = TRADE_RETENTION  # a skipped range older than this would only be pruned again
+GAP_MAX_ATTEMPTS = 30  # failed backfill chunks before a gap is FAILED (and alerted)
 E18 = Decimal(10) ** 18
 
 
@@ -127,6 +129,10 @@ class ChainWorker:
                     res.trades, res.decode_errors = again.trades, res.decode_errors + again.decode_errors
                 async with self.session_factory() as session:
                     counts = await store.persist_scan(session, ad, res, now)
+                    if skipped:  # recorded with the cursor move, so it is never lost nor recorded twice
+                        session.add(EvmScanGap(chain=self.chain, launchpad=key, from_block=skipped["from"],
+                                               to_block=skipped["to"], next_block=skipped["from"], status="PENDING",
+                                               detected_at=now, reason=skipped, launches=0, trades=0, attempts=0))
                     touched = {t.token for t in res.trades} | {ln.token for ln in res.launches}
                     await store.refresh_stats(session, self.chain, touched, now, s)
                     await session.commit()
@@ -157,6 +163,59 @@ class ChainWorker:
                 if not isinstance(exc, EvmRpcUnavailableError) or failing_s >= RPC_OUTAGE_ALERT_SECONDS:
                     await alert_error(SERVICE, f"{self.chain}.{key}.discovery_failed",
                                       {**out[key], "failing_for_s": round(failing_s)})
+        return out
+
+    async def gap_pass(self, s: evm_settings.EvmTradingSettings, now: datetime,
+                       discovery: dict[str, Any]) -> dict[str, Any]:
+        """Backfills ranges the live scan skipped (EvmScanGap, master §68-70):
+        one chunk per launchpad per pass, only while that launchpad's live
+        scan is caught up, so recovery never delays new launches. History
+        only (persist_scan backfill): no cursor move, no observation, no
+        entry. Gaps older than the trade retention are EXPIRED."""
+        cs = s.chain(self.chain)
+        out: dict[str, Any] = {}
+        async with self.session_factory() as session:
+            await session.execute(update(EvmScanGap).where(
+                EvmScanGap.chain == self.chain, EvmScanGap.status == "PENDING",
+                EvmScanGap.detected_at < now - GAP_MAX_AGE).values(status="EXPIRED", completed_at=now,
+                                                                  last_error="older than the trade retention"))
+            await session.commit()
+        for key, ad in self.adapters.items():
+            live = discovery.get(key) or {}
+            if not ad.spec.active or "error" in live or (live.get("lag") or 0) > cs.max_blocks_per_pass:
+                continue
+            async with self.session_factory() as session:
+                gap = (await session.execute(select(EvmScanGap).where(
+                    EvmScanGap.chain == self.chain, EvmScanGap.launchpad == key, EvmScanGap.status == "PENDING")
+                    .order_by(EvmScanGap.id).limit(1))).scalar_one_or_none()
+                if gap is None:
+                    continue
+                fb, tb = gap.next_block, min(gap.to_block, gap.next_block + cs.max_blocks_per_pass - 1)
+                try:
+                    before = len(await ad._emitters() or [])
+                    res = await ad.scan(fb, tb)
+                    if len(await ad._emitters() or []) != before:
+                        again = await ad.scan(fb, tb)
+                        res.trades = again.trades
+                    counts = await store.persist_scan(session, ad, res, now, backfill=True)
+                    gap.launches += counts["launches"]
+                    gap.trades += counts["trades"]
+                    gap.next_block = tb + 1
+                    if gap.next_block > gap.to_block:
+                        gap.status, gap.completed_at = "DONE", now
+                    out[key] = {"gap": gap.id, "from": fb, "to": tb, **counts, "status": gap.status}
+                except Exception as exc:  # noqa: BLE001 - retried next pass; the live scan is unaffected
+                    await session.rollback()
+                    gap = await session.get(EvmScanGap, gap.id)
+                    gap.attempts += 1
+                    gap.last_error = f"{type(exc).__name__}: {str(exc)[:200]}"
+                    if gap.attempts >= GAP_MAX_ATTEMPTS:
+                        gap.status, gap.completed_at = "FAILED", now
+                        await alert_error(SERVICE, f"{self.chain}.{key}.gap_backfill_failed",
+                                          {"gap": gap.id, "from": gap.from_block, "to": gap.to_block,
+                                           "next": gap.next_block, "error": gap.last_error})
+                    out[key] = {"gap": gap.id, "error": gap.last_error, "attempts": gap.attempts}
+                await session.commit()
         return out
 
     # --- safety -------------------------------------------------------------------------------------

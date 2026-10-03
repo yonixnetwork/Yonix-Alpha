@@ -54,6 +54,9 @@ async def chain_loop(worker: ChainWorker, stop: asyncio.Event) -> None:
             async with worker.session_factory() as session:
                 s = await evm_settings.load(session)
             worker.status["discovery"] = await worker.discovery_pass(s, now)
+            gaps = await worker.gap_pass(s, now, worker.status["discovery"])
+            if gaps:
+                worker.status["gap_backfill"] = gaps
             worker.status["positions"] = await worker.manage_pass(now)
             manual_out = await worker.manual_pass(s, now)
             if manual_out["processed"]:

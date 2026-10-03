@@ -105,6 +105,9 @@ async def test_evm_copy_is_gated_idempotent_and_mirrors_partial_sells(session_fa
     assert await eng.watch_evm("bsc") == 0  # the same target trade is never processed twice
     ev = (await events_of(session_factory))[0]
     assert ev.decision == "SKIPPED" and ev.reason.startswith("LAUNCHPAD_NOT_VERIFIED")
+    rec = ev.detail["decision_record"]  # §77: the target's buy is a trigger, not permission
+    assert (rec["decision"], rec["layer"]) == ("NO_TRADE", "DATA_SAFETY") and rec["ml_evidence"]["contribution_pct"] == 0
+    assert rec["wallet_evidence"]["source"] == "copy"
 
     await evidence(session_factory, clock)
     await whale_trade(session_factory, clock, 2, True, 10 ** 24, 10 ** 18)
@@ -117,6 +120,9 @@ async def test_evm_copy_is_gated_idempotent_and_mirrors_partial_sells(session_fa
         assert cp.target_tokens == Decimal(10 ** 24)
         start_qty = positions[0].remaining_quantity
     assert ev.decision == "COPIED" and set(ev.latency_ms) >= {"detection", "analysis", "risk", "execution", "total"}
+    rec = ev.detail["decision_record"]
+    assert rec["decision"] in ("EXECUTE", "REDUCE_SIZE") and rec["wallet_evidence"]["target_mode"]
+    assert rec["safety_evidence"]["verdict"] == "PASS" and rec["provider_status"]["quote_sources"]
     assert ev.latency_ms["landing"] is None and "landing" in ev.latency_ms["live_only"]  # paper: no landing, never 0
 
     await whale_trade(session_factory, clock, 3, False, 5 * 10 ** 23, 5 * 10 ** 17)  # target sells half
@@ -155,6 +161,7 @@ async def test_a_target_buying_into_a_bundled_launch_is_not_copied(session_facto
     assert await eng.watch_evm("bsc") == 1
     ev = (await events_of(session_factory))[-1]
     assert ev.decision == "SKIPPED" and ev.reason.startswith("LAUNCH_COORDINATION"), ev.reason
+    assert ev.detail["decision_record"]["layer"] == "TOKEN_SAFETY"
     assert "LAUNCH_BLOCK_BUNDLE" in ev.reason and co.skip_class(ev.decision, ev.reason) == "BLOCKED_BY_SAFETY"
     async with session_factory() as s:
         row = await s.get(EvmToken, ("bsc", TOKEN))

@@ -1258,6 +1258,34 @@ class EvmTrade(Base):
     extra: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
 
+class EvmScanGap(Base):
+    """A block range a launchpad's live scan skipped because it fell more
+    than max_lag_minutes behind (master §68-70). Recorded in the same
+    transaction that moves the cursor past it, then backfilled in chunks
+    while the live scan is caught up (chains.evm.store.persist_scan with
+    backfill=True: no cursor move, no observation, never an entry).
+    status: PENDING | DONE | EXPIRED (older than trade retention) | FAILED."""
+
+    __tablename__ = "evm_scan_gaps"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    chain: Mapped[str] = mapped_column(String(16), nullable=False)
+    launchpad: Mapped[str] = mapped_column(String(32), nullable=False)
+    from_block: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    to_block: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    next_block: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default="PENDING", index=True)
+    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reason: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    launches: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    trades: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[str | None] = mapped_column(String(300), nullable=True)
+
+    __table_args__ = (Index("ix_evm_scan_gaps_chain_launchpad_status", "chain", "launchpad", "status"),)
+
+
 class EvmCursor(Base):
     """Last block fully processed per (chain, launchpad). Written in the same
     transaction as the trades of that range, so a restart resumes exactly."""

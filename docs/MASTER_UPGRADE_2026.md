@@ -69,11 +69,11 @@ Providers), see M7.
 | 60 | NO EMOJIS | DONE (this phase) | alert prefixes and the live page tick mark removed | M0 |
 | 62–63 | 24/7 server-side workers | DONE | all engines are containers; dashboard is a viewer | — |
 | 64–66 | GitHub / provider update monitor with Telegram + System Health | DONE in code (M15); GitHub path NOT VERIFIED against the real API from the build environment (blocked there), PyPI path checked against pypi.org | `update_monitor.py` in the ml service: 14 repositories + 8 pinned dependencies every 6 h via GitHub REST and PyPI JSON (no HTML); classes INFO / UPGRADE_AVAILABLE / BREAKING_CHANGE / SECURITY_UPDATE / PROVIDER_CHANGE / ACTION_REQUIRED; baseline first check; history in `update_events` (migration 0031); Telegram kind `infrastructure_update`; System Health → Research / Updates with acknowledge; never deploys (section 21). M15b: every update says what to do (APPLIED / PIN BUMP / INTEGRATION CHECK / REVIEW ONLY); `DEPLOY_PULL=1` for base-image patches; first dependency round applied (section 25) | M15 |
-| 67–70 | Multiple detection methods, source priority, NO_TRADE on provider failure | PARTIAL | NO_TRADE on unavailable data holds on both chains; single detection path per chain | M8 |
+| 67–70 | Multiple detection methods, source priority, NO_TRADE on provider failure | PARTIAL (improved in M16) | on-chain first everywhere (no scraping); EVM: launchpad event logs per adapter (primary), Robinhood sequencer feed and BSC pending transactions as early sightings, RPC role routing with fallback to the other endpoints and NO_TRADE when none answers; M16: ranges the live scan skips are recorded and backfilled, never lost, and RPC / Data Providers shows each method's state (section 28). Not done: an indexed API as a further launch source, an automatic stream-vs-logs launch count, an external safety provider; the §67 research flow is the update monitor plus manual research records | M8, M16 |
 | 71–75 | Paper trading all chains feeding ML | DONE in code (M12), NOT VERIFIED on real data yet | Solana complete; EVM: every observation is a sample whether traded or not, a traded one carries the executable return of its closed paper position (fees and taxes included); ML knowledge on ML Review (samples by kind, wins / losses, missed winners, copy outcomes, models, contribution 0 %) (section 26) | M12 |
-| 76–77 | Safety hierarchy, decision states EXECUTE / REDUCE_SIZE / WAIT / MANUAL_APPROVAL / REJECT / NO_TRADE | PARTIAL | Solana gate implements the hierarchy; decision words differ (PROMOTE/REJECT/...); MANUAL_APPROVAL not implemented | M6 |
+| 76–77 | Safety hierarchy, decision states EXECUTE / REDUCE_SIZE / WAIT / MANUAL_APPROVAL / REJECT / NO_TRADE | DONE (EVM in M16; Solana gate unchanged) | Solana: the gate's FinalDecision has the six states (REQUIRE_MANUAL_APPROVAL = MANUAL APPROVAL). BSC / Robinhood automatic, manual and copy entries: every blocker belongs to a §76 layer, the highest blocking layer decides, and each decision stores timestamp, reason, deciding layer, features, risk, wallet / safety / ML evidence and provider status (`decision_states.py`, section 28). MANUAL APPROVAL: launch coordination with operator approval | M16 |
 | 78 | Preserve historical data | DONE | migrations are additive only | — |
-| 79–81 | Test matrix, automatic-sell regression, 24/7 acceptance | PARTIAL | automatic-vs-manual exit regression added (`services/paper-trading/tests/test_exit_parity.py`); 24/7 acceptance (§81) is an operator procedure on the server, not automated | M2 |
+| 79–81 | Test matrix, automatic-sell regression, 24/7 acceptance | PARTIAL | automatic-vs-manual exit regression (`services/paper-trading/tests/test_exit_parity.py`); hierarchy matrix (`test_decision_states.py`: safety, data and liquidity outrank strategy, risk and copy; unknown codes never pass); 24/7 acceptance (§81) is an operator procedure on the server, not automated | M2, M16 |
 | 82–83 | Final requirement audit and report | this document, updated per phase | | every phase |
 
 ## 3. Phase plan (smallest safe steps, evidence first)
@@ -1762,3 +1762,97 @@ never deleted (§78), so watch the disk figure deploy.sh prints.
 NOT VERIFIED on the server until the next deploy: the first cycle's
 `evm_ml.completed` log line shows the batches, the built count and
 `drained`.
+
+## 28. M16 — decision states, safety hierarchy, detection integrity (2026-10-04)
+
+### §76-77 on BSC and Robinhood
+
+The Solana gate already decides with the six states (`FinalDecision`) and is
+not changed. EVM entries used to report only PAPER_BUY or NO_TRADE plus a
+list of blocker codes. Now every automatic, manual and copy entry produces
+one decision record (`yonixalpha_core/decision_states.py`,
+`chains/evm/paper.EntryDecision.to_dict`).
+
+**How the decision is made.** Every blocker code belongs to one §76 layer
+and implies one state:
+
+| Layer | Codes | State |
+|---|---|---|
+| DATA SAFETY | SAFETY_STALE, COORDINATION_NOT_CHECKED, LAUNCHPAD_NOT_VERIFIED, GAS_PRICE_UNAVAILABLE | NO_TRADE |
+| TOKEN SAFETY | SAFETY_NOT_PASSED | REJECT |
+| | LAUNCH_COORDINATION | NO_TRADE |
+| | COORDINATION_MANUAL_APPROVAL | MANUAL_APPROVAL |
+| LIQUIDITY SAFETY | LIQUIDITY_TOO_LOW | WAIT |
+| EXECUTION SAFETY | NO_EXECUTABLE_ROUND_TRIP, NO_EXECUTABLE_QUOTE, INSUFFICIENT_GAS, CHASE_GUARD | NO_TRADE |
+| | ROUND_TRIP_EXCEEDS_STOP_BUDGET | REJECT |
+| RISK | kill switch, controls, limits, cooldown, risk settings, plan findings, unknown codes | NO_TRADE |
+| STRATEGY | TOO_FEW_BUYS, TOO_FEW_BUYERS, SELLING_PRESSURE | WAIT |
+| | CATEGORY_NOT_TRADED | REJECT |
+
+- The decision is the state of the highest blocking layer. Within one
+  layer, the most restrictive state wins (REJECT > NO_TRADE > MANUAL
+  APPROVAL > WAIT).
+- No blocker gives EXECUTE, or REDUCE_SIZE when launch coordination or the
+  risk plan reduced the size.
+- A plan that is missing with no reason is NO_TRADE, never a pass.
+
+**What cannot override what.** ML has no codes and contributes 0 %. A copy
+target's buy only starts the evaluation; the record's wallet evidence says
+so. A lower layer can never lift a higher layer's block.
+
+**What the record contains:**
+- decision, timestamp, reason, the deciding layer;
+- every blocker with its layer and state;
+- features (the token's stats, liquidity, category, stage);
+- risk (account state, and the plan when there is one);
+- wallet evidence (source, coordination, smart-money buyers, the copy target);
+- safety evidence (verdict, age, launchpad status, findings);
+- ML evidence (contribution 0 %, SHADOW);
+- provider status (RPC endpoint states with URLs redacted, gas read, quote sources).
+
+**Where it shows:**
+- EVM Markets: state, deciding layer and blockers on hover;
+- the explorer token page;
+- the observation's last decision;
+- each copy event's detail (`decision_record`).
+
+A record stored before this deploy still reads PAPER_BUY or NO_TRADE and is
+shown as before.
+
+### §68-70: nothing skipped is lost
+
+When a launchpad's live scan falls more than `max_lag_minutes` behind, it
+still jumps to recent blocks so that new launches are not delayed. What
+changes:
+- **Recorded.** The skipped range is stored in `evm_scan_gaps` (migration
+  0036), in the same transaction as the cursor move, so it is never lost and
+  never recorded twice.
+- **Backfilled.** data-evm backfills one chunk per launchpad per pass, only
+  while that launchpad's live scan is caught up. Backfill is history only:
+  - the cursor does not move;
+  - no observation is opened, so a backfilled launch is never entered;
+  - launches are marked `backfilled`.
+- **Expiry and failure.** A gap older than the 14-day trade retention is
+  EXPIRED. 30 failed attempts make it FAILED, with a Telegram alert.
+
+RPC / Data Providers → Detection integrity shows per chain:
+- event logs, with each launchpad's cursor and when it last advanced (NOT
+  ADVANCING after 5 minutes);
+- the stream's state;
+- skipped ranges with the blocks, launches and trades recovered.
+
+The fallback rule is stated there: the next endpoint for the role, then the
+others, then NO_TRADE.
+
+### Verified here
+
+- `test_decision_states.py`: hierarchy matrix, every code mapped, record
+  fields, no API key in the record.
+- data-evm worker:
+  - a real entry pass stores NO_TRADE / DATA_SAFETY before venue evidence and EXECUTE after it;
+  - a skipped range is recorded, then backfilled only while the scan is caught up (7 trades, 1 launch);
+  - the cursor stays, no observation is opened, and old gaps expire.
+- copy-engine: the §77 record on skipped and copied buys.
+- API: `/api/evm/detection`.
+
+NOT VERIFIED on the server until deployed.

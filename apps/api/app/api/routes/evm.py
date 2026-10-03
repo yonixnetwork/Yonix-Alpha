@@ -21,8 +21,8 @@ from yonixalpha_core.chains.evm import streams as evm_streams
 from yonixalpha_core.chains.evm import wallet as evm_wallet
 from yonixalpha_core.chains.evm import rpc_registry as evm_rpc_registry
 from yonixalpha_core.config import Settings
-from yonixalpha_core.db.models import (CopyEvent, EvmObservation, EvmToken, EvmTrade, PaperAccount, PaperPosition,
-                                       PlatformSetting)
+from yonixalpha_core.db.models import (CopyEvent, EvmCursor, EvmObservation, EvmScanGap, EvmToken, EvmTrade, PaperAccount,
+                                       PaperPosition, PlatformSetting)
 
 router = APIRouter(prefix="/evm", tags=["evm"])
 CHAIN = "^(bsc|robinhood)$"
@@ -391,6 +391,54 @@ async def get_streams(db: AsyncSession = Depends(get_db), redis: Redis = Depends
                              "copy decisions stay on confirmed trades. A stream absent here is not running or has not "
                              "reported in 3 minutes. Lead = confirmed-trade detection time minus the time a stream saw "
                              "the same transaction."})
+
+
+@router.get("/detection")
+async def get_detection(db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
+                        _: str = Depends(get_current_username)) -> dict:
+    """Master §68-70 per chain: the detection methods and their state (event
+    logs per launchpad with the cursor's last advance, the stream that
+    sights transactions early), and the ranges the live scan skipped with
+    their backfill. Missing data never passes a check: an entry without
+    fresh data is NO_TRADE."""
+    now = datetime.now(timezone.utc)
+    cursors = (await db.execute(select(EvmCursor))).scalars().all()
+    g = EvmScanGap
+    sums = (await db.execute(select(g.chain, g.launchpad, g.status, func.count(), func.sum(g.to_block - g.from_block + 1),
+                                    func.sum(g.next_block - g.from_block), func.sum(g.launches), func.sum(g.trades))
+                             .group_by(g.chain, g.launchpad, g.status))).all()
+    recent = (await db.execute(select(g).order_by(desc(g.id)).limit(20))).scalars().all()
+    chains: dict[str, dict] = {}
+    for chain, stream in (("bsc", "pending_tx"), ("robinhood", "sequencer_feed")):
+        reps = await evm_streams.reports(redis, chain)
+        logs = [{"launchpad": c.launchpad, "last_block": c.last_block, "advanced_at": c.updated_at,
+                 "idle_s": round((now - c.updated_at).total_seconds())} for c in cursors if c.chain == chain]
+        gaps: dict[str, dict] = {}
+        for ch, lp, status, n, blocks, done_blocks, launches, trades in sums:
+            if ch != chain:
+                continue
+            d = gaps.setdefault(lp, {})
+            d[status] = {"ranges": n, "blocks": int(blocks or 0), "blocks_backfilled": int(done_blocks or 0),
+                         "launches_recovered": int(launches or 0), "trades_recovered": int(trades or 0)}
+        chains[chain] = {
+            "methods": [
+                {"method": "launchpad event logs (eth_getLogs, every adapter)", "role": "primary: launches, trades, "
+                 "migrations", "launchpads": sorted(logs, key=lambda x: x["launchpad"])},
+                {"method": "Robinhood sequencer feed" if chain == "robinhood" else "BSC pending transactions (WSS)",
+                 "role": "early sighting and cross-check only, never a trading trigger",
+                 "state": (reps.get(stream) or {}).get("state") or "NOT_RUNNING"},
+                {"method": "skipped-range backfill", "role": "recovers history the live scan skipped (lag over "
+                 "max_lag_minutes); never opens an entry", "gaps": gaps},
+            ],
+        }
+    return jsonable({"chains": chains,
+                     "recent_gaps": [{"id": x.id, "chain": x.chain, "launchpad": x.launchpad, "from": x.from_block,
+                                      "to": x.to_block, "next": x.next_block, "status": x.status,
+                                      "detected_at": x.detected_at, "completed_at": x.completed_at,
+                                      "launches": x.launches, "trades": x.trades, "attempts": x.attempts,
+                                      "last_error": x.last_error, "reason": x.reason} for x in recent],
+                     "fallback": "provider failure: the next endpoint for the role, then the other endpoints; with "
+                                 "none answering, data is unavailable and entries are NO_TRADE (never assumed safe)"})
 
 
 @router.put("/stream-settings")

@@ -20,7 +20,7 @@ from sqlalchemy.exc import IntegrityError
 
 from yonixalpha_core import copy_outcomes as co
 from yonixalpha_core import copy_trading as ct
-from yonixalpha_core import events, kill_switch, launch_coordination, paper_engine, wallet_profiles
+from yonixalpha_core import decision_states, events, kill_switch, launch_coordination, paper_engine, wallet_profiles
 from yonixalpha_core.chains import controls, verification
 from yonixalpha_core.chains.base import Chain
 from yonixalpha_core.chains.evm import paper, safety, store, streams
@@ -64,9 +64,12 @@ class Outcome:
         self.analyzed_at = self.planned_at = self.executed_at = None
         self.position_id: uuid.UUID | None = None
         self.stream: dict[str, Any] | None = None  # the target's tx seen earlier on a stream (master §9 / §13)
+        self.code: str | None = None
+        self.message = ""
 
     def skip(self, code: str, message: str = "") -> "Outcome":
         self.decision, self.reason = "SKIPPED", f"{code}: {message}"[:300] if message else code
+        self.code, self.message = code, message
         return self
 
 
@@ -194,6 +197,19 @@ class CopyEngine:
         return n
 
     async def _evm_buy(self, target: CopyTarget, t: EvmTrade, detected: datetime) -> Outcome:
+        """A target's buy, evaluated as an entry; the outcome carries the
+        §77 decision record (decision_states): the target's buy only
+        triggers the evaluation, it never passes a check."""
+        o = await self._evm_buy_eval(target, t, detected)
+        if "decision_record" not in o.detail and o.decision == "SKIPPED" and o.code:
+            r = decision_states.resolve([{"code": o.code, "message": o.message}])
+            o.detail["decision_record"] = {
+                "at": self.now().isoformat(), **r, "ml_evidence": decision_states.ML_EVIDENCE,
+                "wallet_evidence": {"source": "copy", "target_wallet": target.wallet, "target_mode": target.mode,
+                                    "target_tx": t.event_id}}
+        return o
+
+    async def _evm_buy_eval(self, target: CopyTarget, t: EvmTrade, detected: datetime) -> Outcome:
         o = Outcome()
         s, _ = ct.parse_settings(target.settings)
         chain = target.chain
@@ -248,13 +264,19 @@ class CopyEngine:
             await paper.build_plan(session, ad, row, ct.size_for(s, chain, t_quote) * fx.size_factor, acct_state, liq,
                                    self.now(), d)
             o.planned_at = self.now()
-            o.detail = {"plan_detail": d.detail, "target_price": str(Decimal(t.quote_amount) / Decimal(t.token_amount))}
-            if d.blockers:
-                return o.skip(d.blockers[0]["code"], d.blockers[0]["message"])
-            guard = ct.chase_guard(Decimal(t.quote_amount) / Decimal(t.token_amount),
-                                   Decimal(d.buy.amount_in) / Decimal(d.buy.amount_out), s.chase_guard_pct)
-            if guard:
-                return o.skip("CHASE_GUARD", guard)
+            if not d.blockers and d.buy is not None:
+                guard = ct.chase_guard(Decimal(t.quote_amount) / Decimal(t.token_amount),
+                                       Decimal(d.buy.amount_in) / Decimal(d.buy.amount_out), s.chase_guard_pct)
+                if guard:
+                    d.block("CHASE_GUARD", guard)
+            d.size_reduced = d.size_reduced or fx.size_factor < 1
+            paper.attach_evidence(d, row, acct_state, ad, self.now(), "copy",
+                                  {"target_wallet": target.wallet, "target_mode": target.mode, "target_tx": t.event_id})
+            record = {k: v for k, v in d.to_dict().items() if k not in ("plan", "detail")}
+            o.detail = {"plan_detail": d.detail, "target_price": str(Decimal(t.quote_amount) / Decimal(t.token_amount)),
+                        "decision_record": record}
+            if record["blockers"]:
+                return o.skip(record["blockers"][0]["code"], record["blockers"][0]["message"])
             p = await paper.open_position(session, d, row, self.now(), engine=engine)
             session.add(CopyPosition(position_id=p.id, target_id=target.id, chain=chain, token=t.token,
                                      target_tokens=Decimal(t.token_amount)))
