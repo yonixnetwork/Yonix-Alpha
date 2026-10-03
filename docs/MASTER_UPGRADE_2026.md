@@ -59,7 +59,7 @@ Providers), see M7.
 | 32 | Copy position link fields | DONE (paper) | `copy_outcomes.link`: source wallet / tx / position, our position, ratio, mode, target vs our entry and exit, latency, displacement, PnL; slippage None for paper (measured on live fills only); on `/api/copy/positions` and the Copy page | M4b |
 | 33 | Copy latency stages on dashboard | DONE (paper) | detection / analysis / risk / decision / execution / total (ms) on the Copy page; build / sign / submission / landing / confirmation are None and labelled live only (no live copy); the target's own submit time is not observable from confirmed trades | M4b |
 | 34–35 | Copy safety never overridden; paper copy with would-have-won / missed | DONE (paper), NOT VERIFIED in production | safety enforced; every target buy (copied, skipped, notify-only) gets a paper outcome after 60 min (`copy_events.outcome`, migration 0025): simulated entry / exit, result, best / worst move, class COPIED / MISSED / BLOCKED_BY_SAFETY / FILTERED_BY_SETTINGS / NOT_COPYABLE / NOTIFY_ONLY; NO_PRICE_DATA instead of 0 % | M4b |
-| 36–44 | ML: wallet behaviour, mistake labels, frozen validation set, staged contribution, champion/challenger, no look-ahead, paper as training data | PARTIAL: EVM samples, wallet labels and BUY / WAIT / REJECT comparison DONE in code (M12), NOT VERIFIED on real data until enough samples exist | Solana ML unchanged (multi-target shadow models, champion/challenger, contribution 0 until validated). M12: every BSC / Robinhood observation becomes a sample at T+5 (`ml/evm_samples.py`, table `evm_ml_samples`), labels from the following hour; wallet entries labelled SUCCESSFUL / FAILED / LATE ENTRY / PREMATURE EXIT / LATE EXIT, winners missed (`ml/wallet_labels.py`, table `wallet_trade_labels`, migration 0034); shadow models `shadow_evm_*` / `shadow_wallet_*` with time split and purge; §41 comparison of deterministic / risk / final / ML verdicts, in-sample ML verdicts excluded; ML contribution stays 0 % (section 26). Still missing: SELL / HOLD comparison (exits), a frozen validation set beyond the time-split holdout, staged contribution | M12 |
+| 36–44 | ML: wallet behaviour, mistake labels, frozen validation set, staged contribution, champion/challenger, no look-ahead, paper as training data | PARTIAL: EVM samples, wallet labels and BUY / WAIT / REJECT comparison DONE in code (M12), NOT VERIFIED on real data until enough samples exist | Solana ML unchanged (multi-target shadow models, champion/challenger, contribution 0 until validated). M12: every BSC / Robinhood observation becomes a sample at T+5 (`ml/evm_samples.py`, table `evm_ml_samples`), labels from the following hour; wallet entries labelled SUCCESSFUL / FAILED / LATE ENTRY / PREMATURE EXIT / LATE EXIT, winners missed (`ml/wallet_labels.py`, table `wallet_trade_labels`, migration 0034); shadow models `shadow_evm_*` / `shadow_wallet_*` with time split and purge; §41 comparison of deterministic / risk / final / ML verdicts, in-sample ML verdicts excluded; ML contribution stays 0 % (section 26); built in batches until drained, training on the newest 30k samples, retrained at most daily, ML Review aggregated in SQL (section 27). Still missing: SELL / HOLD comparison (exits), a frozen validation set beyond the time-split holdout, staged contribution | M12 |
 | 45 | Manual BUY/SELL on all chains | DONE (EVM paper; Solana unchanged), NOT VERIFIED on the server yet | Solana: `manual_trade.py` (unchanged). BSC / Robinhood: Manual BUY queues a request for the chain's data-evm worker, which runs `evaluate_entry(operator=True)`: every entry check except the strategy signal (switches, launchpad status, fresh safety, liquidity, coordination, limits, cooldown, gas, risk plan); BLOCKED lists every reason; observe-only venues refused; paper only (EVM live locked). Manual SELL: the existing operator exit, now with a SELL button on EVM positions (section 24) | M13 |
 | 46–47 | Automatic-vs-manual sell diagnosis with stage-level evidence | DONE in code (M2); production result pending the server run | `tools/exit_diagnosis.py` (read-only report from `execution_orders` + position timeline + reconciliation); `tests/test_exit_diagnosis.py` | M2 |
 | 48–53 | Provider dashboard, roles, plan health / UPGRADE REQUIRED | DONE (routing + reporting); mempool / sequencer streaming is M8 | roles per endpoint (dashboard, .env and public), role-preferred routing on Solana and EVM with counted fallbacks, operator-stated plan, WSS stored for BSC / Robinhood, plan health from observed limits on RPC / Data Providers and System Health; see section 16 | M7 |
@@ -1731,3 +1731,34 @@ endpoints (Alchemy and the public one) at the same time. Token safety
 reported "unavailable" for that read, which means NO_TRADE. That is the
 intended behaviour. If it repeats, Providers will show the endpoints'
 plan health.
+
+## 27. M12c — ML data at BSC scale (2026-10-04)
+
+The first query after deploying e682203 returned 0 samples and 0 labels. That
+was expected: the EVM step runs last in the hourly ml cycle, and the query
+ran seconds after the deploy. Reviewing it against the real volume found
+four problems, fixed here. Four.meme alone logged 807 launches in one hour,
+and every launch opens an observation: about 20k samples a day.
+
+| Problem | Effect | Fix |
+|---|---|---|
+| A fixed batch per hourly cycle: 500 samples, 200 wallet-label tokens | 12k samples and 4.8k tokens a day: the backlog would grow forever and age out of the 14-day trade retention | builders run in batches, committing each one, until the backlog is drained or 5 minutes are spent (per builder) |
+| The wallet-label builder read the 1000 oldest tokens and dropped the processed ones in Python | once those 1000 were labelled, it would label nothing until they aged out | the next unprocessed tokens are selected in SQL (`NOT EXISTS`), with index `ix_wallet_trade_labels_chain_token` (migration 0035) |
+| A MISSED row counted as "token processed" | missed-winner rows are written within the hour for tokens younger than a day: the winners' own episodes would never be labelled | only EPISODE and NONE rows mark a token processed |
+| Training and `/api/ml/evm` loaded every sample into memory; scoring took the newest 2000 unscored rows, unscorable rows included | memory exhaustion on the 2 GB server within days; unscorable rows (80 % of recent Four.meme curves are stock-quoted) would fill the scoring batch and starve the labelled backlog | training reads the newest 30,000 labelled samples (columns only); ML Review counts and the §41 comparison are computed in SQL (a test proves they equal `compare()`); behaviour summaries are grouped in SQL; scoring selects labelled rows only |
+
+**Retraining rule.** A shadow model is retrained at most once every 24 hours,
+and only when newer samples exist (`dataset_end` advanced). Retraining every
+hour on a moving window would replace the model after every batch of trades,
+which §42 forbids. Older versions stay as superseded.
+
+The comparison median is now the interpolated median, the same as the
+database's `percentile_cont(0.5)`.
+
+**Storage.** One row per observation, roughly 2 KB with features. At 20k a
+day that is about 40 MB a day, about 1.2 GB a month. Historical ML data is
+never deleted (§78), so watch the disk figure deploy.sh prints.
+
+NOT VERIFIED on the server until the next deploy: the first cycle's
+`evm_ml.completed` log line shows the batches, the built count and
+`drained`.

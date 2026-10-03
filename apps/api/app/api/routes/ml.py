@@ -280,22 +280,15 @@ async def evm_knowledge(days: int = Query(14, ge=1, le=90), db: AsyncSession = D
     learned from (samples by kind), the BUY / WAIT / REJECT comparison of the
     rules, the risk layer, the final action and the shadow ML (§41), and the
     shadow models' holdout metrics. ML contribution is 0 %: shadow only."""
-    from yonixalpha_core.db.models import CopyEvent, EvmMlSample, WalletTradeLabel
+    from yonixalpha_core.db.models import CopyEvent, WalletTradeLabel
     from yonixalpha_core.ml import evm_samples, wallet_labels
 
     since = datetime.now(timezone.utc) - timedelta(days=days)
-    rows = (await db.execute(select(EvmMlSample).where(EvmMlSample.decided_at >= since))).scalars().all()
-    lab = [r for r in rows if r.labels and "unknown" not in r.labels]
-    by_cat: dict[str, int] = {}
-    for r in rows:
-        by_cat[r.category] = by_cat.get(r.category, 0) + 1
-    traded = [r for r in rows if r.traded]
-    ex = [r.executable_return_pct for r in traded if r.executable_return_pct is not None]
-    label_counts: dict[str, int] = {}
-    for labels_, in (await db.execute(select(WalletTradeLabel.labels).where(
-            WalletTradeLabel.entry_at >= since, WalletTradeLabel.kind.in_(("EPISODE", "MISSED"))))).all():
-        for x in labels_ or []:
-            label_counts[x] = label_counts.get(x, 0) + 1
+    # aggregated in the database: BSC alone adds ~20k samples a day
+    know = await evm_samples.knowledge(db, since)
+    each = select(func.jsonb_array_elements_text(WalletTradeLabel.labels).label("l")).where(
+        WalletTradeLabel.entry_at >= since, WalletTradeLabel.kind.in_(("EPISODE", "MISSED"))).subquery()
+    label_counts = {k: n for k, n in (await db.execute(select(each.c.l, func.count()).group_by(each.c.l))).all()}
     episodes = (await db.execute(select(func.count()).where(WalletTradeLabel.kind == "EPISODE",
                                                             WalletTradeLabel.entry_at >= since))).scalar_one()
     copy_samples = (await db.execute(select(func.count()).where(CopyEvent.outcome.is_not(None),
@@ -305,18 +298,9 @@ async def evm_knowledge(days: int = Query(14, ge=1, le=90), db: AsyncSession = D
                                .order_by(ModelVersion.name))).scalars().all()
     return jsonable({
         "window_days": days,
-        "samples": {
-            "evm_total": len(rows), "evm_labelled": len(lab), "by_category": by_cat, "traded": len(traded),
-            "rejected": sum(1 for r in rows if r.observation_state == "REJECTED"),
-            "expired_no_entry": sum(1 for r in rows if r.observation_state == "EXPIRED"),
-            "missed_winners": sum(1 for r in lab if r.verdicts.get("final") != "BUY" and r.labels.get("upside_100")),
-            "wins": sum(1 for v in ex if v > 0), "losses": sum(1 for v in ex if v < 0),
-            "scored": sum(1 for r in rows if r.ml_shadow),
-            "scored_out_of_sample": sum(1 for r in rows if (r.ml_shadow or {}).get("out_of_sample")),
-            "wallet_episodes": episodes, "wallet_labels": label_counts, "copy_outcomes": copy_samples,
-        },
-        "comparison": evm_samples.compare([{"verdicts": r.verdicts or {}, "labels": r.labels,
-                                            "executable_return_pct": r.executable_return_pct} for r in rows]),
+        "samples": {**know["samples"], "wallet_episodes": episodes, "wallet_labels": label_counts,
+                    "copy_outcomes": copy_samples},
+        "comparison": know["comparison"],
         "models": [{"name": m.name, "version": m.version, "target": (m.metrics or {}).get("target"),
                     "kind": (m.metrics or {}).get("kind"), "trained_at": m.trained_at,
                     "train_rows": (m.metrics or {}).get("train_rows"), "dataset_size": (m.metrics or {}).get("dataset_size"),

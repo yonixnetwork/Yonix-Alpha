@@ -105,11 +105,16 @@ def episode_labels(entry: Trade, wallet_trades: list[Trade], token_trades: list[
 
 
 def entry_features(entry: Trade, token_trades: list[Trade], first_at: datetime | None, first_price: float | None,
-                   prior: list[dict[str, Any]], chain: str, launchpad: str) -> dict[str, Any]:
+                   prior: list[dict[str, Any]], chain: str, launchpad: str,
+                   prior_known: tuple[int, int] | None = None) -> dict[str, Any]:
     """Features at the entry: only trades before it, and only earlier
-    episodes whose outcome was known at the entry (available_at <= entry)."""
+    episodes whose outcome was known at the entry (available_at <= entry).
+    prior_known: (episodes, successful) already counted that way (builder)."""
     before = [t for t in token_trades if t.at < entry.at]
-    known = [p for p in prior if datetime.fromisoformat(p["available_at"]) <= entry.at]
+    if prior_known is None:
+        known = [p for p in prior if datetime.fromisoformat(p["available_at"]) <= entry.at]
+        prior_known = (len(known), sum(1 for p in known if p.get("successful_entry")))
+    n_prior, n_success = prior_known
     x: dict[str, Any] = {
         "token_age_s": (entry.at - first_at).total_seconds() if first_at else None,
         "entry_multiple": entry.price / first_price if first_price else None,
@@ -118,8 +123,8 @@ def entry_features(entry: Trade, token_trades: list[Trade], first_at: datetime |
         "buy_volume_before": sum(t.quote for t in before if t.is_buy),
         "sell_volume_before": sum(t.quote for t in before if not t.is_buy),
         "entry_size": entry.quote,
-        "prior_episodes": float(len(known)),
-        "prior_success_rate": (sum(1 for p in known if p.get("successful_entry")) / len(known)) if known else None,
+        "prior_episodes": float(n_prior),
+        "prior_success_rate": n_success / n_prior if n_prior else None,
     }
     for n in NUMERIC:
         x[f"{n}__missing"] = 1.0 if x.get(n) is None else 0.0
@@ -165,13 +170,15 @@ async def build(session, now: datetime, token_limit: int = 200) -> dict[str, int
         func.coalesce(WalletProfile.metrics["account"]["kind"].astext, "") != address_kinds.CONTRACT))).all()}
     if not profiled:
         return {"tokens": 0, "episodes": 0}
-    done_tokens = {(c, t) for c, t in (await session.execute(select(WalletTradeLabel.chain, WalletTradeLabel.token)
-                                                             .distinct())).all()}
+    # processed = an EPISODE or the NONE marker; a MISSED row (written for
+    # winners younger than SETTLE) does not mean the token's episodes exist
+    done = select(WalletTradeLabel.token).where(WalletTradeLabel.chain == EvmToken.chain,
+                                                WalletTradeLabel.token == EvmToken.token,
+                                                WalletTradeLabel.kind.in_(("EPISODE", "NONE"))).exists()
     toks = (await session.execute(select(EvmToken).where(
         EvmToken.chain.in_(CHAINS), EvmToken.created_at >= retention_start, EvmToken.created_at <= now - SETTLE,
-        func.coalesce(func.lower(EvmToken.quote_token), NATIVE_QUOTES[0]).in_(NATIVE_QUOTES))
-        .order_by(EvmToken.created_at).limit(token_limit * 5))).scalars().all()
-    toks = [t for t in toks if (t.chain, t.token) not in done_tokens][:token_limit]
+        func.coalesce(func.lower(EvmToken.quote_token), NATIVE_QUOTES[0]).in_(NATIVE_QUOTES), ~done)
+        .order_by(EvmToken.created_at).limit(token_limit))).scalars().all()
     out = {"tokens": 0, "episodes": 0}
     for tok in toks:
         rows = (await session.execute(select(e.at, holder, e.is_buy, e.quote_amount, e.token_amount).where(
@@ -191,14 +198,18 @@ async def build(session, now: datetime, token_limit: int = 200) -> dict[str, int
             entry = next((t for t in wt if t.is_buy), None)
             if entry is None or entry.at > now - HORIZON:
                 continue
-            prior = [dict(r.outcome or {}) for r in (await session.execute(select(WalletTradeLabel).where(
+            # an episode's outcome is known HORIZON after its entry (available_at),
+            # so "known at this entry" is entry_at <= entry - HORIZON; counted in SQL
+            n_prior, n_success = (await session.execute(select(
+                func.count(), func.count().filter(WalletTradeLabel.outcome["successful_entry"].as_boolean())).where(
                 WalletTradeLabel.chain == tok.chain, WalletTradeLabel.wallet == w, WalletTradeLabel.kind == "EPISODE",
-                WalletTradeLabel.entry_at < entry.at))).scalars()]
+                WalletTradeLabel.entry_at <= entry.at - HORIZON))).one()
             res = episode_labels(entry, wt, trades, first_price, now)
             await session.execute(insert(WalletTradeLabel).values(
                 chain=tok.chain, wallet=w, token=tok.token, kind="EPISODE", launchpad=tok.launchpad, entry_at=entry.at,
                 labels=res["labels"], outcome={k: v for k, v in res.items() if k != "labels"},
-                features=entry_features(entry, trades, first_at, first_price, prior, tok.chain, tok.launchpad),
+                features=entry_features(entry, trades, first_at, first_price, [], tok.chain, tok.launchpad,
+                                        prior_known=(n_prior, n_success)),
                 feature_version=FEATURE_VERSION, label_version=LABEL_VERSION, created_at=now)
                 .on_conflict_do_nothing(index_elements=["chain", "wallet", "token"]))
             out["episodes"] += 1

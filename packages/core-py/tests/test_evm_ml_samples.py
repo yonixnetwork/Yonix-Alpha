@@ -127,9 +127,9 @@ async def sf():
     await engine.dispose()
 
 
-def trade(i, at, trader, buy, price, quote=Decimal("0.1")):
+def trade(i, at, trader, buy, price, quote=Decimal("0.1"), token=TOK):
     q = int(quote * E18)
-    return EvmTrade(event_id=f"bsc:0x{i:064x}:0", chain="bsc", launchpad="fourmeme", token=TOK, trader=trader,
+    return EvmTrade(event_id=f"bsc:0x{i:064x}:0", chain="bsc", launchpad="fourmeme", token=token, trader=trader,
                     is_buy=buy, token_amount=Decimal(int(q / price)), quote_amount=Decimal(q), at=at)
 
 
@@ -197,3 +197,67 @@ async def test_missed_winners_for_a_copy_target(sf):
         rows = (await s.execute(select(WalletTradeLabel))).scalars().all()
         assert [(r.token, r.kind, r.labels) for r in rows] == [(tok2, "MISSED", [wl.MISSED])]
         assert await wl.build_missed(s, now) == 0  # recorded once
+
+
+async def test_knowledge_in_sql_matches_compare(sf):
+    win = {"upside_50": True, "upside_100": True, "fast_dump": False, "migrate_60m": False, "return_60m_pct": 80.0}
+    dump = {"upside_50": False, "upside_100": False, "fast_dump": True, "migrate_60m": False, "return_60m_pct": -60.0}
+    flat = {"upside_50": True, "upside_100": False, "fast_dump": False, "migrate_60m": False, "return_60m_pct": 7.5}
+
+    def v(final, ml, det="WAIT", risk="ALLOW"):
+        return {"deterministic": det, "risk": risk, "final": final, "ml": ml}
+    spec = [(v("BUY", "REJECT", "BUY"), dump, -55.0, "ENTERED", True, {"out_of_sample": True}),
+            (v("BUY", "BUY", "BUY"), win, 40.0, "ENTERED", True, {"out_of_sample": True}),
+            (v("WAIT", "BUY"), win, None, "EXPIRED", False, {"out_of_sample": True}),
+            (v("WAIT", "IN_SAMPLE"), flat, None, "EXPIRED", False, {"out_of_sample": False}),
+            (v("WAIT", "NOT_AVAILABLE"), dump, None, "EXPIRED", False, None),
+            (v("REJECT", "NOT_AVAILABLE", risk="REJECT"), {"unknown": "no T+5 snapshot was taken"}, None, "REJECTED",
+             False, None)]
+    rows = []
+    async with sf() as s:
+        for i, (ver, lab, ex, state, traded, ml) in enumerate(spec):
+            s.add(EvmMlSample(chain="bsc", token=f"0x{i:040x}", category="FRESH" if i % 2 else "MOMENTUM",
+                              launchpad="fourmeme", decided_at=T + timedelta(minutes=i), features={"trades": 1.0},
+                              labels=lab, feature_version=es.FEATURE_VERSION, label_version=es.LABEL_VERSION, verdicts=ver,
+                              observation_state=state, traded=traded, executable_return_pct=ex, ml_shadow=ml, created_at=T))
+            rows.append({"verdicts": ver, "labels": lab, "executable_return_pct": ex})
+        s.add(EvmMlSample(chain="bsc", token="0x" + "f" * 40, category="FRESH", launchpad="fourmeme",
+                          decided_at=T - timedelta(days=1), features={}, labels=win, feature_version=es.FEATURE_VERSION,
+                          label_version=es.LABEL_VERSION, verdicts=v("BUY", "BUY"), observation_state="ENTERED",
+                          traded=True, created_at=T))  # before the window: not counted
+        await s.commit()
+    async with sf() as s:
+        k = await es.knowledge(s, T)
+    assert k["comparison"] == es.compare(rows)
+    assert k["samples"] == {"evm_total": 6, "evm_labelled": 5, "by_category": {"FRESH": 3, "MOMENTUM": 3}, "traded": 2,
+                            "rejected": 1, "expired_no_entry": 3, "missed_winners": 1, "wins": 1, "losses": 1,
+                            "scored": 4, "scored_out_of_sample": 3}
+
+
+async def test_wallet_label_builder_walks_every_token_and_ignores_missed_rows(sf):
+    w = "0x" + "a" * 40
+    toks = ["0x" + str(i) * 40 for i in (4, 5, 6, 7)]
+    minutes = (0, 1, 2, 180)  # the 4th entry comes after the first three outcomes were known
+    now = T + timedelta(days=2)
+    async with sf() as s:
+        s.add(WalletProfile(chain="bsc", wallet=w, metrics={}, labels=[], source="t", trades=3, tokens=3))
+        for i, tk in enumerate(toks):
+            s.add(EvmToken(chain="bsc", token=tk, launchpad="fourmeme", created_at=T + timedelta(minutes=minutes[i]),
+                           category="FRESH", stage="CURVE", venue={}, stats={}))
+            s.add(trade(10 + i, T + timedelta(minutes=minutes[i], seconds=30), w, True, 1e-6, token=tk))
+        # a missed-winner row written before the token was labelled must not mark it processed
+        s.add(WalletTradeLabel(chain="bsc", wallet="0x" + "9" * 40, token=toks[0], kind="MISSED", launchpad="fourmeme",
+                               entry_at=T, labels=[wl.MISSED], outcome={}, features={}, feature_version=wl.FEATURE_VERSION,
+                               label_version=wl.LABEL_VERSION, created_at=T))
+        await s.commit()
+    for _ in toks:  # one token per pass, each pass picks the next unprocessed one
+        async with sf() as s:
+            assert await wl.build(s, now, token_limit=1) == {"tokens": 1, "episodes": 1}
+            await s.commit()
+    async with sf() as s:
+        assert await wl.build(s, now, token_limit=1) == {"tokens": 0, "episodes": 0}
+        eps = {r.token: r for r in (await s.execute(select(WalletTradeLabel).where(
+            WalletTradeLabel.kind == "EPISODE"))).scalars()}
+    assert sorted(eps) == sorted(toks)
+    assert eps[toks[1]].features["prior_episodes"] == 0.0  # the first outcome was not known a minute later
+    assert eps[toks[3]].features["prior_episodes"] == 3.0 and eps[toks[3]].features["prior_success_rate"] == 0.0
