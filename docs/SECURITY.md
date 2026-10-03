@@ -256,6 +256,25 @@ see the script's comments for the exact jail config chosen and why.
   follow-up to apply and fully re-verify (`typecheck`/`lint`/`build`, then a
   real browser pass per the Phase 8 dashboard verification) rather than
   applied speculatively.
+- **braces (GHSA-vfj7-8cjw-p6xm, high), dev toolchain only, no fix
+  published (2026-10-03).**
+  - **What:** `braces <=3.0.3` can exhaust the stack on a deeply nested
+    brace pattern.
+  - **Where it sits:** it reaches this project only through the lint
+    toolchain (`eslint-config-next` → `@next/eslint-plugin-next` →
+    `fast-glob` → `micromatch` → `braces`).
+  - **Why it is not reachable:** that toolchain runs in CI and on developer
+    machines on the repository's own file patterns. It is absent from the
+    production install (`npm ls braces --omit=dev` is empty), so nothing
+    request-controlled can reach it.
+  - **Fix:** every published braces release is affected, so there is
+    nothing to upgrade to.
+  - **CI:** the audit gate allows these five package names for the full
+    tree only. The production-only audit (`--omit=dev`) still fails on
+    anything but the deferred next/postcss finding.
+  - **Next step:** remove the allowance as soon as a patched braces (or a
+    toolchain without it) is published; the update monitor and `npm audit`
+    surface that.
 - **Single account, no RBAC.** Acceptable for a private single-operator
   platform; would need real design work (roles, per-route authorization) if
   ever opened to more than one operator.
