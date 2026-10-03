@@ -87,6 +87,51 @@ const num = (v: any, d = 4) => (v === null || v === undefined ? "—" : Number(v
 const signed = (v: any) => (v === null || v === undefined ? "" : Number(v) > 0 ? "pos" : Number(v) < 0 ? "neg" : "");
 const hold = (s: any) => (s === null || s === undefined ? "—" : s < 120 ? `${Math.round(s)} s` : s < 7200 ? `${Math.round(s / 60)} min` : `${(s / 3600).toFixed(1)} h`);
 
+const BEHAVIOUR_SHORT: Record<string, string> = {
+  SUCCESSFUL_ENTRY_PATTERN: "success", FAILED_ENTRY_PATTERN: "failed", LATE_ENTRY: "late entry",
+  PREMATURE_EXIT: "premature exit", LATE_EXIT: "late exit", MISSED_WINNER: "missed winner",
+};
+
+function BehaviourSummary({ b }: { b: J | undefined }) {
+  if (!b) return <span className="muted small">—</span>;
+  const l = (b.labels ?? {}) as Record<string, number>;
+  return (
+    <span className="small" title={Object.entries(l).map(([k, v]) => `${BEHAVIOUR_SHORT[k] ?? k}: ${v}`).join(" · ")}>
+      {b.episodes} entries: <span className="pos">{l.SUCCESSFUL_ENTRY_PATTERN ?? 0}</span> / <span className="neg">{l.FAILED_ENTRY_PATTERN ?? 0}</span>
+      {l.MISSED_WINNER ? <span className="muted"> · {l.MISSED_WINNER} missed</span> : null}
+    </span>
+  );
+}
+
+function BehaviourDetail({ chain, wallet }: { chain: string; wallet: string }) {
+  const { data, error, loading } = useApi<J>(`/api/wallets/behaviour/${chain}/${wallet}`);
+  if (error) return <ErrorNotice error={error} />;
+  if (loading && !data) return <Loading />;
+  if (!data) return null;
+  const eps = (data.episodes ?? []) as J[];
+  return (
+    <div style={{ marginTop: 10 }}>
+      <h4 className="small">Entry behaviour (labelled a day after each launch, last 14 days)</h4>
+      <p className="muted small">{data.note}</p>
+      {eps.length === 0 ? <p className="muted small">No labelled entries yet.</p> : (
+        <div className="table-scroll"><table className="data-table">
+          <thead><tr><th>Entry</th><th>Token</th><th>Launchpad</th><th>Labels</th><th>Entry multiple</th><th>Best within 1 h</th><th>Worst within 1 h</th></tr></thead>
+          <tbody>{eps.map((e) => (
+            <tr key={`${e.kind}:${e.token}`}>
+              <td>{formatDate(e.entry_at)}</td>
+              <td className="mono small" title={e.token}>{e.token.slice(0, 6)}…{e.token.slice(-4)}</td>
+              <td>{e.launchpad ?? "—"}</td>
+              <td className="small">{(e.labels ?? []).map((x: string) => BEHAVIOUR_SHORT[x] ?? x).join(", ")}</td>
+              <td>{e.outcome?.entry_multiple === undefined ? "—" : `${num(e.outcome.entry_multiple, 2)}x`}</td>
+              <td className="pos">{e.outcome?.max_return_60m_pct === undefined ? "—" : `${num(e.outcome.max_return_60m_pct, 1)}%`}</td>
+              <td className="neg">{e.outcome?.min_return_60m_pct === undefined ? "—" : `${num(e.outcome.min_return_60m_pct, 1)}%`}</td>
+            </tr>))}
+          </tbody></table></div>)}
+      <ul className="muted small">{Object.entries((data.definitions ?? {}) as Record<string, string>).map(([k, v]) => <li key={k}>{BEHAVIOUR_SHORT[k] ?? k}: {v}</li>)}</ul>
+    </div>
+  );
+}
+
 function PnlBlock({ st, unit }: { st: J; unit: string }) {
   if (!st || st.closed_trades === null || st.closed_trades === undefined || st.closed_trades === 0) {
     return <p className="small"><span className="pill pill-off">INSUFFICIENT DATA</span> <span className="muted">{(st?.reasons ?? []).join("; ")}</span></p>;
@@ -116,7 +161,10 @@ function PnlBlock({ st, unit }: { st: J; unit: string }) {
 function WalletDetail({ p, onRefreshed }: { p: J; onRefreshed?: () => void }) {
   const pnl = p.metrics?.pnl;
   const unit = NATIVE[p.chain] ?? "";
-  const external = <ExternalDetail chain={p.chain} wallet={p.wallet} ext={p.external} onRefreshed={onRefreshed} />;
+  const external = <>
+    {p.chain !== "solana" && <BehaviourDetail chain={p.chain} wallet={p.wallet} />}
+    <ExternalDetail chain={p.chain} wallet={p.wallet} ext={p.external} onRefreshed={onRefreshed} />
+  </>;
   if (!pnl) return <><p className="muted small">No P/L profile yet (rebuilt every 10 minutes).</p>{external}</>;
   const windows = Object.entries((pnl.windows ?? {}) as Record<string, J>);
   return (
@@ -183,7 +231,7 @@ export default function SmartWalletsPage() {
         {data && data.profiles.length > 0 && (
           <div className="table-scroll">
             <table className="data-table">
-              <thead><tr><th /><th>Chain</th><th>Wallet</th><th>Behaviour</th><th>Trades</th><th>Tokens</th><th>Closed</th><th>Win rate</th><th>Realized</th><th>Early entries</th><th>Avg hold</th><th>Score</th><th>Stage</th><th>External</th><th>Last seen</th><th /></tr></thead>
+              <thead><tr><th /><th>Chain</th><th>Wallet</th><th>Behaviour</th><th>Trades</th><th>Tokens</th><th>Closed</th><th>Win rate</th><th>Realized</th><th>Early entries</th><th>Avg hold</th><th>Score</th><th>Stage</th><th title="labelled entries: successful / failed (EVM)">Entries</th><th>External</th><th>Last seen</th><th /></tr></thead>
               <tbody>
                 {data.profiles.map((p: J) => {
                   const k = `${p.chain}:${p.wallet}`;
@@ -204,12 +252,13 @@ export default function SmartWalletsPage() {
                     <td>{p.metrics.discovery ? <span className={STAGE_CLASS[p.metrics.discovery.stage] ?? "pill pill-off"} title={p.metrics.discovery.reason ?? p.metrics.validation?.reason}>
                       {p.metrics.discovery.stage.replaceAll("_", " ")}</span> : <span className="muted small">—</span>}
                       {p.metrics.stale && <span className="pill pill-warn" title={p.metrics.stale.reason}> STALE</span>}</td>
+                    <td><BehaviourSummary b={p.behaviour} /></td>
                     <td><ExternalBadges ext={p.external} /></td>
                     <td>{formatDate(p.last_seen)}</td>
                     <td>{p.is_copy_target ? <span className="muted small">target</span> :
                       <button className="btn btn-ghost btn-sm" onClick={() => watch({ chain: p.chain, wallet: p.wallet })}><Eye size={14} aria-hidden /> Watch</button>}</td>
                   </tr>,
-                  open === k && <tr key={`${k}:detail`}><td colSpan={16}><WalletDetail p={p} onRefreshed={reload} /></td></tr>,
+                  open === k && <tr key={`${k}:detail`}><td colSpan={17}><WalletDetail p={p} onRefreshed={reload} /></td></tr>,
                   ];
                 })}
               </tbody>

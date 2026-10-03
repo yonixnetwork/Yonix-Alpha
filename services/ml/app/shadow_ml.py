@@ -97,16 +97,16 @@ def time_split(samples: list[Sample], holdout_fraction: float = HOLDOUT_FRACTION
     return train, hold, {"holdout_start": start.isoformat(), "purged": cut - len(train), "train": len(train), "holdout": len(hold)}
 
 
-def medians(train: list[Sample]) -> dict[str, float]:
+def medians(train: list[Sample], names: tuple[str, ...] = FEATURE_NAMES) -> dict[str, float]:
     out = {}
-    for n in FEATURE_NAMES:
+    for n in names:
         vals = [s.x[n] for s in train if s.x.get(n) is not None]
         out[n] = statistics.median(vals) if vals else 0.0  # all-missing: the __missing indicator carries it
     return out
 
 
-def matrix(samples: list[Sample], med: dict[str, float]) -> list[list[float]]:
-    return [[s.x[n] if s.x.get(n) is not None else med[n] for n in FEATURE_NAMES] for s in samples]
+def matrix(samples: list[Sample], med: dict[str, float], names: tuple[str, ...] = FEATURE_NAMES) -> list[list[float]]:
+    return [[s.x[n] if s.x.get(n) is not None else med[n] for n in names] for s in samples]
 
 
 def binary_metrics(y: list[int], p: list[float], segments: list[dict] | None = None) -> dict[str, Any]:
@@ -132,7 +132,7 @@ def binary_metrics(y: list[int], p: list[float], segments: list[dict] | None = N
         out[f"precision_at_{k}"] = round(sum(y[j] for j in top) / len(top), 4)
     if segments:
         seg_out: dict[str, Any] = {}
-        for key in ("stage", "engine", "data_regime"):
+        for key in segments[0]:  # Solana: stage, engine, data_regime; EVM: category, chain, launchpad
             for val in sorted({s[key] for s in segments}):
                 idx = [j for j, s in enumerate(segments) if s[key] == val]
                 ys, ps = [y[j] for j in idx], [p[j] for j in idx]
@@ -157,30 +157,32 @@ def regression_metrics(y: list[float], pred: list[float], train_mean: float) -> 
             "beats_baseline": mae < base, "correlation": corr}
 
 
-def fit(target: str, train: list[Sample], hold: list[Sample]) -> tuple[Any, dict[str, Any]] | tuple[None, dict[str, Any]]:
-    med = medians(train)
-    if target in BINARY_TARGETS:
-        key = BINARY_TARGETS[target]
+def fit(target: str, train: list[Sample], hold: list[Sample], names: tuple[str, ...] = FEATURE_NAMES,
+        binary_targets: dict[str, str] = BINARY_TARGETS, regression_targets: dict[str, str] = REGRESSION_TARGETS,
+        ) -> tuple[Any, dict[str, Any]] | tuple[None, dict[str, Any]]:
+    med = medians(train, names)
+    if target in binary_targets:
+        key = binary_targets[target]
         tr = [s for s in train if isinstance(s.labels.get(key), bool)]
         ho = [s for s in hold if isinstance(s.labels.get(key), bool)]
         ytr = [int(s.labels[key]) for s in tr]
         yho = [int(s.labels[key]) for s in ho]
         if sum(ytr) < MIN_POSITIVES_TRAIN or sum(ytr) == len(ytr):
             return None, {"status": "skipped", "reason": f"{sum(ytr)} positives in training (needs {MIN_POSITIVES_TRAIN})"}
-        est = make_pipeline(StandardScaler(), LogisticRegression(max_iter=2000)).fit(matrix(tr, med), ytr)
-        p = [float(v) for v in est.predict_proba(matrix(ho, med))[:, 1]] if ho else []
+        est = make_pipeline(StandardScaler(), LogisticRegression(max_iter=2000)).fit(matrix(tr, med, names), ytr)
+        p = [float(v) for v in est.predict_proba(matrix(ho, med, names))[:, 1]] if ho else []
         m = binary_metrics(yho, p, [s.segment for s in ho])
         if sum(yho) < MIN_POSITIVES_HOLDOUT:
             m["warning"] = f"only {sum(yho)} holdout positives: metrics are anecdotal"
         return est, {"status": "trained", "kind": "binary", "holdout": m, "train_rows": len(tr), "medians": med}
-    key = REGRESSION_TARGETS[target]
+    key = regression_targets[target]
     tr = [s for s in train if isinstance(s.labels.get(key), (int, float)) and not isinstance(s.labels.get(key), bool)]
     ho = [s for s in hold if isinstance(s.labels.get(key), (int, float)) and not isinstance(s.labels.get(key), bool)]
     if len(tr) < MIN_ROWS // 2:
         return None, {"status": "skipped", "reason": f"{len(tr)} rows with this label (needs {MIN_ROWS // 2})"}
     ytr = [float(s.labels[key]) for s in tr]
-    est = make_pipeline(StandardScaler(), Ridge(alpha=1.0)).fit(matrix(tr, med), ytr)
-    pred = [float(v) for v in est.predict(matrix(ho, med))] if ho else []
+    est = make_pipeline(StandardScaler(), Ridge(alpha=1.0)).fit(matrix(tr, med, names), ytr)
+    pred = [float(v) for v in est.predict(matrix(ho, med, names))] if ho else []
     m = regression_metrics([float(s.labels[key]) for s in ho], pred, statistics.fmean(ytr))
     return est, {"status": "trained", "kind": "regression", "holdout": m, "train_rows": len(tr), "medians": med}
 

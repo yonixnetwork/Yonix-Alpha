@@ -271,3 +271,62 @@ async def opportunities_compare(days: int = Query(7, ge=1, le=90), db: AsyncSess
     averages of the decision-time features. Review data only."""
     since = datetime.now(timezone.utc) - timedelta(days=days)
     return jsonable(await opportunities.comparison(db, since))
+
+
+@router.get("/evm")
+async def evm_knowledge(days: int = Query(14, ge=1, le=90), db: AsyncSession = Depends(get_db),
+                        _: str = Depends(get_current_username)) -> dict:
+    """EVM and wallet-behaviour ML (master §36-44, §75): what the models have
+    learned from (samples by kind), the BUY / WAIT / REJECT comparison of the
+    rules, the risk layer, the final action and the shadow ML (§41), and the
+    shadow models' holdout metrics. ML contribution is 0 %: shadow only."""
+    from yonixalpha_core.db.models import CopyEvent, EvmMlSample, WalletTradeLabel
+    from yonixalpha_core.ml import evm_samples, wallet_labels
+
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    rows = (await db.execute(select(EvmMlSample).where(EvmMlSample.decided_at >= since))).scalars().all()
+    lab = [r for r in rows if r.labels and "unknown" not in r.labels]
+    by_cat: dict[str, int] = {}
+    for r in rows:
+        by_cat[r.category] = by_cat.get(r.category, 0) + 1
+    traded = [r for r in rows if r.traded]
+    ex = [r.executable_return_pct for r in traded if r.executable_return_pct is not None]
+    label_counts: dict[str, int] = {}
+    for labels_, in (await db.execute(select(WalletTradeLabel.labels).where(
+            WalletTradeLabel.entry_at >= since, WalletTradeLabel.kind.in_(("EPISODE", "MISSED"))))).all():
+        for x in labels_ or []:
+            label_counts[x] = label_counts.get(x, 0) + 1
+    episodes = (await db.execute(select(func.count()).where(WalletTradeLabel.kind == "EPISODE",
+                                                            WalletTradeLabel.entry_at >= since))).scalar_one()
+    copy_samples = (await db.execute(select(func.count()).where(CopyEvent.outcome.is_not(None),
+                                                                CopyEvent.target_at >= since))).scalar_one()
+    models = (await db.execute(select(ModelVersion).where(ModelVersion.status == "shadow", ModelVersion.name.like("shadow_evm_%")
+                                                          | ModelVersion.name.like("shadow_wallet_%"))
+                               .order_by(ModelVersion.name))).scalars().all()
+    return jsonable({
+        "window_days": days,
+        "samples": {
+            "evm_total": len(rows), "evm_labelled": len(lab), "by_category": by_cat, "traded": len(traded),
+            "rejected": sum(1 for r in rows if r.observation_state == "REJECTED"),
+            "expired_no_entry": sum(1 for r in rows if r.observation_state == "EXPIRED"),
+            "missed_winners": sum(1 for r in lab if r.verdicts.get("final") != "BUY" and r.labels.get("upside_100")),
+            "wins": sum(1 for v in ex if v > 0), "losses": sum(1 for v in ex if v < 0),
+            "scored": sum(1 for r in rows if r.ml_shadow),
+            "scored_out_of_sample": sum(1 for r in rows if (r.ml_shadow or {}).get("out_of_sample")),
+            "wallet_episodes": episodes, "wallet_labels": label_counts, "copy_outcomes": copy_samples,
+        },
+        "comparison": evm_samples.compare([{"verdicts": r.verdicts or {}, "labels": r.labels,
+                                            "executable_return_pct": r.executable_return_pct} for r in rows]),
+        "models": [{"name": m.name, "version": m.version, "target": (m.metrics or {}).get("target"),
+                    "kind": (m.metrics or {}).get("kind"), "trained_at": m.trained_at,
+                    "train_rows": (m.metrics or {}).get("train_rows"), "dataset_size": (m.metrics or {}).get("dataset_size"),
+                    "split": (m.metrics or {}).get("split"), "holdout": (m.metrics or {}).get("holdout")} for m in models],
+        "contribution": {"percent": 0, "status": "SHADOW",
+                         "why": "no EVM or wallet model has passed a validation gate; the models are scored and compared "
+                                "only. Contribution is raised by an operator after validation, never by a winning streak."},
+        "definitions": {"decision_point": f"T+{evm_samples.DECISION_MINUTE} min of each observation",
+                        "labels": "upside_50 / upside_100: the price reached +50 % / +100 % within the hour; fast_dump: "
+                                  "-50 % within 10 min; return_60m: the price an hour later",
+                        "wallet_labels": list(wallet_labels.LABELS),
+                        "feature_versions": [evm_samples.FEATURE_VERSION, wallet_labels.FEATURE_VERSION]},
+    })

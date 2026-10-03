@@ -12,6 +12,7 @@ from yonixalpha_core.notify import send_telegram_alert
 from yonixalpha_core import update_monitor
 
 from app.ablation import run_ablation
+from app.evm_ml import run_evm_cycle
 from app.gate_ml import run_cycle
 from app.shadow_ml import run_shadow_cycle
 from app.train import train_and_maybe_register
@@ -74,6 +75,16 @@ async def _training_loop(session_factory, redis, settings, stop_event: asyncio.E
         except Exception as exc:  # noqa: BLE001
             log.error("shadow_ml.failed", error=str(exc))
             await _record_system_event(session_factory, "shadow_ml_cycle_failed", "error", {"error": str(exc)})
+
+        # EVM opportunities and wallet behaviour (M12): samples, labels and
+        # SHADOW models; review only, never read by an entry or exit.
+        try:
+            evm = await run_evm_cycle(session_factory)
+            log.info("evm_ml.completed", result=evm)
+            await _record_system_event(session_factory, "evm_ml_cycle", "info", evm)
+        except Exception as exc:  # noqa: BLE001
+            log.error("evm_ml.failed", error=str(exc))
+            await _record_system_event(session_factory, "evm_ml_cycle_failed", "error", {"error": str(exc)})
 
         # Do the scanner-intelligence features help out of sample? (every 6 h;
         # results stored for the ML Review page, never used for decisions)
