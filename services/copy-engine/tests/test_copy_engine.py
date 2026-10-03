@@ -393,3 +393,15 @@ async def test_stream_lead_is_recorded_when_a_stream_saw_the_target_first(sessio
     assert await eng.watch_evm("bsc") == 1
     ev = (await events_of(session_factory))[-1]
     assert ev.latency_ms["stream_source"] == "pending_tx" and ev.latency_ms["stream_lead"] == 1500
+
+
+async def test_wallet_enrichment_step_is_off_until_switched_on(session_factory, redis_client):
+    """Nansen / MadeOnSol cost credits: without settings, or with keys but the
+    switch off (the default), the step calls nothing."""
+    from types import SimpleNamespace
+
+    clock = Clock()
+    assert await CopyEngine(session_factory, redis_client, {}, clock).enrich() == {"status": "NOT_CONFIGURED"}
+    eng = CopyEngine(session_factory, redis_client, {}, clock,
+                     settings=SimpleNamespace(NANSEN_API_KEY="nk", MADEONSOL_API_KEY="mk"))
+    assert await eng.enrich() == {"profiles": {"status": "OFF"}, "discovery": {"status": "OFF"}}

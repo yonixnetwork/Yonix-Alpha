@@ -50,6 +50,7 @@ async def test_dashboard_then_env_then_public_and_overrides(sf):
         p = (await s.execute(RpcProvider.__table__.select().where(RpcProvider.chain == "bsc"))).first()
         await s.execute(RpcProvider.__table__.update().where(RpcProvider.id == p.id).values(enabled=False))
         await s.commit()
+        s.expire_all()  # a Core UPDATE does not refresh ORM objects already loaded in this session
         assert await reg.effective_urls(s, SETTINGS, "bsc") == list(CHAINS[Chain.BSC].public_rpc)
         assert await reg.effective_urls(s, SETTINGS, "robinhood") == list(CHAINS[Chain.ROBINHOOD].public_rpc)
 

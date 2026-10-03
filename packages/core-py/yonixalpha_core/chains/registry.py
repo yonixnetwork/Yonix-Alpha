@@ -39,6 +39,12 @@ _FOUR = ("github.com/four-meme-community/four-meme-ai (skills/four-meme-integrat
 _FLAP = ("github.com/CoolBB97/flap_sniper (built on docs.flap.sh, 2026-09-29)",)
 _PONS = ("github.com/ponsdotdev/pons-labs (official Solidity source, 2026-09-29)",)
 _HOOD = ("npm hoodchain 0.1.1 (github.com/nirholas/robinhood-chain-sdk)", "github.com/nirholas/hood-oracle (2026-09-15)")
+# The Odyssey: no launch or trade seen by Launchpad Health since monitoring
+# began (M1), and the operator reported it no longer active (2026-10-03).
+# The adapters stay (decoders, tests, history); discovery skips inactive
+# venues, so no RPC is spent on them and nothing is traded there.
+_ODYSSEY_INACTIVE = ("no activity seen by Launchpad Health since monitoring began; operator reported The Odyssey "
+                     "no longer active (2026-10-03)")
 
 LAUNCHPADS: dict[str, LaunchpadSpec] = {s.key: s for s in (
     # --- Solana (existing implementation) --------------------------------------------------------
@@ -168,6 +174,7 @@ LAUNCHPADS: dict[str, LaunchpadSpec] = {s.key: s for s in (
         supported_events=("TokenCreated", "Traded", "PoolCompleted", "PoolMigrated"),
         contracts={"bonding_curve_factory": "0xEb3FeeD2716cF0eEAda05B22e67424794e1f5a80",
                    "legacy_factory": "0xAf9f3ce1d34909F59E88c23027f89d5807B0F915", **ROBINHOOD_UNISWAP_V3},
+        active=False, inactive_reason=_ODYSSEY_INACTIVE,
         quote_asset="ETH", sources=_HOOD),
     LaunchpadSpec(
         "odyssey_instant", Chain.ROBINHOOD, "The Odyssey (instant)", Lifecycle.INSTANT_POOL,
@@ -176,6 +183,7 @@ LAUNCHPADS: dict[str, LaunchpadSpec] = {s.key: s for s in (
         safety_model="V3 round trip, ERC-20 checks",
         supported_events=("InstantTokenCreated", "InstantFirstBuy"),
         contracts={"instant_factory": "0xD7601cEe401306fdea5833c6898181D9c770F800", **ROBINHOOD_UNISWAP_V3},
+        active=False, inactive_reason=_ODYSSEY_INACTIVE,
         quote_asset="ETH", sources=_HOOD),
     LaunchpadSpec(
         "odyssey_reflection", Chain.ROBINHOOD, "The Odyssey (reflection)", Lifecycle.BONDING_CURVE_TO_DEX,
@@ -183,7 +191,8 @@ LAUNCHPADS: dict[str, LaunchpadSpec] = {s.key: s for s in (
         migration_model="PoolMigratedV4(token, poolId, ...)", execution_model="not supported (observe only)",
         safety_model="observe only", supported_events=("TokenCreated", "PoolMigratedV4"),
         contracts={"reflection_factory": "0x6Ce85c4b7cE12903E5867652C265bCcce57f935F"},
-        supports_trading=False, supports_copy_trading=False, quote_asset="ETH", sources=_HOOD,
+        supports_trading=False, supports_copy_trading=False, active=False, inactive_reason=_ODYSSEY_INACTIVE,
+        quote_asset="ETH", sources=_HOOD,
         notes="Reflection mechanics change balances; the reference executor refuses curve buys here."),
     LaunchpadSpec(
         "noxa", Chain.ROBINHOOD, "NOXA", Lifecycle.INSTANT_POOL,

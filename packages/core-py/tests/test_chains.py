@@ -49,8 +49,11 @@ def test_status_follows_evidence_never_the_label():
 
 def test_inactive_and_observe_only_venues_are_disabled_whatever_the_evidence():
     assert compute_status(LAUNCHPADS["noxa"], passed(*CHECKS), "LIVE", NOW)["status"] == "DISABLED"
-    refl = compute_status(LAUNCHPADS["odyssey_reflection"], passed(*CHECKS), "LIVE", NOW)
-    assert refl["status"] == "DISABLED" and "observe only" in refl["why"]
+    genius = compute_status(LAUNCHPADS["genius_fun"], passed(*CHECKS), "LIVE", NOW)
+    assert genius["status"] == "DISABLED" and "observe only" in genius["why"]
+    for key in ("odyssey_curve", "odyssey_instant", "odyssey_reflection"):  # no longer active (2026-10-03)
+        st = compute_status(LAUNCHPADS[key], passed(*CHECKS), "LIVE", NOW)
+        assert st["status"] == "DISABLED" and "no longer active" in st["why"] and not LAUNCHPADS[key].active
 
 
 def test_switches_block_the_right_entries():

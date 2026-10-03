@@ -30,10 +30,25 @@ echo "==> Pulling latest ${BRANCH}"
 git fetch origin "${BRANCH}"
 git merge --ff-only "origin/${BRANCH}"
 
+# DEPLOY_PULL=1 also pulls newer base images (python:3.12-slim, node:22-slim,
+# nginx, postgres:16-alpine, redis:7-alpine, certbot): the same major
+# versions with the operating-system security patches published since the
+# last pull. Without it, cached base layers are reused (faster). Run it about
+# once a month; it does not change any Python / npm dependency (those are
+# pinned in the repository and change only through a pull request).
+BUILD_FLAGS=""
+if [ "${DEPLOY_PULL:-0}" = "1" ]; then
+    BUILD_FLAGS="--pull"
+    echo "==> Pulling newer base and service images (DEPLOY_PULL=1)"
+    # Only the services that use a ready image (postgres, redis, certbot);
+    # the built ones get their newer base through `build --pull` below.
+    ${COMPOSE} pull --ignore-buildable || echo "    image pull failed (ignored; the build continues)"
+fi
+
 echo "==> Building images"
 df -h / | tail -1 | awk '{print "    disk: " $4 " free of " $2}'
 if [ "${DEPLOY_PARALLEL_BUILD:-0}" = "1" ]; then
-    ${COMPOSE} build
+    ${COMPOSE} build ${BUILD_FLAGS}
 else
     # One service at a time, each retried: on the 2 vCPU / 2 GB server, ten
     # parallel image exports ran past BuildKit's deadline ("failed to solve:
@@ -42,7 +57,7 @@ else
     # DEPLOY_PARALLEL_BUILD=1 restores the parallel build on a bigger box.
     for svc in $(${COMPOSE} config --services); do
         for attempt in 1 2 3; do
-            if ${COMPOSE} build "${svc}"; then
+            if ${COMPOSE} build ${BUILD_FLAGS} "${svc}"; then
                 break
             fi
             if [ "${attempt}" -eq 3 ]; then

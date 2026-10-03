@@ -19,10 +19,11 @@ from app.api.deps import get_current_username, get_db, get_redis, get_settings
 from app.api.util import audit, jsonable
 from yonixalpha_core import copy_outcomes as co
 from yonixalpha_core import copy_trading as ct
-from yonixalpha_core import events, position_pnl, wallet_validation
+from yonixalpha_core import enrichment, events, position_pnl, wallet_validation
 from yonixalpha_core.chains.evm import address_kinds
 from yonixalpha_core.config import Settings
-from yonixalpha_core.db.models import CopyEvent, CopyPosition, CopyTarget, PaperPosition, PlatformSetting, WalletProfile
+from yonixalpha_core.db.models import (CopyEvent, CopyPosition, CopyTarget, PaperPosition, PlatformSetting, WalletEnrichment,
+                                       WalletProfile)
 
 router = APIRouter(tags=["copy"])
 CHAIN = "^(solana|bsc|robinhood)$"
@@ -83,15 +84,126 @@ async def profiles(chain: str | None = Query(None, pattern=CHAIN), label: str | 
         q = q.where(WalletProfile.metrics["discovery"]["stage"].astext == stage)
     rows = (await db.execute(q.order_by(nulls_last(desc(SORTS[sort]))).limit(limit))).scalars().all()
     targets = {(t.chain, t.wallet.lower()) for t in (await db.execute(select(CopyTarget))).scalars()}
+    external = await _external(db, [(r.chain, r.wallet) for r in rows])
     return jsonable({
         "profiles": [{"chain": r.chain, "wallet": r.wallet, "metrics": r.metrics, "labels": r.labels, "score": r.score,
                       "score_detail": r.score_detail, "source": r.source, "trades": r.trades, "tokens": r.tokens,
                       "first_seen": r.first_seen, "last_seen": r.last_seen, "updated_at": r.updated_at,
-                      "is_copy_target": (r.chain, r.wallet.lower()) in targets} for r in rows],
+                      "is_copy_target": (r.chain, r.wallet.lower()) in targets,
+                      "external": external.get((r.chain, r.wallet), {})} for r in rows],
         "sorted_by": sort,
         "note": "profiles describe observed behaviour; they are not a ranking and no wallet is labelled best. "
                 "A score needs enough closed trades and is shrunk toward a base rate. Contract addresses (routers, "
                 "bots) are hidden unless asked for: the trades credited to them belong to the wallets that call them."})
+
+
+def _external_view(e: WalletEnrichment) -> dict:
+    d = e.data or {}
+    return {"status": e.status, "kind": e.kind, "labels": d.get("labels") or ([d["label"]] if d.get("label") else []),
+            "name": d.get("name"), "pnl": d.get("pnl"), "pnl_currency": d.get("pnl_currency"),
+            "pnl_window_days": d.get("pnl_window_days"), "source": d.get("source"),
+            "provider_metrics": d.get("provider_metrics"), "error": e.error, "fetched_at": e.fetched_at,
+            "discovered_at": e.discovered_at, "note": enrichment.NOTE}
+
+
+async def _external(db: AsyncSession, keys: list[tuple[str, str]]) -> dict[tuple[str, str], dict]:
+    """(chain, wallet) -> {provider: view} for the given wallets."""
+    if not keys:
+        return {}
+    out: dict[tuple[str, str], dict] = {}
+    rows = (await db.execute(select(WalletEnrichment).where(WalletEnrichment.wallet.in_({w for _, w in keys})))).scalars()
+    wanted = set(keys)
+    for e in rows:
+        if (e.chain, e.wallet) in wanted:
+            out.setdefault((e.chain, e.wallet), {})[e.provider] = _external_view(e)
+    return out
+
+
+@router.get("/wallets/enrichment")
+async def enrichment_status(db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
+                            settings: Settings = Depends(get_settings), _: str = Depends(get_current_username)) -> dict:
+    """Nansen / MadeOnSol (master §24-25): settings, key status (never the
+    key), today's calls against the budget, record counts and the candidate
+    wallets the providers suggested."""
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    cfg = await enrichment.load_settings(db)
+    counts = (await db.execute(select(WalletEnrichment.provider, WalletEnrichment.kind, WalletEnrichment.status, func.count())
+                               .group_by(WalletEnrichment.provider, WalletEnrichment.kind, WalletEnrichment.status))).all()
+    providers = {}
+    for p in enrichment.PROVIDERS:
+        providers[p] = {"configured": bool(enrichment.key_of(settings, p)), "key": enrichment.KEY_SETTING[p],
+                        "chains": list(enrichment.CHAINS[p]), "calls_today": await enrichment.calls_today(redis, p, now),
+                        "daily_budget": cfg.budget(p),
+                        "records": {f"{k}:{st}": n for pp, k, st, n in counts if pp == p}}
+    cands = (await db.execute(select(WalletEnrichment).where(WalletEnrichment.discovered_at.is_not(None))
+                              .order_by(desc(WalletEnrichment.discovered_at)).limit(100))).scalars().all()
+    known = {(p.chain, p.wallet): p for p in (await db.execute(select(WalletProfile).where(
+        WalletProfile.wallet.in_([c.wallet for c in cands])))).scalars()} if cands else {}
+    return jsonable({
+        "settings": cfg.to_dict(), "defaults": enrichment.EnrichmentSettings().to_dict(), "providers": providers,
+        "candidates": [{"chain": c.chain, "wallet": c.wallet, "provider": c.provider, **_external_view(c),
+                        "own_history": {"trades": known[(c.chain, c.wallet)].trades,
+                                        "stage": ((known[(c.chain, c.wallet)].metrics or {}).get("discovery") or {}).get("stage")}
+                        if (c.chain, c.wallet) in known else None} for c in cands],
+        "note": "Enrichment only: provider labels and P/L are shown next to YonixAlpha's own measurements and are never "
+                "a trade signal. Paid APIs: nothing is called until enrichment is switched on, then only inside the "
+                "daily budget. Candidates are listed, never copied; a candidate becomes a validated wallet only "
+                "through its own trades here and the validation gates.",
+    })
+
+
+@router.put("/wallets/enrichment-settings")
+async def put_enrichment_settings(body: dict, request: Request, db: AsyncSession = Depends(get_db),
+                                  username: str = Depends(get_current_username)) -> dict:
+    row = await db.get(PlatformSetting, enrichment.SETTINGS_KEY)
+    merged = {**(dict(row.value) if row else {}), **body}
+    try:
+        cfg = enrichment.EnrichmentSettings.parse(merged)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if row is None:
+        db.add(PlatformSetting(key=enrichment.SETTINGS_KEY, value=cfg.to_dict()))
+    else:
+        row.value = cfg.to_dict()
+    await audit(db, username, request, "wallet_enrichment.settings", cfg.to_dict())
+    await db.commit()
+    return {"settings": cfg.to_dict()}
+
+
+@router.post("/wallets/enrichment/{chain}/{wallet}/refresh")
+async def refresh_enrichment(chain: str, wallet: str, request: Request, db: AsyncSession = Depends(get_db),
+                             redis: Redis = Depends(get_redis), settings: Settings = Depends(get_settings),
+                             username: str = Depends(get_current_username)) -> dict:
+    """One wallet now, for every provider that covers its chain (counts
+    against the daily budget). Works while automatic enrichment is off."""
+    from datetime import datetime, timezone
+
+    import httpx
+
+    if chain not in ("solana", "bsc", "robinhood") or not re.match(r"^[0-9A-Za-z]{32,64}$", wallet):
+        raise HTTPException(422, "chain solana / bsc / robinhood and a wallet address")
+    now = datetime.now(timezone.utc)
+    cfg = await enrichment.load_settings(db)
+    results = {}
+    async with httpx.AsyncClient() as client:
+        for p in enrichment.PROVIDERS:
+            key = enrichment.key_of(settings, p)
+            if chain not in enrichment.CHAINS[p]:
+                results[p] = enrichment.UNSUPPORTED
+                continue
+            if not key:
+                results[p] = enrichment.NOT_CONFIGURED
+                continue
+            if await enrichment.calls_today(redis, p, now) + 2 > cfg.budget(p):
+                results[p] = enrichment.BUDGET_EXHAUSTED
+                continue
+            results[p] = await enrichment.lookup_into(db, redis, client, p, key, chain, wallet, now)
+    await audit(db, username, request, "wallet_enrichment.refresh", {"chain": chain, "wallet": wallet, "results": results})
+    await db.commit()
+    return jsonable({"chain": chain, "wallet": wallet, "results": results,
+                     "external": (await _external(db, [(chain, wallet)])).get((chain, wallet), {})})
 
 
 @router.get("/wallets/validation-settings")

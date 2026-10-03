@@ -44,6 +44,9 @@ EDITABLE_KEYS: dict[str, str] = {
     "BSC_RPC_URLS": "url_list",
     "ROBINHOOD_RPC_URLS": "url_list",
     "ETHERSCAN_API_KEY": "secret",
+    "GITHUB_TOKEN": "secret",
+    "NANSEN_API_KEY": "secret",
+    "MADEONSOL_API_KEY": "secret",
 }
 
 # Never editable from the dashboard, whatever a request says.

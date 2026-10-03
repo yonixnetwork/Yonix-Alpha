@@ -144,18 +144,32 @@ jobs:
       # this step still fails on anything *new*, rather than raising
       # --audit-level and silently missing a future high/critical finding
       # in some other dependency.
+      #
+      # Two checks. (1) What ships: `--omit=dev` (the production install)
+      # may only carry the deferred next/postcss finding. (2) Everything,
+      # dev tools included: additionally allows GHSA-vfj7-8cjw-p6xm
+      # (braces <=3.0.3, stack exhaustion on deeply nested glob patterns),
+      # which reaches only the lint toolchain (eslint-config-next ->
+      # @next/eslint-plugin-next -> fast-glob -> micromatch -> braces),
+      # runs on first-party patterns, is absent from the production install,
+      # and has no patched braces release (2026-10-03). See docs/SECURITY.md
+      # section 10. Any other finding still fails the build.
       - name: Dependency audit (npm audit)
         run: |
+          npm audit --omit=dev --json > audit-prod.json || true
           npm audit --json > audit.json || true
           node -e '
-            const r = require("./audit.json");
-            const allowed = new Set(["next", "postcss"]);
-            const unexpected = Object.keys(r.vulnerabilities || {}).filter(n => !allowed.has(n));
-            if (unexpected.length > 0) {
-              console.error("Unexpected new vulnerabilities:", unexpected);
+            const prod = require("./audit-prod.json");
+            const all = require("./audit.json");
+            const shipped = new Set(["next", "postcss"]);
+            const devOnly = new Set(["braces", "micromatch", "fast-glob", "@next/eslint-plugin-next", "eslint-config-next"]);
+            const badProd = Object.keys(prod.vulnerabilities || {}).filter(n => !shipped.has(n));
+            const badAll = Object.keys(all.vulnerabilities || {}).filter(n => !shipped.has(n) && !devOnly.has(n));
+            if (badProd.length > 0 || badAll.length > 0) {
+              console.error("Unexpected new vulnerabilities:", { production: badProd, any: badAll });
               process.exit(1);
             }
-            console.log("Only known, deferred findings present:", Object.keys(r.vulnerabilities || {}));
+            console.log("Only known, deferred findings present:", Object.keys(all.vulnerabilities || {}));
           '
 
       - name: Typecheck

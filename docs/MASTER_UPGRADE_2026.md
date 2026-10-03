@@ -46,14 +46,14 @@ Providers), see M7.
 | 7 | Solana launchpads beyond Pump.fun/PumpSwap (LetsBONK, LaunchLab, Meteora DBC, Bags, Moonshot, Jupiter Studio) | PARTIAL: activity monitored, observe only (M10a); launch sites split by on-chain config (M10c) | Raydium LaunchLab, Meteora DBC and Moonshot in the registry as OBSERVE ONLY; activity from a 5-minute probe (section 19); per-site split from each sampled instruction's platform / pool config, LaunchLab sites named from their own PlatformConfig (section 22); StonkFun identified: it runs on LaunchLab (seen as one of its platform configs); trading NOT IMPLEMENTED | M10 |
 | 8 | BSC: Four.meme, Flap verified; Genius.fun etc. researched | PARTIAL | Four.meme / Flap adapters, discovery live, read-only checks PASS; Four.meme X Mode detected by a plain-buy simulation (revert "A") and FAILS safety; AntiSniperFeeMode / template layout pending `tools.fourmeme_modes` on the server (section 22); Genius.fun researched and added OBSERVE ONLY (Pons V2 event decoder, two factories); Four.meme curves quoted in tokenized stocks (32 of 40 newest) kept out of BNB volume, wallet P/L and regimes (section 23) | M10 |
 | 9 | BSC mempool wallet copying | DONE (measurement) | `evm.streams.PendingTxStream`: eth_subscribe newPendingTransactions (full bodies) over a dashboard WSS endpoint; matches copy targets / launchpads; REFUSED / LIMITED become UPGRADE REQUIRED; copy decisions stay on confirmed trades (§17) | M8 |
-| 10 | Robinhood: Pons, NOXA, Odyssey | PARTIAL | adapters exist; only Pons V2 proven active | M1 |
+| 10 | Robinhood: Pons, NOXA, Odyssey | DONE | Pons V1 / V2 active and traded on paper; NOXA (paused since 2026-07) and The Odyssey (curve, instant, reflection; no activity seen, operator confirmed 2026-10-03) marked inactive: adapters, decoders and tests kept, discovery skips them, never traded (section 25) | M10 |
 | 11 | Pons coordinated-launch safety (privileged / creator-linked / common-funder / simultaneous buyers) | DONE (paper; on-chain assumptions NOT VERIFIED until coordination_check runs on the server) | launch_coordination: 13 detections, configurable NO_TRADE / REDUCE_SIZE / MANUAL_APPROVAL / NONE, data-evm entries + EVM copy buys; see section 13 | M5 |
 | 12 | Robinhood reference repos inspected | DONE (M9) | all seven inspected plus the official Pons contract source (section 18): Pons events match the official source, sequencer decoder matches 143 real transactions, feed signatures verified, router attribution measured by `tools.trader_attribution` | M9 |
 | 13 | Robinhood sequencer feed (+ delayed feed fallback), latency / gaps measured | DONE | `evm.streams.SequencerFeed` in data-evm: Nitro broadcast decoding, resume by sequence number, delayed-feed fallback, gaps / duplicates / delay / matches, stream lead on copy events (§17). Real feed NOT VERIFIED from this environment | M8 |
 | 14–17 | Observation state machine for every token on all chains, windows T0..T+60, expiry, stored | DONE (EVM, paper); Solana PARTIAL (own state names, see section 15) | EVM: `evm_observations`, full state machine, T0/T+5/T+10/T+20/T+30/T+60 snapshots with the §16 fields, adaptive MIGRATED / MOMENTUM windows, EXPIRED_NO_ENTRY, entries only while observed; Solana: `token_observations` + follow-ups, T+20m added | M6 |
 | 18–23 | Wallet performance model: 24H–180D windows, avg/median win and loss, profit factor, drawdown, FIFO ledger, INSUFFICIENT DATA | DONE in code for BSC / Robinhood (M3; router / bot contracts excluded since M10b, section 20); Solana PARTIAL | `wallet_pnl.py` (FIFO lots, usually earns / usually loses, profit factor, drawdown, holds, best / worst), windows 24H / 7D (14D+ INSUFFICIENT DATA: 7-day profile history, 14-day trade retention); fees listed not subtracted (NOT VERIFIED per launchpad), gas not included; Solana profiles have no sells (launch_buyers) and say so | M3 |
-| 24 | Nansen / MadeOnSol enrichment | MISSING | | M11 |
-| 25–28 | Wallet discovery, validation gates, outlier test, regime test | DONE for BSC / Robinhood (M3b); Solana INSUFFICIENT DATA (no sells recorded) | outlier test (M3); `wallet_validation` (12 configurable checks, per-day consistency, INSUFFICIENT DATA vs NOT VALIDATED); `market_regimes` (hourly volume / net flow / price range, migration 0026; CONSISTENT / REGIME_DEPENDENT); discovery stage COLLECTING_HISTORY → VALIDATED → PAPER_FOLLOWED / REJECTED, never auto-copied; Smart Wallets UI + rules editor. External smart-money sources (§24-25 Nansen, MadeOnSol) not connected | M3b |
+| 24 | Nansen / MadeOnSol enrichment | DONE in code (M11), NOT VERIFIED against the real APIs (no keys here) | `enrichment.py`: Nansen labels + P/L summary (Solana, BSC), MadeOnSol FIFO P/L + KOL profile (Solana); off by default, daily call budget, refresh window; provider-reported, shown next to the own ledger, never a signal (section 25) | M11 |
+| 25–28 | Wallet discovery, validation gates, outlier test, regime test | DONE for BSC / Robinhood (M3b); Solana INSUFFICIENT DATA (no sells recorded) | outlier test (M3); `wallet_validation` (12 configurable checks, per-day consistency, INSUFFICIENT DATA vs NOT VALIDATED); `market_regimes` (hourly volume / net flow / price range, migration 0026; CONSISTENT / REGIME_DEPENDENT); discovery stage COLLECTING_HISTORY → VALIDATED → PAPER_FOLLOWED / REJECTED, never auto-copied; Smart Wallets UI + rules editor. External sources (M11): Nansen smart-money traders and the MadeOnSol KOL leaderboard become CANDIDATES (once a day, off by default), listed for the operator and never copied; a candidate is validated only through its own trades here | M3b, M11 |
 | 29 | Copy BUY ONLY / SELL ONLY / BUY+SELL | DONE (paper) | modes NOTIFY, BUY_ONLY, MIRROR (buy+sell), SELL_ONLY (M4); SELL ONLY exits PAPER positions only | M4 |
 | 30–31 | Copy buy checks, chase guard; sell 20/50/100 % replication | DONE (paper) | `copy-engine`, partial sells on Solana (queued) and EVM | — |
 | 32 | Copy position link fields | DONE (paper) | `copy_outcomes.link`: source wallet / tx / position, our position, ratio, mode, target vs our entry and exit, latency, displacement, PnL; slippage None for paper (measured on live fills only); on `/api/copy/positions` and the Copy page | M4b |
@@ -68,7 +68,7 @@ Providers), see M7.
 | 59–61 | PnL always shown with colour, market cap $K/$M | DONE in code (M14) | `position_pnl.view` on every positions list (paper, live, copy, EVM, overview, token pages): PROFIT / LOSS / BREAKEVEN with %, PNL_UNAVAILABLE with the reason when there is no mark (never a bare OPEN, never 0); entry, current, quantity, value, unrealized, realized, fees, net, peak, drawdown; green / red / neutral with TrendingUp / TrendingDown / Minus icons; EVM market cap in USD ($950 / $9.5K / $1.05B) on the token list and token page (section 24) | M14 |
 | 60 | NO EMOJIS | DONE (this phase) | alert prefixes and the live page tick mark removed | M0 |
 | 62–63 | 24/7 server-side workers | DONE | all engines are containers; dashboard is a viewer | — |
-| 64–66 | GitHub / provider update monitor with Telegram + System Health | DONE in code (M15); GitHub path NOT VERIFIED against the real API from the build environment (blocked there), PyPI path checked against pypi.org | `update_monitor.py` in the ml service: 14 repositories + 8 pinned dependencies every 6 h via GitHub REST and PyPI JSON (no HTML); classes INFO / UPGRADE_AVAILABLE / BREAKING_CHANGE / SECURITY_UPDATE / PROVIDER_CHANGE / ACTION_REQUIRED; baseline first check; history in `update_events` (migration 0031); Telegram kind `infrastructure_update`; System Health → Research / Updates with acknowledge; never deploys (section 21) | M15 |
+| 64–66 | GitHub / provider update monitor with Telegram + System Health | DONE in code (M15); GitHub path NOT VERIFIED against the real API from the build environment (blocked there), PyPI path checked against pypi.org | `update_monitor.py` in the ml service: 14 repositories + 8 pinned dependencies every 6 h via GitHub REST and PyPI JSON (no HTML); classes INFO / UPGRADE_AVAILABLE / BREAKING_CHANGE / SECURITY_UPDATE / PROVIDER_CHANGE / ACTION_REQUIRED; baseline first check; history in `update_events` (migration 0031); Telegram kind `infrastructure_update`; System Health → Research / Updates with acknowledge; never deploys (section 21). M15b: every update says what to do (APPLIED / PIN BUMP / INTEGRATION CHECK / REVIEW ONLY); `DEPLOY_PULL=1` for base-image patches; first dependency round applied (section 25) | M15 |
 | 67–70 | Multiple detection methods, source priority, NO_TRADE on provider failure | PARTIAL | NO_TRADE on unavailable data holds on both chains; single detection path per chain | M8 |
 | 71–75 | Paper trading all chains feeding ML | PARTIAL | Solana complete; EVM paper entries exist, not yet ML features | M12 |
 | 76–77 | Safety hierarchy, decision states EXECUTE / REDUCE_SIZE / WAIT / MANUAL_APPROVAL / REJECT / NO_TRADE | PARTIAL | Solana gate implements the hierarchy; decision words differ (PROMOTE/REJECT/...); MANUAL_APPROVAL not implemented | M6 |
@@ -1487,3 +1487,129 @@ USD figure (section 23).
 - the EVM wallet balance read;
 - the BNB/ETH USD rate from the real router;
 - a manual BUY taken by the real worker.
+
+## 25. M10 close, M15b, M11 — Odyssey / NOXA, staying up to date, external wallet intelligence (2026-10-03)
+
+### Robinhood venues (M10 close)
+
+The operator reported NOXA and The Odyssey are no longer active. Launchpad
+Health agrees: no launch or trade was seen from either since monitoring
+began.
+- NOXA was already inactive.
+- The three Odyssey adapters (curve, instant, reflection) are now
+  `active=False` with that reason.
+
+Effect:
+- discovery skips them, so no RPC is spent on them;
+- the Launchpads page shows them DISABLED with the reason;
+- nothing is traded there;
+- decoders, adapters and tests stay, so a reactivation is a one-line
+  change.
+
+### Staying up to date (M15b)
+
+The question was how to take the upgrades the monitor reports. Deploying
+again does not do it: every Python dependency is pinned in the
+repository, and a deploy installs those exact pins.
+
+Each update now says what to do, in the panel and in the Telegram text:
+
+| What to do | Meaning |
+|---|---|
+| APPLIED | the server already runs that version |
+| PIN BUMP | a newer release of a pinned dependency; it reaches the server through a dependency-update pull request that runs every test, then a deploy |
+| INTEGRATION CHECK | a repository whose IDL / ABI / API is read changed a file used here |
+| REVIEW ONLY | a repository that is not installed; nothing to deploy |
+
+`DEPLOY_PULL=1 scripts/deploy.sh` pulls the newest base images (same
+major versions) for operating-system patches. The routine is in
+DEPLOYMENT.md section 3.1.
+
+**First dependency round.** PyPI was checked on 2026-10-03; no pinned
+version had a known vulnerability.
+
+| Package | Change | Result |
+|---|---|---|
+| websockets | 14.1 → 17.1 | applied; all uses are the modern client API (`connect`, `additional_headers`, `recv`) |
+| eth-abi | 5.2.0 → 6.0.0 | applied |
+| eth-account | 0.13.7 → 0.14.0 | applied |
+| cryptography | 50.0.1 → 50.0.2 | applied |
+| pyjwt | 2.15.0 → 2.15.1 | applied |
+| fastapi | 0.141.1 → 0.142.2 | applied |
+| starlette | 1.6.0 → 1.7.0 | applied |
+| alembic | 1.14.0 → 1.20.0 | applied; `alembic check` clean |
+| SQLAlchemy | 2.0.36 → 2.0.54 (newest 2.0.x) | applied |
+| SQLAlchemy | 2.1.3 | **held back**: under it, two tests that read rows after a raw SQL statement failed intermittently in the full suite (passing alone), a behaviour change not cleared in tests |
+
+The RPC-registry test that showed the staleness now expires the session
+explicitly.
+
+The API's live-update WebSocket was also checked end to end on websockets
+17.1: a real uvicorn server, then login, connect, auth and `ws.ready`. The
+API tests cannot show this, because they run the app without uvicorn.
+uvicorn 0.32.1 still serves WebSockets through websockets' deprecated
+legacy module. It works with 17.1, but the next websockets major version
+may remove that module, so uvicorn is the next pin to bump.
+
+### External wallet intelligence (M11)
+
+Sources were read from the providers' own code (2026-10-03), not from
+HTML or guesswork.
+
+**Nansen** (nansen-ai/nansen-cli `src/api.js`):
+- base `https://api.nansen.ai`, header `apikey`;
+- `POST /api/v1/profiler/address/labels`;
+- `/profiler/address/pnl-summary` with a `date` range;
+- `/smart-money/dex-trades` for candidates;
+- free `GET /api/v1/account` for the connection test;
+- chains `solana` and `bnb` (BSC). Robinhood Chain is not covered.
+
+**MadeOnSol** (madeonsol/madeonsol-sdk `src/index.ts`):
+- base `https://madeonsol.com/api/v1`, `Authorization: Bearer`;
+- `GET /wallet/{a}/pnl` (FIFO P/L summary in SOL);
+- `/kol/{wallet}` (404 when not a tracked KOL);
+- `/kol/leaderboard` for candidates;
+- free `GET /me` (tier and quota) for the test;
+- Solana only.
+
+**Rules:**
+- **Enrichment only.** Labels, name and provider P/L are stored in
+  `wallet_enrichment` (migration 0033) and shown next to YonixAlpha's own
+  FIFO ledger, marked "provider-reported; not verified by YonixAlpha and
+  never used as a trade signal". They do not change validation, scores,
+  copy decisions or the safety gate.
+- **Paid, so off by default.**
+  - Keys (`NANSEN_API_KEY`, `MADEONSOL_API_KEY`, and now `GITHUB_TOKEN`)
+    are set and tested from Settings, never returned.
+  - Nothing is called until "Enrichment on" is set in Smart Wallets →
+    External intelligence.
+  - Calls are limited by a daily budget per provider (default 100 Nansen,
+    200 MadeOnSol) and a refresh window per wallet (24 h).
+  - A refusing provider (401 / 402 / 429) is not called again in that pass,
+    and errors go to Telegram (throttled).
+- **Order.** Copy targets first, then validated / paper-followed wallets,
+  then the highest-scored wallets still collecting history. Every
+  10 minutes, `wallets_per_pass` per provider.
+- **Discovery (§25)**, a separate switch:
+  - once a day per provider and chain, the Nansen smart-money traders and
+    the MadeOnSol KOL leaderboard (30 d) are stored as CANDIDATES;
+  - candidates are listed with their own history here (or INSUFFICIENT
+    DATA);
+  - candidates are never copied;
+  - the operator can only add a NOTIFY target, which buys nothing;
+  - a candidate becomes VALIDATED only through its own trades and the
+    validation gates.
+
+**Tests:**
+- core `test_enrichment`: request shapes and headers, BSC → bnb,
+  unsupported chains, error classes, budget, refresh window, a refusing
+  provider, discovery once a day, nothing copied;
+- api `test_enrichment_api`: off by default, settings validated and
+  audited, profiles carry provider records, manual lookup without keys
+  calls nothing, update guidance;
+- copy-engine: step off until switched on.
+
+**NOT VERIFIED until real keys are used:** the provider responses beyond
+the fields typed in their SDKs. The Nansen smart-money row shape is read
+by `trader_address`; an unrecognised shape is reported, never guessed.
+

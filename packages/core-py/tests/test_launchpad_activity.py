@@ -108,9 +108,9 @@ async def test_rollup_counts_only_new_events_and_drives_the_status(db):
 
 
 async def test_a_venue_never_seen_active_is_unverified_until_seven_days_of_monitoring(db):
-    spec = LAUNCHPADS["odyssey_reflection"]
-    await verification.record(db, "odyssey_reflection", "ACTIVE", True, {}, "launchpad_verify", NOW - timedelta(days=1))
-    await verification.record(db, "odyssey_reflection", "DISCOVERY", False, {"launches": 0}, "launchpad_verify",
+    spec = LAUNCHPADS["pons_v1"]
+    await verification.record(db, "pons_v1", "ACTIVE", True, {}, "launchpad_verify", NOW - timedelta(days=1))
+    await verification.record(db, "pons_v1", "DISCOVERY", False, {"launches": 0}, "launchpad_verify",
                               NOW - timedelta(days=1))
     await db.commit()
     a = await activity.launchpad_activity(db, spec, "PAPER", None, NOW)

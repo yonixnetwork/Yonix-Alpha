@@ -315,6 +315,45 @@ async def check_all(session, client: httpx.AsyncClient, now: datetime, token: st
     return events
 
 
+# --- what the operator does with an update ----------------------------------------------------------
+
+# Where each watched dependency is pinned. A deploy installs exactly these
+# pins, so a newer release reaches the server only through a pull request
+# that changes the pin (and runs every test) - never by deploying again.
+PIN_FILE = "packages/core-py/pyproject.toml"
+APPLIED, PIN_BUMP, INTEGRATION_CHECK, REVIEW_ONLY = "APPLIED", "PIN_BUMP", "INTEGRATION_CHECK", "REVIEW_ONLY"
+
+
+def apply_guide(w: Watch, classification: str | None, installed: str | None, target: str | None) -> dict[str, str]:
+    """How an update reaches YonixAlpha, for one watch (and one event's target
+    version / commit). Four cases:
+      APPLIED            a dependency whose installed version on this server is
+                         already the target: nothing left to do;
+      PIN_BUMP           a newer dependency release: it needs a pull request
+                         that changes the pin and passes every test, then a
+                         deploy (deploying alone keeps the old version);
+      INTEGRATION_CHECK  a repository whose IDL / ABI / API we read changed on
+                         a path we use (or with security / breaking wording):
+                         the integration is re-checked in code first;
+      REVIEW_ONLY        a repository YonixAlpha does not install: read it,
+                         acknowledge it; there is nothing to deploy."""
+    if w.kind == "pypi":
+        if installed and target and installed == target:
+            return {"action": APPLIED, "steps": f"this server already runs {w.target} {installed}; acknowledge"}
+        return {"action": PIN_BUMP,
+                "steps": f"{w.target} is pinned to {installed or 'an older version'} in {PIN_FILE}; deploying again keeps "
+                         f"that version. Ask for a dependency update pull request ({w.target} {target or 'latest'}): "
+                         "every test runs against the new version before it is merged. Then deploy."}
+    if w.used_directly and classification in (ACTION, SECURITY, BREAKING):
+        return {"action": INTEGRATION_CHECK,
+                "steps": "YonixAlpha does not install this repository but reads its IDL / ABI / API, and a path we use "
+                         "changed. Ask for an integration check of this change (paste the event); a code change, if "
+                         "needed, comes as a pull request. Deploying alone changes nothing."}
+    return {"action": REVIEW_ONLY,
+            "steps": "Informational: YonixAlpha does not install this repository, so there is nothing to deploy. "
+                     "Read the change and acknowledge it."}
+
+
 def message(ev: dict[str, Any]) -> tuple[str, str]:
     s = ev["summary"]
     title = f"{ev['classification'].replace('_', ' ')}: {ev['key'].split(':', 1)[1]}"
@@ -327,7 +366,12 @@ def message(ev: dict[str, Any]) -> tuple[str, str]:
         parts.append("; ".join(s["reasons"]))
     if s.get("messages"):
         parts.append("e.g. " + s["messages"][0])
-    parts.append("Not applied automatically: review and deploy by hand.")
+    w = next((x for x in WATCHES if x.key == ev["key"]), None)
+    if w is not None:
+        v = s.get("version") or {}
+        g = apply_guide(w, ev["classification"], v.get("installed"), v.get("latest"))
+        parts.append(f"What to do ({g['action'].replace('_', ' ')}): {g['steps']}")
+    parts.append("Never applied automatically.")
     return title, ". ".join(parts)
 
 

@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     # Optional GitHub token (read-only, no scopes needed) for the update monitor:
     # 5,000 API requests per hour instead of 60. Never logged or returned.
     GITHUB_TOKEN: Optional[SecretStr] = None
+    # Optional paid wallet-intelligence APIs (master §24-25): enrichment only,
+    # switched on in the dashboard with a daily call budget. Never logged or returned.
+    NANSEN_API_KEY: Optional[SecretStr] = None
+    MADEONSOL_API_KEY: Optional[SecretStr] = None
     EVM_WALLET_ADDRESS: Optional[str] = None
     EVM_WALLET_PRIVATE_KEY: Optional[SecretStr] = None
     JUPITER_API_KEY: Optional[str] = None

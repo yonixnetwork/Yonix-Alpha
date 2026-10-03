@@ -1359,6 +1359,27 @@ class WalletProfile(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
+class WalletEnrichment(Base):
+    """What an external provider (Nansen, MadeOnSol) reports about one wallet
+    on one chain (yonixalpha_core.enrichment): labels, name, provider P/L.
+    Provider-reported and never a trade signal; kind CANDIDATE marks a wallet
+    a provider's leaderboard / smart-money feed suggested for discovery (it
+    still has to build its own history here and pass validation)."""
+
+    __tablename__ = "wallet_enrichment"
+
+    chain: Mapped[str] = mapped_column(String(16), primary_key=True)
+    wallet: Mapped[str] = mapped_column(String(64), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(16), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, default="PROFILE")  # PROFILE | CANDIDATE
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    data: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    error: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    discovered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
 class CopyTarget(Base):
     """A wallet the operator chose to copy on one chain, with its mode
     (MIRROR / BUY_ONLY / NOTIFY) and limits. Copying never bypasses the
