@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Network } from "lucide-react";
 import ConfirmButton from "@/components/ConfirmDialog";
+import EvmDetection from "@/components/EvmDetection";
 import EvmStreams from "@/components/EvmStreams";
 import PlanHealth, { RolesPlan, ROLES } from "@/components/PlanHealth";
 import RuntimeApply from "@/components/RuntimeApply";
@@ -122,6 +123,7 @@ function EvmProviders({ busy, run }: { busy: boolean; run: (fn: () => Promise<un
         </Section>))}
       <p className="muted">{data.note}</p>
       <EvmStreams />
+      <EvmDetection />
       <Section title="Where to get an RPC — one provider for Solana, BSC and Robinhood Chain">
         <p className="small">{data.guide.summary}</p>
         <div className="table-scroll">

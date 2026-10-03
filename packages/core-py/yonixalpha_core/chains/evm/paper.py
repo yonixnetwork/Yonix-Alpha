@@ -35,7 +35,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yonixalpha_core import kill_switch, launch_coordination, paper_engine
+from yonixalpha_core import decision_states, kill_switch, launch_coordination, paper_engine
 from yonixalpha_core.chains import controls, verification
 from yonixalpha_core.chains.base import Quote
 from yonixalpha_core.chains.evm.settings import EvmTradingSettings
@@ -82,6 +82,8 @@ class EntryDecision:
     plan: Any = None
     buy: Quote | None = None
     detail: dict[str, Any] = field(default_factory=dict)
+    size_reduced: bool = False
+    evidence: dict[str, Any] = field(default_factory=dict)  # master §77 (attach_evidence)
 
     @property
     def ok(self) -> bool:
@@ -91,10 +93,63 @@ class EntryDecision:
         self.blockers.append({"code": code, "message": message})
 
     def to_dict(self) -> dict[str, Any]:
-        return {"at": self.at.isoformat(), "decision": "PAPER_BUY" if self.ok else "NO_TRADE",
-                "category": self.category, "blockers": self.blockers,
+        """The §77 decision record: decision (one of decision_states.STATES,
+        by the §76 hierarchy), timestamp, reason, the deciding layer, every
+        blocker with its layer, features, risk, wallet / safety / ML
+        evidence and provider status; plus the plan and quote detail."""
+        blockers = self.blockers
+        if not self.ok and not blockers:  # no plan and no reason: never reported as a pass
+            blockers = [{"code": "PLAN_INCOMPLETE", "message": "no executable plan was produced"}]
+        r = decision_states.resolve(blockers, self.size_reduced)
+        return {"at": self.at.isoformat(), "decision": r["decision"], "layer": r["layer"], "reason": r["reason"],
+                "category": self.category, "blockers": r["blockers"],
                 "plan": self.plan.to_dict() if self.plan is not None else None,
-                "detail": {k: (str(v) if isinstance(v, Decimal) else v) for k, v in self.detail.items()}}
+                "detail": {k: (str(v) if isinstance(v, Decimal) else v) for k, v in self.detail.items()},
+                **{k: self.evidence.get(k) for k in EVIDENCE_KEYS}, "ml_evidence": decision_states.ML_EVIDENCE}
+
+
+EVIDENCE_KEYS = ("features", "risk", "wallet_evidence", "safety_evidence", "provider_status")
+FEATURE_KEYS = ("window_s", "trades", "buys", "sells", "unique_buyers", "unique_sellers", "net_buy_ratio", "volatility",
+                "buy_volume", "sell_volume", "smart_money_buyers")
+
+
+def _s(v: Any) -> Any:
+    return str(v) if isinstance(v, Decimal) else v
+
+
+def attach_evidence(d: EntryDecision, row: EvmToken, acct: AccountState | None, adapter, now: datetime,
+                    source: str, wallet: dict[str, Any] | None = None) -> None:
+    """Fills the §77 evidence of a decision from what the checks used.
+    Evidence only: nothing here changes the decision."""
+    st = row.stats or {}
+    d.evidence["features"] = {**{k: _s(st[k]) for k in FEATURE_KEYS if k in st}, "category": row.category,
+                              "launchpad": d.launchpad, "stage": row.stage,
+                              "liquidity_quote": (row.state or {}).get("liquidity_quote")}
+    findings = (row.safety or {}).get("findings") or []
+    d.evidence["safety_evidence"] = {
+        "verdict": row.safety_verdict, "checked_at": row.safety_at.isoformat() if row.safety_at else None,
+        "age_s": round((now - row.safety_at).total_seconds()) if row.safety_at else None,
+        "launchpad_status": d.detail.get("launchpad_status"),
+        "findings": [f.get("code") if isinstance(f, dict) else str(f) for f in findings][:12]}
+    coord = row.coordination or {}
+    d.evidence["wallet_evidence"] = {
+        "source": source, "coordination_action": coord.get("action"),
+        "coordination_effect": (d.detail.get("coordination") or {}).get("effect"),
+        "smart_money_buyers": st.get("smart_money_buyers"), **(wallet or {}),
+        "note": "a wallet buying is never permission to buy: every check above still applies"}
+    risk: dict[str, Any] = {}
+    if acct is not None:
+        risk["account"] = {"open_positions": acct.open_positions, "exposure": _s(acct.current_exposure),
+                           "available": _s(acct.available_balance), "daily_realized_pnl": _s(acct.daily_realized_pnl)}
+    if d.plan is not None:
+        risk["plan"] = {"size": _s(d.plan.position_size.value), "stop": _s(d.plan.stop_loss.value),
+                        "max_loss": _s(d.plan.max_loss.value)}
+    d.evidence["risk"] = risk
+    d.evidence["provider_status"] = {
+        "rpc": decision_states.provider_status(adapter.rpc) if adapter is not None else None,
+        "gas": "read" if (d.detail.get("gas") or {}).get("round_trip_gas") else
+               ("unavailable" if (d.detail.get("gas") or {}).get("error") else "not read"),
+        "quote_sources": [x for x in (d.detail.get("buy_source"), d.detail.get("sell_source")) if x]}
 
 
 def _signal(d: EntryDecision, row: EvmToken, s: EvmTradingSettings) -> None:
@@ -185,10 +240,10 @@ async def evaluate_entry(session: AsyncSession, redis, adapter, row: EvmToken, s
                                 "size_factor": fx.size_factor}
     if fx.blocker:
         d.block(fx.blocker, fx.message)
-    if d.blockers:
-        return d  # no quote is spent on a token that cannot be entered anyway
-
-    await build_plan(session, adapter, row, cs.position_size * fx.size_factor, acct_state, liq, now, d)
+    d.size_reduced = fx.size_factor < 1
+    if not d.blockers:  # no quote is spent on a token that cannot be entered anyway
+        await build_plan(session, adapter, row, cs.position_size * fx.size_factor, acct_state, liq, now, d)
+    attach_evidence(d, row, acct_state, adapter, now, "manual" if operator else source)
     return d
 
 
@@ -289,6 +344,7 @@ async def build_plan(session: AsyncSession, adapter, row: EvmToken, size: Decima
                 f"round-trip cost {rt_bps / 100:.2f}% uses half or more of the {plan.stop_distance_pct:.2%} stop")
         return
     if plan.position_size.value < spent:  # the planner sized it down: fill at that size
+        d.size_reduced = True
         buy = await adapter.quote_buy(row.token, int(plan.position_size.value * E18))
         if not buy.ok:
             d.block("NO_EXECUTABLE_QUOTE", buy.error or "buy quote failed at the planned size")

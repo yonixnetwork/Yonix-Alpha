@@ -78,22 +78,29 @@ async def _ensure_token(session: AsyncSession, chain: str, launchpad: str, token
     ).on_conflict_do_nothing(index_elements=["chain", "token"]))
 
 
-async def persist_scan(session: AsyncSession, adapter, res: ScanResult, now: datetime) -> dict[str, int]:
+async def persist_scan(session: AsyncSession, adapter, res: ScanResult, now: datetime,
+                       backfill: bool = False) -> dict[str, int]:
     """Stores one scan's launches, trades, migrations and settings events and
-    advances the cursor to res.to_block. Caller commits."""
+    advances the cursor to res.to_block. Caller commits.
+
+    backfill (a skipped range recovered later, master §68-70): history only.
+    The live cursor is not moved, no observation is opened (the launch is
+    long past its window, so it is never entered), and launches are marked
+    "backfilled"."""
     from yonixalpha_core.chains.evm import observation
 
     chain, key = adapter.spec.chain.value, adapter.spec.key
     counts = {"launches": 0, "trades": 0, "migrations": 0}
     acc = activity.Accumulator()
-    ocfg = await observation.load_config(session) if res.launches else None
+    ocfg = await observation.load_config(session) if res.launches and not backfill else None
     for ln in res.launches:
         venue = {k: ln.extra[k] for k in VENUE_KEYS if ln.extra.get(k)}
         stmt = insert(EvmToken).values(
             chain=chain, token=ln.token, launchpad=key, creator=ln.creator, name=(ln.name or None) and ln.name[:128],
             symbol=(ln.symbol or None) and ln.symbol[:64], created_at=ln.created_at, created_block=ln.block,
             created_tx=ln.tx_hash, quote_token=ln.quote_token, venue=_js(venue), stats={},
-            extra=_js({"launch_seen": True, **{k: v for k, v in ln.extra.items() if k not in VENUE_KEYS}}),
+            extra=_js({"launch_seen": True, **({"backfilled": True} if backfill else {}),
+                       **{k: v for k, v in ln.extra.items() if k not in VENUE_KEYS}}),
             category=TokenCategory.FRESH.value, stage="DEX" if venue.get("pool") else "CURVE")
         # A row created earlier from a trade (launch not yet seen) gets its real launch data.
         r = await session.execute(stmt.on_conflict_do_update(
@@ -107,7 +114,8 @@ async def persist_scan(session: AsyncSession, adapter, res: ScanResult, now: dat
         counts["launches"] += r.rowcount or 0
         if r.rowcount:
             acc.launch(ln.created_at)
-            await observation.ensure(session, chain, ln.token, "FRESH", ln.created_at, "launch observed", ocfg)
+            if not backfill:
+                await observation.ensure(session, chain, ln.token, "FRESH", ln.created_at, "launch observed", ocfg)
     for t in res.trades:
         await _ensure_token(session, chain, key, t.token, t.at)
         r = await session.execute(insert(EvmTrade).values(
@@ -150,7 +158,8 @@ async def persist_scan(session: AsyncSession, adapter, res: ScanResult, now: dat
             extra["events"] = (extra["events"] + [_js(o)])[-10:]
         row.extra = _js(extra)
     await activity.record(session, chain, key, acc, now)
-    await set_cursor(session, chain, key, res.to_block, now)
+    if not backfill:
+        await set_cursor(session, chain, key, res.to_block, now)
     return counts
 
 

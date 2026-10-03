@@ -169,7 +169,8 @@ async def open_for(session: AsyncSession, chain: str, token: str, category: str)
 def record_entry_decision(obs: EvmObservation, decision: dict[str, Any], opened: bool, now: datetime) -> None:
     """The entry pass's verdict on an open observation."""
     codes = [b["code"] for b in decision.get("blockers", [])]
-    obs.last_decision = {"at": now.isoformat(), "decision": decision.get("decision"), "blockers": codes[:8]}
+    obs.last_decision = {"at": now.isoformat(), "decision": decision.get("decision"), "layer": decision.get("layer"),
+                         "reason": decision.get("reason"), "blockers": codes[:8]}
     if opened:
         transition(obs, PENDING, now, "paper entry planned")
         transition(obs, ENTERED, now, "paper position opened")

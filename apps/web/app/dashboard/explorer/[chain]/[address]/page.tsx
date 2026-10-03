@@ -102,7 +102,7 @@ export default function EvmTokenPage() {
           <dt>Launchpad</dt><dd>{t.launchpad.name} {t.launchpad.observe_only && <span className="pill pill-warn">observe only</span>}</dd>
           <dt>Category / stage</dt><dd>{t.status.category ?? "—"} / {t.status.stage ?? "—"}</dd>
           <dt>Migration</dt><dd>{t.migration.migrated_at ? `migrated ${formatDate(t.migration.migrated_at)}` : t.migration.stage === "CURVE" ? "on the bonding curve" : t.migration.stage ?? "—"}</dd>
-          <dt>Last automatic decision</dt><dd>{t.status.entry_decision ? `${t.status.entry_decision.decision}${(t.status.entry_decision.blockers ?? []).length ? `: ${t.status.entry_decision.blockers.map((b: J) => b.code).join(", ")}` : ""}` : "—"}</dd>
+          <dt>Last automatic decision</dt><dd>{t.status.entry_decision ? `${t.status.entry_decision.decision.replaceAll("_", " ")}${t.status.entry_decision.layer ? ` (decided by ${t.status.entry_decision.layer.replaceAll("_", " ").toLowerCase()})` : ""}${(t.status.entry_decision.blockers ?? []).length ? `: ${t.status.entry_decision.blockers.map((b: J) => b.code).join(", ")}` : ""}` : "—"}</dd>
           <dt>Last manual decision</dt><dd>{t.status.manual_decision ? `${t.status.manual_decision.decision}${(t.status.manual_decision.blockers ?? []).length ? `: ${t.status.manual_decision.blockers.map((b: J) => b.code).join(", ")}` : ""}` : "—"}</dd>
           <dt>Smart money</dt><dd>{t.smart_money.copy_targets_traded.length} copy target(s), {t.smart_money.validated_wallets_traded.length} validated wallet(s) traded it
             <div className="muted small">{t.smart_money.note}. A wallet buying is not a reason to buy.</div></dd>

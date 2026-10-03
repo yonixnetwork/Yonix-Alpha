@@ -22,13 +22,23 @@ function Verdict({ v }: { v: string | null }) {
   return <span className={VERDICT_CLASS[v] ?? "pill pill-off"}><Icon size={12} aria-hidden /> {v}</span>;
 }
 
+const STATE_CLASS: Record<string, string> = {
+  EXECUTE: "pill pill-ok", REDUCE_SIZE: "pill pill-ok", WAIT: "pill pill-off", MANUAL_APPROVAL: "pill pill-warn",
+  REJECT: "pill pill-danger", NO_TRADE: "pill pill-off",
+};
+
+/** Master §77 decision: the state, the §76 layer that decided, the first blocker (all on hover). */
 function Decision({ d }: { d: J | null | undefined }) {
   if (!d) return <span className="muted">—</span>;
-  if (d.decision === "PAPER_BUY") return <span className="pill pill-ok">PAPER BUY</span>;
+  if (d.decision === "PAPER_BUY" || d.decision === "EXECUTE") return <span className="pill pill-ok">PAPER BUY</span>;
+  if (d.decision === "REDUCE_SIZE") return <span className="pill pill-ok">PAPER BUY (reduced size)</span>;
   const first = (d.blockers ?? [])[0];
+  const state = d.decision === "NO_TRADE" || !STATE_CLASS[d.decision] ? "NO TRADE" : d.decision.replaceAll("_", " ");
   return (
-    <span title={(d.blockers ?? []).map((b: J) => `${b.code}: ${b.message ?? ""}`).join("\n")}>
-      <CircleSlash size={12} aria-hidden className="muted" /> {first ? first.code.replaceAll("_", " ") : "NO TRADE"}
+    <span title={[d.layer ? `decided by ${d.layer.replaceAll("_", " ")}` : "", ...(d.blockers ?? []).map((b: J) =>
+      `${b.layer ? `[${b.layer.replaceAll("_", " ")}] ` : ""}${b.code}: ${b.message ?? ""}`)].filter(Boolean).join("\n")}>
+      <span className={STATE_CLASS[d.decision] ?? "pill pill-off"}><CircleSlash size={12} aria-hidden /> {state}</span>
+      {first ? <span className="small"> {first.code.replaceAll("_", " ")}</span> : null}
       {(d.blockers ?? []).length > 1 ? <span className="muted small"> +{d.blockers.length - 1}</span> : null}
     </span>
   );

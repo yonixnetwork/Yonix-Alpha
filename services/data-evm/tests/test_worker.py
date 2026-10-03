@@ -18,7 +18,8 @@ from yonixalpha_core.chains.evm import settings as evm_settings
 from yonixalpha_core.chains.evm import paper, store
 from yonixalpha_core.chains.evm.abi import ZERO_ADDRESS
 from yonixalpha_core.chains.evm.fourmeme import EVENTS, FourMeme
-from yonixalpha_core.db.models import EvmToken, EvmTrade, LaunchpadCheck, PaperAccount, PaperPosition
+from yonixalpha_core.db.models import (EvmObservation, EvmScanGap, EvmToken, EvmTrade, LaunchpadCheck, PaperAccount,
+                                       PaperPosition)
 from yonixalpha_core.testing.evm_node import Node, enc, log_of, rpc_for
 
 from app.worker import ChainWorker
@@ -108,10 +109,16 @@ async def test_pipeline_discovery_safety_entry_exit(session_factory, redis_clien
         row = await session.get(EvmToken, ("bsc", TOKEN))
         codes = {b["code"] for b in row.extra["entry_decision"]["blockers"]}
         assert codes == {"LAUNCHPAD_NOT_VERIFIED"}  # never traded before real-chain evidence
+        rec = row.extra["entry_decision"]  # master §77 record, decided by the §76 hierarchy
+        assert (rec["decision"], rec["layer"]) == ("NO_TRADE", "DATA_SAFETY")
+        assert rec["safety_evidence"]["verdict"] == "PASS" and rec["ml_evidence"]["contribution_pct"] == 0
+        assert rec["provider_status"]["rpc"]["available"] is True and rec["features"]["category"] == row.category
 
     await record_paper_evidence(session_factory, now)
     counts = await w.entry_pass(s, now)
     assert counts["opened"] == 1, (await _decision(session_factory))
+    rec = await _decision(session_factory)
+    assert rec["decision"] in ("EXECUTE", "REDUCE_SIZE") and rec["blockers"] == [] and rec["risk"]["plan"]["size"]
     assert (await w.entry_pass(s, now))["opened"] == 0  # no second entry on the same token
     from yonixalpha_core.db.models import EvmObservation
     async with session_factory() as session:  # master §14: observed from the launch, entered through observation
@@ -256,6 +263,34 @@ async def test_discovery_far_behind_jumps_to_recent_blocks_and_says_so(session_f
     assert out["from"] == 881 and out["trades"] == 3  # blocks 910, 940, 970
     async with session_factory() as session:
         assert await store.get_cursor(session, "bsc", "fourmeme") == node.head
+        gap = (await session.execute(select(EvmScanGap))).scalar_one()  # recorded with the cursor move
+        assert (gap.from_block, gap.to_block, gap.status) == (11, 880, "PENDING")
+        n_obs = (await session.execute(select(func.count()).select_from(EvmObservation))).scalar_one()
+
+    # master §68-70: the skipped range is backfilled, only while the live scan is caught up
+    assert await w.gap_pass(s, now, {"fourmeme": {"lag": 10 ** 6}}) == {}
+    back = (await w.gap_pass(s, now, {"fourmeme": {"lag": 0}}))["fourmeme"]
+    assert back["status"] == "DONE" and back["trades"] == 7 and back["launches"] == 1  # blocks 690 .. 880
+    async with session_factory() as session:
+        gap = (await session.execute(select(EvmScanGap))).scalar_one()
+        assert (gap.status, gap.trades, gap.launches, gap.next_block) == ("DONE", 7, 1, 881)
+        assert await store.get_cursor(session, "bsc", "fourmeme") == node.head  # history only: the cursor stays
+        assert (await session.execute(select(func.count()).select_from(EvmTrade))).scalar_one() == 10
+        row = await session.get(EvmToken, ("bsc", TOKEN))
+        assert row.extra["backfilled"] is True and row.created_block == 690
+        # a backfilled launch is past its window: no observation is opened, so it is never entered
+        assert (await session.execute(select(func.count()).select_from(EvmObservation))).scalar_one() == n_obs
+    assert await w.gap_pass(s, now, {"fourmeme": {"lag": 0}}) == {}
+
+    async with session_factory() as session:  # a gap older than the trade retention is expired, not scanned
+        session.add(EvmScanGap(chain="bsc", launchpad="fourmeme", from_block=1, to_block=5, next_block=1,
+                               status="PENDING", detected_at=now - timedelta(days=15), reason={}, launches=0, trades=0,
+                               attempts=0))
+        await session.commit()
+    assert await w.gap_pass(s, now, {"fourmeme": {"lag": 0}}) == {}
+    async with session_factory() as session:
+        assert (await session.execute(select(EvmScanGap.status).order_by(EvmScanGap.id))).scalars().all() == \
+            ["DONE", "EXPIRED"]
 
     s0, _ = evm_settings.parse({"bsc": {"confirmations": 0, "max_lag_minutes": 0}})
     async with session_factory() as session:
