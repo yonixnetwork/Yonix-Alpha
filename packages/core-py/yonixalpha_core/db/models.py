@@ -8,6 +8,7 @@ from sqlalchemy import (
     CheckConstraint,
     Date,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -1357,6 +1358,54 @@ class WalletProfile(Base):
     first_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class EvmMlSample(Base):
+    """One EVM opportunity (an observation: chain, token, category) as an ML
+    sample (yonixalpha_core.ml.evm_samples): decision-time features at T+5,
+    outcome labels from the hour after, the BUY / WAIT / REJECT verdicts
+    (§41) and, once scored, the shadow models' outputs. Review data."""
+
+    __tablename__ = "evm_ml_samples"
+
+    chain: Mapped[str] = mapped_column(String(16), primary_key=True)
+    token: Mapped[str] = mapped_column(String(42), primary_key=True)
+    category: Mapped[str] = mapped_column(String(16), primary_key=True)
+    launchpad: Mapped[str] = mapped_column(String(32), nullable=False)
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    features: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    labels: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    feature_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    label_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    verdicts: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    observation_state: Mapped[str] = mapped_column(String(24), nullable=False)
+    traded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    position_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    executable_return_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ml_shadow: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class WalletTradeLabel(Base):
+    """How a wallet traded one token (yonixalpha_core.ml.wallet_labels):
+    kind EPISODE (its entry, features at the entry, labels such as
+    SUCCESSFUL_ENTRY_PATTERN / LATE_EXIT), MISSED (a winner it did not buy)
+    or NONE (a token no profiled wallet traded: a processed marker)."""
+
+    __tablename__ = "wallet_trade_labels"
+
+    chain: Mapped[str] = mapped_column(String(16), primary_key=True)
+    wallet: Mapped[str] = mapped_column(String(64), primary_key=True)
+    token: Mapped[str] = mapped_column(String(42), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(8), nullable=False)
+    launchpad: Mapped[str] = mapped_column(String(32), nullable=False)
+    entry_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    labels: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    outcome: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    features: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    feature_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    label_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class WalletEnrichment(Base):

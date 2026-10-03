@@ -59,18 +59,18 @@ Providers), see M7.
 | 32 | Copy position link fields | DONE (paper) | `copy_outcomes.link`: source wallet / tx / position, our position, ratio, mode, target vs our entry and exit, latency, displacement, PnL; slippage None for paper (measured on live fills only); on `/api/copy/positions` and the Copy page | M4b |
 | 33 | Copy latency stages on dashboard | DONE (paper) | detection / analysis / risk / decision / execution / total (ms) on the Copy page; build / sign / submission / landing / confirmation are None and labelled live only (no live copy); the target's own submit time is not observable from confirmed trades | M4b |
 | 34–35 | Copy safety never overridden; paper copy with would-have-won / missed | DONE (paper), NOT VERIFIED in production | safety enforced; every target buy (copied, skipped, notify-only) gets a paper outcome after 60 min (`copy_events.outcome`, migration 0025): simulated entry / exit, result, best / worst move, class COPIED / MISSED / BLOCKED_BY_SAFETY / FILTERED_BY_SETTINGS / NOT_COPYABLE / NOTIFY_ONLY; NO_PRICE_DATA instead of 0 % | M4b |
-| 36–44 | ML: wallet behaviour, mistake labels, frozen validation set, staged contribution, champion/challenger, no look-ahead, paper as training data | PARTIAL | Solana ML: multi-target shadow models, champion/challenger, labels, contribution 0 until validated, no-look-ahead audit; missing: wallet-behaviour labels (§37), EVM features, BUY/WAIT/REJECT/SELL/HOLD comparison (§41) | M12 |
+| 36–44 | ML: wallet behaviour, mistake labels, frozen validation set, staged contribution, champion/challenger, no look-ahead, paper as training data | PARTIAL: EVM samples, wallet labels and BUY / WAIT / REJECT comparison DONE in code (M12), NOT VERIFIED on real data until enough samples exist | Solana ML unchanged (multi-target shadow models, champion/challenger, contribution 0 until validated). M12: every BSC / Robinhood observation becomes a sample at T+5 (`ml/evm_samples.py`, table `evm_ml_samples`), labels from the following hour; wallet entries labelled SUCCESSFUL / FAILED / LATE ENTRY / PREMATURE EXIT / LATE EXIT, winners missed (`ml/wallet_labels.py`, table `wallet_trade_labels`, migration 0034); shadow models `shadow_evm_*` / `shadow_wallet_*` with time split and purge; §41 comparison of deterministic / risk / final / ML verdicts, in-sample ML verdicts excluded; ML contribution stays 0 % (section 26). Still missing: SELL / HOLD comparison (exits), a frozen validation set beyond the time-split holdout, staged contribution | M12 |
 | 45 | Manual BUY/SELL on all chains | DONE (EVM paper; Solana unchanged), NOT VERIFIED on the server yet | Solana: `manual_trade.py` (unchanged). BSC / Robinhood: Manual BUY queues a request for the chain's data-evm worker, which runs `evaluate_entry(operator=True)`: every entry check except the strategy signal (switches, launchpad status, fresh safety, liquidity, coordination, limits, cooldown, gas, risk plan); BLOCKED lists every reason; observe-only venues refused; paper only (EVM live locked). Manual SELL: the existing operator exit, now with a SELL button on EVM positions (section 24) | M13 |
 | 46–47 | Automatic-vs-manual sell diagnosis with stage-level evidence | DONE in code (M2); production result pending the server run | `tools/exit_diagnosis.py` (read-only report from `execution_orders` + position timeline + reconciliation); `tests/test_exit_diagnosis.py` | M2 |
 | 48–53 | Provider dashboard, roles, plan health / UPGRADE REQUIRED | DONE (routing + reporting); mempool / sequencer streaming is M8 | roles per endpoint (dashboard, .env and public), role-preferred routing on Solana and EVM with counted fallbacks, operator-stated plan, WSS stored for BSC / Robinhood, plan health from observed limits on RPC / Data Providers and System Health; see section 16 | M7 |
-| 54–55 | Token explorer all chains, explorer links per chain | DONE in code (M14) | one search across Solana / BSC / Robinhood (name / symbol prefix, mint / contract, creator, wallet; migration 0032 indexes); EVM token page with every §54 field (holders: not tracked on EVM, stated, never 0; ML: NOT_AVAILABLE until M12); `explorer_links` builds every link for the token's own chain from confirmed URL formats only; Robinhood has no confirmed DEX page, shown unavailable with the reason (section 24) | M14 |
+| 54–55 | Token explorer all chains, explorer links per chain | DONE in code (M14) | one search across Solana / BSC / Robinhood (name / symbol prefix, mint / contract, creator, wallet; migration 0032 indexes); EVM token page with every §54 field (holders: not tracked on EVM, stated, never 0; ML: NOT_AVAILABLE on the token page); `explorer_links` builds every link for the token's own chain from confirmed URL formats only; Robinhood has no confirmed DEX page, shown unavailable with the reason (section 24) | M14 |
 | 56–58 | Balances, gas reserve, INSUFFICIENT GAS, unified wallet (Solana + EVM accounts) | DONE in code (M13); EVM live balance NOT VERIFIED on the server yet | YonixAlpha Trading Wallet (`/api/wallets/overview`, Wallets page): Total / Available / Reserved / Gas reserve / Trading balance per chain, LIVE and PAPER separate, USD from SOL / BNB / ETH rates; EVM entries need gas for the buy and the sell plus the gas reserve (INSUFFICIENT_GAS / GAS_PRICE_UNAVAILABLE, NO_TRADE); Solana LIVE entries need the fee reserve (INSUFFICIENT GAS in the gate); Solana paper unchanged (section 24) | M13 |
 | 59–61 | PnL always shown with colour, market cap $K/$M | DONE in code (M14) | `position_pnl.view` on every positions list (paper, live, copy, EVM, overview, token pages): PROFIT / LOSS / BREAKEVEN with %, PNL_UNAVAILABLE with the reason when there is no mark (never a bare OPEN, never 0); entry, current, quantity, value, unrealized, realized, fees, net, peak, drawdown; green / red / neutral with TrendingUp / TrendingDown / Minus icons; EVM market cap in USD ($950 / $9.5K / $1.05B) on the token list and token page (section 24) | M14 |
 | 60 | NO EMOJIS | DONE (this phase) | alert prefixes and the live page tick mark removed | M0 |
 | 62–63 | 24/7 server-side workers | DONE | all engines are containers; dashboard is a viewer | — |
 | 64–66 | GitHub / provider update monitor with Telegram + System Health | DONE in code (M15); GitHub path NOT VERIFIED against the real API from the build environment (blocked there), PyPI path checked against pypi.org | `update_monitor.py` in the ml service: 14 repositories + 8 pinned dependencies every 6 h via GitHub REST and PyPI JSON (no HTML); classes INFO / UPGRADE_AVAILABLE / BREAKING_CHANGE / SECURITY_UPDATE / PROVIDER_CHANGE / ACTION_REQUIRED; baseline first check; history in `update_events` (migration 0031); Telegram kind `infrastructure_update`; System Health → Research / Updates with acknowledge; never deploys (section 21). M15b: every update says what to do (APPLIED / PIN BUMP / INTEGRATION CHECK / REVIEW ONLY); `DEPLOY_PULL=1` for base-image patches; first dependency round applied (section 25) | M15 |
 | 67–70 | Multiple detection methods, source priority, NO_TRADE on provider failure | PARTIAL | NO_TRADE on unavailable data holds on both chains; single detection path per chain | M8 |
-| 71–75 | Paper trading all chains feeding ML | PARTIAL | Solana complete; EVM paper entries exist, not yet ML features | M12 |
+| 71–75 | Paper trading all chains feeding ML | DONE in code (M12), NOT VERIFIED on real data yet | Solana complete; EVM: every observation is a sample whether traded or not, a traded one carries the executable return of its closed paper position (fees and taxes included); ML knowledge on ML Review (samples by kind, wins / losses, missed winners, copy outcomes, models, contribution 0 %) (section 26) | M12 |
 | 76–77 | Safety hierarchy, decision states EXECUTE / REDUCE_SIZE / WAIT / MANUAL_APPROVAL / REJECT / NO_TRADE | PARTIAL | Solana gate implements the hierarchy; decision words differ (PROMOTE/REJECT/...); MANUAL_APPROVAL not implemented | M6 |
 | 78 | Preserve historical data | DONE | migrations are additive only | — |
 | 79–81 | Test matrix, automatic-sell regression, 24/7 acceptance | PARTIAL | automatic-vs-manual exit regression added (`services/paper-trading/tests/test_exit_parity.py`); 24/7 acceptance (§81) is an operator procedure on the server, not automated | M2 |
@@ -1613,3 +1613,121 @@ HTML or guesswork.
 the fields typed in their SDKs. The Nansen smart-money row shape is read
 by `trader_address`; an unrecognised shape is reported, never guessed.
 
+## 26. M12 — EVM opportunities and wallet behaviour as ML data (2026-10-03)
+
+Everything in this phase is review data. No entry, exit or size reads it,
+and ML contribution stays 0 %. Real-data results are NOT VERIFIED until the
+server has collected enough samples: a model trains only from 200 labelled
+samples.
+
+### M12a: every EVM opportunity is a sample
+
+Source: the observation state machine (section 15). Each BSC / Robinhood
+observation becomes one sample, whether it was traded, waited or rejected
+(`yonixalpha_core/ml/evm_samples.py`, table `evm_ml_samples`).
+
+| Part | Rule |
+|---|---|
+| Decision point | the observation's T+5 snapshot, the same moment for every token, so traded and untraded opportunities are comparable |
+| Features | only T0 and T+5 data: trades, buyers, sellers, volumes, holders, effective buyers, top buyer share, flows, smart-money buyers, creator trades, market cap, price change since T0, chain / category / launchpad. Unknown stays unknown, with a `__missing` flag, never 0 |
+| Live state | liquidity and curve progress are read from the chain, not from trades. They are used only when read within 90 s of the snapshot; a later read could carry the future, so it is left missing |
+| Labels | from the token's trades in the hour after T+5: reached +50 %, reached +100 %, fell 50 % within 10 min (fast dump), return after 60 min, max drawdown, migrated within the hour |
+| Executable return | only for a traded sample: the result of its closed paper position, fees and taxes included |
+| Left out | curves quoted in another token (Four.meme tokenized stocks: not BNB volumes), and observations without a T+5 snapshot or a price (stored as unknown, never trained on) |
+
+The sample is built once the outcome hour has passed, and only while the
+trades are still retained (14 days). Building is idempotent: one row per
+observation.
+
+### §41 comparison: BUY / WAIT / REJECT
+
+Each sample records four verdicts:
+- **deterministic**: did the trade signal qualify (BUY / WAIT);
+- **risk**: did safety allow it (ALLOW / REJECT);
+- **final**: what the system did (BUY = entered, REJECT = rejected, WAIT = expired without entry);
+- **ML**: from the shadow models once trained. BUY when P(+50 %) is at least 0.5, REJECT when P(fast dump) is at least 0.5, WAIT otherwise.
+
+ML Review → EVM shows, per recommender and verdict:
+- the share that reached +50 % and +100 %;
+- the share that dumped fast;
+- the mean and median hour return;
+- the executable paper result.
+
+It also shows the final action's missed winners (not bought, reached
++100 %) and bad entries (bought, dumped fast).
+
+**In-sample rule.** A model's predictions on samples older than its holdout
+start are marked IN_SAMPLE. They are never counted as an ML BUY / WAIT /
+REJECT. Only out-of-sample verdicts measure whether ML would add anything.
+
+SELL / HOLD (exits) are not compared yet.
+
+### M12b: wallet behaviour labels (§36-37)
+
+Scope: BSC / Robinhood wallets with a profile, contracts excluded
+(`yonixalpha_core/ml/wallet_labels.py`, table `wallet_trade_labels`). A
+token is labelled a day after its launch, once, from the retained trades.
+
+| Label | Rule |
+|---|---|
+| SUCCESSFUL_ENTRY_PATTERN | the price reached +50 % over the wallet's entry within an hour, before any -50 % |
+| FAILED_ENTRY_PATTERN | -50 % first, or +50 % never reached within the hour |
+| LATE_ENTRY | bought at 3x or more the token's first price |
+| PREMATURE_EXIT | the price doubled within an hour after its last sell |
+| LATE_EXIT | up 2x while held, then sold (or still holds) at half that peak or less |
+| MISSED_WINNER | a token of a launchpad the wallet was trading doubled in its first hour, and the wallet never bought it (copy targets and validated wallets only) |
+
+Features at the entry use only what was known then:
+- token age;
+- entry multiple;
+- buyers, trades and volumes before the entry;
+- entry size;
+- the wallet's earlier episodes, counted only once their outcome hour had passed (`available_at`).
+
+A shadow model `shadow_wallet_p_successful_entry` is trained from them.
+
+Smart Wallets shows the summary per wallet ("Entries": successful / failed,
+missed winners) and every labelled entry in the wallet detail. Behaviour
+labels describe how a wallet traded; they are never a reason to copy or
+buy.
+
+### Models
+
+The ml service runs this every training cycle after the Solana models
+(`services/ml/app/evm_ml.py`).
+
+| Model | Target |
+|---|---|
+| shadow_evm_p_upside_50, _p_upside_100, _p_fast_dump, _p_migrate | binary outcomes of the hour after T+5 |
+| shadow_evm_e_return_60m, _e_max_drawdown | regression |
+| shadow_wallet_p_successful_entry | wallet entry outcome |
+
+Training follows the same method as the Solana shadow models:
+- time split (oldest 75 % train, newest 25 % holdout) with a purge gap;
+- holdout metrics;
+- no training when no new samples arrived.
+
+Registry handling:
+- each model is registered with status "shadow";
+- a newer version marks the older one superseded, never deleted;
+- these models are not "challenger", so the promotion flow cannot pick them up.
+
+A cycle failure is recorded as `evm_ml_cycle_failed` (error, so it reaches
+Telegram).
+
+### Verified here
+
+- core: features without look-ahead (late live state dropped), labels, verdicts, comparison, wallet labels, prior-only wallet features, both builders idempotent, missed winners;
+- ml service: 300 synthetic samples train and register every model, and in-sample predictions are marked IN_SAMPLE;
+- api: `/api/ml/evm` counts, comparison and contribution 0; behaviour on profiles and `/api/wallets/behaviour`;
+- migration 0034: upgrade, downgrade and check.
+
+NOT VERIFIED on real data.
+
+### Server observation (deploy 1232c4b)
+
+data-evm logged one ConnectTimeout on `eth_call` from both Robinhood
+endpoints (Alchemy and the public one) at the same time. Token safety
+reported "unavailable" for that read, which means NO_TRADE. That is the
+intended behaviour. If it repeats, Providers will show the endpoints'
+plan health.

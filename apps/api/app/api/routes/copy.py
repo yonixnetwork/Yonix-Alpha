@@ -85,12 +85,14 @@ async def profiles(chain: str | None = Query(None, pattern=CHAIN), label: str | 
     rows = (await db.execute(q.order_by(nulls_last(desc(SORTS[sort]))).limit(limit))).scalars().all()
     targets = {(t.chain, t.wallet.lower()) for t in (await db.execute(select(CopyTarget))).scalars()}
     external = await _external(db, [(r.chain, r.wallet) for r in rows])
+    behaviour = await _behaviour(db, [(r.chain, r.wallet) for r in rows])
     return jsonable({
         "profiles": [{"chain": r.chain, "wallet": r.wallet, "metrics": r.metrics, "labels": r.labels, "score": r.score,
                       "score_detail": r.score_detail, "source": r.source, "trades": r.trades, "tokens": r.tokens,
                       "first_seen": r.first_seen, "last_seen": r.last_seen, "updated_at": r.updated_at,
                       "is_copy_target": (r.chain, r.wallet.lower()) in targets,
-                      "external": external.get((r.chain, r.wallet), {})} for r in rows],
+                      "external": external.get((r.chain, r.wallet), {}),
+                      "behaviour": behaviour.get((r.chain, r.wallet.lower()))} for r in rows],
         "sorted_by": sort,
         "note": "profiles describe observed behaviour; they are not a ranking and no wallet is labelled best. "
                 "A score needs enough closed trades and is shrunk toward a base rate. Contract addresses (routers, "
@@ -117,6 +119,54 @@ async def _external(db: AsyncSession, keys: list[tuple[str, str]]) -> dict[tuple
         if (e.chain, e.wallet) in wanted:
             out.setdefault((e.chain, e.wallet), {})[e.provider] = _external_view(e)
     return out
+
+
+async def _behaviour(db: AsyncSession, keys: list[tuple[str, str]]) -> dict[tuple[str, str], dict]:
+    """(chain, wallet lower) -> label counts of its labelled episodes (§37)."""
+    from yonixalpha_core.db.models import WalletTradeLabel
+
+    evm = [(c, w.lower()) for c, w in keys if c in ("bsc", "robinhood")]
+    if not evm:
+        return {}
+    out: dict[tuple[str, str], dict] = {}
+    rows = (await db.execute(select(WalletTradeLabel.chain, WalletTradeLabel.wallet, WalletTradeLabel.kind,
+                                    WalletTradeLabel.labels).where(
+        WalletTradeLabel.wallet.in_({w for _, w in evm}), WalletTradeLabel.kind.in_(("EPISODE", "MISSED"))))).all()
+    wanted = set(evm)
+    for chain, wallet, kind, labels in rows:
+        if (chain, wallet) not in wanted:
+            continue
+        d = out.setdefault((chain, wallet), {"episodes": 0, "labels": {}})
+        d["episodes"] += 1 if kind == "EPISODE" else 0
+        for x in labels or []:
+            d["labels"][x] = d["labels"].get(x, 0) + 1
+    return out
+
+
+@router.get("/wallets/behaviour/{chain}/{wallet}")
+async def wallet_behaviour(chain: str, wallet: str, limit: int = Query(50, ge=1, le=200), db: AsyncSession = Depends(get_db),
+                           _: str = Depends(get_current_username)) -> dict:
+    """How this wallet traded (§36-37): every labelled entry with the
+    numbers behind its labels, and the winners it missed. Retained trade
+    history only (14 days); tokens are labelled a day after launch."""
+    from yonixalpha_core.db.models import WalletTradeLabel
+    from yonixalpha_core.ml import wallet_labels
+
+    rows = (await db.execute(select(WalletTradeLabel).where(
+        WalletTradeLabel.chain == chain, WalletTradeLabel.wallet == wallet.lower(),
+        WalletTradeLabel.kind.in_(("EPISODE", "MISSED"))).order_by(desc(WalletTradeLabel.entry_at)).limit(limit))).scalars().all()
+    summary = (await _behaviour(db, [(chain, wallet)])).get((chain, wallet.lower()))
+    return jsonable({"chain": chain, "wallet": wallet, "summary": summary,
+                     "episodes": [{"token": r.token, "kind": r.kind, "launchpad": r.launchpad, "entry_at": r.entry_at,
+                                   "labels": r.labels, "outcome": r.outcome} for r in rows],
+                     "definitions": {
+                         wallet_labels.SUCCESSFUL: "+50 % over the entry within an hour, before any -50 %",
+                         wallet_labels.FAILED: "-50 % first, or +50 % never reached within the hour",
+                         wallet_labels.LATE_ENTRY: "bought at 3x or more the token's first price",
+                         wallet_labels.PREMATURE: "the price doubled within an hour after its last sell",
+                         wallet_labels.LATE_EXIT: "up 2x while held, sold (or still holds) at half that peak or less",
+                         wallet_labels.MISSED: "a token of a launchpad it was trading doubled in its first hour; it never bought"},
+                     "note": "Behaviour labels describe how the wallet traded; they are never a reason to copy or buy."})
 
 
 @router.get("/wallets/enrichment")
