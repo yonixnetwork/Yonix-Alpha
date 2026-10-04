@@ -10,7 +10,8 @@ launchpad's own tax / restriction fields.
 Verdicts: PASS, WARN, FAIL, UNKNOWN. UNKNOWN (an RPC or API that could not
 answer) is never read as safe; automatic entries require PASS (WARN only
 when the operator allows it). Honeypot.is (BSC) is enrichment: a positive
-honeypot flag fails the token, a clean result never passes it on its own.
+honeypot flag fails the token, a clean result never passes it on its own. GoPlus token
+security (optional, off by default) works the same way.
 """
 
 from __future__ import annotations
@@ -29,6 +30,17 @@ from yonixalpha_core.chains.evm.settings import ChainTradingSettings, EvmTrading
 EIP1967_IMPLEMENTATION = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
 EIP1967_BEACON = "0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50"
 HONEYPOT_URL = "https://api.honeypot.is/v2/IsHoneypot"
+# GoPlus token security (endpoint and fields from the official SDK,
+# GoPlusSecurity/goplus-sdk-python 0.2.6: GET /api/v1/token_security/{chain_id}
+# ?contract_addresses=..., {"code": 1, "message", "result": {address: {...}}},
+# flags as "0" / "1" strings). Robinhood Chain is not covered.
+GOPLUS_URL = "https://api.gopluslabs.io/api/v1/token_security/{chain_id}"
+GOPLUS_CHAIN_ID = {"bsc": 56}
+GOPLUS_FAIL = {"is_honeypot": "a honeypot", "cannot_sell_all": "holders cannot sell everything",
+               "cannot_buy": "it cannot be bought"}
+GOPLUS_RISKS = ("hidden_owner", "can_take_back_ownership", "owner_change_balance", "selfdestruct", "transfer_pausable",
+                "is_blacklisted", "slippage_modifiable", "personal_slippage_modifiable", "is_mintable", "is_proxy",
+                "external_call", "trading_cooldown")
 PASS, WARN, FAIL, UNKNOWN = "PASS", "WARN", "FAIL", "UNKNOWN"
 
 
@@ -183,6 +195,35 @@ async def honeypot_is(token: str, client: httpx.AsyncClient | None = None) -> di
             await client.aclose()
 
 
+async def goplus(token: str, chain: str, client: httpx.AsyncClient | None = None) -> dict[str, Any]:
+    """GoPlus token security. {"available": bool, "flags": [...], "risks":
+    [...], taxes}. A token GoPlus has not indexed yet is unavailable, never
+    clean."""
+    cid = GOPLUS_CHAIN_ID.get(chain)
+    if cid is None:
+        return {"available": False, "detail": f"{chain} is not covered by GoPlus"}
+    own = client is None
+    client = client or httpx.AsyncClient(timeout=8.0)
+    try:
+        r = await client.get(GOPLUS_URL.format(chain_id=cid), params={"contract_addresses": token})
+        if r.status_code != 200:
+            return {"available": False, "detail": f"HTTP {r.status_code}"}
+        body = r.json()
+        if body.get("code") != 1:
+            return {"available": False, "detail": f"code {body.get('code')}: {str(body.get('message'))[:120]}"}
+        res = (body.get("result") or {}).get(token.lower())
+        if not isinstance(res, dict) or not res:
+            return {"available": False, "detail": "token not indexed by GoPlus yet"}
+        return {"available": True, "flags": [k for k in GOPLUS_FAIL if res.get(k) == "1"],
+                "risks": [k for k in GOPLUS_RISKS if res.get(k) == "1"], "buy_tax": res.get("buy_tax"),
+                "sell_tax": res.get("sell_tax"), "is_open_source": res.get("is_open_source")}
+    except (httpx.HTTPError, ValueError) as exc:
+        return {"available": False, "detail": f"{type(exc).__name__}"}
+    finally:
+        if own:
+            await client.aclose()
+
+
 async def check(adapter, token: str, probe: int, settings: EvmTradingSettings, state: TokenState | None = None,
                 http: httpx.AsyncClient | None = None) -> tuple[SafetyReport, dict[str, Any]]:
     """Full check. Returns the report and the round-trip detail (for the
@@ -224,6 +265,18 @@ async def check(adapter, token: str, probe: int, settings: EvmTradingSettings, s
         else:
             findings.append(_f("INFO", "HONEYPOT_IS_CLEAN", "Honeypot.is did not flag it (enrichment, not proof)",
                                "honeypot.is", **hp))
+    if chain in GOPLUS_CHAIN_ID and settings.goplus_enabled:  # master §68: a second external provider
+        gp = await goplus(token, chain, http)
+        sources.append("goplus")
+        if not gp.get("available"):
+            findings.append(_f("INFO", "GOPLUS_UNAVAILABLE", "GoPlus gave no answer (enrichment only)", "goplus",
+                               detail=gp.get("detail")))
+        elif gp["flags"]:
+            findings.append(_f(FAIL, "GOPLUS_FLAGGED", "GoPlus flags this token: "
+                               + ", ".join(GOPLUS_FAIL[k] for k in gp["flags"]), "goplus", **gp))
+        else:
+            findings.append(_f("INFO", "GOPLUS_CLEAN", "GoPlus did not flag it (enrichment, not proof)"
+                               + (f"; noted risks: {', '.join(gp['risks'])}" if gp["risks"] else ""), "goplus", **gp))
     report = SafetyReport(token=token, verdict=verdict_of(findings), findings=findings, sellable=rt.get("sellable"),
                           buy_tax_bps=state.buy_tax_bps if state else None,
                           sell_tax_bps=state.sell_tax_bps if state else None,

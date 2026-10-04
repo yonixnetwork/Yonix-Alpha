@@ -693,6 +693,8 @@ async def test_evm_streams_state_lead_and_settings(app, client, auth_headers):
     assert rh["copy_events_24h"] == 3 and rh["seen_on_stream_24h"] == 2 and rh["by_source_24h"] == {"sequencer_feed": 2}
     assert rh["lead_ms_median"] == 700 and rh["lead_ms_p95"] is None  # too few samples for a p95
     assert r["chains"]["bsc"]["streams"]["pending_tx"]["state"] == "REFUSED" and r["chains"]["bsc"]["copy_events_24h"] == 0
+    xc = rh["crosscheck"]  # master §68: nothing counted yet -> rates NOT AVAILABLE, never 0 %
+    assert xc["stream_txs_in_logs"]["rate"] is None and xc["launches_seen_first_by_stream"]["logged"] == 0
     assert r["settings"]["robinhood_feed_url"] == "wss://feed.mainnet.chain.robinhood.com"
     bad = await client.put("/api/evm/stream-settings", json={"robinhood_feed_url": "http://x"}, headers=auth_headers)
     assert bad.status_code == 422

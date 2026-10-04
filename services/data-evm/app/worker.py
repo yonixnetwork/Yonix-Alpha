@@ -20,7 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from yonixalpha_core import copy_trading as ct
 from yonixalpha_core import events, launch_coordination
 from yonixalpha_core.chains import verification
-from yonixalpha_core.chains.evm import dex, manual, native_price, observation, paper, safety, store
+from yonixalpha_core.chains.evm import crosscheck, dex, manual, native_price, observation, paper, safety, store
 from yonixalpha_core.chains.evm import settings as evm_settings
 from yonixalpha_core.chains.evm.rpc import EvmRpcUnavailableError
 from yonixalpha_core.db.models import EvmObservation, EvmScanGap, EvmToken, EvmTrade, PaperPosition
@@ -137,6 +137,12 @@ class ChainWorker:
                     touched = {t.token for t in res.trades} | {ln.token for ln in res.launches}
                     await store.refresh_stats(session, self.chain, touched, now, s)
                     await session.commit()
+                try:  # master §68: had a stream already seen these transactions? (measurement only)
+                    await crosscheck.note_logged(self.redis, self.chain,
+                                                 [("launch", ln.tx_hash) for ln in res.launches]
+                                                 + [("trade", t.tx_hash) for t in res.trades], datetime.now(timezone.utc))
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("data-evm.crosscheck_note_failed", chain=self.chain, error=str(exc)[:160])
                 ev = self.evidence[key]
                 ev.launches += len(res.launches)
                 ev.trades += len(res.trades)
@@ -590,6 +596,11 @@ class ChainWorker:
                     done += 1
                 await session.commit()
         return done
+
+    async def crosscheck_pass(self, now: datetime) -> dict[str, int]:
+        """Master §68: stream-seen launchpad transactions checked against the
+        logs (chains.evm.crosscheck). Measurement only."""
+        return await crosscheck.sweep(self.redis, self.chain, now)
 
     async def prune(self, now: datetime) -> int:
         async with self.session_factory() as session:

@@ -17,6 +17,7 @@ from yonixalpha_core import events, launch_coordination, position_pnl
 from yonixalpha_core.chains.evm import native_price, token_view
 from yonixalpha_core.chains.evm import observation as evm_observation
 from yonixalpha_core.chains.evm import settings as evm_settings
+from yonixalpha_core.chains.evm import crosscheck as evm_crosscheck
 from yonixalpha_core.chains.evm import streams as evm_streams
 from yonixalpha_core.chains.evm import wallet as evm_wallet
 from yonixalpha_core.chains.evm import rpc_registry as evm_rpc_registry
@@ -384,6 +385,8 @@ async def get_streams(db: AsyncSession = Depends(get_db), redis: Redis = Depends
             "seen_on_stream_24h": len(leads),
             "by_source_24h": by_source,
             "lead_ms_median": _pct(leads, 0.5), "lead_ms_p95": _pct(leads, 0.95) if len(leads) >= 20 else None,
+            # master §68: the streams and the launchpad logs checked against each other
+            "crosscheck": await evm_crosscheck.report(redis, chain, datetime.now(timezone.utc)),
         }
     return jsonable({"settings": cfg.to_dict(), "defaults": evm_streams.StreamConfig().to_dict(), "errors": errors,
                      "chains": chains,

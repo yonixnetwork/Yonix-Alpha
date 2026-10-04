@@ -97,6 +97,12 @@ async def test_pipeline_discovery_safety_entry_exit(session_factory, redis_clien
     async with session_factory() as session:
         assert (await session.execute(select(func.count()).select_from(EvmTrade))).scalar_one() == 10
         assert await store.get_cursor(session, "bsc", "fourmeme") == node.head
+    # master §68: what the log scan stored is counted for the stream cross-check, once despite the re-scan
+    from yonixalpha_core.chains.evm import crosscheck
+    rep = await crosscheck.report(redis_client, "bsc", datetime.now(timezone.utc))
+    assert rep["launches_seen_first_by_stream"]["logged"] == 1 and rep["launches_seen_first_by_stream"]["rate"] == 0.0
+    assert 1 <= rep["trades_seen_first_by_stream"]["logged"] <= 10
+    assert (await w.crosscheck_pass(now))["checked"] == 0  # no stream ran: nothing to check
 
     assert await w.safety_pass(s, now) == 1
     async with session_factory() as session:

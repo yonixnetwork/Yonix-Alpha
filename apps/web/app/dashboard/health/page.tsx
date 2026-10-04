@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { Server } from "lucide-react";
 import PlanHealth from "@/components/PlanHealth";
+import ResearchPipeline from "@/components/ResearchPipeline";
 import UpdateMonitor from "@/components/UpdateMonitor";
 import { ErrorNotice, Loading, PageHeader, Section, Stat, StatePill } from "@/components/ui";
 import type { ConfigValidationOut, HealthOut } from "@/lib/cc";
@@ -141,6 +142,7 @@ export default function HealthPage() {
         </Section>
       )}
       <UpdateMonitor />
+      <ResearchPipeline />
     </div>
   );
 }
