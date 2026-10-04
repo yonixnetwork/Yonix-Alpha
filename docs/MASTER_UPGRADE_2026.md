@@ -43,7 +43,7 @@ Providers), see M7.
 | 4 | Only Solana, BSC, Robinhood in the active UI | DONE | legacy futures/forex/grid removed (archive branch) | — |
 | 5 | Launchpad health: activity status, last launch/trade/migration, 7d counts, verified flags | DONE in code (M1), NOT VERIFIED in production yet | `chains/activity.py`, table `launchpad_activity` (migration 0024), rollup written in `evm/store.persist_scan`, `/api/launchpads`, Launchpads page; `tests/test_launchpad_activity.py`, `test_control_center` | M1 |
 | 6 | 7-day inactivity → INACTIVE, hidden from active filter, adapter kept, auto-reactivation | DONE in code (M1) | INACTIVE needs 7 days without activity AND 7 days of monitoring (else UNVERIFIED); Active / Archived tabs; discovery keeps scanning, so activity returns the venue to ACTIVE; Solana trade counts are "not tracked" (None), never 0 | M1 |
-| 7 | Solana launchpads beyond Pump.fun/PumpSwap (LetsBONK, LaunchLab, Meteora DBC, Bags, Moonshot, Jupiter Studio) | PARTIAL: activity monitored, observe only (M10a); launch sites split by on-chain config (M10c) | Raydium LaunchLab, Meteora DBC and Moonshot in the registry as OBSERVE ONLY; activity from a 5-minute probe (section 19); per-site split from each sampled instruction's platform / pool config, LaunchLab sites named from their own PlatformConfig (section 22); StonkFun identified: it runs on LaunchLab (seen as one of its platform configs); trading NOT IMPLEMENTED | M10 |
+| 7 | Solana launchpads beyond Pump.fun/PumpSwap (LetsBONK, LaunchLab, Meteora DBC, Bags, Moonshot, Jupiter Studio) | PARTIAL: activity monitored, observe only (M10a); launch sites split by on-chain config (M10c); DBC and LaunchLab quote paths equal to the official SDKs (M22), NOT VERIFIED against the chain until the server checks pass | Raydium LaunchLab, Meteora DBC and Moonshot in the registry as OBSERVE ONLY; activity from a 5-minute probe (section 19); per-site split from each sampled instruction's platform / pool config, LaunchLab sites named from their own PlatformConfig (section 22); StonkFun identified: it runs on LaunchLab (seen as one of its platform configs); M22 (section 34): `solana/dbc.py` (240 quotes + 720 curve walks equal to dynamic-bonding-curve-sdk 1.5.13) and `solana/launchlab.py` (336 trades equal to raydium-sdk-v2; linear curve and Token-2022 mints refused), on-server replays `tools.dbc_verify` / `tools.launchlab_verify`; Moonshot quotes not done (no exact reference); paper trading on these venues NOT IMPLEMENTED (needs their discovery, launch safety and a research item moved to PAPER) | M10, M22 |
 | 8 | BSC: Four.meme, Flap verified; Genius.fun etc. researched | PARTIAL | Four.meme / Flap adapters, discovery live, read-only checks PASS; Four.meme X Mode detected by a plain-buy simulation (revert "A") and FAILS safety; AntiSniperFeeMode / template layout pending `tools.fourmeme_modes` on the server (section 22); Genius.fun researched and added OBSERVE ONLY (Pons V2 event decoder, two factories); Four.meme curves quoted in tokenized stocks (32 of 40 newest) kept out of BNB volume, wallet P/L and regimes (section 23) | M10 |
 | 9 | BSC mempool wallet copying | DONE (measurement) | `evm.streams.PendingTxStream`: eth_subscribe newPendingTransactions (full bodies) over a dashboard WSS endpoint; matches copy targets / launchpads; REFUSED / LIMITED become UPGRADE REQUIRED; copy decisions stay on confirmed trades (§17) | M8 |
 | 10 | Robinhood: Pons, NOXA, Odyssey | DONE | Pons V1 / V2 active and traded on paper; NOXA (paused since 2026-07) and The Odyssey (curve, instant, reflection; no activity seen, operator confirmed 2026-10-03) marked inactive: adapters, decoders and tests kept, discovery skips them, never traded (section 25) | M10 |
@@ -2361,3 +2361,158 @@ NOT VERIFIED on real data: ledgers start with launches resolved after the
 deploy. Wallets need several covered launches before validation can say
 anything.
 
+
+## 34. M22 — Solana launchpads: Meteora DBC and Raydium LaunchLab quote paths (2026-10-04)
+
+§7 asks for the Solana launchpads beyond Pump.fun / PumpSwap. Since M10 the
+system monitors LaunchLab, Meteora DBC and Moonshot (activity probe, launch
+sites per platform config), all OBSERVE ONLY, with no trade path. A paper
+trade needs a price the venue would really give. M22 adds that price, as a
+read path checked against the venues' own SDKs, for the two venues whose
+math can be checked exactly: Meteora DBC and Raydium LaunchLab.
+
+Nothing here builds, signs or sends a transaction, and no venue changes
+mode: all three stay OBSERVE ONLY. Paper trading a venue still goes through
+the research pipeline (§67, section 32), never automatically.
+
+### Meteora DBC (`solana/dbc.py`)
+
+Covers Bags, Jupiter Studio and the other sites on the DBC program.
+- PoolConfig and VirtualPool decoded from the program's IDL 0.2.1
+  (`dbc_layout`, generated, not hand-written).
+- Swap events (EvtSwap, EvtSwap2) read from transactions.
+- Exact-input quotes in both directions: a port of the official SDK
+  (dynamic-bonding-curve-sdk 1.5.13, `src/math`), integer for integer:
+  - the curve walk over up to 20 segments;
+  - all three base fee modes: linear and exponential fee scheduler, rate
+    limiter;
+  - the dynamic (volatility) fee;
+  - fee on input or on output, protocol fee split.
+- The exact-output and partial-fill curve walks (swap2), which the server
+  check needs.
+
+Assumptions stated in the module: no first-swap fee discount (it applies only
+to a pool's very first swap) and no referral account.
+
+**Checked against the SDK.** `tests/fixtures/dbc_sdk/generate.cjs` runs the
+official SDK offline on 60 seeded pools. The pool bytes are encoded with the
+SDK's own account coder, and decoded back by the SDK as a check. The vectors:
+- 240 swap quotes, 34 of them refused ("Insufficient Liquidity");
+- 720 curve walks (from input with an amount left over, from output), 140 of
+  them refused.
+
+`test_dbc.py` reproduces every one exactly: every output, fee, next price and
+error. A test also shows that each perturbed formula is caught.
+
+**Checked against the chain** (on the server, read-only):
+`tools.dbc_verify` decodes recent swap events and the most active pools.
+Consecutive swaps of a pool are then replayed from the price the previous
+swap left, each in its own mode:
+- exact in / partial fill: from the chain's own post-fee input;
+- exact out: from the output.
+
+The next sqrt price and the curve amount must be equal. This is independent
+of the fee state of that moment, which cannot be known afterwards. A swap
+missing in between is caught, not passed.
+
+### Raydium LaunchLab (`solana/launchlab.py`)
+
+Covers LetsBONK, StonkFun and the other sites on the LaunchLab program.
+- PoolState, GlobalConfig and PlatformConfig decoded from the program's IDL
+  0.2.0 (`launchlab_layout`, generated). PlatformConfig is read up to its
+  trailing variable-length list, which a quote does not need.
+- TradeEvents read from transactions.
+- Buys and sells, exact in and exact out: a port of the official
+  raydium-sdk-v2 (0.2.73-alpha) `Curve`, with:
+  - the three curves: constant product, fixed price, linear price;
+  - the protocol, platform, creator and share fee split;
+  - the cap of a buy to what is left on the curve.
+
+**Refused rather than guessed** (no quote, so no trade):
+- **Linear price curve.** The SDK takes its square root through decimal.js
+  (20 significant digits, rounded), which cannot be the program's exact
+  integer result. The math is kept with an integer root so the server replay
+  can test it, but `quote_buy` / `quote_sell` refuse it until that passes.
+- **Token-2022 base or quote mint** (`token_program_flag`). A transfer fee
+  would change the amounts, and it is not modelled.
+- **Pool off its curve** (migrating or migrated).
+- **A sell larger than the curve has sold.**
+
+No share (referral) fee is ever assumed.
+
+**Checked against the SDK.** `tests/fixtures/launchlab_sdk/generate.cjs`
+builds 45 pools, 15 per curve, with the SDK's own `getInitParam` and its own
+buys. They are encoded with the SDK's account layouts and traded with the
+SDK's `Curve` under random fee rates: 336 trades, 32 of them refused.
+
+`test_launchlab.py` reproduces every constant-product and fixed-price trade
+exactly: amounts, all four fees, the capped buys and the errors. On the
+linear curve, the two operations without a square root are exact. The two
+with one match the paid / received amount and the fees exactly; the base
+amount is within 1, and differs only where the SDK rounds up. A mutation
+check shows every perturbed formula is caught.
+
+**Checked against the chain** (on the server, read-only):
+`tools.launchlab_verify`. A TradeEvent carries the pool's virtual and real
+amounts from before the trade, so every trade is replayed on its own, from
+those amounts and its own fees. The check compares:
+- the traded amounts, and the pool's change (after minus before);
+- per curve type, so the linear curve gets its own verdict.
+
+It also checks:
+- the layout: the pool's fixed amounts against its own events;
+- the coverage: which pools a quote can serve (curve types, Token-2022
+  flags, statuses).
+
+### Shared decoding
+
+`solana/anchor_codec.py` reads IDL-generated layouts, checks account
+discriminators and length, and finds a program's emit_cpi! events in a
+getTransaction result. Both venues use it; `test_anchor_codec.py` covers it.
+
+### Update monitor (§64-66)
+
+The ports are pinned to SDK versions. The watched repositories now name the
+math they depend on:
+- DBC `src/math`;
+- raydium-sdk-V2 `src/raydium/launchpad/curve` and `layout` (a new watch).
+
+A change there is reported as an API change, never deployed.
+
+### Not done
+
+- **Moonshot.** No server evidence of activity yet. Its only official math
+  is a multi-chain off-chain helper (`@heliofi/launchpad-common`). It uses
+  bignumber.js decimals and fixes the curve constants and a 1 % fee in the
+  SDK, not from the program, so an exact port cannot be checked offline the
+  way DBC and LaunchLab were. The path, if the probe shows activity: decode
+  its TradeEvent (IDL V4) and replay real trades on the server first, then
+  port.
+- **Paper trading on DBC / LaunchLab.** That needs discovery of their launches,
+  launch-safety checks per venue (Token-2022 extensions, update
+  authorities) and a research item moved to PAPER. The quote paths are the
+  prerequisite; they are not wired into any engine.
+- **Four.meme AntiSniperFeeMode / template layout (§8).** This still needs
+  the output of `tools.fourmeme_modes` from the server (section 22).
+
+### Verified here
+
+- core:
+  - `test_dbc.py` (6): 240 quotes and 720 walks equal to the SDK;
+    decoding; refusals; the server replay, for consecutive exact-in swaps
+    and for partial-fill and exact-out swaps built from SDK numbers.
+  - `test_launchlab.py` (4): 336 trades against the SDK; decoding; every
+    refusal; the server replay of trades built from SDK numbers, with a
+    wrong amount caught.
+  - `test_anchor_codec.py` (2): events found in order and only for their
+    own program; account discriminator and length checks.
+  - `test_venue_verify_tools.py` (3): both server checks run end to end
+    against a fake RPC serving SDK-built pools and transactions: PASS when
+    the trades agree, FAIL on one unit off, FAIL (not a crash) on an
+    undecodable pool.
+  - `test_update_monitor.py` passes with the new watch.
+- ruff clean.
+
+NOT VERIFIED against the chain until `tools.dbc_verify` and
+`tools.launchlab_verify` print PASS on the server; the GitHub and Solana RPC
+endpoints are blocked from this environment.
