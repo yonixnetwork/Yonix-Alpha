@@ -7,7 +7,7 @@ import { useApi } from "@/lib/useApi";
 type J = Record<string, any>;
 const LABEL: Record<string, string> = {
   solana_training: "Solana model training", gate_models: "Safety-gate models", solana_shadow: "Solana shadow models",
-  ablation: "Feature ablation", evm_wallet_ml: "EVM / wallet ML",
+  ablation: "Feature ablation", frozen_validation: "Frozen-set validation", evm_wallet_ml: "EVM / wallet ML",
 };
 const CLASS: Record<string, string> = { OK: "pill pill-ok", RUNNING: "pill pill-warn", FAILED: "pill pill-danger", INTERRUPTED: "pill pill-danger", STOPPED: "pill pill-off" };
 const dur = (s: number | null | undefined) => (s === null || s === undefined ? "—" : s < 120 ? `${s} s` : s < 7200 ? `${Math.round(s / 60)} min` : `${(s / 3600).toFixed(1)} h`);

@@ -17,6 +17,7 @@ from app.evm_ml import run_evm_cycle
 from app.gate_ml import run_cycle
 from app.shadow_ml import run_shadow_cycle
 from app.train import train_and_maybe_register
+from app.validation import run_validation
 
 log = get_logger("ml.main")
 
@@ -44,7 +45,8 @@ async def _record_system_event(session_factory, event_type: str, severity: str, 
 
 
 async def _training_loop(session_factory, redis, settings, stop_event: asyncio.Event) -> None:
-    """Solana training, gate models, shadow models and the ablation, hourly.
+    """Solana training, gate models, shadow models, the ablation and the
+    frozen-set validation, hourly.
     Each step is timed in Redis (yonixalpha_core.ml.steps) for ML Review."""
     while not stop_event.is_set():
         try:
@@ -93,6 +95,19 @@ async def _training_loop(session_factory, redis, settings, stop_event: asyncio.E
         except Exception as exc:  # noqa: BLE001
             log.error("ablation.failed", error=str(exc))
             await _record_system_event(session_factory, "feature_ablation_failed", "error", {"error": str(exc)})
+
+        # Frozen validation sets (master §38): freeze the due windows, score each
+        # model on the sets it never saw. A PASS is what an operator needs before
+        # raising a contribution (ml.governance); nothing is raised from here.
+        try:
+            val = await steps.timed(redis, "frozen_validation", lambda: run_validation(session_factory), log)
+            log.info("validation.completed", frozen=val.get("frozen"), evaluated=val.get("evaluated"))
+            if val.get("frozen") or val.get("evaluated"):
+                await _record_system_event(session_factory, "frozen_validation", "info",
+                                           {k: val.get(k) for k in ("frozen", "evaluated", "skipped_seen", "budget_spent")})
+        except Exception as exc:  # noqa: BLE001
+            log.error("validation.failed", error=str(exc))
+            await _record_system_event(session_factory, "frozen_validation_failed", "error", {"error": str(exc)[:500]})
 
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=TRAIN_INTERVAL_SECONDS)

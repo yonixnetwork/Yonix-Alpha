@@ -1441,6 +1441,42 @@ class EvmExitSample(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class MlValidationSet(Base):
+    """A frozen validation window (master §38): one UTC day of one sample
+    family that no model trains on from the moment it is frozen. Models are
+    scored on it only when they never saw it (ml.validation)."""
+
+    __tablename__ = "ml_validation_sets"
+    __table_args__ = (UniqueConstraint("family", "window_start", name="uq_ml_validation_sets_family_start"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    family: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    window_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    frozen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    samples: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    note: Mapped[str | None] = mapped_column(String(300), nullable=True)
+
+
+class MlValidationReport(Base):
+    """One model version scored on one frozen set: accuracy, calibration,
+    precision, recall, false positives / negatives and the decision
+    outcomes of its calls; PASS / FAIL / INSUFFICIENT_DATA."""
+
+    __tablename__ = "ml_validation_reports"
+    __table_args__ = (UniqueConstraint("set_id", "model_name", "model_version", name="uq_ml_validation_reports_set_model"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    set_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("ml_validation_sets.id", ondelete="CASCADE"), nullable=False,
+                                        index=True)
+    model_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    model_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    metrics: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+
 class WalletTradeLabel(Base):
     """How a wallet traded one token (yonixalpha_core.ml.wallet_labels):
     kind EPISODE (its entry, features at the entry, labels such as

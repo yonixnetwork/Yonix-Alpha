@@ -44,7 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from yonixalpha_core.db.models import ModelVersion, OpportunityOutcome
 from yonixalpha_core.logging import get_logger
-from yonixalpha_core.ml import registry
+from yonixalpha_core.ml import frozen, governance, registry
 from yonixalpha_core.ml.opportunity_features import FEATURE_NAMES, FEATURE_VERSION, features
 
 log = get_logger("ml.shadow")
@@ -193,7 +193,8 @@ def fit(target: str, train: list[Sample], hold: list[Sample], names: tuple[str, 
     return est, {"status": "trained", "kind": "regression", "holdout": m, "train_rows": len(tr), "medians": med}
 
 
-async def load_ledger(session: AsyncSession, since: datetime | None = None, limit: int | None = None) -> list[Sample]:
+async def load_ledger(session: AsyncSession, since: datetime | None = None, limit: int | None = None,
+                      wins: list | None = None) -> list[Sample]:
     """The newest `limit` (default MAX_TRAIN_ROWS) completed, labelled ledger
     rows as samples, oldest first; only the columns sample() reads. The
     whole ledger is never loaded: Solana adds tens of thousands of rows a
@@ -203,6 +204,9 @@ async def load_ledger(session: AsyncSession, since: datetime | None = None, limi
         o.status == "COMPLETE", o.labels.is_not(None))
     if since is not None:
         q = q.where(o.decided_at >= since)
+    if wins is None:  # master §38: frozen validation windows are never trained on
+        wins = await frozen.windows(session, "solana_opportunity")
+    q = q.where(frozen.exclude(o.decided_at, wins))
     q = q.order_by(o.decided_at.desc()).limit(limit or MAX_TRAIN_ROWS).execution_options(yield_per=STREAM_CHUNK)
     # streamed: each snapshot (the full intel blob) becomes its small feature
     # dict and is dropped before the next chunk is read
@@ -216,7 +220,8 @@ async def load_ledger(session: AsyncSession, since: datetime | None = None, limi
 
 async def train_all(session: AsyncSession, now: datetime | None = None) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
-    samples = await load_ledger(session)
+    wins = await frozen.windows(session, "solana_opportunity")
+    samples = await load_ledger(session, wins=wins)
     out: dict[str, Any] = {"samples": len(samples), "not_trained": NOT_TRAINED}
     if len(samples) < MIN_ROWS:
         out["status"] = f"skipped: {len(samples)} completed, labelled opportunities (needs {MIN_ROWS})"
@@ -244,6 +249,7 @@ async def train_all(session: AsyncSession, now: datetime | None = None) -> dict[
             continue
         metrics.update({"target": target, "dataset_size": len(samples), "dataset_end": dataset_end,
                         "max_train_rows": MAX_TRAIN_ROWS, "split": split, "feature_version": FEATURE_VERSION,
+                        "frozen_excluded": [i for *_, i in wins],
                         "role": "SHADOW: review only, never used for decisions or sizing"})
         await session.execute(update(ModelVersion).where(ModelVersion.name == name, ModelVersion.status == SHADOW)
                               .values(status="superseded"))
@@ -258,7 +264,8 @@ async def score_recent(session: AsyncSession, now: datetime | None = None, limit
     now = now or datetime.now(timezone.utc)
     # only this ledger's own models: shadow_evm_* / shadow_wallet_* (app.evm_ml) share target names
     # (P_UPSIDE_50 ...) but not the features, and must never score a Solana opportunity
-    own = [model_name(t) for t in (*BINARY_TARGETS, *REGRESSION_TARGETS)]
+    skip = await governance.observation_only(session)  # operator-set OBSERVATION_ONLY: never scored
+    own = [model_name(t) for t in (*BINARY_TARGETS, *REGRESSION_TARGETS) if model_name(t) not in skip]
     models = (await session.execute(select(ModelVersion).where(ModelVersion.status == SHADOW,
                                                                ModelVersion.name.in_(own)))).scalars().all()
     if not models:

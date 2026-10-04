@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from yonixalpha_core import events
 from yonixalpha_core.db.models import DataQualityEvent, MLFeatureSnapshot, ModelVersion, SystemEvent
 from yonixalpha_core.logging import get_logger
-from yonixalpha_core.ml import registry
+from yonixalpha_core.ml import frozen, registry
 from yonixalpha_core.ml.gate_features import (
     ACTIVE_MODELS,
     DRIFT_FLAG_PREFIX,
@@ -182,9 +182,12 @@ def _metrics(y: list[int], scores: list[float], returns: list[float]) -> dict[st
 
 
 async def train_challenger(session: AsyncSession, model_name: str) -> dict[str, Any]:
+    wins = await frozen.windows(session, "solana_candidate")  # master §38: never trained on
     rows = (await session.execute(
         select(MLFeatureSnapshot).where(MLFeatureSnapshot.engine.in_(ENGINES_FOR_MODEL[model_name]),
-                                        MLFeatureSnapshot.quality_status == "ok").order_by(MLFeatureSnapshot.created_at)
+                                        MLFeatureSnapshot.quality_status == "ok",
+                                        frozen.exclude(MLFeatureSnapshot.created_at, wins))
+        .order_by(MLFeatureSnapshot.created_at)
     )).scalars().all()
     names = FEATURES_FOR_MODEL[model_name]
     # One sample per trade: a candidate re-evaluated every cycle has many
@@ -239,6 +242,8 @@ async def train_challenger(session: AsyncSession, model_name: str) -> dict[str, 
     metrics["reference"]["__prediction__"] = _psi_reference([float(p) for p in est.predict_proba(X)[:, 1]])
     metrics["reference_accuracy"] = sum(1 for s, t in zip(scores, yh) if (s >= 0.5) == bool(t)) / len(yh)
     metrics["dataset_size"] = len(data)
+    metrics["dataset_end"] = rows[-1].created_at.isoformat()
+    metrics["frozen_excluded"] = [i for *_, i in wins]
     # Only the newest challenger is a candidate for promotion.
     await session.execute(update(ModelVersion).where(ModelVersion.name == model_name, ModelVersion.status == "challenger")
                           .values(status="superseded"))

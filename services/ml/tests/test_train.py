@@ -76,18 +76,26 @@ async def test_skips_when_only_one_class_present(db_session):
     assert rows == []
 
 
-async def test_separable_dataset_trains_and_activates(db_session):
+async def test_separable_dataset_trains_a_challenger_that_only_an_operator_promotes(db_session):
+    """Master §39: clearing the bar never puts a model into production by
+    itself; it becomes a promotable challenger and waits for the operator."""
+    from yonixalpha_core.ml.model import NullModel
+
     await _seed_separable_dataset(db_session, count_per_class=30)
 
     outcome = await train_and_maybe_register(db_session)
 
-    assert outcome.status == "activated"
+    assert outcome.status == "challenger_ready"
     assert outcome.model_version is not None
-    assert outcome.model_version.status == "active"
+    assert outcome.model_version.status == "challenger" and outcome.model_version.activated_at is None
+    assert outcome.model_version.metrics["promotable"] is True
     assert outcome.model_version.training_sample_count == 60
     assert set(outcome.model_version.feature_names) == set(FEATURE_NAMES)
     assert outcome.metrics["holdout_auc"] > train_module.MIN_ACTIVATION_AUC
+    assert isinstance(await registry.get_active_model(db_session, train_module.MODEL_NAME), NullModel)
 
+    await registry.promote_challenger(db_session, outcome.model_version, note="test")  # the operator's action
+    await db_session.commit()
     model = await registry.get_active_model(db_session, train_module.MODEL_NAME)
     prediction = model.predict({name: 5.0 for name in FEATURE_NAMES} | {"tx_acceleration_ratio": 8.0})
     assert 0.0 <= prediction.score <= 1.0
@@ -109,22 +117,38 @@ async def test_registers_but_does_not_activate_below_threshold(db_session, monke
     assert isinstance(model, NullModel)  # registered, but never promoted -> still no active model
 
 
-async def test_second_better_training_run_retires_the_first(db_session):
+async def test_promoting_a_second_challenger_retires_the_first_champion(db_session):
     await _seed_separable_dataset(db_session, count_per_class=30)
     first = await train_and_maybe_register(db_session)
-    assert first.status == "activated"
+    assert first.status == "challenger_ready"
+    await registry.promote_challenger(db_session, first.model_version, note="test")
+    await db_session.commit()
 
-    # A second, larger round of the same clearly-separable pattern trains
-    # and activates again — real behavior, not mocked: this exercises
-    # registry.activate_model's demotion of whatever was active before.
+    # A second, larger round of the same clearly-separable pattern registers
+    # a new challenger; the operator promotes it, and registry.activate_model
+    # retires the champion before it (history kept, never deleted).
     await _seed_separable_dataset(db_session, count_per_class=30)
     second = await train_and_maybe_register(db_session)
-    assert second.status == "activated"
+    assert second.status == "challenger_ready"
     assert second.model_version.version == first.model_version.version + 1
+    await registry.promote_challenger(db_session, second.model_version, note="test")
+    await db_session.commit()
 
     await db_session.refresh(first.model_version)
     assert first.model_version.status == "retired"
     assert second.model_version.status == "active"
+
+
+async def test_a_newer_challenger_supersedes_the_unpromoted_one(db_session):
+    await _seed_separable_dataset(db_session, count_per_class=30)
+    first = await train_and_maybe_register(db_session)
+    await _seed_separable_dataset(db_session, count_per_class=30)
+    second = await train_and_maybe_register(db_session)
+    assert (first.status, second.status) == ("challenger_ready", "challenger_ready")
+    await db_session.refresh(first.model_version)
+    # only the newest is a candidate for promotion; the older one is kept
+    assert first.model_version.status == "superseded" and second.model_version.status == "challenger"
+    assert await registry.get_active_model_row(db_session, "solana_candidate_momentum") is None
 
 
 # ---------------------------------------------------------------------------
@@ -236,8 +260,8 @@ async def test_noise_dataset_does_not_activate_a_model(db_session):
 
     outcome = await train_and_maybe_register(db_session)
 
-    assert outcome.status != "activated", (
-        f"a model trained on noise was activated: metrics={outcome.metrics}"
+    assert outcome.status not in ("activated", "challenger_ready"), (
+        f"a model trained on noise became promotable: metrics={outcome.metrics}"
     )
 
 
@@ -250,6 +274,6 @@ async def test_activation_requires_a_lower_confidence_bound_above_chance(db_sess
     assert "holdout_auc_lower_bound" in outcome.metrics
     assert outcome.metrics["scored_per"] == "candidate"
     assert outcome.metrics["split"] == "temporal_grouped_by_candidate"
-    if outcome.status == "activated":
+    if outcome.status == "challenger_ready":
         assert outcome.metrics["holdout_auc_lower_bound"] > 0.5
         assert outcome.metrics["holdout_candidates"] >= train_module.MIN_HOLDOUT_CANDIDATES

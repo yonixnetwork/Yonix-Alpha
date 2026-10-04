@@ -453,8 +453,9 @@ class ChainWorker:
                     r = await paper.manage_position(session, ad, p, now, extra_exit=extra)
                     if r["status"] != "UNPRICED":
                         try:  # master §41 SELL / HOLD checkpoint: review data, never blocks management
-                            tok = await session.get(EvmToken, (self.chain, p.asset_id))
-                            await exit_samples.record(session, p, r["price"], list(r["exits"]), tok, self.chain, now)
+                            async with session.begin_nested():  # a failure here never spoils the position update
+                                tok = await session.get(EvmToken, (self.chain, p.asset_id))
+                                await exit_samples.record(session, p, r["price"], list(r["exits"]), tok, self.chain, now)
                         except Exception as exc:  # noqa: BLE001
                             log.warning("data-evm.exit_sample_failed", position_id=str(pid), error=str(exc)[:160])
                     if extra is not None and r["status"] != "UNPRICED":

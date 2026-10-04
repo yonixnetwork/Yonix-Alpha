@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yonixalpha_core.db.models import MLFeatureSnapshot
+from yonixalpha_core.ml import frozen
 
 # Must match services/decision-engine/app/ml_features.py's FEATURE_NAMES —
 # duplicated rather than imported across the service boundary (services
@@ -46,6 +47,10 @@ class LabeledDataset:
     groups: list[str] = field(default_factory=list)
     group_started_at: dict[str, datetime] = field(default_factory=dict)
     skipped_rows: int = 0
+    # ids of the frozen validation windows left out (master §38): a model
+    # trained on this dataset never saw them, so ml validation may score it there
+    frozen_excluded: list[int] = field(default_factory=list)
+    dataset_end: datetime | None = None  # the newest row used
 
     @property
     def candidate_count(self) -> int:
@@ -65,12 +70,15 @@ async def load_labeled_dataset(session: AsyncSession, feature_names: list[str] =
     silently fabricated value would defeat the whole point of a labeled
     dataset.
     """
+    wins = await frozen.windows(session, "solana_candidate")
     result = await session.execute(
-        select(MLFeatureSnapshot).where(MLFeatureSnapshot.label.is_not(None)).order_by(MLFeatureSnapshot.created_at)
+        select(MLFeatureSnapshot).where(MLFeatureSnapshot.label.is_not(None),
+                                        frozen.exclude(MLFeatureSnapshot.created_at, wins))
+        .order_by(MLFeatureSnapshot.created_at)
     )
     rows = result.scalars().all()
 
-    dataset = LabeledDataset()
+    dataset = LabeledDataset(frozen_excluded=[i for *_, i in wins])
     for row in rows:
         if any(name not in row.features for name in feature_names):
             dataset.skipped_rows += 1
@@ -83,5 +91,6 @@ async def load_labeled_dataset(session: AsyncSession, feature_names: list[str] =
         dataset.labels.append(row.label)
         dataset.groups.append(group)
         dataset.group_started_at.setdefault(group, row.created_at)
+        dataset.dataset_end = row.created_at
 
     return dataset

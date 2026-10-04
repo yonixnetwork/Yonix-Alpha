@@ -10,6 +10,7 @@ from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import MLFeatureSnapshot, RiskEvent, StrategySignal, Token, TradingCandidate
 from yonixalpha_core.decision import Decision, DecisionType, EntryType, no_trade
 from yonixalpha_core.logging import get_logger
+from yonixalpha_core.ml import governance
 from yonixalpha_core.ml.registry import get_active_model
 from yonixalpha_core.risk import DataQuality, RiskConfig, RiskContext, evaluate as evaluate_risk
 from yonixalpha_core.state_machine import CandidateState, apply_transition
@@ -105,16 +106,26 @@ async def evaluate_candidate(
         reasons = score_reasons
         ml_model_id = None
         ml_score: Decimal | None = None
+    elif MODEL_NAME in await governance.observation_only(session):
+        # operator-set OBSERVATION_ONLY (ml.governance): the model is not scored here
+        confidence = rule_confidence
+        reasons = score_reasons + [f"ML model {MODEL_NAME} is observation only: not scored, rules decide"]
+        ml_model_id = None
+        ml_score = None
     else:
         model = await get_active_model(session, MODEL_NAME)
         prediction = model.predict(feature_vector)
         if prediction.model_version is not None:
-            blended = (rule_confidence + prediction.score) / 2
+            # Master §40: the operator-set contribution, 0 % until validated
+            # (ml.governance); never the former fixed 50 %.
+            w = await governance.weight_for(session, MODEL_NAME)
+            blended = (1 - w) * rule_confidence + w * prediction.score
             blended, cap_reasons = cap_for_data_quality(blended, features.data_quality)
             confidence = blended
             reasons = (
                 score_reasons
-                + [f"blended with ML model {prediction.model_name} v{prediction.model_version} (ml_score={prediction.score:.2f})"]
+                + [f"ML model {prediction.model_name} v{prediction.model_version} ml_score={prediction.score:.2f}, "
+                   f"contribution {w:.0%}" + ("" if w else " (shadow: rules decide)")]
                 + cap_reasons
             )
             ml_model_id = prediction.model_id

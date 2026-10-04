@@ -58,11 +58,12 @@ pipeline, not a model.
   everything above, is the expected outcome of every run for the
   foreseeable future. Given enough labeled, two-class data, it trains a
   `LogisticRegression`, evaluates it on a held-out split, registers the
-  result unconditionally, and **only** promotes it to `active` if its
-  holdout AUC clears `MIN_ACTIVATION_AUC` (0.55) *and* is at least as
-  good as whatever is currently active. A model that trains but doesn't
-  clear that bar stays `trained` — inspectable, never silently discarded,
-  never auto-promoted either.
+  result unconditionally, and marks it a promotable **challenger** only if
+  its holdout AUC clears `MIN_ACTIVATION_AUC` (0.55) with its lower bound
+  above 0.5 *and* it is at least as good as the current champion. It is
+  never activated by the training job (master §39): an operator promotes
+  it from ML Review (audited). A model that trains but doesn't clear that
+  bar stays `trained` — inspectable, never silently discarded.
 - **Genuine, safe inference integration.** `decision-engine` calls
   `registry.get_active_model()` on every evaluation. When nothing is
   active — today, always — it gets `NullModel`, whose `model_version` is
@@ -72,8 +73,12 @@ pipeline, not a model.
   (`"no active trained ML model — confidence is rule-based only"`)
   rather than blending in some fabricated "neutral" score that would
   silently bias confidence upward for a candidate with nothing backing
-  it. When a real model *is* active, its score is averaged with the
-  rule-based confidence, and Phase 5's `DEGRADED`-data cap is
+  it. When a real model *is* active, its score is blended with the
+  rule-based confidence at the **contribution the operator set**
+  (`yonixalpha_core/ml/governance.py`): 0 % by default (shadow: rules
+  decide), raised 5 % at a time, at most weekly, to 25 % at most, and only
+  while the champion passes its frozen validation set (docs
+  `MASTER_UPGRADE_2026.md` section 31). Phase 5's `DEGRADED`-data cap is
   **re-applied after blending** — a confident model can never push a
   DEGRADED-data candidate's confidence back above the safety ceiling.
 
@@ -83,11 +88,12 @@ Nothing in this pipeline needs to change. A future phase (most likely
 Phase 7, paper trading) sets `MLFeatureSnapshot.label` on rows whose
 candidate reached a known outcome, `services/ml`'s hourly loop picks up
 enough labeled rows to clear `MIN_TRAINING_SAMPLES`, trains for real, and
-— if the model is actually good — activates it. `decision-engine` starts
-blending its score in on the very next evaluation, with no deploy or code
-change required. That's the point of building the plumbing now: so the
-first real model can go live the moment there's real data, not require a
-whole extra phase of infrastructure work once it exists.
+— if the model is actually good — registers it as a promotable challenger.
+From there every step is an operator's: promote it (ML Review), wait for a
+PASS on a frozen validation window it never saw, then raise its
+contribution from 0 % in 5 % steps (ML Review, ML governance). No deploy
+or code change is needed, and nothing in the pipeline raises a model's
+influence by itself.
 
 ## Where things live
 
@@ -99,7 +105,9 @@ whole extra phase of infrastructure work once it exists.
 | Feature vector construction | `services/decision-engine/app/ml_features.py` |
 | Inference blending + feature-snapshot persistence | `services/decision-engine/app/evaluate.py` |
 | Labeled-dataset loading | `services/ml/app/dataset.py` |
-| Training job + activation gating | `services/ml/app/train.py` |
+| Training job + challenger gating | `services/ml/app/train.py` |
+| Frozen validation windows + per-model reports | `packages/core-py/yonixalpha_core/ml/frozen.py`, `services/ml/app/validation.py` |
+| Stages and contribution % | `packages/core-py/yonixalpha_core/ml/governance.py`, `/api/ml/governance` |
 | Periodic training loop | `services/ml/app/main.py` |
 
 `numpy`/`scikit-learn`/`joblib` are an optional `[ml]` extra on

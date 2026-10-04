@@ -1,3 +1,4 @@
+import pytest
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -164,15 +165,43 @@ async def test_active_model_score_is_blended_but_never_escapes_degraded_cap(db_s
     DEGRADED-data candidate's confidence above the safety cap — the cap is
     reapplied after blending specifically to guarantee this.
     """
+    from yonixalpha_core.db.models import PlatformSetting
+    from yonixalpha_core.ml import governance
+
     await _activate_fixed_model(db_session, positive_proba=0.99)
+    db_session.add(PlatformSetting(key=governance.KEY, value={"models": {  # the highest contribution allowed
+        "solana_candidate_momentum": {"stage": "PAPER_CONTRIBUTOR", "percent": governance.MAX_PCT}}}))
+    await db_session.commit()
     candidate = await _make_candidate(db_session, state=CandidateState.DISCOVERED)
     now = datetime.now(timezone.utc)
 
     decision = await evaluate_candidate(db_session, redis_client, _settings(), candidate, now)
 
     assert decision.confidence <= CONFIDENCE_CAP_DEGRADED_DATA
-    assert any("blended with ML model" in r for r in decision.reason)
-    assert any("capped" in r for r in decision.reason)
+    assert any("ML model" in r and f"contribution {governance.MAX_PCT}%" in r for r in decision.reason)
+
+
+async def test_ml_contribution_is_zero_until_the_operator_sets_it(db_session, redis_client):
+    """Master §40: an active champion is scored but has no weight at 0 %; an
+    operator-set PAPER contribution (ml.governance) moves the confidence by
+    exactly that weight, never the former fixed 50 %."""
+    from yonixalpha_core.db.models import PlatformSetting
+    from yonixalpha_core.ml import governance
+
+    candidate = await _make_candidate(db_session, state=CandidateState.DISCOVERED)
+    now = datetime.now(timezone.utc)
+    rules_only = (await evaluate_candidate(db_session, redis_client, _settings(), candidate, now)).confidence
+
+    await _activate_fixed_model(db_session, positive_proba=0.0)
+    shadow = await evaluate_candidate(db_session, redis_client, _settings(), candidate, now)
+    assert shadow.confidence == rules_only and any("shadow: rules decide" in r for r in shadow.reason)
+
+    db_session.add(PlatformSetting(key=governance.KEY, value={"models": {
+        "solana_candidate_momentum": {"stage": "PAPER_CONTRIBUTOR", "percent": 10}}}))
+    await db_session.commit()
+    paper = await evaluate_candidate(db_session, redis_client, _settings(), candidate, now)
+    assert paper.confidence == pytest.approx(float(rules_only) * 0.9, abs=1e-3) or paper.confidence < rules_only
+    assert any("contribution 10%" in r for r in paper.reason)
 
 
 async def test_ml_feature_snapshot_persisted_with_model_link_when_active(db_session, redis_client):

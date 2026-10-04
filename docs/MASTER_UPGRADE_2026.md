@@ -59,7 +59,7 @@ Providers), see M7.
 | 32 | Copy position link fields | DONE (paper) | `copy_outcomes.link`: source wallet / tx / position, our position, ratio, mode, target vs our entry and exit, latency, displacement, PnL; slippage None for paper (measured on live fills only); on `/api/copy/positions` and the Copy page | M4b |
 | 33 | Copy latency stages on dashboard | DONE (paper) | detection / analysis / risk / decision / execution / total (ms) on the Copy page; build / sign / submission / landing / confirmation are None and labelled live only (no live copy); the target's own submit time is not observable from confirmed trades | M4b |
 | 34–35 | Copy safety never overridden; paper copy with would-have-won / missed | DONE (paper), NOT VERIFIED in production | safety enforced; every target buy (copied, skipped, notify-only) gets a paper outcome after 60 min (`copy_events.outcome`, migration 0025): simulated entry / exit, result, best / worst move, class COPIED / MISSED / BLOCKED_BY_SAFETY / FILTERED_BY_SETTINGS / NOT_COPYABLE / NOTIFY_ONLY; NO_PRICE_DATA instead of 0 % | M4b |
-| 36–44 | ML: wallet behaviour, mistake labels, frozen validation set, staged contribution, champion/challenger, no look-ahead, paper as training data | PARTIAL: EVM samples, wallet labels and BUY / WAIT / REJECT comparison DONE in code (M12), NOT VERIFIED on real data until enough samples exist | Solana ML unchanged (multi-target shadow models, champion/challenger, contribution 0 until validated). M12: every BSC / Robinhood observation becomes a sample at T+5 (`ml/evm_samples.py`, table `evm_ml_samples`), labels from the following hour; wallet entries labelled SUCCESSFUL / FAILED / LATE ENTRY / PREMATURE EXIT / LATE EXIT, winners missed (`ml/wallet_labels.py`, table `wallet_trade_labels`, migration 0034); shadow models `shadow_evm_*` / `shadow_wallet_*` with time split and purge; §41 comparison of deterministic / risk / final / ML verdicts, in-sample ML verdicts excluded; ML contribution stays 0 % (section 26); built in batches until drained, training on the newest 30k samples, retrained at most daily, ML Review aggregated in SQL (section 27). SELL / HOLD exit checkpoints with the same four verdicts since M18 (section 30). Still missing: a frozen validation set beyond the time-split holdout, staged contribution | M12, M18 |
+| 36–44 | ML: wallet behaviour, mistake labels, frozen validation set, staged contribution, champion/challenger, no look-ahead, paper as training data | DONE in code (M12, M18, M19); NOT VERIFIED on real data until the first frozen windows have labelled samples | Solana multi-target shadow models and gate champion/challenger unchanged. M12: every BSC / Robinhood observation becomes a sample at T+5 (`ml/evm_samples.py`, table `evm_ml_samples`), labels from the following hour; wallet entries labelled SUCCESSFUL / FAILED / LATE ENTRY / PREMATURE EXIT / LATE EXIT, winners missed (`ml/wallet_labels.py`, migration 0034); shadow models `shadow_evm_*` / `shadow_wallet_*` with time split and purge; §41 comparison of deterministic / risk / final / ML verdicts, in-sample ML verdicts excluded (section 26); built in batches until drained, training on the newest 20k samples, retrained at most daily, ML Review aggregated in SQL (section 27). SELL / HOLD exit checkpoints since M18 (section 30), copy positions included since M19. M19 (section 31): frozen validation windows every trainer leaves out (migration 0038), each model scored only on windows it never saw (PASS / FAIL / INSUFFICIENT_DATA); stages OBSERVATION_ONLY / SHADOW / PAPER_CONTRIBUTOR / LIVE_CONTRIBUTOR (locked) with an operator-set contribution, 0 % by default, +5 % at most weekly, max 25 %, only with a PASS; no automatic activation of any model | M12, M18, M19 |
 | 45 | Manual BUY/SELL on all chains | DONE (EVM paper; Solana unchanged), NOT VERIFIED on the server yet | Solana: `manual_trade.py` (unchanged). BSC / Robinhood: Manual BUY queues a request for the chain's data-evm worker, which runs `evaluate_entry(operator=True)`: every entry check except the strategy signal (switches, launchpad status, fresh safety, liquidity, coordination, limits, cooldown, gas, risk plan); BLOCKED lists every reason; observe-only venues refused; paper only (EVM live locked). Manual SELL: the existing operator exit, now with a SELL button on EVM positions (section 24) | M13 |
 | 46–47 | Automatic-vs-manual sell diagnosis with stage-level evidence | DONE in code (M2); production result pending the server run | `tools/exit_diagnosis.py` (read-only report from `execution_orders` + position timeline + reconciliation); `tests/test_exit_diagnosis.py` | M2 |
 | 48–53 | Provider dashboard, roles, plan health / UPGRADE REQUIRED | DONE (routing + reporting); mempool / sequencer streaming is M8 | roles per endpoint (dashboard, .env and public), role-preferred routing on Solana and EVM with counted fallbacks, operator-stated plan, WSS stored for BSC / Robinhood, plan health from observed limits on RPC / Data Providers and System Health; see section 16 | M7 |
@@ -2013,3 +2013,167 @@ the copy engine) are not recorded yet.
   in-sample calls are marked IN_SAMPLE; the final verdict is never changed.
 - API: exits on `/api/ml/evm`.
 - steps: a normal stop gives STOPPED, not INTERRUPTED.
+
+## 31. M19 — ML governance (2026-10-04)
+
+### Server finding (deploy cca3257)
+
+- Four steps OK and one RUNNING. No interruption after the deploy: the
+  STOPPED marking works.
+- One exit checkpoint so far (a SELL, not labelled yet).
+- 5 open EVM paper positions and 154 closed.
+
+The copy engine manages its own `evm_copy_*` positions, so its checkpoints
+were missing. They are recorded now (below).
+
+### What the audit found against §38-42
+
+| Rule | Before M19 | Now |
+|---|---|---|
+| §39: no automatic production contribution because of a high score | the Solana candidate model (`solana_candidate_momentum`) was **activated by its training job** when its holdout cleared the bar, and the decision engine then blended it at a **fixed 50 %** | the training job only registers a promotable **challenger**; an operator promotes it (audited); its weight is the contribution % the operator sets, **0 % by default** |
+| §38: a validation set the model has never seen | only the time-split holdout inside each training run | weekly frozen windows, excluded from every trainer, scored per model (below) |
+| §40: staged contribution, no raise from a winning streak | not present | stages and the raise rules below; a winning streak is not an input |
+| §42: do not overwrite the active model after every trade | already held: daily retraining at most, versions superseded, never deleted | unchanged |
+
+**Behaviour change on deploy.** If a `solana_candidate_momentum` model is
+active on the server, its weight in the candidate confidence drops from 50 %
+to 0 % until an operator raises it. The gate models (`gate_solana_*`) are
+unchanged: they only make a decision WAIT below the engine's
+`min_ml_confidence`, and only after an operator promotes them.
+
+### Frozen validation sets
+
+Code: `yonixalpha_core/ml/frozen.py`; table `ml_validation_sets` (migration
+0038).
+
+**Freezing.** Once a week per sample family, the UTC day 3 days back is
+frozen. Its labels are complete by then. The families are:
+- EVM entries;
+- wallet entries;
+- EVM exits;
+- Solana opportunities;
+- Solana candidates.
+
+An empty window is still frozen, with the note "no labelled samples in this
+window", never a fabricated count.
+
+**Exclusion.** From then on every trainer leaves the window out and records
+the window ids in the model's metrics (`frozen_excluded`). The trainers are:
+- the EVM, wallet and exit shadow models;
+- the Solana opportunity shadow models;
+- the candidate model;
+- the gate models.
+
+Rows are kept: freezing only changes who may train on them.
+
+**Scoring.** Code: `services/ml/app/validation.py`, step "Frozen-set
+validation", hourly. A model is scored only on windows it never saw. A
+window counts as unseen when one of these holds:
+- it is in the model's `frozen_excluded`;
+- the model's data ended before the window started.
+
+The newest 8 such windows are pooled, so a family with few labels a day
+still reaches a meaningful sample. They are capped at 20,000 rows in total,
+spread evenly over each window and streamed.
+
+**Reports.** One report per (newest window, model version), so a new window
+brings a new report (table `ml_validation_reports`). Each report holds:
+- AUC with its 95 % lower bound;
+- Brier score and calibration error (ECE);
+- accuracy, precision and recall;
+- false positives and false negatives at 0.5;
+- the breakdown per window.
+
+Some families add their decision outcomes on the frozen windows:
+
+| Family | Also reported |
+|---|---|
+| EVM entries | AUC per category (FRESH / MOMENTUM / MIGRATED). The ML BUY group (P_UPSIDE_50 at least 0.5 and P_FAST_DUMP below 0.5) next to the rules' final BUY group: mean 60-minute return, executable return (NOT AVAILABLE when no paper trade in the group closed), drawdown, fast-dump rate, missed winners, bad entries |
+| EVM exits | bad exits (SELL, then the price rose 10 %) and missed exits (HOLD, then it fell 10 %), for ML and for the system's own calls |
+| Solana opportunities | the executable return of the ML BUY group against all opportunities |
+
+**Verdict:**
+
+| Verdict | When |
+|---|---|
+| PASS | at least 100 samples, 10 of each class, AUC of 0.55 or more with the lower bound above 0.5, and ECE of 0.10 or less |
+| FAIL | enough data, but one of those is not met |
+| INSUFFICIENT_DATA | too few labelled samples |
+
+Copy trades and wallet exits have no model: they are listed as NOT
+AVAILABLE, never scored.
+
+### Contribution stages
+
+Code: `yonixalpha_core/ml/governance.py`; setting `ml_contribution`.
+
+| Stage | Meaning |
+|---|---|
+| OBSERVATION_ONLY | trained and validated, but not scored onto new samples or decisions |
+| SHADOW | scored and compared, never read by a decision (the default) |
+| PAPER_CONTRIBUTOR | its consumer uses it in paper decisions at the set percentage |
+| LIVE_CONTRIBUTOR | locked: no ML live authorization exists |
+
+**Which models can contribute.**
+- Only `solana_candidate_momentum` has a decision consumer: the decision
+  engine's candidate confidence, (1 - w) x rules + w x model. That flow
+  feeds paper trading only; Solana live entries run their own safety gate
+  and never read this confidence.
+- The EVM, wallet, exit and Solana opportunity models have no consumer.
+  They can only be SHADOW or OBSERVATION_ONLY.
+- Gate models are governed by promotion and the risk settings, not here.
+
+**Raising** needs all of these:
+- the operator-promoted champion;
+- a PASS on that champion's latest frozen-set report;
+- at most +5 % per change;
+- at least 7 days since the last raise, including after a lowering;
+- 25 % at most.
+
+Lowering is always allowed at once. Every change is audited
+(`ml.contribution_changed`). Nothing raises a contribution automatically.
+
+### Dashboard
+
+ML Review → ML governance shows, per model:
+- stage and contribution;
+- consumer and version (and the champion);
+- training samples and validation samples;
+- out-of-sample AUC, confidence (AUC lower bound) and calibration;
+- the frozen-set verdict and health (OK / DEGRADED / DRIFT / NOT_VALIDATED).
+
+It also has the candidate model's promote button, the stage and percentage
+editor (refusals show the API's reasons), the decision outcomes on frozen
+windows, and the list of frozen sets. `GET /api/ml/governance` and
+`PUT /api/ml/governance/{name}` need authentication.
+
+### Copy positions in the §41 exit test
+
+The copy engine records the same SELL / HOLD checkpoints for its EVM copy
+positions:
+- every management pass (5-minute cadence);
+- every mirrored sell, which is a deterministic SELL.
+
+### Verified here
+
+- core: contribution defaults and weight; every raise rule (champion, PASS,
+  one step, 7 days, maximum, multiples of 5); lowering; the locked live
+  stage; models without a consumer; gate models refused; health.
+- ml service:
+  - a frozen day is left out of EVM training and recorded;
+  - the trained model is scored only on the windows it never saw, pooled with
+    the per-window breakdown and the ML BUY / rules BUY outcomes;
+  - one report per newest window and version (a second pass adds none);
+  - candidate and gate training leave frozen windows out;
+  - an OBSERVATION_ONLY model is not scored;
+  - the activation tests now require operator promotion.
+- decision engine: the confidence equals rules only at 0 %, and the
+  contribution is applied at 10 %.
+- copy engine: both mirrored sells of a copy position are SELL checkpoints.
+- API: governance read; every refusal; the audited 5 % raise; the 7-day
+  refusal; lowering; models without a consumer; authentication.
+
+NOT VERIFIED on real data: the first windows freeze on the first ml cycle
+after deploy. Until enough labelled samples fall in them, every model stays
+NOT_VALIDATED or INSUFFICIENT_DATA, and no contribution can be raised.
+
