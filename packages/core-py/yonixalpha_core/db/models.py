@@ -1414,6 +1414,33 @@ class EvmMlSample(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class EvmExitSample(Base):
+    """A SELL / HOLD decision point of an open EVM paper position (master
+    §41; yonixalpha_core.ml.exit_samples): features known at that moment,
+    the deterministic / risk / final / ML verdicts and, after 15 minutes,
+    what the price did. Review data."""
+
+    __tablename__ = "evm_exit_samples"
+    __table_args__ = (Index("ix_evm_exit_samples_position_at", "position_id", "at"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    position_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    chain: Mapped[str] = mapped_column(String(16), nullable=False)
+    token: Mapped[str] = mapped_column(String(42), nullable=False)
+    engine: Mapped[str] = mapped_column(String(32), nullable=False)
+    launchpad: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+    features: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    verdicts: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    exit_reasons: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    labels: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    ml_shadow: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    feature_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    label_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class WalletTradeLabel(Base):
     """How a wallet traded one token (yonixalpha_core.ml.wallet_labels):
     kind EPISODE (its entry, features at the entry, labels such as

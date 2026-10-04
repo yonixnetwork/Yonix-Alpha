@@ -18,8 +18,8 @@ from yonixalpha_core.chains.evm import settings as evm_settings
 from yonixalpha_core.chains.evm import paper, store
 from yonixalpha_core.chains.evm.abi import ZERO_ADDRESS
 from yonixalpha_core.chains.evm.fourmeme import EVENTS, FourMeme
-from yonixalpha_core.db.models import (EvmObservation, EvmScanGap, EvmToken, EvmTrade, LaunchpadCheck, PaperAccount,
-                                       PaperPosition)
+from yonixalpha_core.db.models import (EvmExitSample, EvmObservation, EvmScanGap, EvmToken, EvmTrade, LaunchpadCheck,
+                                       PaperAccount, PaperPosition)
 from yonixalpha_core.testing.evm_node import Node, enc, log_of, rpc_for
 
 from app.worker import ChainWorker
@@ -156,6 +156,11 @@ async def test_pipeline_discovery_safety_entry_exit(session_factory, redis_clien
         p = (await session.execute(select(PaperPosition))).scalar_one()
         assert p.status == "closed" and p.exit_reason == "stop_loss"
         assert p.realized_pnl == p.proceeds_quote - entry_cost and p.realized_pnl < 0
+        # master §41 exits: a checkpoint per tick here (HOLD, the mirrored copy sell, the stop)
+        xs = (await session.execute(select(EvmExitSample).order_by(EvmExitSample.id))).scalars().all()
+        assert [(x.verdicts["deterministic"], x.verdicts["risk"], x.verdicts["final"]) for x in xs] == [
+            ("HOLD", "HOLD", "HOLD"), ("SELL", "HOLD", "SELL"), ("HOLD", "SELL", "SELL")]
+        assert xs[2].exit_reasons == ["stop_loss"] and xs[0].features["held_s"] == 0.0 and xs[0].launchpad == "fourmeme"
 
     n = await w.evidence_pass(now, force=True)
     async with session_factory() as session:

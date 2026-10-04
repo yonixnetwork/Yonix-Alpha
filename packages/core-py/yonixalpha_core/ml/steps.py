@@ -104,3 +104,15 @@ async def mark_interrupted(redis) -> list[dict[str, Any]]:
             await _put(redis, step, rec)
             out.append({"step": step, "started_at": rec.get("started_at")})
     return out
+
+
+async def mark_stopped(redis) -> int:
+    """On a normal shutdown (SIGTERM: deploy, restart): a step still RUNNING
+    is STOPPED, not left to look like a crash at the next start."""
+    n = 0
+    for step, rec in (await read(redis)).items():
+        if rec.get("state") == "RUNNING":
+            await _put(redis, step, {**rec, "state": "STOPPED", "finished_at": _now(), "running_s": None,
+                                     "error": "the ml service was stopped (deploy or restart) while this step ran"})
+            n += 1
+    return n

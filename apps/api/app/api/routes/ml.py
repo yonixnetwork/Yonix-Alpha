@@ -295,8 +295,8 @@ async def evm_knowledge(days: int = Query(14, ge=1, le=90), db: AsyncSession = D
     learned from (samples by kind), the BUY / WAIT / REJECT comparison of the
     rules, the risk layer, the final action and the shadow ML (§41), and the
     shadow models' holdout metrics. ML contribution is 0 %: shadow only."""
-    from yonixalpha_core.db.models import CopyEvent, WalletTradeLabel
-    from yonixalpha_core.ml import evm_samples, wallet_labels
+    from yonixalpha_core.db.models import CopyEvent, EvmExitSample, WalletTradeLabel
+    from yonixalpha_core.ml import evm_samples, exit_samples, wallet_labels
 
     since = datetime.now(timezone.utc) - timedelta(days=days)
     # aggregated in the database: BSC alone adds ~20k samples a day
@@ -308,14 +308,23 @@ async def evm_knowledge(days: int = Query(14, ge=1, le=90), db: AsyncSession = D
                                                             WalletTradeLabel.entry_at >= since))).scalar_one()
     copy_samples = (await db.execute(select(func.count()).where(CopyEvent.outcome.is_not(None),
                                                                 CopyEvent.target_at >= since))).scalar_one()
+    # §41 exits: a few checkpoints per open position every hour, so a plain load is small
+    x = EvmExitSample
+    exit_rows = (await db.execute(select(x.verdicts, x.labels).where(x.at >= since).order_by(x.at.desc())
+                                  .limit(20000))).all()
+    exits = exit_samples.compare([{"verdicts": v, "labels": lab} for v, lab in exit_rows])
+    exits["checkpoints"] = len(exit_rows)
+    exits["labelled"] = sum(1 for _, lab in exit_rows if lab and "unknown" not in lab)
     models = (await db.execute(select(ModelVersion).where(ModelVersion.status == "shadow", ModelVersion.name.like("shadow_evm_%")
-                                                          | ModelVersion.name.like("shadow_wallet_%"))
+                                                          | ModelVersion.name.like("shadow_wallet_%")
+                                                          | ModelVersion.name.like("shadow_exit_%"))
                                .order_by(ModelVersion.name))).scalars().all()
     return jsonable({
         "window_days": days,
         "samples": {**know["samples"], "wallet_episodes": episodes, "wallet_labels": label_counts,
                     "copy_outcomes": copy_samples},
         "comparison": know["comparison"],
+        "exits": exits,
         "models": [{"name": m.name, "version": m.version, "target": (m.metrics or {}).get("target"),
                     "kind": (m.metrics or {}).get("kind"), "trained_at": m.trained_at,
                     "train_rows": (m.metrics or {}).get("train_rows"), "dataset_size": (m.metrics or {}).get("dataset_size"),

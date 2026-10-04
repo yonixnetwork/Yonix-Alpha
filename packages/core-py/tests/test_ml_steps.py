@@ -56,3 +56,10 @@ async def test_a_step_left_running_by_a_dead_process_is_marked_interrupted(redis
         return None
     await steps.timed(redis, "x", ok)
     assert (await steps.read(redis))["x"]["peak_rss_mb"] > 0
+
+
+async def test_a_normal_stop_marks_running_steps_stopped_not_interrupted(redis):
+    await steps._put(redis, "evm_wallet_ml", {"state": "RUNNING", "started_at": "2026-10-04T13:20:34+00:00"})
+    assert await steps.mark_stopped(redis) == 1
+    assert (await steps.read(redis))["evm_wallet_ml"]["state"] == "STOPPED"
+    assert await steps.mark_interrupted(redis) == []  # a deploy is not a crash
