@@ -137,6 +137,12 @@ async def test_evm_copy_is_gated_idempotent_and_mirrors_partial_sells(session_fa
     async with session_factory() as s:
         p = (await s.execute(select(PaperPosition))).scalar_one()
         assert p.status == "closed" and p.exit_reason == "copy_sell"
+        # §41: each mirrored sell is a SELL checkpoint of the copy position (review data)
+        from yonixalpha_core.db.models import EvmExitSample
+        cps = (await s.execute(select(EvmExitSample).order_by(EvmExitSample.at))).scalars().all()
+        assert len(cps) == 2 and all(c.engine == "evm_copy_bsc" and c.position_id == p.id for c in cps)
+        assert all(c.verdicts["final"] == "SELL" and c.verdicts["deterministic"] == "SELL" for c in cps)
+        assert all(any(r.startswith("copy_sell") for r in c.exit_reasons) for c in cps)
 
 
 async def test_a_target_buying_into_a_bundled_launch_is_not_copied(session_factory, redis_client):

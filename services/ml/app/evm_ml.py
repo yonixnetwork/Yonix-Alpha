@@ -36,7 +36,7 @@ from sqlalchemy import select, update
 from app.shadow_ml import MIN_ROWS, SHADOW, Sample, fit, time_split
 from yonixalpha_core.db.models import EvmExitSample, EvmMlSample, ModelVersion, WalletTradeLabel
 from yonixalpha_core.logging import get_logger
-from yonixalpha_core.ml import evm_samples, exit_samples, registry, wallet_labels
+from yonixalpha_core.ml import evm_samples, exit_samples, frozen, governance, registry, wallet_labels
 
 log = get_logger("ml.evm")
 
@@ -78,7 +78,8 @@ def exit_sample(row) -> Sample | None:
 
 
 async def _train(session, prefix: str, samples: list[Sample], names: tuple[str, ...], binary: dict[str, str],
-                 regression: dict[str, str], feature_version: str, now: datetime) -> dict[str, Any]:
+                 regression: dict[str, str], feature_version: str, now: datetime,
+                 excluded: list[int] | None = None) -> dict[str, Any]:
     out: dict[str, Any] = {"samples": len(samples)}
     if len(samples) < MIN_ROWS:
         out["status"] = f"skipped: {len(samples)} labelled samples (needs {MIN_ROWS})"
@@ -104,6 +105,7 @@ async def _train(session, prefix: str, samples: list[Sample], names: tuple[str, 
             continue
         metrics.update({"target": target, "dataset_size": len(samples), "dataset_end": dataset_end, "split": split,
                         "max_train_rows": MAX_TRAIN_ROWS, "feature_version": feature_version,
+                        "frozen_excluded": excluded or [],
                         "role": "SHADOW: review only, never used for decisions or sizing"})
         await session.execute(update(ModelVersion).where(ModelVersion.name == name, ModelVersion.status == SHADOW)
                               .values(status="superseded"))
@@ -114,8 +116,9 @@ async def _train(session, prefix: str, samples: list[Sample], names: tuple[str, 
 
 
 async def score_evm(session, now: datetime, limit: int = 2000) -> int:
-    models = (await session.execute(select(ModelVersion).where(ModelVersion.status == SHADOW,
-                                                               ModelVersion.name.like("shadow_evm_%")))).scalars().all()
+    skip = await governance.observation_only(session)  # operator-set OBSERVATION_ONLY: never scored
+    models = [m for m in (await session.execute(select(ModelVersion).where(
+        ModelVersion.status == SHADOW, ModelVersion.name.like("shadow_evm_%")))).scalars().all() if m.name not in skip]
     if not models:
         return 0
     loaded = [(m, joblib.load(io.BytesIO(m.artifact))) for m in models]
@@ -155,7 +158,7 @@ async def score_exits(session, now: datetime, limit: int = 2000) -> int:
     m = (await session.execute(select(ModelVersion).where(ModelVersion.status == SHADOW,
                                                           ModelVersion.name == "shadow_exit_p_fell_10")
                                .order_by(ModelVersion.version.desc()).limit(1))).scalar_one_or_none()
-    if m is None:
+    if m is None or m.name in await governance.observation_only(session):
         return 0
     est = joblib.load(io.BytesIO(m.artifact))
     met = m.metrics or {}
@@ -214,28 +217,33 @@ async def run_evm_cycle(session_factory, now: datetime | None = None) -> dict[st
         out["exit_labels"] = await exit_samples.label_pending(session, now)
         await session.commit()
     async with session_factory() as session:
+        # master §38: frozen validation windows are never trained on
         e = EvmMlSample
+        wins = await frozen.windows(session, "evm_entry")
         evm_rows = await _latest(session, select(e.decided_at, e.features, e.labels, e.category, e.chain, e.launchpad).where(
-            e.feature_version == evm_samples.FEATURE_VERSION, e.labels["unknown"].is_(None))
-            .order_by(e.decided_at.desc()), MAX_TRAIN_ROWS)
+            e.feature_version == evm_samples.FEATURE_VERSION, e.labels["unknown"].is_(None),
+            frozen.exclude(e.decided_at, wins)).order_by(e.decided_at.desc()), MAX_TRAIN_ROWS)
         out["evm_models"] = await _train(session, "shadow_evm_", [s for s in map(evm_sample, evm_rows) if s],
                                          evm_samples.FEATURE_NAMES, EVM_BINARY, EVM_REGRESSION, evm_samples.FEATURE_VERSION,
-                                         now)
+                                         now, [i for *_, i in wins])
         del evm_rows
         w = WalletTradeLabel
+        wins = await frozen.windows(session, "wallet_entry")
         w_rows = await _latest(session, select(w.kind, w.outcome, w.entry_at, w.features, w.chain, w.launchpad).where(
-            w.kind == "EPISODE", w.feature_version == wallet_labels.FEATURE_VERSION).order_by(w.entry_at.desc()),
-            MAX_TRAIN_ROWS)
+            w.kind == "EPISODE", w.feature_version == wallet_labels.FEATURE_VERSION, frozen.exclude(w.entry_at, wins))
+            .order_by(w.entry_at.desc()), MAX_TRAIN_ROWS)
         out["wallet_models"] = await _train(session, "shadow_wallet_", [s for s in map(wallet_sample, w_rows) if s],
                                             wallet_labels.FEATURE_NAMES, WALLET_BINARY, {}, wallet_labels.FEATURE_VERSION,
-                                            now)
+                                            now, [i for *_, i in wins])
         del w_rows
         x = EvmExitSample
+        wins = await frozen.windows(session, "evm_exit")
         x_rows = await _latest(session, select(x.at, x.features, x.labels, x.chain, x.launchpad).where(
-            x.feature_version == exit_samples.FEATURE_VERSION, x.labels.is_not(None), x.labels["unknown"].is_(None))
-            .order_by(x.at.desc()), MAX_TRAIN_ROWS)
+            x.feature_version == exit_samples.FEATURE_VERSION, x.labels.is_not(None), x.labels["unknown"].is_(None),
+            frozen.exclude(x.at, wins)).order_by(x.at.desc()), MAX_TRAIN_ROWS)
         out["exit_models"] = await _train(session, "shadow_exit_", [s for s in map(exit_sample, x_rows) if s],
-                                          exit_samples.FEATURE_NAMES, EXIT_BINARY, {}, exit_samples.FEATURE_VERSION, now)
+                                          exit_samples.FEATURE_NAMES, EXIT_BINARY, {}, exit_samples.FEATURE_VERSION, now,
+                                          [i for *_, i in wins])
         await session.commit()
     async with session_factory() as session:
         out["scored"] = await score_evm(session, now)

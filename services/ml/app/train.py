@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, roc_auc_score
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yonixalpha_core.db.models import ModelVersion
@@ -13,8 +14,8 @@ from app.dataset import FEATURE_NAMES, LabeledDataset, load_labeled_dataset
 log = get_logger("ml.train")
 
 # Must match services/decision-engine/app/evaluate.py's MODEL_NAME — that
-# module is what actually loads and predicts against whatever this job
-# activates under this name.
+# module predicts with the champion an operator promoted under this name
+# (this job only registers challengers, master §39).
 MODEL_NAME = "solana_candidate_momentum"
 
 # Conservative gates for a system that has produced exactly zero labeled
@@ -67,7 +68,7 @@ def _auc_standard_error(auc: float, n_positive: int, n_negative: int) -> float:
 
 @dataclass
 class TrainingOutcome:
-    status: str  # skipped_insufficient_samples | skipped_single_class | registered | activated
+    status: str  # skipped_insufficient_samples | skipped_single_class | registered | challenger_ready
     available_samples: int
     model_version: ModelVersion | None = None
     metrics: dict | None = None
@@ -176,6 +177,8 @@ async def train_and_maybe_register(session: AsyncSession) -> TrainingOutcome:
         "training_candidates": len({dataset.groups[i] for i in train_idx}),
         "split": "temporal_grouped_by_candidate",
         "scored_per": "candidate",
+        "dataset_end": dataset.dataset_end.isoformat() if dataset.dataset_end else None,
+        "frozen_excluded": dataset.frozen_excluded,
     }
 
     model_version = await registry.register_trained_model(
@@ -198,19 +201,30 @@ async def train_and_maybe_register(session: AsyncSession) -> TrainingOutcome:
         and auc_lower_bound > 0.5
     )
     if activatable:
+        # Master §39: a model that clears the bar is never put into production by
+        # this job. It becomes a promotable challenger; only an operator promotes
+        # it (registry.promote_challenger, audited), and its weight in decisions
+        # is the contribution % the operator sets after validation (ml.governance).
         current = await registry.get_active_model_row(session, MODEL_NAME)
         current_auc = (current.metrics or {}).get("holdout_auc") if current is not None else None
         if current_auc is None or holdout_auc >= current_auc:
-            await registry.activate_model(session, model_version)
+            # only the newest challenger is a candidate for promotion (kept, never deleted)
+            await session.execute(update(ModelVersion).where(ModelVersion.name == MODEL_NAME,
+                                                             ModelVersion.status == "challenger")
+                                  .values(status="superseded"))
+            model_version.status = "challenger"
+            model_version.metrics = {**metrics, "promotable": True,
+                                     "promotion": "operator only (ML Review); never automatic"}
             await session.commit()
             log.info(
-                "train.activated",
+                "train.challenger_ready",
                 version=model_version.version,
                 holdout_auc=holdout_auc,
                 holdout_auc_lower_bound=auc_lower_bound,
                 holdout_candidates=len(per_candidate),
             )
-            return TrainingOutcome(status="activated", available_samples=len(features), model_version=model_version, metrics=metrics)
+            return TrainingOutcome(status="challenger_ready", available_samples=len(features),
+                                   model_version=model_version, metrics=model_version.metrics)
 
     await session.commit()
     log.info("train.registered_not_activated", version=model_version.version, holdout_auc=holdout_auc)

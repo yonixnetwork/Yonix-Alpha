@@ -8,7 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_username, get_db, get_redis
-from app.api.util import jsonable, user_id
+from app.api.util import audit, jsonable, user_id
 from app.schemas.common import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, Page
 from app.schemas.ml import MLStatsOut, ModelVersionOut
 from yonixalpha_core import events, opportunities
@@ -282,7 +282,7 @@ async def ml_steps(redis: Redis = Depends(get_redis), _: str = Depends(get_curre
 
     return jsonable({"steps": await steps.read(redis),
                      "intervals_s": {"solana_training": 3600, "gate_models": 3600, "solana_shadow": 3600,
-                                     "ablation": 3600, "evm_wallet_ml": 1800},
+                                     "ablation": 3600, "frozen_validation": 3600, "evm_wallet_ml": 1800},
                      "note": "Solana steps run one after another every hour; EVM / wallet ML runs in its own loop "
                              "every 30 minutes, so a slow Solana step cannot hold it up. Absent: not run since the "
                              "ml service started with this version."})
@@ -330,11 +330,162 @@ async def evm_knowledge(days: int = Query(14, ge=1, le=90), db: AsyncSession = D
                     "train_rows": (m.metrics or {}).get("train_rows"), "dataset_size": (m.metrics or {}).get("dataset_size"),
                     "split": (m.metrics or {}).get("split"), "holdout": (m.metrics or {}).get("holdout")} for m in models],
         "contribution": {"percent": 0, "status": "SHADOW",
-                         "why": "no EVM or wallet model has passed a validation gate; the models are scored and compared "
-                                "only. Contribution is raised by an operator after validation, never by a winning streak."},
+                         "why": "EVM, wallet and exit models have no decision consumer: they are scored and compared only "
+                                "and stay SHADOW (ML Review, ML governance). No contribution is ever raised by a winning "
+                                "streak."},
         "definitions": {"decision_point": f"T+{evm_samples.DECISION_MINUTE} min of each observation",
                         "labels": "upside_50 / upside_100: the price reached +50 % / +100 % within the hour; fast_dump: "
                                   "-50 % within 10 min; return_60m: the price an hour later",
                         "wallet_labels": list(wallet_labels.LABELS),
                         "feature_versions": [evm_samples.FEATURE_VERSION, wallet_labels.FEATURE_VERSION]},
     })
+
+
+# --- ML governance (master §38-42) ---------------------------------------------------------
+
+class ContributionIn(BaseModel):
+    stage: str = Field(min_length=3, max_length=32)
+    percent: int = Field(ge=0, le=100)
+    note: str | None = Field(None, max_length=500)
+
+
+async def _latest_reports(db: AsyncSession) -> dict[tuple[str, int], dict]:
+    """(model name, version) -> its newest frozen-validation report (pooled
+    over the frozen windows the model never saw)."""
+    from yonixalpha_core.db.models import MlValidationReport, MlValidationSet
+
+    r, v = MlValidationReport, MlValidationSet
+    rows = (await db.execute(select(r, v.family, v.window_start).join(v, v.id == r.set_id)
+                             .order_by(v.window_start.desc(), r.evaluated_at.desc()))).all()
+    out: dict[tuple[str, int], dict] = {}
+    for rep, family, newest in rows:
+        key = (rep.model_name, rep.model_version)
+        if key in out:
+            continue
+        m = rep.metrics or {}
+        out[key] = {"status": rep.status, "reason": rep.reason, "evaluated_at": rep.evaluated_at, "family": family,
+                    "newest_window": newest, "windows": m.get("sets") or [], "n": m.get("n"),
+                    "positives": m.get("positives"), "negatives": m.get("negatives"), "auc": m.get("auc"),
+                    "auc_lower_bound": m.get("auc_lower_bound"), "brier": m.get("brier"), "ece": m.get("ece"),
+                    "accuracy": m.get("accuracy"), "precision": m.get("precision"), "recall": m.get("recall"),
+                    "false_positives": m.get("false_positives"), "false_negatives": m.get("false_negatives"),
+                    "scored_per": m.get("scored_per"), "decisions": m.get("decisions"),
+                    "by_category": m.get("by_category")}
+    return out
+
+
+@router.get("/governance")
+async def governance_view(db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
+                          _: str = Depends(get_current_username)) -> dict:
+    """Every model: stage, contribution %, consumer, the version that counts
+    (champion, else the newest), training and frozen-validation samples,
+    out-of-sample score (AUC), calibration (ECE), confidence (AUC lower
+    bound) and health; plus the frozen validation sets. Read-only."""
+    from yonixalpha_core.db.models import MlValidationReport, MlValidationSet
+    from yonixalpha_core.ml import frozen, governance
+
+    contrib = await governance.load(db)
+    reports = await _latest_reports(db)
+    rows = (await db.execute(select(ModelVersion).where(ModelVersion.status.in_(("active", "challenger", "shadow", "trained")))
+                             .order_by(ModelVersion.name, ModelVersion.version.desc()))).scalars().all()
+    by_name: dict[str, dict[str, ModelVersion]] = {}
+    for m in rows:
+        if frozen.family_of(m.name) is not None:
+            by_name.setdefault(m.name, {}).setdefault(m.status, m)
+    for name in governance.CONTRIBUTABLE:
+        by_name.setdefault(name, {})
+    models = []
+    for name in sorted(by_name):
+        st = by_name[name]
+        champion = st.get("active")
+        shown = champion or st.get("challenger") or st.get("shadow") or st.get("trained")
+        met = (shown.metrics or {}) if shown else {}
+        rep = reports.get((shown.name, shown.version)) if shown else None
+        drift = met.get("drift") if champion is not None else None
+        c = contrib.get(name, governance.Contribution())
+        spec = governance.CONTRIBUTABLE.get(name)
+        if name.startswith("gate_"):
+            kind, consumer = "gate", ("safety gate: may only make a decision WAIT below the engine's min_ml_confidence "
+                                      "(Risk settings); never approves, sizes or overrides safety")
+        elif spec:
+            kind, consumer = "contributor", spec["consumer"]
+        else:
+            kind, consumer = "shadow", "none: scored and compared only (ML Review)"
+        regression = met.get("kind") == "regression"
+        health, why = (("NOT_APPLICABLE", "regression model: no AUC; see its holdout MAE") if regression
+                       else governance.health(validation=rep, drift=drift))
+        challenger = st.get("challenger")
+        models.append({
+            "name": name, "family": frozen.family_of(name), "kind": kind, "consumer": consumer,
+            "stage": (c.stage if spec else "GATE_CAUTION_ONLY" if kind == "gate"
+                      else c.stage if c.stage in ("OBSERVATION_ONLY", "SHADOW") else "SHADOW"),
+            "percent": c.percent if spec else 0, "weight": c.weight() if spec else 0.0,
+            "max_stage": (spec or {}).get("max_stage", "SHADOW"), "changed_at": c.changed_at, "changed_by": c.changed_by,
+            "raised_at": c.raised_at,
+            "version": shown.version if shown else None, "status": shown.status if shown else None,
+            "champion_version": champion.version if champion else None,
+            "challenger": ({"id": challenger.id, "version": challenger.version,
+                            "promotable": bool((challenger.metrics or {}).get("promotable"))} if challenger else None),
+            "trained_at": shown.trained_at if shown else None,
+            "training_samples": shown.training_sample_count if shown else None,
+            "target": met.get("target"), "model_kind": met.get("kind") or ("binary" if shown else None),
+            "frozen_excluded": len(met.get("frozen_excluded") or []),
+            "validation": rep,
+            "validation_samples": (rep or {}).get("n"),
+            "out_of_sample_auc": (rep or {}).get("auc"),
+            "calibration_ece": (rep or {}).get("ece"),
+            "confidence_auc_lower_bound": (rep or {}).get("auc_lower_bound"),
+            "health": health, "health_reason": why,
+        })
+    sets = (await db.execute(select(MlValidationSet).order_by(MlValidationSet.window_start.desc()).limit(60))).scalars().all()
+    counts = {k: (n, p) for k, n, p in (await db.execute(select(
+        MlValidationReport.set_id, func.count(), func.count().filter(MlValidationReport.status == "PASS"))
+        .group_by(MlValidationReport.set_id))).all()}
+    return jsonable({
+        "models": models,
+        "frozen_sets": [{"id": s.id, "family": s.family, "window_start": s.window_start, "window_end": s.window_end,
+                         "frozen_at": s.frozen_at, "samples_at_freeze": s.samples, "note": s.note,
+                         "reports": counts.get(s.id, (0, 0))[0], "passed": counts.get(s.id, (0, 0))[1]} for s in sets],
+        "not_validated": frozen.NOT_AVAILABLE,
+        "rules": {"stages": list(governance.STAGES), "step_pct": governance.STEP_PCT, "max_pct": governance.MAX_PCT,
+                  "min_days_between_increases": governance.MIN_DAYS_BETWEEN_INCREASES, "pass_rule": frozen.PASS_RULE,
+                  "live": governance.LIVE_LOCKED,
+                  "freeze": f"one UTC day per family every {frozen.FREEZE_EVERY.days} days, {frozen.LAG.days} days back; "
+                            "never trained on from then on"},
+        "note": "Contribution starts at 0 % and is raised only by an operator, 5 % at a time, at most weekly, while the "
+                "champion's latest frozen-set report is PASS. Nothing raises it automatically; a winning streak is not "
+                "an input. ML never overrides a safety rule.",
+    })
+
+
+@router.put("/governance/{name}")
+async def governance_set(name: str, body: ContributionIn, request: Request, db: AsyncSession = Depends(get_db),
+                         redis: Redis = Depends(get_redis), username: str = Depends(get_current_username)) -> dict:
+    """Sets a model's stage and contribution %, within ml.governance's rules
+    (refused with the reasons otherwise). Audited."""
+    from sqlalchemy.dialects.postgresql import insert
+
+    from yonixalpha_core.db.models import PlatformSetting
+    from yonixalpha_core.ml import governance
+
+    now = governance.now_utc()
+    all_ = await governance.load(db)
+    current = all_.get(name, governance.Contribution())
+    champion = await registry.get_active_model_row(db, name)
+    validation = (await _latest_reports(db)).get((name, champion.version)) if champion else None
+    errors = governance.check_change(name, current, body.stage, body.percent, champion=champion is not None,
+                                     validation=validation, now=now)
+    if errors:
+        raise HTTPException(409, {"errors": errors})
+    new = governance.apply_change(current, body.stage, body.percent, username, now)
+    all_[name] = new
+    value = {"models": {k: v.to_dict() for k, v in all_.items()}}
+    await db.execute(insert(PlatformSetting).values(key=governance.KEY, value=value).on_conflict_do_update(
+        index_elements=["key"], set_={"value": value, "updated_at": func.now()}))
+    await audit(db, username, request, "ml.contribution_changed",
+                {"model": name, "before": current.to_dict(), "after": new.to_dict(), "note": body.note,
+                 "champion_version": champion.version if champion else None,
+                 "validation": (validation or {}).get("status")})
+    await db.commit()
+    await events.publish(redis, "settings.updated", {"key": governance.KEY}, "api")
+    return jsonable({"model": name, "contribution": new.to_dict(), "weight": new.weight()})

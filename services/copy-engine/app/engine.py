@@ -28,6 +28,7 @@ from yonixalpha_core.chains.evm import settings as evm_settings
 from yonixalpha_core.db.models import (CopyEvent, CopyPosition, CopyTarget, EvmToken, EvmTrade, PaperAccount, PaperPosition,
                                        RiskAssessment)
 from yonixalpha_core.logging import get_logger
+from yonixalpha_core.ml import exit_samples
 from yonixalpha_core.notify import alert_error
 from yonixalpha_core.safety.liquidity import ConstantProductModel
 from yonixalpha_core.safety.models import FinalDecision, ManualOverrides
@@ -309,6 +310,8 @@ class CopyEngine:
             remaining = p.remaining_quantity if p.remaining_quantity is not None else p.quantity
             o.analyzed_at = o.planned_at = self.now()
             r = await paper.manage_position(session, ad, p, self.now(), extra_exit=(remaining * frac, "copy_sell"))
+            if r["status"] != "UNPRICED":
+                await self._exit_checkpoint(session, p, r, target.chain)
             if r["status"] == "UNPRICED":
                 await session.rollback()
                 o.decision, o.reason = "FAILED", f"exit not quotable: {r.get('error')}"
@@ -377,6 +380,16 @@ class CopyEngine:
                 PaperPosition.engine.is_not(None), PaperPosition.engine.not_like("evm\\_%")))).scalars().all()
             return await self._queue_own_exits(session, target, list(own), frac, sold, Decimal(held), o)
 
+    async def _exit_checkpoint(self, session, p: PaperPosition, r: dict[str, Any], chain: str) -> None:
+        """Master §41 SELL / HOLD checkpoint of a copy position (review data;
+        never blocks management)."""
+        try:
+            async with session.begin_nested():  # a failure here never spoils the position update
+                tok = await session.get(EvmToken, (chain, p.asset_id))
+                await exit_samples.record(session, p, r["price"], list(r["exits"]), tok, chain, self.now())
+        except Exception as exc:  # noqa: BLE001
+            log.warning("copy.exit_sample_failed", position_id=str(p.id), error=str(exc)[:160])
+
     async def manage_evm(self, chain: str) -> dict[str, int]:
         counts = {"managed": 0, "closed": 0, "unpriced": 0}
         async with self.session_factory() as session:
@@ -391,6 +404,8 @@ class CopyEngine:
                         counts["unpriced"] += 1
                         continue
                     r = await paper.manage_position(session, ad, p, self.now())
+                    if r["status"] != "UNPRICED":
+                        await self._exit_checkpoint(session, p, r, chain)
                     await session.commit()
                 counts["unpriced" if r["status"] == "UNPRICED" else "managed"] += 1
                 counts["closed"] += r["status"] == "CLOSED"
