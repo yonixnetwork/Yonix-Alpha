@@ -47,7 +47,7 @@ WALLET_BINARY = {"P_SUCCESSFUL_ENTRY": "successful_entry"}
 IN_SAMPLE = "IN_SAMPLE"
 BUILD_BUDGET_S = 300.0
 EVM_BATCH, WALLET_BATCH = 500, 200
-MAX_TRAIN_ROWS = 30_000
+MAX_TRAIN_ROWS = 20_000  # 2 GB server, shared with every other service
 RETRAIN_EVERY = timedelta(hours=24)
 
 

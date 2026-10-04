@@ -8,6 +8,7 @@ service up. Observability only: nothing reads this to decide anything.
 from __future__ import annotations
 
 import json
+import resource
 import time
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
@@ -17,6 +18,11 @@ STEPS_KEY = "yx:ml:steps"
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def peak_rss_mb() -> float:
+    """The process's peak resident memory so far (Linux reports KiB)."""
+    return round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 1)
 
 
 async def _put(redis, step: str, value: dict[str, Any]) -> None:
@@ -41,13 +47,14 @@ async def timed(redis, step: str, fn: Callable[[], Awaitable[Any]], log=None) ->
     except Exception as exc:
         secs = round(time.monotonic() - t0, 1)
         await _put(redis, step, {"state": "FAILED", **base, "finished_at": _now(), "seconds": secs,
-                                 "error": f"{type(exc).__name__}: {str(exc)[:300]}"})
+                                 "peak_rss_mb": peak_rss_mb(), "error": f"{type(exc).__name__}: {str(exc)[:300]}"})
         raise
     secs = round(time.monotonic() - t0, 1)
     finished = _now()
-    await _put(redis, step, {"state": "OK", **base, "finished_at": finished, "seconds": secs, "last_ok_at": finished})
+    await _put(redis, step, {"state": "OK", **base, "finished_at": finished, "seconds": secs, "last_ok_at": finished,
+                             "peak_rss_mb": peak_rss_mb()})
     if log is not None:
-        log.info("ml.step_done", step=step, seconds=secs)
+        log.info("ml.step_done", step=step, seconds=secs, peak_rss_mb=peak_rss_mb())
     return result
 
 
@@ -80,4 +87,20 @@ async def read(redis) -> dict[str, dict[str, Any]]:
         if rec.get("state") == "RUNNING" and rec.get("started_at"):
             rec["running_s"] = round((now - datetime.fromisoformat(rec["started_at"])).total_seconds())
         out[key] = rec
+    return out
+
+
+async def mark_interrupted(redis) -> list[dict[str, Any]]:
+    """At service start: a step still RUNNING was cut off when the previous
+    process died (out of memory, kill, crash). Marks it INTERRUPTED and
+    returns them, so the caller can alert: a silent restart loop must not
+    look like a slow step."""
+    out = []
+    for step, rec in (await read(redis)).items():
+        if rec.get("state") == "RUNNING":
+            rec = {**rec, "state": "INTERRUPTED", "finished_at": _now(), "running_s": None,
+                   "error": f"the ml process stopped while this step was running (started {rec.get('started_at')}); "
+                            "out of memory is the usual cause on a small server"}
+            await _put(redis, step, rec)
+            out.append({"step": step, "started_at": rec.get("started_at")})
     return out
