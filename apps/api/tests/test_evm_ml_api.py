@@ -50,6 +50,23 @@ async def test_evm_knowledge_counts_compares_and_keeps_ml_at_zero(app, client, a
     # an in-sample ML verdict is shown as such, never counted as an ML BUY
     assert c["final_vs_ml"] == {"final REJECT / ml BUY": 1, "final WAIT / ml IN_SAMPLE": 1}
     assert r["contribution"]["percent"] == 0 and r["definitions"]["decision_point"] == "T+5 min of each observation"
+    assert r["exits"]["checkpoints"] == 0 and "never exits a position" in r["exits"]["note"]
+    import uuid
+
+    from yonixalpha_core.db.models import EvmExitSample
+    async with app.state.db_session_factory() as s:
+        for i, (final, fell) in enumerate((("SELL", True), ("HOLD", False), ("HOLD", None))):
+            s.add(EvmExitSample(position_id=uuid.uuid4(), chain="bsc", token="0x" + "1" * 40, engine="evm_bsc",
+                                at=NOW - timedelta(minutes=30 + i), price=1.0, features={},
+                                verdicts={"deterministic": "HOLD", "risk": final, "final": final, "ml": "NOT_AVAILABLE"},
+                                exit_reasons=["stop_loss"] if final == "SELL" else [],
+                                labels=None if fell is None else {"forward_return_pct": -20.0 if fell else 4.0,
+                                                                  "fell_10": fell, "rose_10": False, "trades_after": 2},
+                                feature_version="x", label_version="x", created_at=NOW))
+        await s.commit()
+    x = (await client.get("/api/ml/evm", headers=auth_headers)).json()["exits"]
+    assert x["checkpoints"] == 3 and x["labelled"] == 2
+    assert x["final"]["SELL"]["fell_10_rate"] == 1.0 and x["final"]["HOLD"] == {**x["final"]["HOLD"], "n": 2, "labelled": 1}
     old = (await client.get("/api/ml/evm?days=1", headers=auth_headers)).json()
     assert old["samples"]["evm_total"] == 4
     assert (await client.get("/api/ml/evm")).status_code == 401

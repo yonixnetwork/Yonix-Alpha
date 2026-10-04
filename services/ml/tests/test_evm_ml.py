@@ -106,3 +106,35 @@ async def test_drain_runs_batches_until_short_or_out_of_time():
         return {"built": batch}
     out = await _drain(lambda: _S(), full, T, 5, "built", _time.monotonic() - 1)
     assert out == {"batches": 1, "built": 5, "drained": False}
+
+
+@pytest.mark.asyncio
+async def test_exit_checkpoints_train_a_shadow_sell_hold_model_and_are_scored(db_session):
+    import uuid
+
+    from yonixalpha_core.db.models import EvmExitSample
+    from yonixalpha_core.ml import exit_samples as xs
+
+    rng = random.Random(9)
+    pid = uuid.uuid4()
+    rows = []
+    for i in range(300):
+        dd = -rng.uniform(0, 60)  # drawdown from the peak at the checkpoint
+        fell = dd < -30 or rng.random() < 0.1
+        x = {n: 0.0 for n in xs.FEATURE_NAMES}
+        x.update({"drawdown_from_peak_pct": dd, "held_s": 60.0 * i, "unrealized_pct": dd / 2, "chain_bsc": 1.0})
+        rows.append(EvmExitSample(position_id=pid, chain="bsc", token="0x" + "7" * 40, engine="evm_bsc", launchpad="fourmeme",
+                                  at=T + timedelta(minutes=5 * i), price=1.0, features=x, verdicts=xs.verdicts([]),
+                                  exit_reasons=[], labels={"forward_return_pct": -12.0 if fell else 3.0, "fell_10": fell,
+                                                           "rose_10": False, "trades_after": 3},
+                                  feature_version=xs.FEATURE_VERSION, label_version=xs.LABEL_VERSION, created_at=T))
+    db_session.add_all(rows)
+    await db_session.commit()
+    sf = make_session_factory(create_async_engine(os.environ["DATABASE_URL"]))
+    out = await run_evm_cycle(sf, now=T + timedelta(days=30))
+    assert out["exit_models"]["P_FELL_10"].startswith("registered") and out["exits_scored"] == 300
+    db_session.expire_all()
+    got = (await db_session.execute(select(EvmExitSample).order_by(EvmExitSample.at))).scalars().all()
+    assert got[0].verdicts["ml"] == IN_SAMPLE and got[-1].verdicts["ml"] in ("SELL", "HOLD")
+    assert got[-1].ml_shadow["out_of_sample"] is True and 0 <= got[-1].ml_shadow["P_FELL_10"] <= 1
+    assert got[-1].verdicts["final"] == "HOLD"  # the shadow call never changes what the system did

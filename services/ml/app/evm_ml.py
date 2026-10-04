@@ -34,9 +34,9 @@ import joblib
 from sqlalchemy import select, update
 
 from app.shadow_ml import MIN_ROWS, SHADOW, Sample, fit, time_split
-from yonixalpha_core.db.models import EvmMlSample, ModelVersion, WalletTradeLabel
+from yonixalpha_core.db.models import EvmExitSample, EvmMlSample, ModelVersion, WalletTradeLabel
 from yonixalpha_core.logging import get_logger
-from yonixalpha_core.ml import evm_samples, registry, wallet_labels
+from yonixalpha_core.ml import evm_samples, exit_samples, registry, wallet_labels
 
 log = get_logger("ml.evm")
 
@@ -44,6 +44,8 @@ EVM_BINARY = {"P_UPSIDE_50": "upside_50", "P_UPSIDE_100": "upside_100", "P_FAST_
               "P_MIGRATE": "migrate_60m"}
 EVM_REGRESSION = {"E_RETURN_60M": "return_60m_pct", "E_MAX_DRAWDOWN": "max_drawdown_pct"}
 WALLET_BINARY = {"P_SUCCESSFUL_ENTRY": "successful_entry"}
+EXIT_BINARY = {"P_FELL_10": "fell_10"}  # §41 exits: will the price fall 10 % in the next 15 minutes?
+ML_SELL_FELL = 0.5
 IN_SAMPLE = "IN_SAMPLE"
 BUILD_BUDGET_S = 300.0
 EVM_BATCH, WALLET_BATCH = 500, 200
@@ -65,6 +67,14 @@ def wallet_sample(row: WalletTradeLabel) -> Sample | None:
         return None
     return Sample(row.entry_at, datetime.fromisoformat(out["available_at"]), row.features, out,
                   {"chain": row.chain, "launchpad": row.launchpad})
+
+
+def exit_sample(row) -> Sample | None:
+    lab = row.labels or {}
+    if not lab or "unknown" in lab or not row.features:
+        return None
+    return Sample(row.at, row.at + exit_samples.FORWARD, row.features, lab,
+                  {"chain": row.chain, "launchpad": row.launchpad or "unknown"})
 
 
 async def _train(session, prefix: str, samples: list[Sample], names: tuple[str, ...], binary: dict[str, str],
@@ -139,6 +149,32 @@ async def score_evm(session, now: datetime, limit: int = 2000) -> int:
     return n
 
 
+async def score_exits(session, now: datetime, limit: int = 2000) -> int:
+    """The shadow exit model's SELL / HOLD on unscored checkpoints (§41);
+    in-sample checkpoints are marked IN_SAMPLE, never compared."""
+    m = (await session.execute(select(ModelVersion).where(ModelVersion.status == SHADOW,
+                                                          ModelVersion.name == "shadow_exit_p_fell_10")
+                               .order_by(ModelVersion.version.desc()).limit(1))).scalar_one_or_none()
+    if m is None:
+        return 0
+    est = joblib.load(io.BytesIO(m.artifact))
+    met = m.metrics or {}
+    med = met.get("medians") or {}
+    start = (met.get("split") or {}).get("holdout_start")
+    rows = (await session.execute(select(EvmExitSample).where(EvmExitSample.ml_shadow.is_(None))
+                                  .order_by(EvmExitSample.at.desc()).limit(limit))).scalars().all()
+    for row in rows:
+        vec = [[row.features[f] if row.features.get(f) is not None else med.get(f, 0.0) for f in m.feature_names]]
+        p = float(est.predict_proba(vec)[0, 1])
+        oos = not (start and row.at < datetime.fromisoformat(start))
+        verdict = (exit_samples.SELL if p >= ML_SELL_FELL else exit_samples.HOLD) if math.isfinite(p) else None
+        row.ml_shadow = {"scored_at": now.isoformat(), "P_FELL_10": round(p, 4) if math.isfinite(p) else None,
+                         "model": m.name, "version": m.version, "out_of_sample": oos,
+                         "note": "SHADOW: never exits a position"}
+        row.verdicts = {**(row.verdicts or {}), "ml": (verdict if oos else IN_SAMPLE) if verdict else "NOT_AVAILABLE"}
+    return len(rows)
+
+
 async def _drain(session_factory, build, now: datetime, batch: int, key: str, deadline: float) -> dict[str, Any]:
     """Runs build(session, now, batch) and commits until a batch comes back
     short (backlog drained) or the time budget is spent."""
@@ -175,6 +211,7 @@ async def run_evm_cycle(session_factory, now: datetime | None = None) -> dict[st
                                           time.monotonic() + BUILD_BUDGET_S)
     async with session_factory() as session:
         out["missed_winners"] = await wallet_labels.build_missed(session, now)
+        out["exit_labels"] = await exit_samples.label_pending(session, now)
         await session.commit()
     async with session_factory() as session:
         e = EvmMlSample
@@ -192,8 +229,16 @@ async def run_evm_cycle(session_factory, now: datetime | None = None) -> dict[st
         out["wallet_models"] = await _train(session, "shadow_wallet_", [s for s in map(wallet_sample, w_rows) if s],
                                             wallet_labels.FEATURE_NAMES, WALLET_BINARY, {}, wallet_labels.FEATURE_VERSION,
                                             now)
+        del w_rows
+        x = EvmExitSample
+        x_rows = await _latest(session, select(x.at, x.features, x.labels, x.chain, x.launchpad).where(
+            x.feature_version == exit_samples.FEATURE_VERSION, x.labels.is_not(None), x.labels["unknown"].is_(None))
+            .order_by(x.at.desc()), MAX_TRAIN_ROWS)
+        out["exit_models"] = await _train(session, "shadow_exit_", [s for s in map(exit_sample, x_rows) if s],
+                                          exit_samples.FEATURE_NAMES, EXIT_BINARY, {}, exit_samples.FEATURE_VERSION, now)
         await session.commit()
     async with session_factory() as session:
         out["scored"] = await score_evm(session, now)
+        out["exits_scored"] = await score_exits(session, now)
         await session.commit()
     return out

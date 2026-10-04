@@ -25,6 +25,7 @@ from yonixalpha_core.chains.evm import settings as evm_settings
 from yonixalpha_core.chains.evm.rpc import EvmRpcUnavailableError
 from yonixalpha_core.db.models import EvmObservation, EvmScanGap, EvmToken, EvmTrade, PaperPosition
 from yonixalpha_core.logging import get_logger
+from yonixalpha_core.ml import exit_samples
 from yonixalpha_core.notify import alert_error
 from yonixalpha_core.safety.store import add_timeline_event
 
@@ -450,6 +451,12 @@ class ChainWorker:
                         remaining = p.remaining_quantity if p.remaining_quantity is not None else p.quantity
                         extra = (remaining * queued, "copy_sell")
                     r = await paper.manage_position(session, ad, p, now, extra_exit=extra)
+                    if r["status"] != "UNPRICED":
+                        try:  # master §41 SELL / HOLD checkpoint: review data, never blocks management
+                            tok = await session.get(EvmToken, (self.chain, p.asset_id))
+                            await exit_samples.record(session, p, r["price"], list(r["exits"]), tok, self.chain, now)
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning("data-evm.exit_sample_failed", position_id=str(pid), error=str(exc)[:160])
                     if extra is not None and r["status"] != "UNPRICED":
                         p.plan = ct.clear_partial_exit(p.plan)
                         await add_timeline_event(session, "copy_partial_exit_filled", now,

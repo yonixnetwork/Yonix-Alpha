@@ -128,8 +128,14 @@ async def run() -> None:
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
+    stopping: list = []
+
+    def _stop() -> None:  # a deploy stops the container: running steps are STOPPED, not "interrupted"
+        stop_event.set()
+        stopping.append(loop.create_task(steps.mark_stopped(redis)))
+
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, stop_event.set)
+        loop.add_signal_handler(sig, _stop)
 
     await _record_system_event(session_factory, "service_started", "info")
     log.info("ml.started")

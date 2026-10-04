@@ -69,6 +69,25 @@ export default function EvmMlReview() {
           {Object.keys(data.comparison.final_vs_ml).length > 0 && (
             <p className="small">Final action vs ML: {Object.entries(data.comparison.final_vs_ml as Record<string, number>).map(([k, v]) => `${k}: ${v}`).join(" · ")}</p>
           )}
+          <h4>Exit decisions: SELL / HOLD at open paper positions, outcome in the next 15 minutes (§41)</h4>
+          <p className="muted small">{data.exits.note}</p>
+          {data.exits.checkpoints === 0 ? <Empty>No exit checkpoints yet: they are recorded every 5 minutes while an EVM paper position is open.</Empty> : (
+            <div className="table-scroll">
+              <table className="data-table">
+                <thead><tr><th>Recommender</th><th>Verdict</th><th>Checkpoints</th><th>Mean next 15 m</th><th>Fell 10 %</th><th>Rose 10 %</th></tr></thead>
+                <tbody>{WHO.flatMap(([k, label]) => Object.entries((data.exits[k] ?? {}) as Record<string, J>).map(([v, st], i) => (
+                  <tr key={`x:${k}:${v}`}>
+                    <td>{i === 0 ? label : ""}</td>
+                    <td><span className={v === "SELL" ? "pill pill-warn" : v === "HOLD" ? "pill pill-ok" : "pill pill-off"}>{v.replaceAll("_", " ")}</span></td>
+                    <td>{st.n}{st.labelled !== st.n ? <span className="muted small"> ({st.labelled} labelled)</span> : null}</td>
+                    <td className={st.mean_forward_return_pct > 0 ? "pos" : st.mean_forward_return_pct < 0 ? "neg" : ""}>
+                      {st.labelled ? `${num(st.mean_forward_return_pct)}%` : "—"}</td>
+                    <td>{st.labelled ? pct(st.fell_10_rate) : "—"}</td><td>{st.labelled ? pct(st.rose_10_rate) : "—"}</td>
+                  </tr>
+                )))}</tbody>
+              </table>
+            </div>
+          )}
           <h4>Shadow models</h4>
           {data.models.length === 0 ? <Empty>No EVM or wallet model yet: each needs 200 labelled samples.</Empty> : (
             <div className="table-scroll">
