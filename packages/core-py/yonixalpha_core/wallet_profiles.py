@@ -83,7 +83,7 @@ def score(m: dict[str, Any], cfg: ScoreConfig) -> tuple[float | None, dict[str, 
         return None, {"status": "INSUFFICIENT_DATA", "closed": n, "min_closed": cfg.min_closed}
     a = cfg.base_win_rate * cfg.prior_strength
     shrunk = (wins + a) / (n + cfg.prior_strength)
-    pnl_c = 0.5 + 0.5 * math.tanh(float(m["realized_pnl"]) / cfg.pnl_scale)
+    pnl_c = 0.5 + 0.5 * math.tanh(float(m["realized_pnl"] or 0) / cfg.pnl_scale)  # unknown PnL: neutral
     early_c = float(m["early_entry_share"] or 0)
     sample_c = 1 - math.exp(-n / 20)
     comps = {"win_rate_shrunk": round(shrunk, 4), "pnl": round(pnl_c, 4), "early_entry": round(early_c, 4),
@@ -155,28 +155,71 @@ def evm_metrics(trades: Iterable[Any], launch_at: dict[str, datetime], cfg: Scor
     }
 
 
-def solana_metrics(rows: Iterable[LaunchBuyer], cfg: ScoreConfig) -> dict[str, Any]:
+SOLANA_WINDOW_NOTE = ("Solana: the wallet's own buys and sells of each launch it bought early, observed from its "
+                      "first buy until the launch outcome (about 30 minutes after this system's decision); a sell "
+                      "after that is not observed, so a position still held then stays open (no PnL is guessed)")
+
+
+def solana_ledger(rows: Iterable[LaunchBuyer]) -> tuple[list[wallet_pnl.TradeIn], int, int]:
+    """FIFO input from launch buyers whose own trades were recorded with full
+    coverage. Returns (trades, rows used, rows without a usable ledger)."""
+    out: list[wallet_pnl.TradeIn] = []
+    used = skipped = 0
+    for r in rows:
+        led = r.ledger or {}
+        if not led.get("covered"):
+            skipped += 1
+            continue
+        used += 1
+        out.append(wallet_pnl.TradeIn(r.mint, r.first_buy_at, True, Decimal(r.tokens_in), Decimal(r.sol_in)))
+        if Decimal(led.get("tokens_in_later") or 0) > 0 and led.get("last_buy_at"):
+            out.append(wallet_pnl.TradeIn(r.mint, datetime.fromisoformat(led["last_buy_at"]), True,
+                                          Decimal(led["tokens_in_later"]), Decimal(led["sol_in_later"])))
+        if Decimal(led.get("tokens_out") or 0) > 0 and led.get("last_sell_at"):
+            out.append(wallet_pnl.TradeIn(r.mint, datetime.fromisoformat(led["last_sell_at"]), False,
+                                          Decimal(led["tokens_out"]), Decimal(led["sol_out"])))
+    out.sort(key=lambda t: t.at)
+    return out, used, skipped
+
+
+def solana_metrics(rows: Iterable[LaunchBuyer], cfg: ScoreConfig, now: datetime | None = None, history_days: float = 30,
+                   vcfg: wallet_validation.ValidationConfig | None = None) -> dict[str, Any]:
     rows = sorted(rows, key=lambda r: r.first_buy_at)
     resolved = [r for r in rows if r.outcome is not None]
     wins = sum(1 for r in resolved if r.outcome == "WIN")
     with_launch = [r for r in rows if r.launch_created_at]
     early = sum(1 for r in with_launch if (r.first_buy_at - r.launch_created_at).total_seconds() <= cfg.early_seconds)
-    no_sells = ("Solana profiles come from launch_buyers (first buys only): without the wallet's sells there is no "
-                "closed-trade ledger to validate or to split by market regime")
-    validation = {"status": wallet_validation.INSUFFICIENT, "reason": no_sells, "checks": []}
+    ledger_in, used, skipped = solana_ledger(rows)
+    closed = wallet_pnl.fifo(ledger_in).closed
+    if used:
+        validation = wallet_validation.validate(closed, trades=len(ledger_in), unique_tokens=used,
+                                                trade_times=[t.at for t in ledger_in],
+                                                cfg=vcfg or wallet_validation.ValidationConfig())
+        pnl = wallet_pnl.profile(ledger_in, now or rows[-1].first_buy_at, history_days)
+        pnl["notes"] = [SOLANA_WINDOW_NOTE] + pnl["notes"] + (
+            [f"{skipped} launches without a complete trade history (the stream had trimmed it): left out"] if skipped else [])
+    else:
+        reason = ("no launch of this wallet has a recorded own-trade ledger yet (recorded at each launch outcome since "
+                  "M21; older launches have first buys only)")
+        validation = {"status": wallet_validation.INSUFFICIENT, "reason": reason, "checks": []}
+        pnl = {"all": {"status": "INSUFFICIENT_DATA", "closed_trades": None, "reasons": [reason]}, "windows": {},
+               "notes": [SOLANA_WINDOW_NOTE], "cost_basis": None}
+    realized = sum((c.pnl for c in closed), Decimal(0)) if closed else None
+    hold = [(c.closed_at - c.opened_at).total_seconds() for c in closed if c.opened_at and c.closed_at]
     return {
         "validation": validation,
-        "regimes": {"status": "INSUFFICIENT_DATA", "reason": no_sells, "dimensions": {}},
+        "regimes": {"status": "INSUFFICIENT_DATA", "reason": "no Solana market-regime series is recorded (the regime "
+                                                             "test runs on BSC / Robinhood launchpad hours)", "dimensions": {}},
         "discovery": wallet_validation.discovery_status(validation, None),
-        "pnl": {"all": {"status": "INSUFFICIENT_DATA", "closed_trades": None, "reasons": [
-            "Solana profiles come from launch_buyers: the first buys of launches this system decided on. "
-            "Their sells are not recorded, so per-trade PnL, wins / losses and profit factor cannot be computed; "
-            "win rate below is the launch outcome (WIN / LOSS), not the wallet's own result"]},
-                "windows": {}, "notes": [], "cost_basis": None},
-        "trades": len(rows), "buys": len(rows), "sells": None, "tokens": len({r.mint for r in rows}),
+        "pnl": pnl,
+        "ledger_coverage": {"launches": len(rows), "with_ledger": used, "without_ledger": skipped},
+        "trades": len(rows), "buys": len(rows), "sells": sum(1 for t in ledger_in if not t.is_buy) if used else None,
+        "tokens": len({r.mint for r in rows}),
         "closed_tokens": len(resolved), "wins": wins, "win_rate": round(wins / len(resolved), 4) if resolved else None,
-        "realized_pnl": Decimal(0), "volume": sum((r.sol_in for r in rows), Decimal(0)),
-        "median_buy": statistics.median([r.sol_in for r in rows]) if rows else None, "avg_hold_s": None,
+        "win_rate_basis": "launch outcome (WIN / LOSS after this system's decision), not the wallet's own result",
+        "realized_pnl": realized, "volume": sum((r.sol_in for r in rows), Decimal(0)),
+        "median_buy": statistics.median([r.sol_in for r in rows]) if rows else None,
+        "avg_hold_s": round(sum(hold) / len(hold), 1) if hold else None,
         "tokens_with_launch": len(with_launch), "early_entry_share": round(early / len(with_launch), 4) if with_launch else None,
         "median_gap_s": None, "sold_early_share": round(sum(1 for r in rows if r.sold_early) / len(rows), 4) if rows else None,
         "first_seen": rows[0].first_buy_at if rows else None, "last_seen": rows[-1].first_buy_at if rows else None,
@@ -333,6 +376,7 @@ async def mark_stale(session: AsyncSession, chain: str, now: datetime) -> int:
 async def rebuild_solana(session: AsyncSession, now: datetime, cfg: ScoreConfig = ScoreConfig(), days: int = 30,
                          min_rows: int = 3) -> int:
     rows = (await session.execute(select(LaunchBuyer).where(LaunchBuyer.first_buy_at >= now - timedelta(days=days)))).scalars().all()
+    vcfg = await validation_config(session)
     by_wallet: dict[str, list] = defaultdict(list)
     for r in rows:
         by_wallet[r.wallet].append(r)
@@ -340,6 +384,6 @@ async def rebuild_solana(session: AsyncSession, now: datetime, cfg: ScoreConfig 
     for wallet, rs in by_wallet.items():
         if len(rs) < min_rows:
             continue
-        await _upsert(session, "solana", wallet, solana_metrics(rs, cfg), "launch_buyers", cfg, now)
+        await _upsert(session, "solana", wallet, solana_metrics(rs, cfg, now, days, vcfg), "launch_buyers", cfg, now)
         n += 1
     return n

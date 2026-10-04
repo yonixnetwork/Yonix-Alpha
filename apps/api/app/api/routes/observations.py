@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_username, get_db, get_redis
 from app.api.util import jsonable
 from yonixalpha_core.db.models import RiskAssessment, Token, TokenObservation, TradingCandidate
+from yonixalpha_core.solana import observation_states
 from yonixalpha_core.solana import pump_stream
 
 router = APIRouter(prefix="/observations", tags=["observations"])
@@ -61,7 +62,8 @@ async def live_observations(limit: int = Query(100, ge=1, le=500), redis: Redis 
         out.append({"mint": mint, "symbol": meta.get("symbol"), "name": meta.get("name"), "state":
                     "FRESH_OBSERVING" if r["outcome"] == "OBSERVING" else "CONTINUE_MONITORING",
                     "age_seconds": r.get("age_seconds"), "trend": r.get("trend"), "reasons": r.get("reasons"),
-                    "metrics": _summary(r), "evaluated_at": r.get("evaluated_at")})
+                    "metrics": _summary(r), "evaluated_at": r.get("evaluated_at"),
+                    "observation": observation_states.fields(r, r.get("outcome"), None)})
     return out
 
 
@@ -80,10 +82,15 @@ async def list_observations(outcome: str | None = Query(None), q: str | None = Q
         stmt = stmt.where(TokenObservation.mint.ilike(like) | TokenObservation.symbol.ilike(like) | TokenObservation.name.ilike(like))
     total = (await db.execute(select(func.count()).select_from(stmt.subquery()))).scalar_one()
     rows = (await db.execute(stmt.order_by(TokenObservation.decided_at.desc()).limit(limit).offset(offset))).scalars().all()
+    ids = [r.candidate_id for r in rows if r.candidate_id]
+    cstate = {i: st for i, st in (await db.execute(select(TradingCandidate.id, TradingCandidate.state).where(
+        TradingCandidate.id.in_(ids))))} if ids else {}
     return {"total": total, "items": [{
         "mint": r.mint, "symbol": r.symbol, "name": r.name, "outcome": r.outcome, "trend": r.trend, "reasons": r.reasons,
         "decided_at": r.decided_at.isoformat(), "launched_at": r.launched_at.isoformat() if r.launched_at else None,
         "candidate_id": str(r.candidate_id) if r.candidate_id else None, "metrics": _summary(r.report),
+        # master §15 / §17: the same state names and fields as BSC / Robinhood (a view, nothing changes)
+        "observation": observation_states.fields(r.report, r.outcome, r.decided_at, cstate.get(r.candidate_id)),
     } for r in rows]}
 
 
@@ -120,5 +127,9 @@ async def explain_token(mint: str, db: AsyncSession = Depends(get_db), redis: Re
         raise HTTPException(404, "no observation or candidate for this mint (observations are kept 3 days)")
     return jsonable({"mint": mint, "symbol": row.symbol if row else (token.symbol if token else None),
                      "observation": {"outcome": row.outcome if row else (report or {}).get("outcome"),
-                                     "decided_at": row.decided_at.isoformat() if row else None, "report": report},
+                                     "decided_at": row.decided_at.isoformat() if row else None, "report": report,
+                                     **observation_states.fields(
+                                         report, row.outcome if row else (report or {}).get("outcome"),
+                                         row.decided_at if row else None,
+                                         candidates[-1]["state"] if candidates else None)},
                      "candidates": candidates})

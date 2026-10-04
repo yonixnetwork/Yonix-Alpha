@@ -1030,6 +1030,12 @@ class LaunchBuyer(Base):
     outcome_drawdown_pct: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
     outcome_migrated: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     outcome_resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    # Migration 0040 (master §19-23 for Solana): the wallet's own trades of this
+    # mint from its first buy to the outcome (T+30m), from the held stream
+    # history: {"sol_out", "tokens_out", "last_sell_at", "sol_in_later",
+    # "tokens_in_later", "last_buy_at", "until", "covered"}. covered = the
+    # history reached back to the first buy (else the sells are unknown).
+    ledger: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 

@@ -50,10 +50,10 @@ Providers), see M7.
 | 11 | Pons coordinated-launch safety (privileged / creator-linked / common-funder / simultaneous buyers) | DONE (paper; on-chain assumptions NOT VERIFIED until coordination_check runs on the server) | launch_coordination: 13 detections, configurable NO_TRADE / REDUCE_SIZE / MANUAL_APPROVAL / NONE, data-evm entries + EVM copy buys; see section 13 | M5 |
 | 12 | Robinhood reference repos inspected | DONE (M9) | all seven inspected plus the official Pons contract source (section 18): Pons events match the official source, sequencer decoder matches 143 real transactions, feed signatures verified, router attribution measured by `tools.trader_attribution` | M9 |
 | 13 | Robinhood sequencer feed (+ delayed feed fallback), latency / gaps measured | DONE | `evm.streams.SequencerFeed` in data-evm: Nitro broadcast decoding, resume by sequence number, delayed-feed fallback, gaps / duplicates / delay / matches, stream lead on copy events (§17). Real feed NOT VERIFIED from this environment | M8 |
-| 14–17 | Observation state machine for every token on all chains, windows T0..T+60, expiry, stored | DONE (EVM, paper); Solana PARTIAL (own state names, see section 15) | EVM: `evm_observations`, full state machine, T0/T+5/T+10/T+20/T+30/T+60 snapshots with the §16 fields, adaptive MIGRATED / MOMENTUM windows, EXPIRED_NO_ENTRY, entries only while observed; Solana: `token_observations` + follow-ups, T+20m added | M6 |
-| 18–23 | Wallet performance model: 24H–180D windows, avg/median win and loss, profit factor, drawdown, FIFO ledger, INSUFFICIENT DATA | DONE in code for BSC / Robinhood (M3; router / bot contracts excluded since M10b, section 20); Solana PARTIAL | `wallet_pnl.py` (FIFO lots, usually earns / usually loses, profit factor, drawdown, holds, best / worst), windows 24H / 7D (14D+ INSUFFICIENT DATA: 7-day profile history, 14-day trade retention); fees listed not subtracted (NOT VERIFIED per launchpad), gas not included; Solana profiles have no sells (launch_buyers) and say so | M3 |
+| 14–17 | Observation state machine for every token on all chains, windows T0..T+60, expiry, stored | DONE (EVM M6; Solana in the §15 names since M21) | EVM: `evm_observations`, full state machine, T0/T+5/T+10/T+20/T+30/T+60 snapshots, adaptive MIGRATED / MOMENTUM windows, EXPIRED_NO_ENTRY, entries only while observed; Solana: its funnel (`token_observations`, follow-ups incl. T+20m) shown in the §15 names with the §17 fields (`solana/observation_states.py`, section 33); every expired / rejected Solana observation is kept in the opportunity ledger for ML (the detailed report is pruned after 3 days) | M6, M21 |
+| 18–23 | Wallet performance model: 24H–180D windows, avg/median win and loss, profit factor, drawdown, FIFO ledger, INSUFFICIENT DATA | DONE in code for BSC / Robinhood (M3; router / bot contracts excluded since M10b); Solana: FIFO ledger since M21, bounded to each launch's first 30 minutes | `wallet_pnl.py` (FIFO lots, profit factor, drawdown, holds, best / worst), windows 24H / 7D (14D+ INSUFFICIENT DATA: 7-day profile history, 14-day trade retention); fees listed not subtracted (NOT VERIFIED per launchpad), gas not included; Solana: each early buyer's own sells and later buys of the launch, from its first buy to the outcome, recorded only when the held stream history covers the entry (`launch_buyers.ledger`, migration 0040, section 33); a position still held then stays open, never a guessed PnL | M3, M21 |
 | 24 | Nansen / MadeOnSol enrichment | DONE in code (M11), NOT VERIFIED against the real APIs (no keys here) | `enrichment.py`: Nansen labels + P/L summary (Solana, BSC), MadeOnSol FIFO P/L + KOL profile (Solana); off by default, daily call budget, refresh window; provider-reported, shown next to the own ledger, never a signal (section 25) | M11 |
-| 25–28 | Wallet discovery, validation gates, outlier test, regime test | DONE for BSC / Robinhood (M3b); Solana INSUFFICIENT DATA (no sells recorded) | outlier test (M3); `wallet_validation` (12 configurable checks, per-day consistency, INSUFFICIENT DATA vs NOT VALIDATED); `market_regimes` (hourly volume / net flow / price range, migration 0026; CONSISTENT / REGIME_DEPENDENT); discovery stage COLLECTING_HISTORY → VALIDATED → PAPER_FOLLOWED / REJECTED, never auto-copied; Smart Wallets UI + rules editor. External sources (M11): Nansen smart-money traders and the MadeOnSol KOL leaderboard become CANDIDATES (once a day, off by default), listed for the operator and never copied; a candidate is validated only through its own trades here | M3b, M11 |
+| 25–28 | Wallet discovery, validation gates, outlier test, regime test | DONE for BSC / Robinhood (M3b); Solana validation on the M21 ledger, regime test INSUFFICIENT DATA (no Solana regime series) | outlier test (M3); `wallet_validation` (12 configurable checks, per-day consistency, INSUFFICIENT DATA vs NOT VALIDATED); `market_regimes` (hourly volume / net flow / price range, migration 0026; CONSISTENT / REGIME_DEPENDENT); discovery stage COLLECTING_HISTORY → VALIDATED → PAPER_FOLLOWED / REJECTED, never auto-copied; Smart Wallets UI + rules editor; Solana wallets validated on their recorded own trades since M21. External sources (M11): Nansen / MadeOnSol candidates, never copied | M3b, M11, M21 |
 | 29 | Copy BUY ONLY / SELL ONLY / BUY+SELL | DONE (paper) | modes NOTIFY, BUY_ONLY, MIRROR (buy+sell), SELL_ONLY (M4); SELL ONLY exits PAPER positions only | M4 |
 | 30–31 | Copy buy checks, chase guard; sell 20/50/100 % replication | DONE (paper) | `copy-engine`, partial sells on Solana (queued) and EVM | — |
 | 32 | Copy position link fields | DONE (paper) | `copy_outcomes.link`: source wallet / tx / position, our position, ratio, mode, target vs our entry and exit, latency, displacement, PnL; slippage None for paper (measured on live fills only); on `/api/copy/positions` and the Copy page | M4b |
@@ -2279,4 +2279,85 @@ on its own.
   - the cross-check on `/api/evm/streams`;
   - research create, suggestions, one stage at a time, evidence required,
     reject, audit, 404 / 409 / 422, authentication.
+
+## 33. M21 — Solana parity: observation states, wallet ledger (2026-10-04)
+
+### §14-17: Solana observations in the same state names
+
+Solana has its own observation funnel (OBSERVING, CONTINUE_MONITORING,
+PROMOTE, REJECT, NO_TRADE, MIGRATION_DETECTED), followed after a promotion by
+the candidate's lifecycle. `solana/observation_states.py` shows both in the
+§15 names that BSC / Robinhood use:
+
+| Solana | §15 state | §17 reason |
+|---|---|---|
+| OBSERVING | OBSERVING | |
+| CONTINUE_MONITORING | ANALYZING | |
+| NO_TRADE | EXPIRED | EXPIRED_NO_ENTRY |
+| REJECT | REJECTED | DETERIORATION_WHILE_OBSERVED |
+| MIGRATION_DETECTED | EXPIRED | MIGRATED (observed again by the migration engine) |
+| PROMOTE, no candidate yet | QUALIFIED | |
+| PROMOTE, gate still analyzing or waiting | WAITING_FOR_ENTRY | |
+| PROMOTE, entry pending | ENTRY_PENDING | |
+| PROMOTE, entered or later | ENTERED | |
+| PROMOTE, gate rejected | REJECTED | SAFETY_FAILURE |
+
+Each observation also carries `observation_started_at`,
+`observation_deadline` (the launch plus the window) and `observation_reason`.
+These appear on `/api/observations`, on the token detail and on Solana →
+Observing.
+
+This is a view only: no Solana decision or state changes. Every expired or
+rejected Solana observation is already kept in the opportunity ledger for ML;
+only the detailed funnel report is pruned after 3 days (pump.fun's volume).
+
+### §19-23 and §26: a ledger for Solana wallets
+
+Solana trades are kept only in the stream store: 3 hours, at most 400 per
+token. Storing every pump.fun trade is not possible on this server. Solana
+wallet profiles came from `launch_buyers` (the first buyers of launches this
+system decided on) and had no sells at all.
+
+When a launch's outcome resolves (about 30 minutes after the decision), each
+of its early buyers now gets its own trades of that token, from its first
+buy until then:
+- sells: SOL out, tokens out, the last sell;
+- later buys.
+
+They are stored in `launch_buyers.ledger` (migration 0040). The ledger counts
+only when the held history reaches back to the buyer's first buy; otherwise
+a sell could be missing, so the launch is left out and counted as "without
+ledger".
+
+Solana profiles now use these ledgers:
+- the FIFO P/L profile (`wallet_pnl`): wins and losses, profit factor,
+  drawdown;
+- the §26 validation checks;
+- the discovery stage.
+
+The window is stated on every profile. A position still held after it
+stays open, and no PnL is guessed for it. The win rate shown next to the
+P/L is still the launch outcome, labelled as such.
+
+When a wallet has no ledger yet, its PnL is INSUFFICIENT_DATA and
+"realized" is empty, never 0. The score treats unknown PnL as neutral. The
+regime test stays INSUFFICIENT_DATA on Solana: no Solana market-regime series
+is recorded.
+
+### Verified here
+
+- core: six launches of one wallet:
+  - five with full history give five closed trades and a positive realized
+    PnL, with the §26 checks run;
+  - the sixth, with trimmed history, is left out and counted;
+  - a holder stays open with no realized PnL;
+  - no ledger gives INSUFFICIENT_DATA;
+  - the funnel and candidate states map onto the §15 names with the §17
+    fields.
+- API: `/api/observations` and the token detail carry the §15 state and
+  reason.
+
+NOT VERIFIED on real data: ledgers start with launches resolved after the
+deploy. Wallets need several covered launches before validation can say
+anything.
 

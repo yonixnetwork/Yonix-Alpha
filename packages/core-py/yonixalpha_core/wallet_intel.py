@@ -128,6 +128,26 @@ def early_sold_share(trades: list[Trade], wallet: str, start: datetime, seconds:
     return min(1.0, sold / tokens_in), covered
 
 
+def own_trades(trades: list[Trade], wallet: str, first_buy_at: datetime, until: datetime) -> dict[str, Any]:
+    """The wallet's own trades of this mint after its entry and up to `until`
+    (master §19-23 for Solana): sells (SOL out, tokens out, last sell) and
+    later buys. covered: the held history reaches back to the entry, so no
+    sell can be missing; otherwise the figures are a lower bound and the
+    ledger is not used for P/L."""
+    held = sorted(trades, key=lambda x: x.at)
+    covered = bool(held) and held[0].at <= first_buy_at
+    entry_end = first_buy_at + timedelta(seconds=5)  # the entry itself (as early_buyers counts it)
+    sells = [t for t in held if t.trader == wallet and not t.is_buy and first_buy_at <= t.at <= until]
+    later = [t for t in held if t.trader == wallet and t.is_buy and entry_end < t.at <= until]
+    return {"sol_out": str(Decimal(sum(t.sol_lamports for t in sells)) / LAMPORTS),
+            "tokens_out": str(sum(t.token_raw for t in sells)),
+            "last_sell_at": max(t.at for t in sells).isoformat() if sells else None,
+            "sol_in_later": str(Decimal(sum(t.sol_lamports for t in later)) / LAMPORTS),
+            "tokens_in_later": str(sum(t.token_raw for t in later)),
+            "last_buy_at": max(t.at for t in later).isoformat() if later else None,
+            "until": until.isoformat(), "covered": covered}
+
+
 def launch_outcome(peak_pct: Decimal | float | None, drawdown_pct: Decimal | float | None, cfg: WalletConfig) -> str | None:
     """WIN: rose at least win_peak_pct after the decision within 30 min.
     LOSS: did not, and fell at least loss_drawdown_pct. FLAT: neither."""
@@ -329,9 +349,11 @@ async def update_early(session: AsyncSession, mint: str, trades: list[Trade], no
 
 
 async def resolve(session: AsyncSession, redis, mint: str, peak_pct, drawdown_pct, migrated: bool | None,
-                  now: datetime, cfg: WalletConfig) -> dict[str, Any] | None:
+                  now: datetime, cfg: WalletConfig, trades: list[Trade] | None = None) -> dict[str, Any] | None:
     """Writes the launch outcome to its unresolved buyers and only then adds
-    it to the Redis counters (so it informs decisions after `now` only)."""
+    it to the Redis counters (so it informs decisions after `now` only).
+    With the held trades, each buyer's own sells / later buys up to now are
+    recorded as its ledger (Solana wallet P/L)."""
     outcome = launch_outcome(peak_pct, drawdown_pct, cfg)
     if outcome is None:
         return None
@@ -339,6 +361,10 @@ async def resolve(session: AsyncSession, redis, mint: str, peak_pct, drawdown_pc
                                                              LaunchBuyer.outcome_resolved_at.is_(None)))).scalars().all()
     if not rows:
         return None
+    if trades is not None:
+        for r in rows:
+            r.ledger = own_trades(trades, r.wallet, r.first_buy_at, now)
+        await session.flush()
     await session.execute(update(LaunchBuyer).where(LaunchBuyer.mint == mint, LaunchBuyer.outcome_resolved_at.is_(None))
                           .values(outcome=outcome, outcome_peak_pct=peak_pct, outcome_drawdown_pct=drawdown_pct,
                                   outcome_migrated=migrated, outcome_resolved_at=now))

@@ -28,9 +28,13 @@ async def test_observations_explain_why_a_token_was_not_traded(app, client, auth
     item = r.json()["items"][0]
     assert item["mint"] == "MINTNOTRADE" and item["reasons"][0].startswith("NO_TRADE: 3 trades")
     assert item["metrics"]["liquidity_state"].startswith("NO DEX POOL YET") and item["metrics"]["creator_sold"] is True
+    # master §15 / §17 names, as on BSC / Robinhood
+    assert (item["observation"]["state"], item["observation"]["expiry_reason"]) == ("EXPIRED", "EXPIRED_NO_ENTRY")
+    promo = (await client.get("/api/observations", params={"outcome": "PROMOTE"}, headers=auth_headers)).json()["items"][0]
+    assert promo["observation"]["state"] == "QUALIFIED" and promo["observation"]["expiry_reason"] is None
 
     detail = (await client.get("/api/observations/MINTNOTRADE", headers=auth_headers)).json()
-    assert detail["observation"]["outcome"] == "NO_TRADE"
+    assert detail["observation"]["outcome"] == "NO_TRADE" and detail["observation"]["state"] == "EXPIRED"
     assert [c["label"] for c in detail["observation"]["report"]["checkpoints"]] == ["T0", "T+5s", "T+10s"]
     assert (await client.get("/api/observations/UNKNOWN", headers=auth_headers)).status_code == 404
     assert (await client.get("/api/observations", params={"outcome": "BAD"}, headers=auth_headers)).status_code == 422

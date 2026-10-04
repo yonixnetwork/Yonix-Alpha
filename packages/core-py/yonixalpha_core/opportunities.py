@@ -403,7 +403,8 @@ async def _wallets(session: AsyncSession, redis, row: OpportunityOutcome, trades
             analysis = dict(row.analysis or {})
             if "wallet_outcome" not in analysis and now >= row.decided_at + timedelta(seconds=PEAK_WINDOW_SECONDS + 60):
                 res = await wallet_intel.resolve(session, redis, row.mint, row.peak_pct, row.drawdown_pct,
-                                                 row.migrated_at is not None, now, cfg) if row.mint in recorded else None
+                                                 row.migrated_at is not None, now, cfg,
+                                                 trades=trades) if row.mint in recorded else None
                 analysis["wallet_outcome"] = res or {"outcome": None, "note": "no early buyers recorded or already resolved"}
                 row.analysis = analysis
                 changed += 1
