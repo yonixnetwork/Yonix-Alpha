@@ -66,15 +66,15 @@ Providers), see M7.
 | 54–55 | Token explorer all chains, explorer links per chain | DONE in code (M14) | one search across Solana / BSC / Robinhood (name / symbol prefix, mint / contract, creator, wallet; migration 0032 indexes); EVM token page with every §54 field (holders: not tracked on EVM, stated, never 0; ML: NOT_AVAILABLE on the token page); `explorer_links` builds every link for the token's own chain from confirmed URL formats only; Robinhood has no confirmed DEX page, shown unavailable with the reason (section 24) | M14 |
 | 56–58 | Balances, gas reserve, INSUFFICIENT GAS, unified wallet (Solana + EVM accounts) | DONE in code (M13); EVM live balance NOT VERIFIED on the server yet | YonixAlpha Trading Wallet (`/api/wallets/overview`, Wallets page): Total / Available / Reserved / Gas reserve / Trading balance per chain, LIVE and PAPER separate, USD from SOL / BNB / ETH rates; EVM entries need gas for the buy and the sell plus the gas reserve (INSUFFICIENT_GAS / GAS_PRICE_UNAVAILABLE, NO_TRADE); Solana LIVE entries need the fee reserve (INSUFFICIENT GAS in the gate); Solana paper unchanged (section 24) | M13 |
 | 59–61 | PnL always shown with colour, market cap $K/$M | DONE in code (M14) | `position_pnl.view` on every positions list (paper, live, copy, EVM, overview, token pages): PROFIT / LOSS / BREAKEVEN with %, PNL_UNAVAILABLE with the reason when there is no mark (never a bare OPEN, never 0); entry, current, quantity, value, unrealized, realized, fees, net, peak, drawdown; green / red / neutral with TrendingUp / TrendingDown / Minus icons; EVM market cap in USD ($950 / $9.5K / $1.05B) on the token list and token page (section 24) | M14 |
-| 60 | NO EMOJIS | DONE (this phase) | alert prefixes and the live page tick mark removed | M0 |
+| 60 | NO EMOJIS | DONE | alert prefixes and the live page tick mark removed (M0); `test_no_emojis.py` fails on any emoji in the dashboard or the Python code since M23 | M0, M23 |
 | 62–63 | 24/7 server-side workers | DONE | all engines are containers; dashboard is a viewer | — |
 | 64–66 | GitHub / provider update monitor with Telegram + System Health | DONE in code (M15); GitHub path NOT VERIFIED against the real API from the build environment (blocked there), PyPI path checked against pypi.org | `update_monitor.py` in the ml service: 14 repositories + 8 pinned dependencies every 6 h via GitHub REST and PyPI JSON (no HTML); classes INFO / UPGRADE_AVAILABLE / BREAKING_CHANGE / SECURITY_UPDATE / PROVIDER_CHANGE / ACTION_REQUIRED; baseline first check; history in `update_events` (migration 0031); Telegram kind `infrastructure_update`; System Health → Research / Updates with acknowledge; never deploys (section 21). M15b: every update says what to do (APPLIED / PIN BUMP / INTEGRATION CHECK / REVIEW ONLY); `DEPLOY_PULL=1` for base-image patches; first dependency round applied (section 25) | M15 |
 | 67–70 | Multiple detection methods, source priority, NO_TRADE on provider failure, research flow | DONE in code (M8, M16, M20); stream-vs-logs numbers NOT VERIFIED until measured on the server | on-chain first everywhere (no scraping); EVM: launchpad event logs per adapter (primary), Robinhood sequencer feed and BSC pending transactions as early sightings, RPC role routing with fallback and NO_TRADE when no endpoint answers; skipped ranges recorded and backfilled (M16). M20 (section 32): the streams and the logs are checked against each other every 5 minutes (coverage, lead, stream transactions missing from the logs); external safety providers Honeypot.is and GoPlus (both optional, a flag fails a token, a clean or missing answer never passes it); research pipeline RESEARCH -> REVIEW -> PAPER -> VALIDATION -> CONTROLLED_RELEASE (migration 0039), operator moves with evidence, audited, never a rule change. Not done: an indexed API as a further launch source (none verified without a key) | M8, M16, M20 |
 | 71–75 | Paper trading all chains feeding ML | DONE in code (M12), NOT VERIFIED on real data yet | Solana complete; EVM: every observation is a sample whether traded or not, a traded one carries the executable return of its closed paper position (fees and taxes included); ML knowledge on ML Review (samples by kind, wins / losses, missed winners, copy outcomes, models, contribution 0 %) (section 26) | M12 |
 | 76–77 | Safety hierarchy, decision states EXECUTE / REDUCE_SIZE / WAIT / MANUAL_APPROVAL / REJECT / NO_TRADE | DONE (EVM in M16; Solana gate unchanged) | Solana: the gate's FinalDecision has the six states (REQUIRE_MANUAL_APPROVAL = MANUAL APPROVAL). BSC / Robinhood automatic, manual and copy entries: every blocker belongs to a §76 layer, the highest blocking layer decides, and each decision stores timestamp, reason, deciding layer, features, risk, wallet / safety / ML evidence and provider status (`decision_states.py`, section 28). MANUAL APPROVAL: launch coordination with operator approval | M16 |
 | 78 | Preserve historical data | DONE | migrations are additive only | — |
-| 79–81 | Test matrix, automatic-sell regression, 24/7 acceptance | PARTIAL | automatic-vs-manual exit regression (`services/paper-trading/tests/test_exit_parity.py`); hierarchy matrix (`test_decision_states.py`: safety, data and liquidity outrank strategy, risk and copy; unknown codes never pass); 24/7 acceptance (§81) is an operator procedure on the server, not automated | M2, M16 |
-| 82–83 | Final requirement audit and report | this document, updated per phase | | every phase |
+| 79–81 | Test matrix, automatic-sell regression, 24/7 acceptance | DONE (§79–80); §81 NOT VERIFIED until run on the server | §79: every scenario mapped to named tests, the names checked by script (`docs/TEST_MATRIX_2026.md`), Robinhood pipeline test added (M23); §80: `services/paper-trading/tests/test_exit_parity.py` (automatic and dashboard exits under identical conditions); §81: procedure `docs/ACCEPTANCE_24x7.md` with the read-only measurement `tools.acceptance_247` (section 35) | M2, M16, M23 |
+| 82–83 | Final requirement audit and report | DONE (M23) | `docs/FINAL_REQUIREMENT_AUDIT_2026.md` (every section 0–84 with REQUIREMENT / STATUS / FILES / TEST / RESULT / EVIDENCE / REMAINING ISSUE, its 305 file and test references checked by script) and `docs/FINAL_REPORT_2026.md` (the 31 headings of §83) | M23 |
 
 ## 3. Phase plan (smallest safe steps, evidence first)
 
@@ -2516,3 +2516,89 @@ A change there is reported as an API change, never deployed.
 NOT VERIFIED against the chain until `tools.dbc_verify` and
 `tools.launchlab_verify` print PASS on the server; the GitHub and Solana RPC
 endpoints are blocked from this environment.
+
+## 35. M23 — testing and final audit (2026-10-04)
+
+### §79: test matrix
+
+`docs/TEST_MATRIX_2026.md` maps each of the 26 scenarios §79 names to the
+tests that cover it, what they prove, and what they cannot prove (real-chain
+behaviour of BSC / Robinhood, whose live execution is locked). A script
+checked that all 84 named tests exist.
+
+One gap was found and closed. BSC had an end-to-end pipeline test
+(discovery → safety → evidence gate → entry → exit); Robinhood did not.
+`services/data-evm/tests/test_worker.py::test_robinhood_pons_pipeline_discovery_safety_entry_exit`
+runs the same pipeline on a Pons V2 curve:
+- discovery of the launch and ten curve trades;
+- safety with a buy simulated through eth_call;
+- the launchpad evidence gate;
+- the coordination check without the launch transaction: NO_TRADE
+  (COORDINATION_DATA_UNAVAILABLE). The safe answer when data is missing
+  (§11, §70) is now asserted, not assumed;
+- with the chain's answers (launch receipt, curve balance, snipe tax,
+  nonces, no explorer): a paper entry;
+- management, and a stop-loss exit at the executable sell quote, with
+  realized PnL in ETH.
+
+### §80: automatic sell regression
+
+`services/paper-trading/tests/test_exit_parity.py`, from M2. Unchanged; its
+production counterpart is `tools.exit_diagnosis` (section 5).
+
+### §81: 24/7 acceptance
+
+Continuity can only be shown on the real server, so §81 stays an operator
+procedure: `docs/ACCEPTANCE_24x7.md`. M23 makes it measurable.
+`tools.acceptance_247 --since <time>` is read-only. For an unattended
+window it reports:
+- each service's heartbeat now and its restarts in the window;
+- per §81 duty, from what the workers wrote: the number of events, the
+  newest, and the longest silence (window edges included) against a limit.
+  The duties are discovering, monitoring, copying, managing positions,
+  updating exits and recording PnL;
+- restart evidence: the LIVE wallet reconciliation time, reconciliation
+  findings, EVM scan ranges skipped and backfilled;
+- the history from before the window.
+
+The verdicts:
+- ACTIVE, or GAP for a silence longer than the limit;
+- FAIL when a source that never stops (discovery and trades on each chain)
+  produced nothing;
+- NO EVENT where an event depends on the market (copying, exits).
+
+PASS needs no FAIL and every service alive. It proves continuity, never
+profit. `test_acceptance_247.py`, on the real schema:
+- steady discovery is ACTIVE;
+- a 20-minute trade silence is GAP (21 minutes, measured);
+- an empty chain is FAIL;
+- copying without events is NO EVENT;
+- a restart and a stale heartbeat are caught;
+- history is counted.
+
+### §60: no emojis, guarded
+
+`test_no_emojis.py` scans the dashboard code and every Python module that
+produces operator-facing text, and fails on any emoji. It found none, and it
+catches one when one is added (checked).
+
+### §82–83: final audit and report
+
+- `docs/FINAL_REQUIREMENT_AUDIT_2026.md`: every section 0–84 after
+  re-reading the whole prompt, with the columns §82 asks for. Its 305 file
+  and test references were checked by script.
+- `docs/FINAL_REPORT_2026.md`: the 31 headings of §83.
+
+Both use LIVE VERIFIED only for Solana. Neither uses PERFECT.
+
+### Verified here
+
+- core:
+  - `test_acceptance_247.py` (2);
+  - `test_no_emojis.py` (1);
+  - the whole core suite.
+- data-evm: the Robinhood pipeline test (13 tests in the service).
+- Every other suite unchanged and passing.
+
+NOT VERIFIED: the 24/7 acceptance on the server (the procedure in
+`docs/ACCEPTANCE_24x7.md`).

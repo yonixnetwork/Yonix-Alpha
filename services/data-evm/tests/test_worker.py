@@ -544,3 +544,127 @@ async def test_manual_buy_is_refused_on_an_observe_only_venue(session_factory, r
         await session.commit()
         with pytest.raises(manual.ManualTradeError, match="observe only"):
             await manual.create_request(session, redis_client, "bsc", "0x" + "aa" * 20, "op", now)
+
+
+CURVE = "0x3333333333333333333333333333333333333333"
+
+
+def pons_node(now: datetime, quote_reserve: int = 2 * 10 ** 18):
+    """A Pons V2 launch on a fake Robinhood node: the factory announces the
+    curve, ten CurveBuy / CurveSell over the last five minutes, the curve's
+    state for quotes (buy simulated through eth_call, sell from the source's
+    formula on the live reserves)."""
+    from yonixalpha_core.chains.evm.pons import LAUNCHED_TOKEN_TYPES, V2_EVENTS, PonsV2
+
+    node = Node(4663)
+    node.genesis_ts = int(now.timestamp()) - node.head
+    lp = PonsV2(rpc_for(node, "robinhood"))
+    ev = V2_EVENTS.by_name
+    node.logs = [log_of(ev["TokenLaunched"], {"token": TOKEN, "curve": CURVE, "deployer": CREATOR, "pairToken": ZERO_ADDRESS,
+                                              "launchConfigId": 1, "graduationThreshold": 4 * 10 ** 18}, lp.factory, 690, 0)]
+    for i, px in enumerate(PRICES):
+        buy, who = i not in (4, 7), f"0x{(i % 8) + 1:040x}"
+        quote, tokens = px * 10 ** 13, 10 ** 22
+        node.logs.append(log_of(ev["CurveBuy" if buy else "CurveSell"], (
+            {"buyer": who, "recipient": who, "quoteIn": quote, "tokensOut": tokens, "fee": quote // 100, "tax": quote // 100}
+            if buy else
+            {"seller": who, "recipient": who, "tokensIn": tokens, "quoteOut": quote, "fee": quote // 100, "tax": quote // 100}),
+            CURVE, 700 + i * 30, i + 1))
+    node.on(lp.factory, "getLaunchedToken(address)", enc(
+        [LAUNCHED_TOKEN_TYPES], [(TOKEN, CURVE, CREATOR, CREATOR, ZERO_ADDRESS, 4 * 10 ** 18, 10000, 200, 100, False, 0, 0, 0, 0,
+                                  True)]))
+    set_pons_reserves(node, quote_reserve)
+    node.on(CURVE, "feeBps()", enc(["uint256"], [100]))
+    node.on(CURVE, "creatorTaxBps()", enc(["uint256"], [100]))
+    node.on(CURVE, "sellableTokens()", enc(["uint256"], [8 * 10 ** 26]))
+    node.on(CURVE, "graduated()", enc(["bool"], [False]))
+    node.on(CURVE, "readyToGraduate()", enc(["bool"], [False]))
+    node.on(CURVE, "realQuoteReserve()", enc(["uint256"], [10 ** 18]))
+    node.on(TOKEN, "totalSupply()", enc(["uint256"], [10 ** 27]))
+
+    def buy_sim(p):  # the curve's own price, fee and tax taken
+        value = int(p[0]["value"], 16)
+        return enc(["uint256"], [value * 98 // 100 * 10 ** 27 // (2 * 10 ** 18)])
+
+    node.on(CURVE, "buy(uint256,uint256,address)", buy_sim)
+    return node, lp
+
+
+def set_pons_reserves(node: Node, quote_reserve: int) -> None:
+    node.on(CURVE, "getReserves()", enc(["uint256", "uint256"], [quote_reserve, 10 ** 27]))
+
+
+async def test_robinhood_pons_pipeline_discovery_safety_entry_exit(session_factory, redis_client):
+    """Master §79 Robinhood buy / sell: the same pipeline as BSC on a Pons V2
+    curve: discovery, safety, the evidence gate, a paper entry, management,
+    and a stop-loss exit at the executable sell quote, with PnL in ETH."""
+    import httpx
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    node, lp = pons_node(now)
+    explorer = httpx.AsyncClient(transport=httpx.MockTransport(lambda req: httpx.Response(503)))  # never the network
+    w = ChainWorker("robinhood", lp.rpc, [lp], session_factory, redis_client, http=explorer)
+    s, errors = evm_settings.parse({"robinhood": {"confirmations": 0}, "fresh_min_buys": 5, "fresh_min_unique_buyers": 4})
+    assert not errors
+
+    out = await w.discovery_pass(s, now)
+    assert out["pons_v2"]["launches"] == 1 and out["pons_v2"]["trades"] == 10
+    async with session_factory() as session:
+        row = await session.get(EvmToken, ("robinhood", TOKEN))
+        assert row.category == "FRESH" and row.stats["buys"] == 8 and row.launchpad == "pons_v2"
+
+    assert await w.safety_pass(s, now) == 1
+    async with session_factory() as session:
+        row = await session.get(EvmToken, ("robinhood", TOKEN))
+        assert row.safety_verdict == "PASS", row.safety
+
+    assert (await w.entry_pass(s, now))["opened"] == 0  # never traded before real-chain evidence
+    async with session_factory() as session:
+        for c in PAPER_REQUIRED:
+            await verification.record(session, "pons_v2", c, True, {"test": True}, "test", now)
+        await session.commit()
+    # master §11 / §70: the launch-window coordination check cannot read the
+    # launch transaction yet, so the entry is NO_TRADE, never assumed safe
+    assert (await w.entry_pass(s, now))["opened"] == 0
+    async with session_factory() as session:
+        rec = (await session.get(EvmToken, ("robinhood", TOKEN))).extra.get("entry_decision")
+    assert rec["decision"] == "NO_TRADE" and [b["code"] for b in rec["blockers"]] == ["LAUNCH_COORDINATION"]
+    assert "COORDINATION_DATA_UNAVAILABLE" in rec["blockers"][0]["message"]
+    # the chain answers: the launch transaction (no snipe-tax exemptions in its
+    # receipt), the curve's token balance, every buyer pays the snipe tax and
+    # is an old wallet, the explorer has no funding data
+    from yonixalpha_core.testing.evm_node import TX
+    node.txs[TX] = {"from": CREATOR, "to": lp.factory, "input": "0x"}
+    node.receipts[TX] = {"logs": []}
+    node.on(TOKEN, "balanceOf(address)", enc(["uint256"], [10 ** 27 - 6 * 10 ** 22]))  # supply less net curve buys
+    node.on(CURVE, "currentSnipeTaxBps(address)", enc(["uint256"], [9000]))
+    for i in range(1, 9):
+        node.nonces[f"0x{i:040x}"] = 40
+    from app.worker import SAFETY_RECHECK
+    async with session_factory() as session:  # the next safety re-check is due (it refreshes coordination)
+        row = await session.get(EvmToken, ("robinhood", TOKEN))
+        row.safety_at = now - SAFETY_RECHECK - timedelta(seconds=1)
+        await session.commit()
+    assert await w.safety_pass(s, now) == 1
+    counts = await w.entry_pass(s, now)
+    async with session_factory() as session:
+        rec = (await session.get(EvmToken, ("robinhood", TOKEN))).extra.get("entry_decision")
+    assert counts["opened"] == 1, rec
+    assert rec["decision"] in ("EXECUTE", "REDUCE_SIZE") and rec["blockers"] == []
+    assert (await w.entry_pass(s, now))["opened"] == 0  # no second entry on the same token
+    async with session_factory() as session:
+        p = (await session.execute(select(PaperPosition))).scalar_one()
+        assert p.engine == "evm_robinhood" and p.status == "open"
+        acct = await session.get(PaperAccount, p.account_id)
+        assert acct.quote_currency == "ETH" and acct.cash_balance == acct.starting_balance - p.entry_cost_quote
+        entry_cost = p.entry_cost_quote
+
+    r = await w.manage_pass(now)
+    assert r["managed"] == 1 and r["closed"] == 0
+    set_pons_reserves(node, 2 * 10 ** 17)  # the curve's quote side collapses: the sell quote falls below the stop
+    r = await w.manage_pass(now)
+    assert r["closed"] == 1
+    async with session_factory() as session:
+        p = (await session.execute(select(PaperPosition))).scalar_one()
+        assert p.status == "closed" and p.exit_reason == "stop_loss"
+        assert p.realized_pnl == p.proceeds_quote - entry_cost and p.realized_pnl < 0
