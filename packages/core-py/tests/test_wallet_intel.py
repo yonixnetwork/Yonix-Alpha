@@ -208,3 +208,34 @@ async def test_counters_are_rebuilt_once_from_the_table(db, redis):
     after = await wi.assess(redis, new, now, CFG, complete_history=True, created_at=T0 + timedelta(hours=1), mint="New")
     assert after["dump_cluster"] == before["dump_cluster"] and after["dump_cluster"]["level"] == "HIGH"
     assert await redis.hgetall(wi.BASE) == {"n": "21"}
+
+
+async def test_solana_wallet_ledger_from_the_buyers_own_trades(db, redis):
+    """Master §19-23 on Solana: each early buyer's own sells up to the
+    outcome become a FIFO ledger; a holder stays open, never a guessed PnL;
+    a launch whose history was trimmed is left out."""
+    from yonixalpha_core import wallet_profiles as wp
+
+    for n in range(6):
+        start = T0 + timedelta(minutes=10 * n)
+        trades = launch_with(["a", "b", "c", "d"], {"a"}, start)  # a buys first and sells into the later buyers
+        assert await wi.record_launch(db, redis, f"L{n}", trades, int(start.timestamp()), None,
+                                      start + timedelta(seconds=300), CFG) == 4
+        held = trades if n < 5 else [t for t in trades if t.at > start + timedelta(seconds=2)]  # L5: trimmed history
+        await wi.resolve(db, redis, f"L{n}", Decimal("5"), Decimal("-70"), False, start + timedelta(minutes=31), CFG,
+                         trades=held)
+    await db.commit()
+    rows = (await db.execute(select(LaunchBuyer).where(LaunchBuyer.wallet == "a"))).scalars().all()
+    led = {r.mint: r.ledger for r in rows}
+    assert led["L0"]["covered"] is True and Decimal(led["L0"]["sol_out"]) > 0 and led["L0"]["last_sell_at"]
+    assert led["L5"]["covered"] is False
+    m = wp.solana_metrics(rows, wp.ScoreConfig(), T0 + timedelta(hours=2))
+    assert m["ledger_coverage"] == {"launches": 6, "with_ledger": 5, "without_ledger": 1}
+    assert m["pnl"]["all"]["closed_trades"] == 5 and m["realized_pnl"] > 0 and m["sells"] == 5
+    assert m["validation"]["checks"]  # the §26 checks ran on the closed trades
+    assert any("not observed" in x for x in m["pnl"]["notes"]) and any("trimmed" in x for x in m["pnl"]["notes"])
+    holder = (await db.execute(select(LaunchBuyer).where(LaunchBuyer.wallet == "b"))).scalars().all()
+    hm = wp.solana_metrics(holder, wp.ScoreConfig(), T0 + timedelta(hours=2))
+    assert hm["pnl"]["all"]["closed_trades"] in (0, None) and hm["pnl"]["open_tokens"] == 5 and hm["realized_pnl"] is None
+    none = wp.solana_metrics([], wp.ScoreConfig())  # no ledger at all: INSUFFICIENT_DATA, never a 0 PnL
+    assert none["pnl"]["all"]["status"] == "INSUFFICIENT_DATA" and none["realized_pnl"] is None

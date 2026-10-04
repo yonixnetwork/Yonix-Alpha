@@ -245,7 +245,8 @@ export default function SmartWalletsPage() {
                     <td>{p.trades}</td><td>{p.tokens}</td><td>{p.metrics.closed_tokens ?? "—"}</td>
                     <td>{pct(p.metrics.win_rate)}</td>
                     <td className={Number(p.metrics.realized_pnl) > 0 ? "pos" : Number(p.metrics.realized_pnl) < 0 ? "neg" : ""}>
-                      {p.source === "evm_trades" ? Number(p.metrics.realized_pnl).toFixed(4) : "—"}</td>
+                      {p.source === "evm_trades" || (p.metrics.ledger_coverage?.with_ledger && p.metrics.realized_pnl !== null)
+                        ? Number(p.metrics.realized_pnl).toFixed(4) : "—"}</td>
                     <td>{pct(p.metrics.early_entry_share)}</td>
                     <td>{p.metrics.avg_hold_s ? `${Math.round(p.metrics.avg_hold_s)} s` : "—"}</td>
                     <td title={JSON.stringify(p.score_detail?.components ?? p.score_detail)}>{p.score ?? <span className="muted small">insufficient data</span>}</td>

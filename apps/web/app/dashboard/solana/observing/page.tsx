@@ -10,7 +10,7 @@ import { BuyButton } from "@/components/ManualTrade";
 
 type Metrics = Record<string, string | number | boolean | null>;
 type Row = { mint: string; symbol: string | null; outcome: string; trend: string | null; reasons: string[]; decided_at: string;
-  candidate_id: string | null; metrics: Metrics };
+  candidate_id: string | null; metrics: Metrics; observation?: { state: string; expiry_reason: string | null } };
 type LiveRow = { mint: string; symbol: string | null; state: string; age_seconds: number | null; trend: string | null;
   reasons: string[]; metrics: Metrics };
 type Detail = {
@@ -159,7 +159,9 @@ export default function ObservingPage() {
               <Fragment key={r.mint}>
                 <tr onClick={() => setOpen(open === r.mint ? null : r.mint)} className="clickable">
                   <td><TokenLink mint={r.mint} label={r.symbol} /></td>
-                  <td><span className={outcomeClass(r.outcome)}>{r.outcome}</span></td>
+                  <td><span className={outcomeClass(r.outcome)}>{r.outcome}</span>
+                    {r.observation ? <div className="small muted" title="master §15 state (same names as BSC / Robinhood)">
+                      {String(r.observation.state).replaceAll("_", " ")}{r.observation.expiry_reason ? `: ${String(r.observation.expiry_reason).replaceAll("_", " ")}` : ""}</div> : null}</td>
                   <td>{r.trend ?? "—"}</td><td><M m={r.metrics} k="trades_total" /></td><td><M m={r.metrics} k="unique_buyers_total" /></td>
                   <td><M m={r.metrics} k="unique_sellers_total" /></td><td><M m={r.metrics} k="volume_total_sol" /></td>
                   <td><M m={r.metrics} k="liquidity_state" /></td>
