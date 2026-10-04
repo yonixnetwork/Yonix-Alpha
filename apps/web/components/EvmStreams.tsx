@@ -50,6 +50,39 @@ function StreamSettings({ data, reload }: { data: J; reload: () => void }) {
   );
 }
 
+const rate = (r: number | null | undefined) => (r === null || r === undefined ? <span className="muted">NOT AVAILABLE</span> : `${(r * 100).toFixed(1)} %`);
+
+/** Master §68: the streams and the launchpad logs checked against each other, last 24 hours. */
+function CrossCheck({ chains }: { chains: Record<string, J> }) {
+  return (
+    <>
+      <div className="section-title">Streams vs logs (last 24 h)</div>
+      <div className="table-scroll">
+        <table className="data-table">
+          <thead><tr><th>Chain</th><th>Launches in the logs: seen first by a stream</th><th>Trades in the logs: seen first</th>
+            <th>Lead median / p95</th><th>Stream launchpad transactions found in the logs (after 5 min)</th><th>Not in the logs</th></tr></thead>
+          <tbody>{Object.entries(chains).map(([chain, c]) => {
+            const x: J | undefined = c.crosscheck;
+            if (!x) return null;
+            const l = x.launches_seen_first_by_stream, t = x.trades_seen_first_by_stream, st = x.stream_txs_in_logs;
+            return (
+              <tr key={chain}>
+                <td>{CHAIN[chain] ?? chain}</td>
+                <td>{l.seen_first} of {l.logged} ({rate(l.rate)})</td>
+                <td>{t.seen_first} of {t.logged} ({rate(t.rate)})</td>
+                <td>{l.lead_s_median === null ? <span className="muted">no samples</span> : `${l.lead_s_median} s`}
+                  {" / "}{l.lead_s_p95 === null ? <span className="muted" title="needs 20 samples">—</span> : `${l.lead_s_p95} s`}</td>
+                <td>{st.in_logs} of {st.checked} ({rate(st.rate)})</td>
+                <td>{st.not_in_logs}</td>
+              </tr>);
+          })}</tbody>
+        </table>
+      </div>
+      <p className="muted small">{Object.values(chains)[0]?.crosscheck?.note}</p>
+    </>
+  );
+}
+
 /** Real-time transaction streams (master §9, §13): state, sequence health, delay and copy-trade lead. */
 export default function EvmStreams() {
   const { data, error, loading, reload } = useApi<J>("/api/evm/streams", undefined, { refreshMs: 15000 });
@@ -108,6 +141,7 @@ export default function EvmStreams() {
                 </tr>))}</tbody>
             </table>
           </div>
+          <CrossCheck chains={data.chains} />
           <button className="btn btn-ghost btn-sm" onClick={() => setOpen(!open)}>{open ? "Hide stream settings" : "Stream settings"}</button>
           {open && <StreamSettings data={data} reload={reload} />}
         </>

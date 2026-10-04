@@ -69,7 +69,7 @@ Providers), see M7.
 | 60 | NO EMOJIS | DONE (this phase) | alert prefixes and the live page tick mark removed | M0 |
 | 62–63 | 24/7 server-side workers | DONE | all engines are containers; dashboard is a viewer | — |
 | 64–66 | GitHub / provider update monitor with Telegram + System Health | DONE in code (M15); GitHub path NOT VERIFIED against the real API from the build environment (blocked there), PyPI path checked against pypi.org | `update_monitor.py` in the ml service: 14 repositories + 8 pinned dependencies every 6 h via GitHub REST and PyPI JSON (no HTML); classes INFO / UPGRADE_AVAILABLE / BREAKING_CHANGE / SECURITY_UPDATE / PROVIDER_CHANGE / ACTION_REQUIRED; baseline first check; history in `update_events` (migration 0031); Telegram kind `infrastructure_update`; System Health → Research / Updates with acknowledge; never deploys (section 21). M15b: every update says what to do (APPLIED / PIN BUMP / INTEGRATION CHECK / REVIEW ONLY); `DEPLOY_PULL=1` for base-image patches; first dependency round applied (section 25) | M15 |
-| 67–70 | Multiple detection methods, source priority, NO_TRADE on provider failure | PARTIAL (improved in M16) | on-chain first everywhere (no scraping); EVM: launchpad event logs per adapter (primary), Robinhood sequencer feed and BSC pending transactions as early sightings, RPC role routing with fallback to the other endpoints and NO_TRADE when none answers; M16: ranges the live scan skips are recorded and backfilled, never lost, and RPC / Data Providers shows each method's state (section 28). Not done: an indexed API as a further launch source, an automatic stream-vs-logs launch count, an external safety provider; the §67 research flow is the update monitor plus manual research records | M8, M16 |
+| 67–70 | Multiple detection methods, source priority, NO_TRADE on provider failure, research flow | DONE in code (M8, M16, M20); stream-vs-logs numbers NOT VERIFIED until measured on the server | on-chain first everywhere (no scraping); EVM: launchpad event logs per adapter (primary), Robinhood sequencer feed and BSC pending transactions as early sightings, RPC role routing with fallback and NO_TRADE when no endpoint answers; skipped ranges recorded and backfilled (M16). M20 (section 32): the streams and the logs are checked against each other every 5 minutes (coverage, lead, stream transactions missing from the logs); external safety providers Honeypot.is and GoPlus (both optional, a flag fails a token, a clean or missing answer never passes it); research pipeline RESEARCH -> REVIEW -> PAPER -> VALIDATION -> CONTROLLED_RELEASE (migration 0039), operator moves with evidence, audited, never a rule change. Not done: an indexed API as a further launch source (none verified without a key) | M8, M16, M20 |
 | 71–75 | Paper trading all chains feeding ML | DONE in code (M12), NOT VERIFIED on real data yet | Solana complete; EVM: every observation is a sample whether traded or not, a traded one carries the executable return of its closed paper position (fees and taxes included); ML knowledge on ML Review (samples by kind, wins / losses, missed winners, copy outcomes, models, contribution 0 %) (section 26) | M12 |
 | 76–77 | Safety hierarchy, decision states EXECUTE / REDUCE_SIZE / WAIT / MANUAL_APPROVAL / REJECT / NO_TRADE | DONE (EVM in M16; Solana gate unchanged) | Solana: the gate's FinalDecision has the six states (REQUIRE_MANUAL_APPROVAL = MANUAL APPROVAL). BSC / Robinhood automatic, manual and copy entries: every blocker belongs to a §76 layer, the highest blocking layer decides, and each decision stores timestamp, reason, deciding layer, features, risk, wallet / safety / ML evidence and provider status (`decision_states.py`, section 28). MANUAL APPROVAL: launch coordination with operator approval | M16 |
 | 78 | Preserve historical data | DONE | migrations are additive only | — |
@@ -2176,4 +2176,107 @@ positions:
 NOT VERIFIED on real data: the first windows freeze on the first ml cycle
 after deploy. Until enough labelled samples fall in them, every model stays
 NOT_VALIDATED or INSUFFICIENT_DATA, and no contribution can be raised.
+
+## 32. M20 — detection cross-check, external safety, research flow (2026-10-04)
+
+### §68: the streams and the logs, checked against each other
+
+Two detection methods see the same launchpad transactions:
+- the event logs, the primary source that every decision is made on;
+- the Robinhood sequencer feed and the BSC pending-transaction stream (M8),
+  which record each launchpad transaction for 15 minutes.
+
+Code: `yonixalpha_core/chains/evm/crosscheck.py`, in data-evm. It counts
+both directions per hour, in Redis:
+
+| Direction | When | What is counted |
+|---|---|---|
+| logs -> stream | each launch and trade the live log scan stores | was its transaction already seen on a stream, and how much earlier (lead). Each transaction once: a re-scan adds nothing |
+| stream -> logs | every 5 minutes, for each launchpad transaction a stream saw at least 5 minutes earlier | is it in the logs. Each transaction once, split by stream (sequencer feed, delayed feed, pending transactions) |
+
+A stream transaction missing from the logs can mean three things:
+- it reverted;
+- it emitted no decoded event (an approval, a failed call);
+- the log scan missed it.
+
+The first two are normal. A rising share of missing transactions is the
+signal to look at the log scan; its skipped ranges are already shown and
+backfilled (M16).
+
+Shown on RPC / Data Providers → Transaction streams → "Streams vs logs (last
+24 h)". When nothing was counted, a rate is NOT AVAILABLE, never 0 %. This
+is measurement only and changes nothing that is traded. NOT VERIFIED on the
+server: BSC pending transactions need a WSS endpoint that streams full
+bodies (M8).
+
+### §68-69: external safety providers
+
+An external safety provider already existed: Honeypot.is (BSC). M20 adds
+GoPlus token security (BSC) on the same terms. Both:
+- are tertiary sources (§69): on-chain checks stay primary;
+- are off by default, and switched on RPC / Data Providers → External safety
+  providers;
+- fail the token on a flag (GoPlus: honeypot, cannot sell everything, cannot
+  buy);
+- never pass a token on a clean answer;
+- change nothing when they give no answer (the token is not indexed yet, or
+  the API is down);
+- do not cover Robinhood Chain.
+
+GoPlus also lists other contract risks as evidence: hidden owner, owner can
+take back ownership, owner can change balances, self-destruct, pausable
+transfers, blacklist, modifiable slippage, mintable, proxy, external call,
+trading cooldown.
+
+The endpoint and fields come from the official SDK (GoPlusSecurity
+goplus-sdk-python 0.2.6, read from PyPI). The real API could not be reached
+from the build environment: NOT VERIFIED against it.
+
+### §67: research pipeline
+
+Code: `yonixalpha_core/research.py`, `/api/research`; table
+`research_items` (migration 0039); System Health → Research pipeline.
+
+The stages are RESEARCH -> REVIEW -> PAPER -> VALIDATION ->
+CONTROLLED_RELEASE. Moves follow these rules:
+- forward one stage at a time;
+- each forward move needs its evidence:
+
+  | Move to | Evidence |
+  |---|---|
+  | REVIEW | what was researched and its source |
+  | PAPER | how it stays apart from live |
+  | VALIDATION | the paper result |
+  | CONTROLLED_RELEASE | the release limits and roll-back |
+
+- an item can go back to any earlier stage, or be REJECTED, with the reason;
+- a rejected item is reopened to RESEARCH;
+- every move is audited and kept in the item's history.
+
+Suggestions offered for tracking:
+- venues that are observed but not traded (LaunchLab, Meteora DBC, Moonshot,
+  Genius.fun);
+- update-monitor findings of the last 30 days.
+
+CONTROLLED_RELEASE records the operator's decision and its limits; it
+changes no setting. The release itself is made with the existing controls
+(launchpad status, strategy and copy switches, risk settings), each audited
+on its own.
+
+### Verified here
+
+- core:
+  - the cross-check counts each logged transaction once and measures the lead;
+  - a stream transaction is checked once, after the 5-minute grace, per
+    source;
+  - empty counts give NOT AVAILABLE;
+  - research move rules;
+  - GoPlus: request path and parameters, a flag fails, a clean answer and
+    "not indexed" change nothing, Robinhood is never called.
+- data-evm: a real discovery pass feeds the cross-check, once despite a
+  re-scan.
+- API:
+  - the cross-check on `/api/evm/streams`;
+  - research create, suggestions, one stage at a time, evidence required,
+    reject, audit, 404 / 409 / 422, authentication.
 

@@ -1441,6 +1441,26 @@ class EvmExitSample(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class ResearchItem(Base):
+    """A research result on its way through RESEARCH -> REVIEW -> PAPER ->
+    VALIDATION -> CONTROLLED_RELEASE (yonixalpha_core.research, master §67).
+    A record of the operator's review: it changes no trading rule."""
+
+    __tablename__ = "research_items"
+    __table_args__ = (UniqueConstraint("source", "ref", name="uq_research_items_source_ref"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)  # manual | update_event | launchpad
+    ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    stage: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
+    summary: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    history: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class MlValidationSet(Base):
     """A frozen validation window (master §38): one UTC day of one sample
     family that no model trains on from the moment it is frozen. Models are

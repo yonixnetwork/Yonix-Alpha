@@ -32,6 +32,7 @@ log = get_logger("data-evm.main")
 DISCOVERY_SECONDS = 3.0
 SAFETY_SECONDS = 10.0
 PRUNE_SECONDS = 6 * 3600
+CROSSCHECK_SECONDS = 300  # stream-vs-logs check (master §68)
 
 
 async def _system_event(session_factory, event_type: str, severity: str, detail: dict | None = None) -> None:
@@ -46,7 +47,7 @@ async def chain_loop(worker: ChainWorker, stop: asyncio.Event) -> None:
     """Discovery + management every few seconds; safety and entries less
     often; evidence every 30 minutes; old trades pruned every 6 hours."""
     await worker.restore()
-    last_safety = last_prune = last_wallet = 0.0
+    last_safety = last_prune = last_wallet = last_xcheck = 0.0
     rpc_down_since: float | None = None
     while not stop.is_set():
         now = utcnow()
@@ -73,6 +74,12 @@ async def chain_loop(worker: ChainWorker, stop: asyncio.Event) -> None:
             if time.monotonic() - last_wallet >= WALLET_SECONDS:
                 last_wallet = time.monotonic()
                 worker.status["wallet"] = await worker.wallet_pass(now)
+            if time.monotonic() - last_xcheck >= CROSSCHECK_SECONDS:
+                last_xcheck = time.monotonic()
+                try:  # measurement only: a failure never stops discovery
+                    worker.status["crosscheck"] = await worker.crosscheck_pass(now)
+                except Exception as exc:  # noqa: BLE001
+                    worker.status["crosscheck"] = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
             if time.monotonic() - last_prune >= PRUNE_SECONDS:
                 last_prune = time.monotonic()
                 worker.status["pruned_trades"] = await worker.prune(now)

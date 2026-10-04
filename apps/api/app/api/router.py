@@ -16,6 +16,7 @@ from app.api.routes import (
     notifications,
     observations,
     paper,
+    research,
     risk,
     rpc,
     settings_center,
@@ -56,3 +57,4 @@ api_router.include_router(copy.router)
 api_router.include_router(wallets.router)
 api_router.include_router(explorer.router)
 api_router.include_router(ws.router)
+api_router.include_router(research.router)

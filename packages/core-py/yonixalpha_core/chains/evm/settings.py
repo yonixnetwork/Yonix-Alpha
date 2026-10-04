@@ -74,6 +74,7 @@ class EvmTradingSettings:
     allow_safety_warn: bool = False
     reentry_cooldown_hours: int = 24
     honeypot_is_enabled: bool = False  # BSC enrichment only, never the sole check
+    goplus_enabled: bool = False  # GoPlus token security (BSC), same terms: a flag fails, a clean answer never passes
 
     def chain(self, chain: str) -> ChainTradingSettings:
         return getattr(self, chain)

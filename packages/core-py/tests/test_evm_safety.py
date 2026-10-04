@@ -82,6 +82,31 @@ async def test_honeypot_is_is_enrichment_only():
     assert r.verdict == "FAIL"  # a clean Honeypot.is result never overrides a failed sell
 
 
+async def test_goplus_flags_fail_and_a_clean_or_missing_answer_changes_nothing():
+    node, lp = four_node()
+    base, _ = await safety.check(lp, TOKEN, 10 ** 16, S)
+    s = evm_settings.parse({"goplus_enabled": True})[0]
+    seen = []
+
+    def answer(result):
+        def handler(req):
+            seen.append((req.url.path, dict(req.url.params)))
+            return httpx.Response(200, json={"code": 1, "message": "OK", "result": result})
+        return handler
+
+    flagged = {TOKEN.lower(): {"is_honeypot": "0", "cannot_sell_all": "1", "hidden_owner": "1", "sell_tax": "0.1"}}
+    r, _ = await safety.check(lp, TOKEN, 10 ** 16, s, http=httpx.AsyncClient(transport=httpx.MockTransport(answer(flagged))))
+    f = next(x for x in r.findings if x["code"] == "GOPLUS_FLAGGED")
+    assert r.verdict == "FAIL" and f["flags"] == ["cannot_sell_all"] and f["risks"] == ["hidden_owner"]
+    assert seen[0] == ("/api/v1/token_security/56", {"contract_addresses": TOKEN}) and "goplus" in r.sources
+    clean = {TOKEN.lower(): {"is_honeypot": "0", "cannot_sell_all": "0", "cannot_buy": "0"}}
+    for result in (clean, {}):  # clean, then not indexed yet: neither changes the verdict
+        r, _ = await safety.check(lp, TOKEN, 10 ** 16, s, http=httpx.AsyncClient(transport=httpx.MockTransport(answer(result))))
+        assert r.verdict == base.verdict
+    assert any(x["code"] == "GOPLUS_UNAVAILABLE" and "not indexed" in x["detail"] for x in r.findings)
+    assert (await safety.goplus(TOKEN, "robinhood"))["available"] is False  # not covered: never called
+
+
 def test_settings_validate_and_keep_chain_amounts_separate():
     s, errors = evm_settings.parse({"bsc": {"position_size": "0.05", "max_total_exposure": "0.2"},
                                     "entry_categories": ["fresh", "momentum"]})
