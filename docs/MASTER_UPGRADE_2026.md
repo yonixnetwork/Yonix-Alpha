@@ -1856,3 +1856,52 @@ others, then NO_TRADE.
 - API: `/api/evm/detection`.
 
 NOT VERIFIED on the server until deployed.
+
+## 29. M17 — the ml service under real volume (2026-10-04)
+
+### Server finding (deploy 9e35b58)
+
+The decision states from M16 are live. EVM Markets showed:
+
+| Decision | Layer | Count |
+|---|---|---|
+| REJECT | TOKEN SAFETY | 1072 |
+| WAIT | LIQUIDITY SAFETY | 459 |
+| NO_TRADE | TOKEN SAFETY | 203 |
+| NO_TRADE | RISK | 30 |
+| WAIT | STRATEGY | 3 |
+| REDUCE_SIZE | EXECUTION | 2 |
+
+There were also 31170 older records without a layer, and 7 PAPER_BUY.
+
+But three hours after the deploy there were still 0 EVM samples, 0 wallet
+labels and no `evm_ml` log line. Observations are never deleted, and a
+failure would have logged `evm_ml.failed` and alerted. So the EVM step was
+never reached: it ran last in one hourly loop, after the Solana training,
+gate, shadow and ablation steps.
+
+The likely cause is the Solana shadow step and the ablation. Both loaded the
+whole Solana opportunity ledger, full rows with their snapshots, every pass.
+Solana adds tens of thousands of rows a day and the server has 2 GB. NOT
+VERIFIED: the step timing below will show it after this deploy.
+
+### Fixes
+
+| Change | Why |
+|---|---|
+| EVM / wallet ML runs in its own loop, every 30 minutes | a slow Solana step can no longer hold it up |
+| Solana shadow training and the ablation read the newest 30,000 completed rows, only the columns used (`shadow_ml.load_ledger`) | bounded memory and time |
+| A Solana shadow target is retrained at most once per 24 hours, only when newer rows exist | the same rule as the EVM models (§42) |
+| The Solana scorer loads only its own models | it loaded every `shadow_*` model, including `shadow_evm_*` and `shadow_wallet_*` with the same target names (P_UPSIDE_50 ...) but other features: once EVM models exist they would have scored Solana rows with garbage and overwritten the Solana scores |
+| Every ml step is timed in Redis (`yonixalpha_core/ml/steps.py`): state, start, duration, last success, error | shown on ML Review → ML service steps; a step RUNNING much longer than its interval is flagged SLOW |
+
+### Verified here
+
+- `test_ml_steps.py`: OK / FAILED / RUNNING recorded, harmless without Redis.
+- Shadow ML:
+  - an EVM model with the same target name never scores a Solana row;
+  - training reads the newest rows only;
+  - retraining happens at most daily.
+- API: `/api/ml/steps`.
+
+NOT VERIFIED on the server until deployed.

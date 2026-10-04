@@ -71,7 +71,13 @@ async def test_shadow_models_train_score_and_stay_out_of_the_decision_path(db_se
     assert await registry.get_active_model_row(db_session, "shadow_p_upside_50") is None  # never active
     again = await shadow_ml.train_all(db_session)
     assert again["P_UPSIDE_50"]["status"] == "skipped_no_new_samples"
-    # Scoring writes review-only probabilities onto recent rows.
+    # Scoring writes review-only probabilities onto recent rows, with this ledger's own models only:
+    # an EVM model with the same target name (other features) must never score a Solana row.
+    evm = next(m for m in models if m.name == "shadow_p_upside_50")
+    db_session.add(ModelVersion(name="shadow_evm_p_upside_50", version=1, status="shadow", artifact=evm.artifact,
+                                feature_names=["evm_only"], training_sample_count=1,
+                                metrics={**(evm.metrics or {}), "target": "P_UPSIDE_50"}))
+    await db_session.commit()
     now = T0 + timedelta(minutes=10 * 299 + 5)
     scored = await shadow_ml.score_recent(db_session, now=now)
     await db_session.commit()
@@ -79,6 +85,7 @@ async def test_shadow_models_train_score_and_stay_out_of_the_decision_path(db_se
     row = (await db_session.execute(select(OpportunityOutcome).where(OpportunityOutcome.key == "k299"))).scalar_one()
     s = row.ml_shadow
     assert 0 <= s["scores"]["P_UPSIDE_50"]["value"] <= 1 and "never used for decisions" in s["note"]
+    assert s["scores"]["P_UPSIDE_50"]["model"] == "shadow_p_upside_50"
 
 
 async def test_too_few_rows_is_reported_not_trained(db_session):
@@ -100,3 +107,20 @@ async def test_cycle_summary_says_why_a_target_was_skipped(db_session):
     t = out["training"]
     assert t["P_UPSIDE_50"].startswith("skipped: ") and "positives in training" in t["P_UPSIDE_50"]
     assert t["split"]["purged"] > 0 and t["samples"] == 220
+
+
+async def test_training_reads_the_newest_rows_only_and_retrains_at_most_daily(db_session, monkeypatch):
+    rng = random.Random(5)
+    db_session.add_all([_row(i, rng) for i in range(320)])
+    await db_session.commit()
+    newest = await shadow_ml.load_ledger(db_session, limit=250)
+    assert len(newest) == 250 and newest[0].decided_at == T0 + timedelta(minutes=10 * 70)  # the oldest 70 left out
+    assert newest == sorted(newest, key=lambda s: s.decided_at)
+    monkeypatch.setattr(shadow_ml, "MAX_TRAIN_ROWS", 250)
+    out = await shadow_ml.train_all(db_session, now=T0 + timedelta(days=30))
+    await db_session.commit()
+    assert out["samples"] == 250 and out["P_UPSIDE_50"]["status"] == "registered"
+    db_session.add_all([_row(i, rng) for i in range(320, 330)])  # newer rows, but trained less than a day ago
+    await db_session.commit()
+    again = await shadow_ml.train_all(db_session, now=datetime.now(timezone.utc))
+    assert again["P_UPSIDE_50"]["status"] == "skipped_retrained_within_24h"

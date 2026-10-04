@@ -85,3 +85,17 @@ async def test_wallet_behaviour_summary_on_profiles_and_detail(app, client, auth
     none = (await client.get("/api/wallets/behaviour/bsc/0x" + "c" * 40, headers=auth_headers)).json()
     assert none["episodes"] == [] and none["summary"] is None
     assert (await client.get(f"/api/wallets/behaviour/bsc/{W}")).status_code == 401
+
+
+async def test_ml_steps_show_each_step_and_need_auth(app, client, auth_headers):
+    from yonixalpha_core.ml import steps
+
+    redis = app.state.redis
+
+    async def ok():
+        return None
+    await steps.timed(redis, "evm_wallet_ml", ok)
+    r = (await client.get("/api/ml/steps", headers=auth_headers)).json()
+    assert r["steps"]["evm_wallet_ml"]["state"] == "OK" and r["intervals_s"]["evm_wallet_ml"] == 1800
+    assert "its own loop" in r["note"]
+    assert (await client.get("/api/ml/steps")).status_code == 401

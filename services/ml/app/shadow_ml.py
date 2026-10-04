@@ -60,6 +60,11 @@ HOLDOUT_FRACTION = 0.25
 CALIBRATION_BINS = 5
 SCORE_LOOKBACK = timedelta(hours=6)
 SHADOW = "shadow"
+# Training reads the newest MAX_TRAIN_ROWS rows; a target is retrained at most
+# once per RETRAIN_EVERY and only when newer rows exist (§42: the model is not
+# overwritten after every trade).
+MAX_TRAIN_ROWS = 30_000
+RETRAIN_EVERY = timedelta(hours=24)
 
 
 def model_name(target: str) -> str:
@@ -187,29 +192,50 @@ def fit(target: str, train: list[Sample], hold: list[Sample], names: tuple[str, 
     return est, {"status": "trained", "kind": "regression", "holdout": m, "train_rows": len(tr), "medians": med}
 
 
-async def train_all(session: AsyncSession) -> dict[str, Any]:
-    rows = (await session.execute(select(OpportunityOutcome).where(OpportunityOutcome.status == "COMPLETE",
-                                                                   OpportunityOutcome.labels.is_not(None))
-                                  .order_by(OpportunityOutcome.decided_at))).scalars().all()
-    samples = [s for s in (sample(r) for r in rows) if s is not None]
+async def load_ledger(session: AsyncSession, since: datetime | None = None, limit: int | None = None) -> list[Sample]:
+    """The newest `limit` (default MAX_TRAIN_ROWS) completed, labelled ledger
+    rows as samples, oldest first; only the columns sample() reads. The
+    whole ledger is never loaded: Solana adds tens of thousands of rows a
+    day and the server has 2 GB."""
+    o = OpportunityOutcome
+    q = select(o.decided_at, o.labels, o.snapshot, o.engine, o.stage, o.regime).where(
+        o.status == "COMPLETE", o.labels.is_not(None))
+    if since is not None:
+        q = q.where(o.decided_at >= since)
+    rows = (await session.execute(q.order_by(o.decided_at.desc()).limit(limit or MAX_TRAIN_ROWS))).all()
+    return [s for s in (sample(r) for r in reversed(rows)) if s is not None]
+
+
+async def train_all(session: AsyncSession, now: datetime | None = None) -> dict[str, Any]:
+    now = now or datetime.now(timezone.utc)
+    samples = await load_ledger(session)
     out: dict[str, Any] = {"samples": len(samples), "not_trained": NOT_TRAINED}
     if len(samples) < MIN_ROWS:
         out["status"] = f"skipped: {len(samples)} completed, labelled opportunities (needs {MIN_ROWS})"
         return out
-    train, hold, split = time_split(samples)
-    out["split"] = split
+    dataset_end = max(s.decided_at for s in samples).isoformat()
+    split: dict | None = None
     for target in (*BINARY_TARGETS, *REGRESSION_TARGETS):
         name = model_name(target)
         prev = (await session.execute(select(ModelVersion).where(ModelVersion.name == name, ModelVersion.status == SHADOW)
                                       .order_by(ModelVersion.version.desc()).limit(1))).scalar_one_or_none()
-        if prev is not None and (prev.metrics or {}).get("dataset_size") == len(samples):
+        pm = (prev.metrics or {}) if prev is not None else {}
+        if prev is not None and (pm.get("dataset_end") == dataset_end or
+                                 ("dataset_end" not in pm and pm.get("dataset_size") == len(samples))):
             out[target] = {"status": "skipped_no_new_samples"}
             continue
+        if prev is not None and prev.trained_at is not None and prev.trained_at > now - RETRAIN_EVERY:
+            out[target] = {"status": "skipped_retrained_within_24h"}
+            continue
+        if split is None:
+            train, hold, split = time_split(samples)
+            out["split"] = split
         est, metrics = fit(target, train, hold)
         if est is None:
             out[target] = metrics
             continue
-        metrics.update({"target": target, "dataset_size": len(samples), "split": split, "feature_version": FEATURE_VERSION,
+        metrics.update({"target": target, "dataset_size": len(samples), "dataset_end": dataset_end,
+                        "max_train_rows": MAX_TRAIN_ROWS, "split": split, "feature_version": FEATURE_VERSION,
                         "role": "SHADOW: review only, never used for decisions or sizing"})
         await session.execute(update(ModelVersion).where(ModelVersion.name == name, ModelVersion.status == SHADOW)
                               .values(status="superseded"))
@@ -222,8 +248,11 @@ async def train_all(session: AsyncSession) -> dict[str, Any]:
 async def score_recent(session: AsyncSession, now: datetime | None = None, limit: int = 500) -> int:
     """Shadow scores on recent ledger rows (decision-time features only)."""
     now = now or datetime.now(timezone.utc)
+    # only this ledger's own models: shadow_evm_* / shadow_wallet_* (app.evm_ml) share target names
+    # (P_UPSIDE_50 ...) but not the features, and must never score a Solana opportunity
+    own = [model_name(t) for t in (*BINARY_TARGETS, *REGRESSION_TARGETS)]
     models = (await session.execute(select(ModelVersion).where(ModelVersion.status == SHADOW,
-                                                               ModelVersion.name.like("shadow_%")))).scalars().all()
+                                                               ModelVersion.name.in_(own)))).scalars().all()
     if not models:
         return 0
     loaded = [(m, joblib.load(io.BytesIO(m.artifact))) for m in models]
