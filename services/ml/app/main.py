@@ -10,6 +10,7 @@ from yonixalpha_core.db.redis import make_redis
 from yonixalpha_core.logging import configure_logging, get_logger
 from yonixalpha_core.notify import send_telegram_alert
 from yonixalpha_core import update_monitor
+from yonixalpha_core.ml import steps
 
 from app.ablation import run_ablation
 from app.evm_ml import run_evm_cycle
@@ -25,6 +26,7 @@ log = get_logger("ml.main")
 # training_skipped_insufficient_samples, which per docs/ML.md is the
 # expected outcome for a long time.
 TRAIN_INTERVAL_SECONDS = 3600
+EVM_INTERVAL_SECONDS = 1800  # each pass drains the EVM sample / wallet-label backlog (bounded per builder)
 SERVICE_NAME = "ml"
 # GitHub / PyPI update monitor (master §64-66): notifies, never deploys.
 # UPDATE_MONITOR=0 switches it off.
@@ -42,10 +44,14 @@ async def _record_system_event(session_factory, event_type: str, severity: str, 
 
 
 async def _training_loop(session_factory, redis, settings, stop_event: asyncio.Event) -> None:
+    """Solana training, gate models, shadow models and the ablation, hourly.
+    Each step is timed in Redis (yonixalpha_core.ml.steps) for ML Review."""
     while not stop_event.is_set():
         try:
-            async with session_factory() as session:
-                outcome = await train_and_maybe_register(session)
+            async def train():
+                async with session_factory() as session:
+                    return await train_and_maybe_register(session)
+            outcome = await steps.timed(redis, "solana_training", train, log)
             log.info("training_loop.completed", status=outcome.status, available_samples=outcome.available_samples)
             await _record_system_event(
                 session_factory,
@@ -59,7 +65,7 @@ async def _training_loop(session_factory, redis, settings, stop_event: asyncio.E
         # Safety-gate models: quality check, challenger training, drift.
         # Challengers are only ever registered; promotion is an operator action.
         try:
-            cycle = await run_cycle(session_factory, redis, settings)
+            cycle = await steps.timed(redis, "gate_models", lambda: run_cycle(session_factory, redis, settings), log)
             log.info("gate_ml.completed", result=cycle)
             await _record_system_event(session_factory, "gate_ml_cycle", "info", cycle)
         except Exception as exc:  # noqa: BLE001
@@ -69,27 +75,17 @@ async def _training_loop(session_factory, redis, settings, stop_event: asyncio.E
         # Multi-target SHADOW models on the opportunity ledger: review only,
         # never loaded by the decision engine (app.shadow_ml).
         try:
-            shadow = await run_shadow_cycle(session_factory)
+            shadow = await steps.timed(redis, "solana_shadow", lambda: run_shadow_cycle(session_factory), log)
             log.info("shadow_ml.completed", result=shadow)
             await _record_system_event(session_factory, "shadow_ml_cycle", "info", shadow)
         except Exception as exc:  # noqa: BLE001
             log.error("shadow_ml.failed", error=str(exc))
             await _record_system_event(session_factory, "shadow_ml_cycle_failed", "error", {"error": str(exc)})
 
-        # EVM opportunities and wallet behaviour (M12): samples, labels and
-        # SHADOW models; review only, never read by an entry or exit.
-        try:
-            evm = await run_evm_cycle(session_factory)
-            log.info("evm_ml.completed", result=evm)
-            await _record_system_event(session_factory, "evm_ml_cycle", "info", evm)
-        except Exception as exc:  # noqa: BLE001
-            log.error("evm_ml.failed", error=str(exc))
-            await _record_system_event(session_factory, "evm_ml_cycle_failed", "error", {"error": str(exc)})
-
         # Do the scanner-intelligence features help out of sample? (every 6 h;
         # results stored for the ML Review page, never used for decisions)
         try:
-            abl = await run_ablation(session_factory, redis)
+            abl = await steps.timed(redis, "ablation", lambda: run_ablation(session_factory, redis), log)
             log.info("ablation.completed", status=abl.get("status"), samples=abl.get("samples"))
             if abl.get("status") == "EVALUATED":
                 await _record_system_event(session_factory, "feature_ablation", "info",
@@ -100,6 +96,24 @@ async def _training_loop(session_factory, redis, settings, stop_event: asyncio.E
 
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=TRAIN_INTERVAL_SECONDS)
+        except asyncio.TimeoutError:
+            pass
+
+
+async def _evm_loop(session_factory, redis, stop_event: asyncio.Event) -> None:
+    """EVM opportunities and wallet behaviour (M12): samples, labels and
+    SHADOW models; review only, never read by an entry or exit. Its own
+    loop, so a slow Solana step can never hold it up."""
+    while not stop_event.is_set():
+        try:
+            evm = await steps.timed(redis, "evm_wallet_ml", lambda: run_evm_cycle(session_factory), log)
+            log.info("evm_ml.completed", result=evm)
+            await _record_system_event(session_factory, "evm_ml_cycle", "info", evm)
+        except Exception as exc:  # noqa: BLE001
+            log.error("evm_ml.failed", error=str(exc))
+            await _record_system_event(session_factory, "evm_ml_cycle_failed", "error", {"error": str(exc)[:500]})
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=EVM_INTERVAL_SECONDS)
         except asyncio.TimeoutError:
             pass
 
@@ -121,7 +135,8 @@ async def run() -> None:
     log.info("ml.started")
 
     try:
-        tasks = [_training_loop(session_factory, redis, settings, stop_event), heartbeat_loop(settings, "ml", stop_event)]
+        tasks = [_training_loop(session_factory, redis, settings, stop_event), _evm_loop(session_factory, redis, stop_event),
+                 heartbeat_loop(settings, "ml", stop_event)]
         if UPDATE_MONITOR:
             tasks.append(update_monitor.run(session_factory, redis, settings, stop_event))
         await asyncio.gather(*tasks)

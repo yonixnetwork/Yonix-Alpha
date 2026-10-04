@@ -4,6 +4,7 @@ import { Fragment } from "react";
 import { Gauge } from "lucide-react";
 import ConfirmButton from "@/components/ConfirmDialog";
 import EvmMlReview from "@/components/EvmMlReview";
+import MlSteps from "@/components/MlSteps";
 import FeatureAblation from "@/components/FeatureAblation";
 import LedgerReview from "@/components/LedgerReview";
 import OpportunityOutcomes from "@/components/OpportunityOutcomes";
@@ -207,6 +208,7 @@ export default function MLReviewPage() {
       </Section>
       <LedgerReview />
       <OpportunityOutcomes />
+      <MlSteps />
       <EvmMlReview />
     </div>
   );

@@ -273,6 +273,21 @@ async def opportunities_compare(days: int = Query(7, ge=1, le=90), db: AsyncSess
     return jsonable(await opportunities.comparison(db, since))
 
 
+@router.get("/steps")
+async def ml_steps(redis: Redis = Depends(get_redis), _: str = Depends(get_current_username)) -> dict:
+    """When each ml service step last ran, how long it took and whether it
+    failed (yonixalpha_core.ml.steps). A step RUNNING much longer than its
+    interval is the one holding the service up."""
+    from yonixalpha_core.ml import steps
+
+    return jsonable({"steps": await steps.read(redis),
+                     "intervals_s": {"solana_training": 3600, "gate_models": 3600, "solana_shadow": 3600,
+                                     "ablation": 3600, "evm_wallet_ml": 1800},
+                     "note": "Solana steps run one after another every hour; EVM / wallet ML runs in its own loop "
+                             "every 30 minutes, so a slow Solana step cannot hold it up. Absent: not run since the "
+                             "ml service started with this version."})
+
+
 @router.get("/evm")
 async def evm_knowledge(days: int = Query(14, ge=1, le=90), db: AsyncSession = Depends(get_db),
                         _: str = Depends(get_current_username)) -> dict:

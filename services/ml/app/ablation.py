@@ -52,14 +52,12 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_score
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yonixalpha_core.db.models import OpportunityOutcome
 from yonixalpha_core.ml.opportunity_features import FEATURE_NAMES, FEATURE_VERSION, GROUPS, group_features
 from yonixalpha_core.ml.readiness import ABLATION_KEY
 
-from app.shadow_ml import MIN_POSITIVES_TRAIN, Sample, sample, time_split
+from app.shadow_ml import MIN_POSITIVES_TRAIN, Sample, load_ledger, time_split
 
 ABLATION_TTL = 14 * 86400
 ABLATION_EVERY_SECONDS = 6 * 3600
@@ -338,11 +336,8 @@ def matched_validation(samples: list[Sample]) -> dict[str, Any]:
 
 
 async def load_samples(session: AsyncSession, since: datetime | None = None) -> list[Sample]:
-    q = select(OpportunityOutcome).where(OpportunityOutcome.status == "COMPLETE", OpportunityOutcome.labels.is_not(None))
-    if since is not None:
-        q = q.where(OpportunityOutcome.decided_at >= since)
-    rows = (await session.execute(q.order_by(OpportunityOutcome.decided_at))).scalars().all()
-    return [s for s in (sample(r) for r in rows) if s is not None]
+    """The newest labelled ledger rows (bounded: shadow_ml.load_ledger)."""
+    return await load_ledger(session, since)
 
 
 async def run_ablation(session_factory, redis, *, force: bool = False, since: datetime | None = None) -> dict[str, Any]:
