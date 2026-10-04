@@ -1905,3 +1905,34 @@ VERIFIED: the step timing below will show it after this deploy.
 - API: `/api/ml/steps`.
 
 NOT VERIFIED on the server until deployed.
+
+### M17b — the server after deploying 4c81b0e (2026-10-04)
+
+**What worked.** The EVM loop ran on its own and built 3,491 samples:
+
+| Chain | FRESH | MIGRATED | MOMENTUM |
+|---|---|---|---|
+| BSC | 2936 | 9 | 9 |
+| Robinhood | 531 | 9 | 6 |
+
+**What did not.** `solana_training` and `gate_models` finished at 11:54:29
+and again at 11:59:50. That loop runs hourly, so the process had started
+again. `solana_shadow` never finished, there was no `evm_ml.completed`, and
+there were 0 wallet labels. The ledger holds 137,735 rows. `restarts=0` came
+from the container the deploy had just recreated.
+
+**Reading.** The ml process dies during the Solana shadow step. Each ledger
+row's snapshot carries the whole intel blob (wallet lists, scanner data), so
+even 30,000 of them in memory at once is too much for the 2 GB server. That
+also explains every earlier hour: the process died at the same step before
+ever reaching the EVM step.
+
+**Fixes:**
+- The ledger is streamed in chunks of 1,000. Each snapshot becomes its small
+  feature dict at once and is dropped (`shadow_ml.load_ledger`).
+- The training caps are 20,000 rows, for Solana and for EVM.
+- A step still RUNNING when the ml process starts again is marked
+  INTERRUPTED and alerted (`ml_step_interrupted`, Telegram). A silent restart
+  loop can no longer look like a slow step.
+- Each step records the process's peak memory, shown on ML Review → ML
+  service steps.

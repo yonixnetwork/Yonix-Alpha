@@ -133,6 +133,10 @@ async def run() -> None:
 
     await _record_system_event(session_factory, "service_started", "info")
     log.info("ml.started")
+    interrupted = await steps.mark_interrupted(redis)
+    if interrupted:  # the previous process died mid-step: alerted, never silent
+        log.error("ml.steps_interrupted", steps=interrupted)
+        await _record_system_event(session_factory, "ml_step_interrupted", "error", {"steps": interrupted})
 
     try:
         tasks = [_training_loop(session_factory, redis, settings, stop_event), _evm_loop(session_factory, redis, stop_event),

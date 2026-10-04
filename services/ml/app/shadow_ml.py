@@ -63,7 +63,8 @@ SHADOW = "shadow"
 # Training reads the newest MAX_TRAIN_ROWS rows; a target is retrained at most
 # once per RETRAIN_EVERY and only when newer rows exist (§42: the model is not
 # overwritten after every trade).
-MAX_TRAIN_ROWS = 30_000
+MAX_TRAIN_ROWS = 20_000
+STREAM_CHUNK = 1000
 RETRAIN_EVERY = timedelta(hours=24)
 
 
@@ -202,8 +203,15 @@ async def load_ledger(session: AsyncSession, since: datetime | None = None, limi
         o.status == "COMPLETE", o.labels.is_not(None))
     if since is not None:
         q = q.where(o.decided_at >= since)
-    rows = (await session.execute(q.order_by(o.decided_at.desc()).limit(limit or MAX_TRAIN_ROWS))).all()
-    return [s for s in (sample(r) for r in reversed(rows)) if s is not None]
+    q = q.order_by(o.decided_at.desc()).limit(limit or MAX_TRAIN_ROWS).execution_options(yield_per=STREAM_CHUNK)
+    # streamed: each snapshot (the full intel blob) becomes its small feature
+    # dict and is dropped before the next chunk is read
+    out: list[Sample] = []
+    result = await session.stream(q)
+    async for part in result.partitions(STREAM_CHUNK):
+        out.extend(x for x in (sample(r) for r in part) if x is not None)
+    out.reverse()
+    return out
 
 
 async def train_all(session: AsyncSession, now: datetime | None = None) -> dict[str, Any]:

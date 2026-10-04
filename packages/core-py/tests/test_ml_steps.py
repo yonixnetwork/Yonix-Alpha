@@ -42,3 +42,17 @@ async def test_no_redis_is_harmless():
     async def ok():
         return 1
     assert await steps.timed(None, "x", ok) == 1 and await steps.read(None) == {}
+
+
+async def test_a_step_left_running_by_a_dead_process_is_marked_interrupted(redis):
+    await steps._put(redis, "solana_shadow", {"state": "RUNNING", "started_at": "2026-10-04T11:54:30+00:00"})
+    await steps._put(redis, "gate_models", {"state": "OK", "started_at": "2026-10-04T11:54:29+00:00"})
+    assert await steps.mark_interrupted(redis) == [{"step": "solana_shadow", "started_at": "2026-10-04T11:54:30+00:00"}]
+    rec = (await steps.read(redis))
+    assert rec["solana_shadow"]["state"] == "INTERRUPTED" and "out of memory" in rec["solana_shadow"]["error"]
+    assert rec["gate_models"]["state"] == "OK" and await steps.mark_interrupted(redis) == []
+
+    async def ok():
+        return None
+    await steps.timed(redis, "x", ok)
+    assert (await steps.read(redis))["x"]["peak_rss_mb"] > 0

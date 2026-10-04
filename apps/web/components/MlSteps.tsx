@@ -9,7 +9,7 @@ const LABEL: Record<string, string> = {
   solana_training: "Solana model training", gate_models: "Safety-gate models", solana_shadow: "Solana shadow models",
   ablation: "Feature ablation", evm_wallet_ml: "EVM / wallet ML",
 };
-const CLASS: Record<string, string> = { OK: "pill pill-ok", RUNNING: "pill pill-warn", FAILED: "pill pill-danger" };
+const CLASS: Record<string, string> = { OK: "pill pill-ok", RUNNING: "pill pill-warn", FAILED: "pill pill-danger", INTERRUPTED: "pill pill-danger" };
 const dur = (s: number | null | undefined) => (s === null || s === undefined ? "—" : s < 120 ? `${s} s` : s < 7200 ? `${Math.round(s / 60)} min` : `${(s / 3600).toFixed(1)} h`);
 
 /** ml service steps: when each last ran, how long it took, failures. */
@@ -22,7 +22,7 @@ export default function MlSteps() {
     <Section title="ML service steps">
       <p className="muted small">{data.note}</p>
       <div className="table-scroll"><table className="data-table">
-        <thead><tr><th>Step</th><th>State</th><th>Started</th><th>Took</th><th>Last success</th><th>Error</th></tr></thead>
+        <thead><tr><th>Step</th><th>State</th><th>Started</th><th>Took</th><th>Peak memory</th><th>Last success</th><th>Error</th></tr></thead>
         <tbody>{rows.map(([k, r]) => (
           <tr key={k}>
             <td>{LABEL[k]}</td>
@@ -31,6 +31,7 @@ export default function MlSteps() {
                 ? <span className="pill pill-danger"> SLOW: {dur(r.running_s)}</span> : null}</td>
             <td>{r?.started_at ? formatDate(r.started_at) : "—"}</td>
             <td>{r?.state === "RUNNING" ? `${dur(r.running_s)} so far` : dur(r?.seconds)}</td>
+            <td>{r?.peak_rss_mb ? `${Math.round(r.peak_rss_mb)} MB` : "—"}</td>
             <td>{r?.last_ok_at ? formatDate(r.last_ok_at) : "—"}</td>
             <td className="small muted">{r?.error ?? "—"}</td>
           </tr>))}</tbody>
