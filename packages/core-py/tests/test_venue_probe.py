@@ -189,3 +189,14 @@ async def test_probe_reports_sites_with_on_chain_names():
     await vp.probe(rpc, "raydium_launchlab", sample=4)
     assert rpc.calls.count("getMultipleAccounts") == 1  # names are cached
     assert "sites" not in (await vp.probe(FakeRpc(*sigs_and_txs()), "moonshot", sample=2)).evidence()
+
+
+def test_site_accounts_read_version_1_transactions_through_jsonparsed():
+    """Production 2026-10-05: LaunchLab / DBC transactions are version 1; the
+    probe asks for jsonParsed, where the node resolves the accounts itself."""
+    lab = vp.VENUES["raydium_launchlab"]["site"]["index"]
+    data = vp.b58encode(vp.disc("buy_exact_in") + b"\x00" * 8)
+    tx = {"version": 1, "transaction": {"message": {"accountKeys": [{"pubkey": "P"}], "instructions": [
+        {"programId": LAB, "accounts": ["payer", "auth", "cfg", "platformX", "pool"], "data": data, "stackHeight": 1}]}},
+        "meta": {"innerInstructions": []}}
+    assert vp.site_accounts(LAB, tx, lab) == {"platformX": 1}

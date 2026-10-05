@@ -71,25 +71,22 @@ def decode_event(layout: ModuleType, data: bytes) -> tuple[str, dict[str, Any]] 
 
 
 def cpi_events(layout: ModuleType, tx: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
-    """Events of one getTransaction result (encoding "json") that the
-    layout's program emitted as self-invoked inner instructions (emit_cpi!),
-    in execution order."""
+    """Events of one getTransaction result that the layout's program emitted
+    as self-invoked inner instructions (emit_cpi!), in execution order. Any
+    transaction version with encoding "jsonParsed"; legacy / v0 with "json"
+    (solana.txversion.instructions raises UnsupportedTransactionLayout for
+    another version)."""
     from yonixalpha_core.solana.codec import b58decode
+    from yonixalpha_core.solana.txversion import instructions
 
-    msg = (tx.get("transaction") or {}).get("message") or {}
-    meta = tx.get("meta") or {}
-    loaded = meta.get("loadedAddresses") or {}
-    keys = list(msg.get("accountKeys") or []) + list(loaded.get("writable") or []) + list(loaded.get("readonly") or [])
     out = []
-    for group in sorted(meta.get("innerInstructions") or [], key=lambda g: g.get("index", 0)):
-        for ix in group.get("instructions") or []:
-            idx = ix.get("programIdIndex")
-            if idx is None or idx >= len(keys) or keys[idx] != layout.PROGRAM_ID:
-                continue
-            try:
-                ev = decode_event(layout, b58decode(ix.get("data") or ""))
-            except Exception:  # noqa: BLE001 - not an event of ours
-                ev = None
-            if ev is not None:
-                out.append(ev)
+    for program, _accounts, data in instructions(tx, outer=False):
+        if program != layout.PROGRAM_ID:
+            continue
+        try:
+            ev = decode_event(layout, b58decode(data))
+        except Exception:  # noqa: BLE001 - not an event of ours
+            ev = None
+        if ev is not None:
+            out.append(ev)
     return out

@@ -27,6 +27,11 @@ class FakeRpc:
         if method == "getSignaturesForAddress":
             return [{"signature": sig, "err": None} for sig in reversed(list(self.txs))]  # newest first
         if method == "getTransaction":
+            # production 2026-10-05: these programs' transactions are version 1
+            assert params[1]["maxSupportedTransactionVersion"] == 1 and params[1]["encoding"] == "jsonParsed"
+            if self.txs[params[0]] == "too new":
+                from yonixalpha_core.solana.rpc import RpcUnsupportedTransactionVersionError
+                raise RpcUnsupportedTransactionVersionError("Transaction version (2) is not supported")
             return self.txs[params[0]]
         if method == "getMultipleAccounts":
             return {"value": [{"data": [base64.b64encode(self.accounts[a]).decode(), "base64"]} if a in self.accounts else None
@@ -35,10 +40,13 @@ class FakeRpc:
 
 
 def _tx(layout, events):
+    """A version-1 transaction as the node renders it with jsonParsed."""
     data = [b58encode(anchor_codec.EVENT_IX_TAG + bytes(layout.EVENT_DISCRIMINATORS[name]) + encode(layout.TYPES, name, ev))
             for name, ev in events]
-    return {"slot": 1, "transaction": {"message": {"accountKeys": [layout.PROGRAM_ID]}},
-            "meta": {"innerInstructions": [{"index": 0, "instructions": [{"programIdIndex": 0, "data": d} for d in data]}]}}
+    return {"slot": 1, "version": 1, "transaction": {"message": {"accountKeys": [{"pubkey": layout.PROGRAM_ID}],
+                                                                 "instructions": []}},
+            "meta": {"innerInstructions": [{"index": 0, "instructions": [
+                {"programId": layout.PROGRAM_ID, "accounts": [], "data": d, "stackHeight": 2} for d in data]}]}}
 
 
 def _run(module, monkeypatch, txs, accounts):
@@ -86,9 +94,12 @@ def test_launchlab_verify_passes_on_agreeing_trades_and_fails_on_a_wrong_one(mon
                        "trade_direction": ll.BUY if buy else ll.SELL, "pool_status": 0, "exact_in": True})
     assert len(events) >= 3
     txs = {f"sig{i}": _tx(launchlab_layout, [("TradeEvent", ev)]) for i, ev in enumerate(events)}
+    txs["sig_new"] = "too new"  # one transaction the node cannot render: skipped and reported, never a crash
     assert _run(launchlab_verify, monkeypatch, txs, accounts) == 0
     out = capsys.readouterr().out
     assert f"exactly equal {len(events)}/{len(events)} [PASS]" in out and "RESULT: PASS" in out and "quotable now 1" in out
+    assert "not readable (skipped): {'RpcUnsupportedTransactionVersionError': 1}" in out
+    del txs["sig_new"]
     bad = {**events[0], "amount_out": events[0]["amount_out"] + 1}
     txs["sig_bad"] = _tx(launchlab_layout, [("TradeEvent", bad)])
     assert _run(launchlab_verify, monkeypatch, txs, accounts) == 1

@@ -25,7 +25,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Any
 
 import httpx
@@ -34,8 +34,9 @@ from yonixalpha_core.config import get_settings
 from yonixalpha_core.db.base import make_engine, make_session_factory
 from yonixalpha_core.solana import dbc
 from yonixalpha_core.solana.dbc_layout import PROGRAM_ID
-from yonixalpha_core.solana.rpc import RpcManager
+from yonixalpha_core.solana.rpc import RpcManager, RpcRequestError, get_transaction_params
 from yonixalpha_core.solana.rpc_registry import effective_rpc
+from yonixalpha_core.solana.txversion import UnsupportedTransactionLayout
 
 
 def check_pool(pool: dict[str, Any], config: dict[str, Any], config_address: str) -> list[str]:
@@ -113,15 +114,22 @@ async def main(argv: list[str] | None = None) -> int:
         rpc = RpcManager.create(client=http, primary_url=specs[0]["url"])
         rpc.replace_endpoints(specs)
 
+        unreadable: Counter = Counter()
+
         async def swaps_of(address: str, limit: int) -> list[tuple[int, str, dict[str, Any]]]:
             sigs = await rpc.call("getSignaturesForAddress", [address, {"limit": limit}], priority="background")
             out = []  # chronological: the RPC lists newest first (also within a slot)
             for s in reversed(sigs or []):
                 if s.get("err"):
                     continue
-                tx = await rpc.call("getTransaction", [s["signature"], {"encoding": "json", "maxSupportedTransactionVersion": 0}],
-                                    priority="background")
-                for name, ev in dbc.swap_events(tx or {}):
+                try:  # jsonParsed: every transaction version (v1 exists on mainnet)
+                    tx = await rpc.call("getTransaction", get_transaction_params(s["signature"], "jsonParsed"),
+                                        priority="background")
+                    events = dbc.swap_events(tx or {})
+                except (RpcRequestError, UnsupportedTransactionLayout) as exc:
+                    unreadable[type(exc).__name__] += 1
+                    continue
+                for name, ev in events:
                     out.append((tx.get("slot") or 0, name, ev))
             return out
 
@@ -175,6 +183,8 @@ async def main(argv: list[str] | None = None) -> int:
                       f"curve amount equal {ok_out}/{len(pairs)} [{verdict}] ({dict(modes)})")
             else:
                 print("    no consecutive swaps in the sample: quote not checked on this pool")
+        if unreadable:
+            print(f"  transactions not readable (skipped): {dict(unreadable)}")
     print("RESULT:", "PASS" if not failures else f"FAIL ({failures})")
     return 1 if failures else 0
 

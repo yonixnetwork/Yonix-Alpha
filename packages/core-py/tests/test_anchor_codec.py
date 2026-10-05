@@ -71,3 +71,31 @@ def test_accounts_check_discriminator_and_length():
         anchor_codec.decode_account(launchlab_layout, "PoolState", data)
     with pytest.raises(anchor_codec.LayoutError, match="too short"):
         anchor_codec.decode_account(launchlab_layout, "GlobalConfig", data[:-1])
+
+
+def test_instructions_read_any_version_from_jsonparsed_and_fail_closed_on_unknown_json_layouts():
+    """Production 2026-10-05: DBC / LaunchLab transactions are version 1. With
+    jsonParsed the node resolves program ids and accounts itself, so any
+    version is read; the index-based json layout is read for legacy / v0
+    only and fails closed otherwise, never misread."""
+    from yonixalpha_core.solana.txversion import UnsupportedTransactionLayout, instructions
+
+    _, data = _event(dbc_layout, "EvtSwap2")
+    parsed_v1 = {"version": 1, "transaction": {"message": {
+        "accountKeys": [{"pubkey": "Payer1111111111111111111111111111111111111", "signer": True}],
+        "instructions": [{"programId": "11111111111111111111111111111111", "program": "system",
+                          "parsed": {"type": "transfer"}, "stackHeight": None}]}},  # parsed by the node: no data
+        "meta": {"innerInstructions": [{"index": 0, "instructions": [
+            {"programId": dbc_layout.PROGRAM_ID, "accounts": ["A1", "A2"], "data": data, "stackHeight": 2}]}]}}
+    assert instructions(parsed_v1) == [(dbc_layout.PROGRAM_ID, ["A1", "A2"], data)]
+    assert [n for n, _ in dbc.swap_events(parsed_v1)] == ["EvtSwap2"]
+
+    json_v0 = {"version": 0, "transaction": {"message": {"accountKeys": ["K0"], "instructions": []}},
+               "meta": {"loadedAddresses": {"writable": ["K1"], "readonly": [dbc_layout.PROGRAM_ID]},
+                        "innerInstructions": [{"index": 0, "instructions": [
+                            {"programIdIndex": 2, "accounts": [0, 1], "data": data}]}]}}
+    assert instructions(json_v0) == [(dbc_layout.PROGRAM_ID, ["K0", "K1"], data)]
+    with pytest.raises(UnsupportedTransactionLayout):
+        instructions({**json_v0, "version": 1})
+    with pytest.raises(UnsupportedTransactionLayout):
+        dbc.swap_events({**json_v0, "version": 1})

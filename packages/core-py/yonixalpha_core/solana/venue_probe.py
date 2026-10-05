@@ -56,6 +56,7 @@ from typing import Any
 
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.solana.codec import b58decode, b58encode
+from yonixalpha_core.solana.rpc import get_transaction_params
 
 log = get_logger("solana.venue_probe")
 
@@ -123,25 +124,20 @@ _SITE_INFO: dict[str, dict[str, Any]] = {}  # address -> name / web / quote mint
 
 def site_accounts(program: str, tx: dict[str, Any], index: dict[bytes, int]) -> Counter:
     """Site account of every `program` instruction (outer and inner) whose
-    discriminator is in `index`, from a getTransaction(json) result."""
+    discriminator is in `index`, from a getTransaction result ("jsonParsed"
+    for any version; "json" for legacy / v0, see solana.txversion)."""
+    from yonixalpha_core.solana.txversion import instructions
+
     out: Counter = Counter()
-    t = (tx or {}).get("transaction") or {}
-    msg = t.get("message") or {}
-    meta = (tx or {}).get("meta") or {}
-    loaded = meta.get("loadedAddresses") or {}
-    keys = list(msg.get("accountKeys") or []) + list(loaded.get("writable") or []) + list(loaded.get("readonly") or [])
-    ixs = list(msg.get("instructions") or [])
-    for inner in meta.get("innerInstructions") or []:
-        ixs += inner.get("instructions") or []
-    for ix in ixs:
+    for pid, accounts, data in instructions(tx):
+        if pid != program:
+            continue
         try:
-            if keys[ix["programIdIndex"]] != program:
-                continue
-            pos = index.get(b58decode(ix.get("data") or "")[:8])
-            if pos is not None and pos < len(ix.get("accounts") or []):
-                out[keys[ix["accounts"][pos]]] += 1
-        except (IndexError, KeyError, TypeError, ValueError):
-            continue  # a malformed instruction is skipped, never guessed
+            pos = index.get(b58decode(data)[:8])
+        except ValueError:
+            continue  # malformed data is skipped, never guessed
+        if pos is not None and pos < len(accounts):
+            out[accounts[pos]] += 1
     return out
 
 
@@ -257,8 +253,9 @@ async def probe(rpc, venue: str, sample: int = SAMPLE) -> ProbeResult:
         res.rate_per_min = round(len(good) / span * 60, 2) if span > 0 else None
     for s in good[:sample]:
         try:
-            tx = await rpc.call("getTransaction", [s["signature"], {"encoding": "json",
-                                                                    "maxSupportedTransactionVersion": 0}],
+            # jsonParsed: program ids and accounts resolved by the node, so
+            # every transaction version is read (v1 exists on mainnet)
+            tx = await rpc.call("getTransaction", get_transaction_params(s["signature"], "jsonParsed"),
                                 priority="background")
         except Exception as exc:  # noqa: BLE001 - one missing sample is not a failed probe
             log.info("venue_probe.tx_failed", venue=venue, error=type(exc).__name__)
