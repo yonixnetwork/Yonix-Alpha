@@ -102,9 +102,9 @@ No data was removed.
 - **Unchanged:** live execution, as above.
 - **Observation:** shown in the §15 state names with the §17 fields (§33).
 - **Launchpads:** LaunchLab and Meteora DBC monitored. Their quotes are read
-  paths equal to the official SDKs, but NOT VERIFIED against the chain
-  until `dbc_verify` / `launchlab_verify` pass. The venues stay OBSERVE ONLY
-  (§34).
+  paths equal to the official SDKs. LaunchLab constant-product quotes passed
+  against the chain (88/88 trades, §37); DBC is NOT VERIFIED until
+  `dbc_verify` passes again. The venues stay OBSERVE ONLY (§34, §37).
 - **Status:** LIVE VERIFIED (Pump.fun / PumpSwap): production orders since
   September 2026, measured by `exit_diagnosis` (§5).
 
@@ -117,7 +117,8 @@ No data was removed.
 - **Genius.fun:** observe only.
 - **Mempool:** the pending-transaction stream is measured (§17).
 - **Status:** paper only; live execution locked.
-- **Open:** Four.meme AntiSniperFeeMode needs the `fourmeme_modes` output.
+- **Open:** Four.meme AntiSniperFeeMode needs the implementation ABI
+  (ETHERSCAN_API_KEY on the server, §37).
 
 ## 8. Robinhood
 
@@ -288,7 +289,8 @@ Every service error goes to Telegram, along with:
 - **BSC / Robinhood:** NOT LIVE VERIFIED (locked).
 
 Waiting on the server:
-- `dbc_verify`, `launchlab_verify` and `fourmeme_modes`;
+- `dbc_verify` again (after the §37 fix); `launchlab_verify` passed;
+- `fourmeme_modes` with ETHERSCAN_API_KEY set;
 - the 24/7 acceptance procedure (`docs/ACCEPTANCE_24x7.md`);
 - the stream cross-check numbers.
 

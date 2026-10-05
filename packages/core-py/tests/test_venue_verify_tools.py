@@ -147,6 +147,68 @@ def test_dbc_verify_passes_on_consecutive_swaps_and_fails_when_one_is_off(monkey
     assert "RESULT: FAIL" in capsys.readouterr().out
 
 
+def _swap2_twin(ev):
+    """The EvtSwap2 the program emits next to `ev` for the same swap (exact in)."""
+    res = ev["swap_result"]
+    return {"pool": ev["pool"], "config": ev["config"], "trade_direction": ev["trade_direction"], "has_referral": False,
+            "swap_parameters": {"amount_0": ev["amount_in"], "amount_1": 0, "swap_mode": dbc_verify.EXACT_IN},
+            "swap_result": {"included_fee_input_amount": ev["amount_in"], "excluded_fee_input_amount": res["actual_input_amount"],
+                            "amount_left": 0, "output_amount": res["output_amount"], "next_sqrt_price": res["next_sqrt_price"],
+                            "trading_fee": res["trading_fee"], "protocol_fee": res["protocol_fee"],
+                            "referral_fee": res["referral_fee"]},
+            "quote_reserve_amount": 0, "migration_threshold": 0, "current_timestamp": ev["current_timestamp"]}
+
+
+def test_unique_swaps_keeps_one_entry_per_swap():
+    a = {"pool": POOL, "trade_direction": 1, "current_timestamp": 5,
+         "swap_result": {"output_amount": 10, "next_sqrt_price": 7}}
+    a2 = {**a, "swap_result": {**a["swap_result"], "amount_left": 0}}
+    b = {**a, "swap_result": {"output_amount": 11, "next_sqrt_price": 8}}
+    assert dbc.unique_swaps([("EvtSwap", a), ("EvtSwap2", a2), ("EvtSwap", b)]) == [("EvtSwap2", a2), ("EvtSwap", b)]
+    assert dbc.unique_swaps([("EvtSwap2", a2), ("EvtSwap", a)]) == [("EvtSwap2", a2)]
+    # two different swaps that happen to agree are not twins unless one of each event
+    assert dbc.unique_swaps([("EvtSwap", a), ("EvtSwap", a)]) == [("EvtSwap", a), ("EvtSwap", a)]
+    # a different pool, direction or price is another swap
+    other = {**a, "pool": "Other111111111111111111111111111111111111111"}
+    assert len(dbc.unique_swaps([("EvtSwap", a), ("EvtSwap2", other)])) == 2
+
+
+def test_dbc_verify_counts_a_swap_reported_by_both_events_once(monkeypatch, capsys):
+    """Server run 2026-10-05: about half of the pairs were equal in every pool
+    (n swaps, 2n - 1 pairs, n - 1 equal): each swap reported as EvtSwap and
+    EvtSwap2 was replayed from its own twin."""
+    fix = json.loads((FIXTURES / "dbc_sdk" / "fixtures.json").read_text())
+    for case in fix["cases"]:
+        config = dbc.decode_account("PoolConfig", base64.b64decode(case["config"]))
+        pool = dbc.decode_account("VirtualPool", base64.b64decode(case["pool"]))
+        try:
+            swaps, state = [], pool
+            for i, amount in enumerate((10**7, 2 * 10**7, 3 * 10**7)):
+                q = dbc.swap_quote(state, config, False, amount, 1_000_000 + i)
+                swaps.append((q, amount))
+                state = {"pool_state": {**state["pool_state"], "sqrt_price": q.next_sqrt_price}}
+            break
+        except dbc.DbcError:
+            continue
+    cfg_addr = pool["pool_state"]["config"]
+    pool_now = {**pool, "pool_state": {**pool["pool_state"], "sqrt_price": swaps[-1][0].next_sqrt_price}}
+    pool_bytes = bytes(dbc_layout.ACCOUNT_DISCRIMINATORS["VirtualPool"]) + encode(dbc_layout.TYPES, "VirtualPool", pool_now)
+    accounts = {POOL: pool_bytes, cfg_addr: base64.b64decode(case["config"])}
+    txs = {}
+    for i, (q, a) in enumerate(swaps):
+        ev = _swap_event(POOL, cfg_addr, q, a)
+        txs[f"sig{i}"] = _tx(dbc_layout, [("EvtSwap", ev), ("EvtSwap2", _swap2_twin(ev))])
+    assert _run(dbc_verify, monkeypatch, txs, accounts) == 0
+    out = capsys.readouterr().out
+    assert "DBC swaps found in the latest program transactions: 3 in 1 pools" in out
+    assert "next sqrt price equal 2/2" in out and "curve amount equal 2/2" in out and "'exact_in': 2" in out
+    assert "counted once): 3" in out and "RESULT: PASS" in out
+    # without counting the twins once: the server's FAIL, n - 1 of 2n - 1 equal
+    monkeypatch.setattr(dbc, "unique_swaps", lambda events: events)
+    assert _run(dbc_verify, monkeypatch, txs, accounts) == 1
+    assert "next sqrt price equal 2/5" in capsys.readouterr().out
+
+
 def test_dbc_verify_reports_an_undecodable_pool_as_fail(monkeypatch, capsys):
     fix = json.loads((FIXTURES / "dbc_sdk" / "fixtures.json").read_text())
     config = dbc.decode_account("PoolConfig", base64.b64decode(fix["cases"][0]["config"]))
