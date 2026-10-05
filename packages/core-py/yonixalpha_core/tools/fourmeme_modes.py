@@ -16,8 +16,17 @@ on the curve:
   3. the raw 32-byte words _tokenInfos / _tokenInfoEx1s return;
   4. with --api, four.meme's own token API (version "V8" = X Mode,
      feePlan = AntiSniperFeeMode, taxInfo = TaxToken), as a cross-check;
-  5. with ETHERSCAN_API_KEY set, the verified TokenManager2 ABI (via the
-     EIP-1967 implementation), which names the fields outright.
+  5. the verified TokenManager2 ABI (via the EIP-1967 implementation) from
+     Sourcify, which needs no key, and from Etherscan when ETHERSCAN_API_KEY
+     is set: it names the fields outright.
+
+Third run (2026-10-05, 60 tokens): 45 BEP-20-quoted, 15 plain buy OK, no X
+Mode, no TaxToken (feeRate() read on none), no agent bit; the four.meme API
+answered HTTP 403 to every request; no Etherscan key. Word 2 is not a bare
+bit field: its high 160 bits hold an address-like value that differs
+between tokens, and its low 96 bits the flags (creator type 9 on every
+token). The template hypotheses therefore stay untested, and the verified
+ABI is the way to settle them.
 
 Second run (2026-10-02, 40 newest tokens): 13 words; word 0 = the token,
 word 1 = the quote (non-zero exactly for the 32 BEP-20-quoted tokens),
@@ -43,6 +52,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 from collections import Counter
 from typing import Any
 
@@ -120,6 +130,10 @@ def template_lines(rows: list[dict[str, Any]], i: int = TEMPLATE_WORD) -> list[s
     out.append(f"    X Mode by simulation: {len(x)}; with bit 16: {sum(1 for r in x if r['info_words'][i] & X_MODE_BIT)}; "
                f"plain buy OK: {len(plain)}; with bit 16: {sum(1 for r in plain if r['info_words'][i] & X_MODE_BIT)}")
     out.append(f"    agent bit 85 set: {sum(1 for r in have if r['info_words'][i] & AGENT_BIT)} of {len(have)}")
+    high = Counter(hex(r["info_words"][i] >> 96) for r in have)
+    low = Counter(hex(r["info_words"][i] & ((1 << 96) - 1)) for r in have)
+    out.append(f"    high 160 bits: {len(high)} distinct (most common {high.most_common(1)[0][0] if high else '-'}); "
+               f"low 96 bits: {len(low)} distinct ({', '.join(f'{k} x{v}' for k, v in low.most_common(3))})")
     quotes = Counter(hex(r["info_words"][1]) if len(r["info_words"]) > 1 else "?" for r in rows)
     out.append("quote assets (word 1; 0x0 = BNB): " + ", ".join(f"{q} {n}" for q, n in quotes.most_common(8)))
     errs = Counter(r["api_error"] for r in rows if r.get("api_error"))
@@ -143,7 +157,43 @@ async def _api(client: httpx.AsyncClient, token: str) -> dict[str, Any]:
         return {"api_error": type(exc).__name__}
 
 
-async def verified_abi(client: httpx.AsyncClient, rpc, manager: str, key: str) -> list[str]:
+SOURCIFY = "https://sourcify.dev/server/v2/contract/56/{address}"
+ABI_GETTERS = ("_tokenInfos", "_tokenInfoEx1s")
+ABI_HINT = re.compile(r"template|fee|sniper|mode|agent|tax", re.I)
+
+
+def _fields(params: list[dict[str, Any]]) -> str:
+    out = []
+    for o in params or []:
+        if o.get("components"):  # a struct: its own fields, in order
+            out.append(f"{o.get('type')} {o.get('name')} {{{_fields(o['components'])}}}")
+        else:
+            out.append(f"{o.get('type')} {o.get('name')}")
+    return ", ".join(out)
+
+
+def abi_lines(address: str, abi: list[dict[str, Any]]) -> list[str]:
+    """What a verified ABI says about the layout: the two getters' output
+    fields in order, then every other function / event whose name or field
+    names mention template, fee, sniper, mode, agent or tax."""
+    out = []
+    for fn in abi:
+        if fn.get("name") in ABI_GETTERS:
+            out.append(f"  {address} {fn['name']}({_fields(fn.get('inputs'))}) -> ({_fields(fn.get('outputs'))})")
+    for fn in abi:
+        if fn.get("name") in ABI_GETTERS or fn.get("type") not in ("function", "event"):
+            continue
+        names = [fn.get("name") or ""] + [o.get("name") or "" for o in (fn.get("inputs") or []) + (fn.get("outputs") or [])]
+        if any(ABI_HINT.search(n) for n in names):
+            out.append(f"    {fn['type']} {fn.get('name')}({_fields(fn.get('inputs'))})"
+                       + (f" -> ({_fields(fn.get('outputs'))})" if fn.get("outputs") else ""))
+    return out or [f"  {address}: verified, but no getter named {' / '.join(ABI_GETTERS)}"]
+
+
+async def verified_abi(client: httpx.AsyncClient, rpc, manager: str, key: str | None) -> list[str]:
+    """The verified TokenManager2 ABI (implementation behind the EIP-1967
+    proxy first, then the proxy) from Sourcify (no key) and, with a key,
+    Etherscan. The ABI fixes the struct layout exactly."""
     from yonixalpha_core.chains.evm.safety import EIP1967_IMPLEMENTATION
     from yonixalpha_core.launch_coordination import ETHERSCAN_V2
 
@@ -151,16 +201,32 @@ async def verified_abi(client: httpx.AsyncClient, rpc, manager: str, key: str) -
     impl = "0x" + slot[-40:] if slot and int(slot, 16) else None
     out = [f"TokenManager2 {manager}: EIP-1967 implementation {impl or 'not set'}"]
     for addr in [a for a in (impl, manager) if a]:
-        r = await client.get(ETHERSCAN_V2, params={"chainid": 56, "module": "contract", "action": "getabi",
-                                                   "address": addr, "apikey": key})
-        body = r.json()
-        if str(body.get("status")) != "1":
-            out.append(f"  {addr}: no verified ABI ({str(body.get('result'))[:120]})")
+        abi, tried = None, []
+        try:
+            r = await client.get(SOURCIFY.format(address=addr), params={"fields": "abi"})
+            if r.status_code == 200 and isinstance(r.json().get("abi"), list):
+                abi, source = r.json()["abi"], "Sourcify"
+            else:
+                tried.append(f"Sourcify HTTP {r.status_code}")
+        except (httpx.HTTPError, ValueError) as exc:
+            tried.append(f"Sourcify {type(exc).__name__}")
+        if abi is None and key:
+            try:
+                body = (await client.get(ETHERSCAN_V2, params={"chainid": 56, "module": "contract", "action": "getabi",
+                                                               "address": addr, "apikey": key})).json()
+                if str(body.get("status")) == "1":
+                    abi, source = json.loads(body["result"]), "Etherscan"
+                else:
+                    tried.append(f"Etherscan: {str(body.get('result'))[:100]}")
+            except (httpx.HTTPError, ValueError) as exc:
+                tried.append(f"Etherscan {type(exc).__name__}")
+        elif abi is None:
+            tried.append("Etherscan not asked (ETHERSCAN_API_KEY not set)")
+        if abi is None:
+            out.append(f"  {addr}: no verified ABI ({'; '.join(tried)})")
             continue
-        for fn in json.loads(body["result"]):
-            if fn.get("name") in ("_tokenInfos", "_tokenInfoEx1s"):
-                fields = ", ".join(f"{o.get('type')} {o.get('name')}" for o in fn.get("outputs") or [])
-                out.append(f"  {addr} {fn['name']}(address) -> ({fields})")
+        out.append(f"  {addr}: verified ABI from {source}")
+        out += abi_lines(addr, abi)
         break
     return out
 
@@ -233,15 +299,12 @@ async def main() -> int:
                 print(f"sample {r['token']}: plain_buy {r['plain_buy']}, tax {r.get('tax_bps')}, "
                       f"info {[hex(w) for w in r['info_words']]}, ex1 {[hex(w) for w in r['ex1_words']]}"
                       + (f", api {r.get('api_version')} feePlan {r.get('api_fee_plan')}" if args.api else ""))
-            if settings.ETHERSCAN_API_KEY:
-                async with httpx.AsyncClient(timeout=15.0) as client:
-                    from yonixalpha_core.chains.registry import LAUNCHPADS
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                from yonixalpha_core.chains.registry import LAUNCHPADS
 
-                    for line in await verified_abi(client, rpc, LAUNCHPADS["fourmeme"].contracts["manager_v2"],
-                                                   settings.ETHERSCAN_API_KEY):
-                        print(line)
-            else:
-                print("verified ABI: not fetched (ETHERSCAN_API_KEY not set)")
+                for line in await verified_abi(client, rpc, LAUNCHPADS["fourmeme"].contracts["manager_v2"],
+                                               settings.ETHERSCAN_API_KEY or None):
+                    print(line)
     finally:
         if rpc is not None:
             await rpc.aclose()

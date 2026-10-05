@@ -44,7 +44,7 @@ Providers), see M7.
 | 5 | Launchpad health: activity status, last launch/trade/migration, 7d counts, verified flags | DONE in code (M1), NOT VERIFIED in production yet | `chains/activity.py`, table `launchpad_activity` (migration 0024), rollup written in `evm/store.persist_scan`, `/api/launchpads`, Launchpads page; `tests/test_launchpad_activity.py`, `test_control_center` | M1 |
 | 6 | 7-day inactivity → INACTIVE, hidden from active filter, adapter kept, auto-reactivation | DONE in code (M1) | INACTIVE needs 7 days without activity AND 7 days of monitoring (else UNVERIFIED); Active / Archived tabs; discovery keeps scanning, so activity returns the venue to ACTIVE; Solana trade counts are "not tracked" (None), never 0 | M1 |
 | 7 | Solana launchpads beyond Pump.fun/PumpSwap (LetsBONK, LaunchLab, Meteora DBC, Bags, Moonshot, Jupiter Studio) | PARTIAL: activity monitored, observe only (M10a); launch sites split by on-chain config (M10c); DBC and LaunchLab quote paths equal to the official SDKs (M22), NOT VERIFIED against the chain until the server checks pass | Raydium LaunchLab, Meteora DBC and Moonshot in the registry as OBSERVE ONLY; activity from a 5-minute probe (section 19); per-site split from each sampled instruction's platform / pool config, LaunchLab sites named from their own PlatformConfig (section 22); StonkFun identified: it runs on LaunchLab (seen as one of its platform configs); M22 (section 34): `solana/dbc.py` (240 quotes + 720 curve walks equal to dynamic-bonding-curve-sdk 1.5.13) and `solana/launchlab.py` (336 trades equal to raydium-sdk-v2; linear curve and Token-2022 mints refused), on-server replays `tools.dbc_verify` / `tools.launchlab_verify`; Moonshot quotes not done (no exact reference); paper trading on these venues NOT IMPLEMENTED (needs their discovery, launch safety and a research item moved to PAPER) | M10, M22 |
-| 8 | BSC: Four.meme, Flap verified; Genius.fun etc. researched | PARTIAL | Four.meme / Flap adapters, discovery live, read-only checks PASS; Four.meme X Mode detected by a plain-buy simulation (revert "A") and FAILS safety; AntiSniperFeeMode / template layout pending `tools.fourmeme_modes` on the server (section 22); Genius.fun researched and added OBSERVE ONLY (Pons V2 event decoder, two factories); Four.meme curves quoted in tokenized stocks (32 of 40 newest) kept out of BNB volume, wallet P/L and regimes (section 23) | M10 |
+| 8 | BSC: Four.meme, Flap verified; Genius.fun etc. researched | PARTIAL | Four.meme / Flap adapters, discovery live, read-only checks PASS; Four.meme X Mode detected by a plain-buy simulation (revert "A") and FAILS safety; AntiSniperFeeMode / template layout still untested after three server runs (no positive example; four.meme API 403); the tool now fetches the verified ABI from Sourcify, which settles it (section 36); Genius.fun researched and added OBSERVE ONLY (Pons V2 event decoder, two factories); Four.meme curves quoted in tokenized stocks (32 of 40 newest) kept out of BNB volume, wallet P/L and regimes (section 23) | M10 |
 | 9 | BSC mempool wallet copying | DONE (measurement) | `evm.streams.PendingTxStream`: eth_subscribe newPendingTransactions (full bodies) over a dashboard WSS endpoint; matches copy targets / launchpads; REFUSED / LIMITED become UPGRADE REQUIRED; copy decisions stay on confirmed trades (§17) | M8 |
 | 10 | Robinhood: Pons, NOXA, Odyssey | DONE | Pons V1 / V2 active and traded on paper; NOXA (paused since 2026-07) and The Odyssey (curve, instant, reflection; no activity seen, operator confirmed 2026-10-03) marked inactive: adapters, decoders and tests kept, discovery skips them, never traded (section 25) | M10 |
 | 11 | Pons coordinated-launch safety (privileged / creator-linked / common-funder / simultaneous buyers) | DONE (paper; on-chain assumptions NOT VERIFIED until coordination_check runs on the server) | launch_coordination: 13 detections, configurable NO_TRADE / REDUCE_SIZE / MANUAL_APPROVAL / NONE, data-evm entries + EVM copy buys; see section 13 | M5 |
@@ -2602,3 +2602,92 @@ Both use LIVE VERIFIED only for Solana. Neither uses PERFECT.
 
 NOT VERIFIED: the 24/7 acceptance on the server (the procedure in
 `docs/ACCEPTANCE_24x7.md`).
+
+## 36. Server run after the M21–M23 deploy (2026-10-05, deploy d2f9d94)
+
+### dbc_verify / launchlab_verify crashed: version-1 transactions
+
+Both tools stopped on the first transaction:
+- they asked getTransaction for `maxSupportedTransactionVersion: 0`;
+- the node answered -32015: "Transaction version (1) is not supported".
+
+DBC and LaunchLab transactions on mainnet are now version 1. The repo
+already declares version 1 everywhere else (`solana.rpc.get_transaction_params`,
+`MAX_SUPPORTED_TRANSACTION_VERSION = 1`). The new tools hard-coded 0, and so
+did the M10 activity probe (`solana/venue_probe.py`). The probe catches a
+failed sample and goes on, so on the server it has been silently skipping
+every version-1 transaction:
+- launchpad status and last-transaction time come from the signature list
+  and were not affected;
+- the sampled launch / trade / migration kinds and the per-site split were
+  undercounted.
+
+**No version-1 layout is assumed.** All three now fetch with
+`get_transaction_params(sig, "jsonParsed")`. In jsonParsed the node itself
+resolves every instruction's program id and accounts to addresses, so they
+read any version. `solana.txversion.instructions` is the one reader of
+instructions:
+- jsonParsed: address strings, any version;
+- json (index-based): legacy / v0 only; another version raises
+  UnsupportedTransactionLayout, never misread;
+- instructions the node parsed itself (system, token programs) are left
+  out.
+
+`anchor_codec.cpi_events` (DBC and LaunchLab events) and
+`venue_probe.site_accounts` use it. In both tools, a transaction that still
+cannot be read is skipped and counted in the output, never a crash.
+
+Tests (each fails on the previous code):
+- a version-1 jsonParsed transaction is read and its event found;
+- a version-1 json transaction fails closed;
+- v0 json with lookup-table addresses still works;
+- the probe reads a version-1 LaunchLab site;
+- the tools' fake RPC serves version-1 jsonParsed transactions, checks
+  that version 1 is declared, and includes one transaction the node refuses
+  (reported as skipped).
+
+NOT VERIFIED against the chain until the two tools run again on the server.
+
+### Four.meme modes, third run
+
+60 tokens:
+- 45 quoted in a BEP-20 (the plain buy is not applicable);
+- 15 plain buy OK;
+- X Mode: none;
+- TaxToken: `feeRate()` read on none;
+- agent bit: none;
+- four.meme API: HTTP 403 on every request;
+- Etherscan: no key.
+
+**Word 2 is not a bare bit field.** In the samples:
+
+| Part | Content |
+|---|---|
+| high 160 bits | an address-like value that differs between tokens (e.g. `0xc23ea5f2…8f6b6f` on 3 of 5, `0x26b030b3…6dc905`) |
+| low 96 bits | the flags: `…03030000241b`, creator type 9 on every token; bit 16 (X Mode) and bit 85 (agent) clear |
+
+`_tokenInfoEx1s` word 3 is 125,840,857, near the BSC block height; the
+other words are zero.
+
+The template hypotheses (bit 16, creator type 5, bit 85) and the
+AntiSniperFeeMode field stay **untested**: three runs have held no positive
+example, and the API cross-check is refused.
+
+**The way to settle it exactly is the verified ABI.**
+`tools.fourmeme_modes` now:
+- asks Sourcify (no key needed; blocked from the build environment but not
+  from the server) for the EIP-1967 implementation and the proxy, and
+  Etherscan as well when a key is set;
+- prints the getters' fields in order (structs included), plus every
+  function or event whose name mentions template, fee, sniper, mode, agent
+  or tax;
+- prints word 2 as its two parts.
+
+**Safety is not waiting on this.**
+- Every token that could be entered is BNB-quoted (a BEP-20 quote fails
+  safety, NON_NATIVE_QUOTE).
+- Every BNB-quoted token gets the plain-buy simulation, which catches X
+  Mode by the contract's own revert.
+
+The open question is AntiSniperFeeMode: whether a launch-window fee would
+make the paper entry price better than a real buy's. NOT VERIFIED.

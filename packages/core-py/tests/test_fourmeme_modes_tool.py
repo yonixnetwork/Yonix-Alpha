@@ -45,3 +45,72 @@ def test_template_hypothesis_lines_test_word_2_against_the_evidence():
     assert "X Mode by simulation: 1; with bit 16: 1; plain buy OK: 1; with bit 16: 0" in out
     assert "agent bit 85 set: 1 of 4" in out
     assert "0x4902c5ebc598265ed2212b559b042de8a5eeec3f 2" in out and "four.meme API errors: HTTP 403 1" in out
+
+
+def test_word_2_is_split_into_its_address_part_and_its_flag_bits():
+    from yonixalpha_core.tools.fourmeme_modes import template_lines
+
+    w = int("c23ea5f270311e11a6353020a65d4358ae8f6b6f0001500001e103030000241b", 16)  # 2026-10-05 sample
+    w2 = int("26b030b3390df5cfb1386f7400798386176dc90500014000016203030000241b", 16)
+    rows = [{"plain_buy": "PLAIN_BUY_OK", "tax_bps": None, "info_words": [1, 0, x]} for x in (w, w, w2)]
+    out = "\n".join(template_lines(rows))
+    assert "high 160 bits: 2 distinct (most common 0xc23ea5f270311e11a6353020a65d4358ae8f6b6f)" in out
+    assert "low 96 bits: 2 distinct (0x1500001e103030000241b x2, 0x14000016203030000241b x1)" in out
+
+
+ABI = [
+    {"type": "function", "name": "_tokenInfos", "inputs": [{"type": "address", "name": ""}],
+     "outputs": [{"type": "address", "name": "base"}, {"type": "address", "name": "quote"},
+                 {"type": "uint256", "name": "template"}, {"type": "uint256", "name": "totalSupply"}]},
+    {"type": "function", "name": "_tokenInfoEx1s", "inputs": [{"type": "address", "name": ""}],
+     "outputs": [{"type": "tuple", "name": "info", "components": [{"type": "uint256", "name": "launchFee"},
+                                                                   {"type": "uint256", "name": "feeSetting"}]}]},
+    {"type": "function", "name": "setAntiSniperFee", "inputs": [{"type": "uint256", "name": "mode"}], "outputs": []},
+    {"type": "function", "name": "owner", "inputs": [], "outputs": [{"type": "address", "name": ""}]},
+]
+
+
+def test_abi_lines_name_the_getter_fields_and_the_fee_mode_functions():
+    from yonixalpha_core.tools.fourmeme_modes import abi_lines
+
+    out = "\n".join(abi_lines("0xImpl", ABI))
+    assert "_tokenInfos(address ) -> (address base, address quote, uint256 template, uint256 totalSupply)" in out
+    assert "_tokenInfoEx1s(address ) -> (tuple info {uint256 launchFee, uint256 feeSetting})" in out
+    assert "function setAntiSniperFee(uint256 mode)" in out and "owner" not in out
+    assert abi_lines("0xX", [ABI[3]]) == ["  0xX: verified, but no getter named _tokenInfos / _tokenInfoEx1s"]
+
+
+async def test_verified_abi_asks_sourcify_without_a_key_and_etherscan_only_with_one():
+    import json as _json
+
+    import httpx
+
+    from yonixalpha_core.tools.fourmeme_modes import verified_abi
+
+    impl = "0x" + "ab" * 20
+
+    class Rpc:
+        async def get_storage_at(self, addr, slot):
+            return "0x" + "0" * 24 + impl[2:]
+
+    seen = []
+
+    def sourcify_has_it(req):
+        seen.append(req.url.host)
+        if req.url.host == "sourcify.dev" and impl in str(req.url):
+            return httpx.Response(200, json={"abi": ABI})
+        return httpx.Response(404, json={})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(sourcify_has_it)) as c:
+        out = "\n".join(await verified_abi(c, Rpc(), "0xManager", None))
+    assert f"{impl}: verified ABI from Sourcify" in out and "uint256 template" in out and seen == ["sourcify.dev"]
+
+    def only_etherscan(req):
+        if req.url.host == "sourcify.dev":
+            return httpx.Response(404, json={})
+        return httpx.Response(200, json={"status": "1", "result": _json.dumps(ABI)})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(only_etherscan)) as c:
+        assert "verified ABI from Etherscan" in "\n".join(await verified_abi(c, Rpc(), "0xManager", "key"))
+        out = "\n".join(await verified_abi(c, Rpc(), "0xManager", None))
+    assert "no verified ABI (Sourcify HTTP 404; Etherscan not asked (ETHERSCAN_API_KEY not set))" in out

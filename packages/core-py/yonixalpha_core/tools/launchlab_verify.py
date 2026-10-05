@@ -39,8 +39,9 @@ from yonixalpha_core.config import get_settings
 from yonixalpha_core.db.base import make_engine, make_session_factory
 from yonixalpha_core.solana import launchlab as ll
 from yonixalpha_core.solana.launchlab_layout import PROGRAM_ID
-from yonixalpha_core.solana.rpc import RpcManager
+from yonixalpha_core.solana.rpc import RpcManager, RpcRequestError, get_transaction_params
 from yonixalpha_core.solana.rpc_registry import effective_rpc
+from yonixalpha_core.solana.txversion import UnsupportedTransactionLayout
 
 
 def replay(curve_type: int, ev: dict[str, Any]) -> dict[str, Any]:
@@ -115,12 +116,18 @@ async def main(argv: list[str] | None = None) -> int:
         rpc.replace_endpoints(specs)
         sigs = await rpc.call("getSignaturesForAddress", [PROGRAM_ID, {"limit": a.txs}], priority="background")
         events: list[dict[str, Any]] = []
+        unreadable: Counter = Counter()
         for s in reversed(sigs or []):
             if s.get("err"):
                 continue
-            tx = await rpc.call("getTransaction", [s["signature"], {"encoding": "json", "maxSupportedTransactionVersion": 0}],
-                                priority="background")
-            events.extend(ll.trade_events(tx or {}))
+            try:  # jsonParsed: every transaction version (v1 exists on mainnet)
+                tx = await rpc.call("getTransaction", get_transaction_params(s["signature"], "jsonParsed"),
+                                    priority="background")
+                events.extend(ll.trade_events(tx or {}))
+            except (RpcRequestError, UnsupportedTransactionLayout) as exc:
+                unreadable[type(exc).__name__] += 1
+        if unreadable:
+            print(f"transactions not readable (skipped): {dict(unreadable)}")
         by_pool: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for ev in events:
             by_pool[ev["pool_state"]].append(ev)
