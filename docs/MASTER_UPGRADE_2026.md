@@ -2739,8 +2739,17 @@ Tests:
   each emitted as EvtSwap + EvtSwap2, PASS with 2/2; with the dedupe
   disabled the same input gives the server's pattern (2 of 5 equal, FAIL).
 
-DBC quotes stay NOT VERIFIED against the chain until `dbc_verify` passes on
-the server.
+**Server re-run (deploy 871e46a): PASS.**
+- 32 swaps in 3 pools; layout PASS on all three.
+- Consecutive swaps replayed: 22, 24 and 22. Next sqrt price and curve
+  amount were exactly equal on 68 of 68, all exact in.
+- 77 transactions reported their swap as both EvtSwap and EvtSwap2, which
+  confirms the cause.
+
+The DBC exact-in quote is verified against the chain on this sample.
+Partial fill and exact out had no swap in it: NOT VERIFIED on the chain
+(SDK-equal in the tests). The venue stays OBSERVE ONLY; paper trading on it
+is not wired.
 
 ### Four.meme modes, fourth run
 
@@ -2754,7 +2763,29 @@ the server.
   (`0xf32ee25a7a94f5858692b90815493bda9f992eee`) is not on Sourcify (404).
 
 The implementation ABI needs Etherscan: `ETHERSCAN_API_KEY` in the server's
-`.env` (never in the code). AntiSniperFeeMode stays NOT VERIFIED until then.
+`.env` (never in the code).
+
+**Fifth run, with the key (deploy 871e46a).**
+- Etherscan: "Contract source code not verified" for the implementation;
+  Sourcify 404.
+- 60 tokens: 25 BNB-quoted, all plain buy OK; 35 not applicable (BEP-20
+  quote). X Mode, TaxToken, agent: none.
+- Word 2: creator type 9 on all 60; high 160 bits 6 distinct, low 96 bits
+  28 distinct.
+
+The implementation's source is published nowhere (neither Sourcify nor
+Etherscan), so its field layout cannot be read from a verified ABI. The
+template / AntiSniperFeeMode fields stay NOT VERIFIED. Reading them from
+unverified bytecode would be a guess, so it is not done.
+
+Safety does not depend on it:
+- a BEP-20 quote fails safety;
+- every BNB-quoted token is entered only after the plain-buy simulation
+  passes;
+- BSC stays paper only.
+
+The remaining effect is paper accuracy: a launch-window fee, if present,
+is not in the paper entry price.
 
 ### 24/7 acceptance
 
