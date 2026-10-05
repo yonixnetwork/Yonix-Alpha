@@ -4,7 +4,10 @@
     $C run --rm decision-engine python -m yonixalpha_core.tools.dbc_verify [--pools 5] [--swaps 40]
 
 1. Recent DBC transactions -> their swap events (EvtSwap / EvtSwap2) -> the
-   most active pools.
+   most active pools. A swap reported by both events is one swap
+   (dbc.unique_swaps). Replaying a swap from its own twin fits the first
+   server run's FAIL exactly (n swaps: 2n - 1 pairs replayed, n - 1 equal,
+   in all four pools); NOT VERIFIED until the re-run passes.
 2. Each pool's VirtualPool and PoolConfig accounts are decoded (layout:
    discriminator, the pool's config address, curve points ascending, the
    current sqrt price inside [start, migration]).
@@ -115,6 +118,7 @@ async def main(argv: list[str] | None = None) -> int:
         rpc.replace_endpoints(specs)
 
         unreadable: Counter = Counter()
+        twins: set[str] = set()  # transactions whose swap is reported by both an EvtSwap and an EvtSwap2
 
         async def swaps_of(address: str, limit: int) -> list[tuple[int, str, dict[str, Any]]]:
             sigs = await rpc.call("getSignaturesForAddress", [address, {"limit": limit}], priority="background")
@@ -129,6 +133,10 @@ async def main(argv: list[str] | None = None) -> int:
                 except (RpcRequestError, UnsupportedTransactionLayout) as exc:
                     unreadable[type(exc).__name__] += 1
                     continue
+                unique = dbc.unique_swaps(events)
+                if len(unique) < len(events):
+                    twins.add(s["signature"])
+                events = unique
                 for name, ev in events:
                     out.append((tx.get("slot") or 0, name, ev))
             return out
@@ -183,6 +191,8 @@ async def main(argv: list[str] | None = None) -> int:
                       f"curve amount equal {ok_out}/{len(pairs)} [{verdict}] ({dict(modes)})")
             else:
                 print("    no consecutive swaps in the sample: quote not checked on this pool")
+        if twins:
+            print(f"  transactions reporting a swap as both EvtSwap and EvtSwap2 (counted once): {len(twins)}")
         if unreadable:
             print(f"  transactions not readable (skipped): {dict(unreadable)}")
     print("RESULT:", "PASS" if not failures else f"FAIL ({failures})")

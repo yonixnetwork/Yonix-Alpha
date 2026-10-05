@@ -74,6 +74,26 @@ def swap_events(tx: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     return anchor_codec.cpi_events(dbc_layout, tx)
 
 
+def _swap_key(ev: dict[str, Any]) -> tuple:
+    res = ev["swap_result"]
+    return ev["pool"], ev["trade_direction"], res["output_amount"], res["next_sqrt_price"], ev["current_timestamp"]
+
+
+def unique_swaps(events: list[tuple[str, dict[str, Any]]]) -> list[tuple[str, dict[str, Any]]]:
+    """One entry per swap: one swap can be reported by both an EvtSwap and an
+    EvtSwap2 (next to each other, same pool, direction, output and next sqrt
+    price); the pair is kept once, as the EvtSwap2 (it carries the swap mode
+    and both input amounts). Order is kept."""
+    out: list[tuple[str, dict[str, Any]]] = []
+    for name, ev in events:
+        if out and {out[-1][0], name} == {"EvtSwap", "EvtSwap2"} and _swap_key(out[-1][1]) == _swap_key(ev):
+            if name == "EvtSwap2":
+                out[-1] = (name, ev)
+            continue
+        out.append((name, ev))
+    return out
+
+
 # --- math (safeMath / utilsMath / curve) ----------------------------------------------------
 
 def _sub(a: int, b: int) -> int:

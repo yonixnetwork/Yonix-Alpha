@@ -2691,3 +2691,72 @@ example, and the API cross-check is refused.
 
 The open question is AntiSniperFeeMode: whether a launch-window fee would
 make the paper entry price better than a real buy's. NOT VERIFIED.
+
+## 37. Server run after the version-1 fix (2026-10-05, deploy bbb1153)
+
+### launchlab_verify: PASS
+
+- 88 TradeEvents in 21 pools, all on the constant-product curve: every one
+  exactly equal, curve amounts and the pool's change (buy exact in 56, sell
+  exact in 32).
+- Layout PASS: 21 pools, 14 global configs, 5 platform configs.
+- Coverage: 20 of the 21 pools have a Token-2022 mint (token_program_flag 1:
+  8, 3: 12), which `check_quotable` refuses, so 1 pool is quotable now.
+
+The LaunchLab constant-product quote is verified against the chain on this
+sample. The fixed-price and linear curves had no trade in it: NOT VERIFIED
+(linear stays refused). The venue stays OBSERVE ONLY; paper trading on it is
+not wired.
+
+### dbc_verify: FAIL, from the tool, not the quote
+
+Layout PASS on all four pools. The replay was equal on about half of the
+pairs, and the numbers fit one explanation exactly:
+
+| Pool | Pairs replayed | Equal |
+|---|---|---|
+| 1 | 57 | 28 |
+| 2 | 61 | 30 |
+| 3 | 79 | 39 |
+| 4 | 75 | 37 |
+
+Every row is 2n - 1 pairs with n - 1 equal: n swaps, each reported by
+**both** an EvtSwap and an EvtSwap2 next to each other. The tool paired each
+swap with its own twin (replaying a swap from the price it itself left,
+never equal) and only the twin-to-next-swap pairs were true pairs.
+
+Fix: `dbc.unique_swaps` keeps one entry per swap: an EvtSwap and an EvtSwap2
+next to each other with the same pool, direction, output, next sqrt price
+and timestamp are one swap, kept as the EvtSwap2 (it carries the swap mode
+and both input amounts). `dbc_verify` uses it for the pool ranking and the
+replay, and prints how many transactions reported a swap twice.
+`dbc.swap_events` itself is unchanged.
+
+Tests:
+- `test_unique_swaps_keeps_one_entry_per_swap`: twins collapse in either
+  order; two events of the same kind, another pool or another price do not;
+- `test_dbc_verify_counts_a_swap_reported_by_both_events_once`: three swaps,
+  each emitted as EvtSwap + EvtSwap2, PASS with 2/2; with the dedupe
+  disabled the same input gives the server's pattern (2 of 5 equal, FAIL).
+
+DBC quotes stay NOT VERIFIED against the chain until `dbc_verify` passes on
+the server.
+
+### Four.meme modes, fourth run
+
+- 60 tokens: 41 BNB-quoted, all plain buy OK; 19 not applicable (BEP-20
+  quote). X Mode, TaxToken, agent: none.
+- four.meme API: HTTP 403 again.
+- Word 2: 7 distinct high-160 values, 24 distinct low-96 values; creator
+  type 9 on 59 tokens, 0 on 1.
+- Sourcify: the TokenManager2 proxy is verified, but a proxy's ABI has no
+  `_tokenInfos`; the implementation
+  (`0xf32ee25a7a94f5858692b90815493bda9f992eee`) is not on Sourcify (404).
+
+The implementation ABI needs Etherscan: `ETHERSCAN_API_KEY` in the server's
+`.env` (never in the code). AntiSniperFeeMode stays NOT VERIFIED until then.
+
+### 24/7 acceptance
+
+Started 2026-10-05T09:59:09Z (`docs/ACCEPTANCE_24x7.md`); the report and the
+restart check are still to run.
