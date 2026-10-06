@@ -176,3 +176,26 @@ async def test_solana_rebuild_in_row_batches_matches_the_whole_table_at_once(db)
         assert got[w].metrics["pnl"]["all"]["status"] == m["pnl"]["all"]["status"]
     assert got["busy"].metrics["ledger_coverage"] == {"launches": 5, "with_ledger": 3, "without_ledger": 2}
     assert got["calm"].trades == 3  # the 40-day-old buy is outside the window
+
+
+async def test_a_bot_wallet_is_profiled_on_its_most_recent_buys_and_says_so(db):
+    """Server 2026-10-06: batched by whole wallets, one bot wallet buying every
+    launch still took copy-engine out of memory every ~25 minutes."""
+    from yonixalpha_core.db.models import LaunchBuyer
+
+    rows = [LaunchBuyer(mint=f"B{i}", wallet="bot", rank=1, launch_created_at=NOW - timedelta(minutes=i, seconds=2),
+                        first_buy_at=NOW - timedelta(minutes=i), sol_in=Decimal("0.1"), tokens_in=Decimal(10),
+                        recorded_at=NOW, early_window_closed=True) for i in range(7)]
+    rows += [LaunchBuyer(mint=f"H{i}", wallet="human", rank=2, first_buy_at=NOW - timedelta(hours=i), sol_in=Decimal(1),
+                         tokens_in=Decimal(10), recorded_at=NOW, early_window_closed=True) for i in range(3)]
+    db.add_all(rows)
+    await db.commit()
+    assert await wallet_profiles.rebuild_solana(db, NOW, max_rows_per_wallet=4) == 2
+    await db.commit()
+    got = {p.wallet: p for p in (await db.execute(select(WalletProfile).where(WalletProfile.chain == "solana"))).scalars()}
+    bot = got["bot"]
+    assert bot.trades == 4 and bot.metrics["sample"]["launches_in_window"] == 7
+    assert bot.metrics["sample"]["launches_used"] == 4
+    assert bot.first_seen == NOW - timedelta(minutes=3)  # the 4 most recent buys, not the oldest
+    assert any("most recent 4 of 7" in x for x in bot.metrics["pnl"]["notes"])
+    assert "sample" not in got["human"].metrics and got["human"].trades == 3
