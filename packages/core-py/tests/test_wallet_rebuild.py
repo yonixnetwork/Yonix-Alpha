@@ -138,3 +138,41 @@ async def test_trades_quoted_in_other_tokens_are_left_out_and_unrefreshed_profil
     db.expunge_all()
     p = (await db.execute(select(WalletProfile))).scalar_one()
     assert "stale" not in p.metrics
+
+
+def test_row_batches_stay_within_the_budget_and_never_split_a_wallet():
+    counts = [("a", 3), ("b", 2), ("c", 9), ("d", 1), ("e", 1)]
+    assert wallet_profiles._row_batches(counts, 5) == [["a", "b"], ["c"], ["d", "e"]]
+    assert wallet_profiles._row_batches([], 5) == []
+
+
+async def test_solana_rebuild_in_row_batches_matches_the_whole_table_at_once(db):
+    """Server 2026-10-06: the 30-day launch_buyers table (1,066,313 rows) was
+    loaded at once and copy-engine was killed for memory every few minutes.
+    Loaded in row batches, the profiles are the same."""
+    from yonixalpha_core.db.models import LaunchBuyer
+
+    def buyer(wallet, n, days_ago=0.0, led=None):
+        at = NOW - timedelta(days=days_ago, minutes=n)
+        return LaunchBuyer(mint=f"M{wallet}{n}", wallet=wallet, rank=1, launch_created_at=at - timedelta(seconds=2),
+                           first_buy_at=at, sol_in=Decimal("0.5"), tokens_in=Decimal(1000), recorded_at=at,
+                           outcome="WIN" if n % 2 else "LOSS", early_window_closed=True, ledger=led)
+
+    sold = {"covered": True, "sol_out": "0.8", "tokens_out": "1000", "last_sell_at": (NOW - timedelta(minutes=1)).isoformat()}
+    rows = [buyer("busy", i, led=sold if i < 3 else None) for i in range(5)]
+    rows += [buyer("calm", i) for i in range(3)] + [buyer("calm", 9, days_ago=40)]  # one older than the window
+    rows += [buyer("tiny", i) for i in range(2)]  # below min_rows
+    db.add_all(rows)
+    await db.commit()
+
+    want = {w: wallet_profiles.solana_metrics([r for r in rows if r.wallet == w and r.first_buy_at >= NOW - timedelta(days=30)],
+                                              wallet_profiles.ScoreConfig(), NOW, 30) for w in ("busy", "calm")}
+    assert await wallet_profiles.rebuild_solana(db, NOW, row_batch=4) == 2  # "busy" alone is over the budget
+    await db.commit()
+    got = {p.wallet: p for p in (await db.execute(select(WalletProfile).where(WalletProfile.chain == "solana"))).scalars()}
+    assert set(got) == {"busy", "calm"}
+    for w, m in want.items():
+        assert got[w].trades == m["trades"] and got[w].metrics["ledger_coverage"] == m["ledger_coverage"]
+        assert got[w].metrics["pnl"]["all"]["status"] == m["pnl"]["all"]["status"]
+    assert got["busy"].metrics["ledger_coverage"] == {"launches": 5, "with_ledger": 3, "without_ledger": 2}
+    assert got["calm"].trades == 3  # the 40-day-old buy is outside the window

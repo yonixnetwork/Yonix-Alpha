@@ -102,3 +102,32 @@ async def test_disabled_service_idles_with_a_disabled_heartbeat_until_stopped(re
     assert not task.done()  # stays up instead of exiting into a restart loop
     stop.set()
     await asyncio.wait_for(task, 2)
+
+
+async def test_a_third_start_within_the_hour_alerts_once_and_unknown_types_log_once(redis, monkeypatch):
+    """Server 2026-10-06: copy-engine was killed for memory 318 times in a day
+    and no alert went out; and every copy event logged an unknown-type warning."""
+    sent = []
+
+    async def alert_error(service, event, detail=None, **kw):
+        sent.append((service, event, detail))
+        return True
+
+    monkeypatch.setattr("yonixalpha_core.notify.alert_error", alert_error)
+    t0 = 1_000_000.0
+    assert await events.note_start(redis, "copy-engine", now=t0) == 1
+    assert await events.note_start(redis, "copy-engine", now=t0 + 240) == 2
+    assert sent == []  # a deliberate restart (or two) is not a crash loop
+    assert await events.note_start(redis, "copy-engine", now=t0 + 480) == 3
+    assert sent and sent[0][:2] == ("copy-engine", "restarting_repeatedly") and sent[0][2]["starts_last_hour"] == 3
+    assert await events.note_start(redis, "copy-engine", now=t0 + 720) == 4
+    assert len(sent) == 1  # at most one alert an hour, across processes (the throttle is in Redis)
+    assert await events.note_start(redis, "ml", now=t0) == 1 and len(sent) == 1  # per service
+    assert await events.note_start(None, "x") == 0
+
+    warned = []
+    monkeypatch.setattr(events.log, "warning", lambda ev, **kw: warned.append((ev, kw.get("type"))))
+    monkeypatch.setattr(events, "_unknown_logged", set())
+    for _ in range(5):
+        await events.publish(redis, "copy.unregistered", {})
+    assert warned == [("events.unknown_type", "copy.unregistered")]

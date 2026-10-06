@@ -292,7 +292,9 @@ Every service error goes to Telegram, along with:
 
 Waiting on the server:
 - `dbc_verify` and `launchlab_verify` passed (§37);
-- the 24/7 acceptance procedure (`docs/ACCEPTANCE_24x7.md`);
+- the 24/7 acceptance procedure (`docs/ACCEPTANCE_24x7.md`) again: the
+  first run (25.7 h) found copy-engine killed for memory 318 times, fixed
+  in §38;
 - the stream cross-check numbers.
 
 ## 31. Remaining limitations

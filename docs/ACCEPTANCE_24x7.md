@@ -19,7 +19,7 @@ unattended window and prints a verdict per duty. It is read-only.
 | Managing positions | BSC / Robinhood exit checks per open position (`evm_exit_samples.at`); Solana position loop last pass; open positions and their oldest mark | market-dependent |
 | Updating exits | position timeline events (`trade_timeline_events`) | market-dependent |
 | Recording PnL | positions closed with a realized PnL (`paper_positions.exit_at`) | market-dependent |
-| Services | each service's heartbeat now (stale after 90 s, as on the health page) and its restarts in the window | — |
+| Services | each service's heartbeat now (stale after 90 s, as on the health page) and its restarts in the window; more than 3 restarts of one service is a crash loop (FAIL) | — |
 | Restart | LIVE wallet reconciliation time, reconciliation findings, EVM scan ranges skipped and backfilled | — |
 | History | rows from before the window, still there for the dashboard | — |
 
@@ -37,7 +37,14 @@ The verdicts:
 | FAIL | no event from a source that never stops. Solana / BSC / Robinhood discovery and trades are such sources: both EVM chains always run in data-evm, so this is FAIL unless every launchpad of the chain was switched off on the Launchpads page |
 | NO EVENT | no event where one depends on the market: copying needs a target to trade, exits need an open position. Not a failure, and not a proof either |
 
-The result is **PASS** only with no FAIL and no missing or stale heartbeat.
+The result is **PASS** only with no FAIL, no missing or stale heartbeat, and
+no service restarting more than 3 times in the window.
+
+Since 2026-10-06 a service started 3 times within an hour also sends a
+Telegram alert ("restarting_repeatedly"), at most once an hour.
+
+The launchpad activity line reads a daily rollup that is overwritten in
+place, so it reports only the time since its newest write.
 It proves continuity, never profit.
 
 ## Procedure
@@ -97,7 +104,8 @@ C="docker compose --env-file .env -f infra/docker/docker-compose.yml -f infra/do
    ```
 
    Expected:
-   - every service shows one restart;
+   - every service shows one restart (two is possible when it came up
+     before the database was ready; more than 3 is a FAIL);
    - every heartbeat is OK;
    - discovery is ACTIVE again;
    - on LIVE, "LIVE wallet reconciled at" is after the restart;

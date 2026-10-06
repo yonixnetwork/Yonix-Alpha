@@ -373,17 +373,49 @@ async def mark_stale(session: AsyncSession, chain: str, now: datetime) -> int:
     return r.rowcount or 0
 
 
+SOLANA_ROW_BATCH = 20_000  # launch-buyer rows loaded at once by rebuild_solana (bounded memory)
+
+
+def _row_batches(counts: list[tuple[str, int]], budget: int) -> list[list[str]]:
+    """Wallets grouped so each group's rows stay within `budget` (a wallet with
+    more rows than the budget gets a group of its own; it is never split)."""
+    out: list[list[str]] = []
+    cur: list[str] = []
+    size = 0
+    for wallet, n in counts:
+        if cur and size + n > budget:
+            out.append(cur)
+            cur, size = [], 0
+        cur.append(wallet)
+        size += n
+    if cur:
+        out.append(cur)
+    return out
+
+
 async def rebuild_solana(session: AsyncSession, now: datetime, cfg: ScoreConfig = ScoreConfig(), days: int = 30,
-                         min_rows: int = 3) -> int:
-    rows = (await session.execute(select(LaunchBuyer).where(LaunchBuyer.first_buy_at >= now - timedelta(days=days)))).scalars().all()
+                         min_rows: int = 3, row_batch: int = SOLANA_ROW_BATCH) -> int:
+    """Profiles every wallet with at least `min_rows` early buys in the last
+    `days`. Memory is bounded: the wallets and their row counts come from SQL,
+    then their rows are loaded a batch at a time as plain rows (no ORM
+    objects kept in the session). Server 2026-10-06: loading the whole 30-day
+    table at once (1,066,313 rows with their ledgers) took copy-engine past
+    1.2 GB and the kernel killed it every 3-5 minutes (318 restarts in 25.7 h)."""
+    lb = LaunchBuyer
+    since = now - timedelta(days=days)
+    counts = [(w, int(c)) for w, c in (await session.execute(
+        select(lb.wallet, func.count()).where(lb.first_buy_at >= since).group_by(lb.wallet)
+        .having(func.count() >= min_rows).order_by(lb.wallet))).all()]
     vcfg = await validation_config(session)
-    by_wallet: dict[str, list] = defaultdict(list)
-    for r in rows:
-        by_wallet[r.wallet].append(r)
+    columns = list(lb.__table__.columns)
     n = 0
-    for wallet, rs in by_wallet.items():
-        if len(rs) < min_rows:
-            continue
-        await _upsert(session, "solana", wallet, solana_metrics(rs, cfg, now, days, vcfg), "launch_buyers", cfg, now)
-        n += 1
+    for batch in _row_batches(counts, row_batch):
+        by_wallet: dict[str, list] = defaultdict(list)
+        for r in (await session.execute(select(*columns).where(lb.first_buy_at >= since, lb.wallet.in_(batch)))).all():
+            by_wallet[r.wallet].append(r)
+        for wallet in batch:
+            await _upsert(session, "solana", wallet, solana_metrics(by_wallet[wallet], cfg, now, days, vcfg),
+                          "launch_buyers", cfg, now)
+            n += 1
+        del by_wallet
     return n

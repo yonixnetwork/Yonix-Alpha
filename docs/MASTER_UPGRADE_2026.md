@@ -2791,3 +2791,104 @@ is not in the paper entry price.
 
 Started 2026-10-05T09:59:09Z (`docs/ACCEPTANCE_24x7.md`); the report and the
 restart check are still to run.
+
+## 38. First 24/7 acceptance run (2026-10-05 11:26 to 2026-10-06 13:08 UTC)
+
+### What the report showed
+
+Window 1, 25.7 h unattended:
+- every service's heartbeat was OK at the end;
+- Solana, BSC and Robinhood discovery and trades produced throughout (BSC
+  trades: 439,948, longest silence 34 s);
+- 27 positions closed with a PnL;
+- the LIVE wallet reconciled, with no findings.
+
+Window 2, the 4.9 minutes after `$C restart`:
+- every service came back by itself;
+- every duty was ACTIVE again;
+- the LIVE wallet reconciled after the restart.
+
+Both said PASS. **That was wrong:** copy-engine had started 318 times in the
+window, and the report did not count that against it.
+
+### Root cause: copy-engine killed for memory
+
+Server evidence (`dmesg`, `docker stats`, `system_events`):
+- the kernel killed a Python process with 1.1–1.2 GB resident every 3–5
+  minutes ("Out of memory: Killed process");
+- the server has 1.9 GB RAM, with swap nearly full;
+- copy-engine was at 676 MB a minute after a start;
+- its starts rose from 1–4 an hour to 12–19 an hour from 2026-10-05 16:00;
+- `launch_buyers` held 1,066,313 rows in the 30-day window.
+
+`wallet_profiles.rebuild_solana`, run on copy-engine's first pass and every
+10 minutes, loaded all of those rows as ORM objects at once. Each row
+carries its M21 own-trade ledger. The rebuild never finished: the process
+was killed, Docker restarted it, and it started over.
+
+Measured on 200,000 rows (build environment, same data shape):
+
+| Version | Peak RSS | Profiles | Time |
+|---|---|---|---|
+| Before | 727 MB | 20,000 | 92 s |
+| After | 132 MB | 20,000 | 85 s |
+
+The old peak grows with the table; the new one does not.
+
+### Fixes
+
+1. **`rebuild_solana`:**
+   - wallets with at least 3 buys, and their row counts, come from SQL;
+   - their rows are then loaded in batches of at most 20,000, as plain
+     rows rather than ORM objects;
+   - a wallet is never split across batches;
+   - the profiles are the same as before (test).
+2. **copy-engine loop:** the profile rebuild runs beside the loop, one at a
+   time, so watching targets never waits for it. A rebuild still running
+   at shutdown is cancelled. The rebuild reports its duration.
+3. **Telegram on crash loops:**
+   - a service started 3 times within an hour sends "restarting_repeatedly"
+     to Telegram, at most once an hour;
+   - the throttle is in Redis, because every restart is a new process;
+   - it is recorded in `events.heartbeat_loop`, which every service runs.
+     An out-of-memory kill says nothing itself; before this fix, no alert
+     went out.
+4. **`acceptance_247`:**
+   - more than 3 starts of a service in the window is a FAIL line
+     ("restarting repeatedly"), even with a fresh heartbeat;
+   - "launchpad health refreshed" read `launchpad_activity`, a daily rollup
+     overwritten in place. The gaps between rows were not silences (13.0 h
+     while the feeds were ACTIVE). It now measures the time since the
+     newest write.
+5. **Logs:** copy-engine's `copy.event` is not a registered realtime type,
+   and every copy event logged an `events.unknown_type` warning. It is now
+   logged once per type and process.
+
+The realtime type itself is not registered in this change: the copy page
+would then reload on every target trade (about 1 a second). It keeps its
+10–15 s polling.
+
+### Remaining GAP lines in window 1
+
+- **Solana discovery (10.3 min) and decisions (10.2 min), against a
+  10-minute limit:** data-solana restarted at 2026-10-06 00:38 inside the
+  window. On a server under memory pressure, it is a likely cause. Not
+  separately proven.
+- **BSC / Robinhood observations (13.3 min):** same window of memory
+  pressure. Not separately proven.
+- **BSC / Robinhood exit checks (51.4 min):** a sample is written every 5
+  minutes while an EVM position is open, so a silence means no open EVM
+  position. Market-dependent.
+
+All of these are to be re-read on the rerun after this deploy.
+
+Tests (each fails on the previous code):
+- `test_solana_rebuild_in_row_batches_matches_the_whole_table_at_once`;
+- `test_row_batches_stay_within_the_budget_and_never_split_a_wallet`;
+- copy-engine `test_watching_goes_on_while_the_profiles_are_rebuilt`: the
+  old loop made 1 pass while a rebuild ran;
+- `test_a_third_start_within_the_hour_alerts_once_and_unknown_types_log_once`;
+- `test_report_on_the_real_schema`: a crash loop fails the report, and the
+  rollup is measured from its newest write.
+
+§81 stays NOT VERIFIED until the procedure passes again after this deploy.

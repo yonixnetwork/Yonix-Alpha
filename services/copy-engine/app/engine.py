@@ -9,6 +9,7 @@ Nothing here signs or sends a transaction: copy trading is paper only.
 from __future__ import annotations
 
 import hashlib
+import time
 import uuid
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -647,13 +648,15 @@ class CopyEngine:
             await alert_error(SERVICE, "enrichment_errors", problems)
         return out
 
-    async def rebuild_profiles(self) -> dict[str, int]:
+    async def rebuild_profiles(self) -> dict[str, int | float]:
         now = self.now()
-        out = {}
+        started = time.monotonic()
+        out: dict[str, int | float] = {}
         async with self.session_factory() as session:
             for chain in ("bsc", "robinhood"):
                 rpc = next((getattr(ad, "rpc", None) for ad in (self.evm_adapters.get(chain) or {}).values()), None)
                 out[chain] = await wallet_profiles.rebuild_evm(session, chain, now, rpc=rpc)
             out["solana"] = await wallet_profiles.rebuild_solana(session, now)
             await session.commit()
+        out["seconds"] = round(time.monotonic() - started, 1)
         return out
