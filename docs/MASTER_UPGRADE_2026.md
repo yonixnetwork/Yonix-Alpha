@@ -2915,3 +2915,32 @@ launches used, and the PnL notes repeat it. While a rebuild runs, the
 copy-engine heartbeat shows `profiles_running_since`.
 
 Test: `test_a_bot_wallet_is_profiled_on_its_most_recent_buys_and_says_so`.
+
+### Third server check after deploy 26247a3: the BSC / Robinhood rebuild
+
+copy-engine still restarted: 21:14:31, then killed at 21:30:03 with 1.6 GB.
+
+The Solana part is now bounded (its busiest wallet has 52,901 buys in 30
+days, capped at 5,000). The EVM part of the same rebuild was not:
+- `rebuild_evm` loaded the 14-day trades of the 100 most active wallets at
+  once, as ORM objects;
+- those are the BSC bots, with hundreds of thousands of trades among them.
+
+Measured on 600,000 BSC trades (100 bot wallets with 5,000 each, 2,000
+wallets with 50 each):
+
+| Version | Peak RSS | Profiles | Time |
+|---|---|---|---|
+| Before | 1,051 MB | 2,000 | 60 s |
+| After | 109 MB | 2,000 | 34 s |
+
+Fix, the same as for Solana:
+- trades are loaded as plain rows, in batches of at most 20,000 trades
+  (`EVM_ROW_BATCH`) and 100 wallets;
+- a wallet with more than 5,000 trades in the window
+  (`EVM_MAX_TRADES_PER_WALLET`) is profiled on its most recent 5,000, and
+  `metrics.sample` and the PnL notes say so;
+- a sell of a buy before the sample counts as unmatched, as it already did
+  at the window's start.
+
+Test: `test_an_evm_bot_wallet_is_profiled_on_its_most_recent_trades_and_says_so`.

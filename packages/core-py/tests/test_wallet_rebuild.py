@@ -199,3 +199,27 @@ async def test_a_bot_wallet_is_profiled_on_its_most_recent_buys_and_says_so(db):
     assert bot.first_seen == NOW - timedelta(minutes=3)  # the 4 most recent buys, not the oldest
     assert any("most recent 4 of 7" in x for x in bot.metrics["pnl"]["notes"])
     assert "sample" not in got["human"].metrics and got["human"].trades == 3
+
+
+async def test_an_evm_bot_wallet_is_profiled_on_its_most_recent_trades_and_says_so(db):
+    """Server 2026-10-06: the 100 most active BSC wallets' 14 days of trades,
+    loaded at once as ORM objects, took copy-engine to 1.6 GB (1,051 MB
+    measured on 500,000 bot trades; 109 MB in row batches with the cap)."""
+    bot, calm = "0x" + "e" * 40, "0x" + "c" * 40
+    rows, n = [], 0
+    for i in range(4):  # bot: 4 round trips, 8 trades, the oldest first
+        rows += [trade(n, bot, f"0xb{i}", True, 1, 100 - 10 * i), trade(n + 1, bot, f"0xb{i}", False, 2, 95 - 10 * i)]
+        n += 2
+    rows += [trade(n, calm, "0xq", True, 1, 50), trade(n + 1, calm, "0xq", False, 1.5, 40), trade(n + 2, calm, "0xr", True, 1, 30)]
+    db.add_all(rows)
+    await db.commit()
+    assert await wallet_profiles.rebuild_evm(db, "bsc", NOW, max_trades_per_wallet=4, row_batch=3) == 2
+    await db.commit()
+    got = {p.wallet: p for p in (await db.execute(select(WalletProfile))).scalars()}
+    b = got[bot]
+    assert b.metrics["sample"] == {"trades_in_window": 8, "trades_used": 4,
+                                   "basis": "the most recent 4 trades (bounded per wallet)"}
+    assert b.trades == 4 and b.first_seen == NOW - timedelta(minutes=80)  # the 4 most recent trades
+    assert b.metrics["pnl"]["all"]["winning_trades"] == 2  # the two most recent round trips
+    assert any("most recent 4 of 8 trades" in x for x in b.metrics["pnl"]["notes"])
+    assert "sample" not in got[calm].metrics and got[calm].trades == 3
