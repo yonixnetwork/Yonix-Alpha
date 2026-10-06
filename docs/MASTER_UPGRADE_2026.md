@@ -2892,3 +2892,26 @@ Tests (each fails on the previous code):
   rollup is measured from its newest write.
 
 §81 stays NOT VERIFIED until the procedure passes again after this deploy.
+
+### Second server check after deploy 3089003: still killed, now every ~25 minutes
+
+Between 17:08 and 19:45 UTC copy-engine started 7 times, with
+out-of-memory kills at 18:56 (740 MB), 19:20 (1.1 GB) and 19:45 (980 MB).
+
+Cause: the row batches never split a wallet, and a bot wallet that buys
+every launch holds a large share of the 30-day table. It was loaded and
+profiled whole. Measured on 200,000 rows, one wallet holding 100,000 of
+them:
+
+| Version | Peak RSS |
+|---|---|
+| Before | 544 MB |
+| With the cap | 134 MB |
+
+Fix: a wallet with more than 5,000 early buys in the window
+(`SOLANA_MAX_ROWS_PER_WALLET`) is profiled on its most recent 5,000. The
+profile says so: `metrics.sample` holds the launches in the window and the
+launches used, and the PnL notes repeat it. While a rebuild runs, the
+copy-engine heartbeat shows `profiles_running_since`.
+
+Test: `test_a_bot_wallet_is_profiled_on_its_most_recent_buys_and_says_so`.

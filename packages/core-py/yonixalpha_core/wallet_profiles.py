@@ -374,6 +374,7 @@ async def mark_stale(session: AsyncSession, chain: str, now: datetime) -> int:
 
 
 SOLANA_ROW_BATCH = 20_000  # launch-buyer rows loaded at once by rebuild_solana (bounded memory)
+SOLANA_MAX_ROWS_PER_WALLET = 5_000  # a bot wallet's most recent early buys profiled (bounded memory)
 
 
 def _row_batches(counts: list[tuple[str, int]], budget: int) -> list[list[str]]:
@@ -394,13 +395,18 @@ def _row_batches(counts: list[tuple[str, int]], budget: int) -> list[list[str]]:
 
 
 async def rebuild_solana(session: AsyncSession, now: datetime, cfg: ScoreConfig = ScoreConfig(), days: int = 30,
-                         min_rows: int = 3, row_batch: int = SOLANA_ROW_BATCH) -> int:
+                         min_rows: int = 3, row_batch: int = SOLANA_ROW_BATCH,
+                         max_rows_per_wallet: int = SOLANA_MAX_ROWS_PER_WALLET) -> int:
     """Profiles every wallet with at least `min_rows` early buys in the last
     `days`. Memory is bounded: the wallets and their row counts come from SQL,
     then their rows are loaded a batch at a time as plain rows (no ORM
-    objects kept in the session). Server 2026-10-06: loading the whole 30-day
-    table at once (1,066,313 rows with their ledgers) took copy-engine past
-    1.2 GB and the kernel killed it every 3-5 minutes (318 restarts in 25.7 h)."""
+    objects kept in the session), and a wallet with more than
+    `max_rows_per_wallet` early buys (a bot buying every launch) is profiled
+    on its most recent ones, which the profile says ("sample").
+    Server 2026-10-06: loading the whole 30-day table at once (1,066,313 rows
+    with their ledgers) took copy-engine past 1.2 GB and the kernel killed it
+    every 3-5 minutes; batched but with whole wallets, a single bot wallet
+    still did every ~25 minutes (100,000 rows of one wallet: 544 MB measured)."""
     lb = LaunchBuyer
     since = now - timedelta(days=days)
     counts = [(w, int(c)) for w, c in (await session.execute(
@@ -408,14 +414,32 @@ async def rebuild_solana(session: AsyncSession, now: datetime, cfg: ScoreConfig 
         .having(func.count() >= min_rows).order_by(lb.wallet))).all()]
     vcfg = await validation_config(session)
     columns = list(lb.__table__.columns)
+    total = dict(counts)
+    big = [w for w, c in counts if c > max_rows_per_wallet]
+    small = [(w, c) for w, c in counts if c <= max_rows_per_wallet]
     n = 0
-    for batch in _row_batches(counts, row_batch):
+
+    async def profile(wallet: str, rows: list) -> None:
+        m = solana_metrics(rows, cfg, now, days, vcfg)
+        if total[wallet] > len(rows):
+            m["sample"] = {"launches_in_window": total[wallet], "launches_used": len(rows),
+                           "basis": f"the most recent {len(rows)} early buys (bounded per wallet)"}
+            m["pnl"]["notes"] = list(m["pnl"].get("notes") or []) + [
+                f"profiled on the most recent {len(rows)} of {total[wallet]} early buys in the window"]
+        await _upsert(session, "solana", wallet, m, "launch_buyers", cfg, now)
+
+    for batch in _row_batches(small, row_batch):
         by_wallet: dict[str, list] = defaultdict(list)
         for r in (await session.execute(select(*columns).where(lb.first_buy_at >= since, lb.wallet.in_(batch)))).all():
             by_wallet[r.wallet].append(r)
         for wallet in batch:
-            await _upsert(session, "solana", wallet, solana_metrics(by_wallet[wallet], cfg, now, days, vcfg),
-                          "launch_buyers", cfg, now)
+            await profile(wallet, by_wallet[wallet])
             n += 1
         del by_wallet
+    for wallet in big:
+        rows = (await session.execute(select(*columns).where(lb.first_buy_at >= since, lb.wallet == wallet)
+                                      .order_by(lb.first_buy_at.desc()).limit(max_rows_per_wallet))).all()
+        await profile(wallet, list(rows))
+        n += 1
+        del rows
     return n
