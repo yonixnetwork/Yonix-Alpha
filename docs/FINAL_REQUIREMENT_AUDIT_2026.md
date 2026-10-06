@@ -117,7 +117,7 @@ Two facts hold for every row:
 | 78 | Never delete historical ML / trading data | DONE | `apps/api/migrations/versions/` | — | — | 40 migrations, none drops a table or a column on upgrade (checked 2026-10-04) | none |
 | 79 | Test the listed scenarios | DONE | `docs/TEST_MATRIX_2026.md` | 84 named tests, all existing (checked by script) | PASS | Robinhood pipeline test added in M23 | real-chain behaviour of BSC / Robinhood (EVM live locked) |
 | 80 | Automatic sell regression under identical conditions | DONE | `services/paper-trading/tests/test_exit_parity.py` | `svc:paper-trading/test_exit_parity.py` | PASS | §5 | none |
-| 81 | 24/7 acceptance test | NOT VERIFIED | `docs/ACCEPTANCE_24x7.md`, `core/tools/acceptance_247.py` | `test_acceptance_247.py` | PASS | — | the operator runs the procedure on the server |
+| 81 | 24/7 acceptance test | NOT VERIFIED | `docs/ACCEPTANCE_24x7.md`, `core/tools/acceptance_247.py` | `test_acceptance_247.py` | PASS | first server run (25.7 h, tracker §38): every feed kept producing and the restart check passed, but copy-engine was killed for memory 318 times; fixed, and a crash loop now fails the report | rerun the procedure after the §38 deploy |
 | 82 | Final requirement audit | DONE | this document | — | — | — | none |
 | 83 | Final report | DONE | `docs/FINAL_REPORT_2026.md` | — | — | — | none |
 | 84 | Final development rule (research, audit, test, measure, verify; no scraper, no demo; trust nothing blindly) | RULE | — | — | — | every phase recorded in the tracker with its evidence and its NOT VERIFIED items | none |

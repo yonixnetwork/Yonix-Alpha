@@ -10,7 +10,7 @@ and again after a server restart (step 6 of the procedure).
 
 For the window it reports:
   1. Services: each one's heartbeat now, and its restarts inside the window
-     (service_started events).
+     (service_started events); more than MAX_RESTARTS is a crash loop.
   2. Each §81 duty, from what the workers wrote: events in the window, the
      newest one, and the longest silence between two of them (window edges
      included), against a limit per duty.
@@ -29,7 +29,8 @@ Verdict per duty:
   NO EVENT  no event where one depends on the market (copying needs a
             target to trade, exits need an open position): not a failure,
             and not a proof either.
-The result is PASS only with no FAIL and no stale heartbeat. It proves
+The result is PASS only with no FAIL, no stale heartbeat and no service
+restarting repeatedly. It proves
 continuity, never profit.
 """
 
@@ -49,6 +50,12 @@ from yonixalpha_core.db.base import make_engine, make_session_factory
 
 SERVICES = ["data-solana", "engine-solana-discovery", "decision-engine", "ml", "paper-trading", "data-evm", "copy-engine"]
 HEARTBEAT_STALE_SECONDS = 90  # the health page's limit (apps/api health_state)
+# More starts than this inside one window is a crash loop, not an operator
+# restart (a deliberate restart can add a second start when a service comes
+# up before the database): FAIL, even if the heartbeat is fresh right now.
+# Server 2026-10-06: copy-engine started 318 times in 25.7 h and the report
+# still said PASS.
+MAX_RESTARTS = 3
 
 
 @dataclass(frozen=True)
@@ -60,6 +67,9 @@ class Duty:
     where: str = ""
     continuous: bool = True  # the source never stops while the system runs
     max_gap_minutes: int = 15
+    # rows are updated in place (a daily rollup): only the newest update is
+    # evidence, so the silence measured is the one since it, never between rows
+    newest_only: bool = False
 
 
 DUTIES: tuple[Duty, ...] = (
@@ -73,8 +83,11 @@ DUTIES: tuple[Duty, ...] = (
          max_gap_minutes=10),
     Duty("evm_observations", "monitoring: BSC / Robinhood observations moving", "evm_observations", "state_at",
          max_gap_minutes=10),
-    Duty("launchpad_probe", "monitoring: launchpad health refreshed", "launchpad_activity", "updated_at",
-         max_gap_minutes=20),
+    # launchpad_activity is one row per launchpad and day, overwritten on every
+    # write: the gaps between rows are not silences (server 2026-10-06: "13.0 h"
+    # between two launchpads' last writes while the feeds were ACTIVE)
+    Duty("launchpad_probe", "monitoring: launchpad activity rollup (newest write)", "launchpad_activity", "updated_at",
+         max_gap_minutes=20, newest_only=True),
     Duty("copy_events", "copying: target wallet trades seen and decided", "copy_events", "detected_at",
          continuous=False, max_gap_minutes=240),
     Duty("evm_position_ticks", "managing positions: BSC / Robinhood exit checks", "evm_exit_samples", "at",
@@ -125,7 +138,9 @@ async def duty_stats(session, duty: Duty, since: datetime, until: datetime) -> d
         first = (await session.execute(text(f"SELECT min({duty.column}) FROM {duty.table} WHERE {cond}"),
                                        {"since": since, "until": until})).scalar_one()
     longest = None
-    if n:  # the silence before the first event and after the newest one count too
+    if n and duty.newest_only:
+        longest = (until - newest).total_seconds()
+    elif n:  # the silence before the first event and after the newest one count too
         longest = max(float(inner or 0), (first - since).total_seconds(), (until - newest).total_seconds())
     older = (await session.execute(text(f"SELECT count(*) FROM {duty.table} WHERE {duty.column} < :since"
                                         + (f" AND {duty.where}" if duty.where else "")), {"since": since})).scalar_one()
@@ -171,9 +186,11 @@ def render(r: dict[str, Any]) -> tuple[str, bool]:
     bad = False
     for svc, s in r["services"].items():
         flag = s["heartbeat"] in ("NONE", "STALE")
-        bad |= flag
+        looping = s["restarts"] > MAX_RESTARTS
+        bad |= flag or looping
         lines.append(f"  {svc:26s} {s['heartbeat']:9s} age {_fmt_s(s['age_s']):>9s}   restarts {s['restarts']}"
-                     + ("   <- not running" if flag else ""))
+                     + ("   <- not running" if flag else "")
+                     + (f"   <- restarting repeatedly (more than {MAX_RESTARTS})" if looping else ""))
     lines += ["", "DUTIES (events in the window, newest, longest silence vs limit)"]
     for d in r["duties"]:
         bad |= d["verdict"] == "FAIL"
@@ -192,7 +209,7 @@ def render(r: dict[str, Any]) -> tuple[str, bool]:
     for g in rs["scan_gaps"]:
         lines.append(f"  EVM scan ranges skipped: {g['chain']} {g['launchpad']} {g['ranges']}: backfilled {g['backfilled']}, "
                      f"pending {g['pending']}, not recovered {g['lost']}")
-    lines += ["", "RESULT: " + ("FAIL (see the lines marked FAIL / not running)" if bad else
+    lines += ["", "RESULT: " + ("FAIL (see the lines marked FAIL / not running / restarting repeatedly)" if bad else
                                 "PASS: every service alive and every continuous source kept producing; "
                                 "NO EVENT lines are market-dependent, GAP lines need a look")]
     return "\n".join(lines), not bad

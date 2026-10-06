@@ -11,7 +11,8 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from yonixalpha_core.db import models  # noqa: F401
 from yonixalpha_core.db.base import Base, make_session_factory
-from yonixalpha_core.db.models import EvmToken, EvmTrade, PaperPosition, SystemEvent, TokenObservation
+from yonixalpha_core.db.models import (EvmToken, EvmTrade, LaunchpadActivity, PaperPosition, SystemEvent,
+                                       TokenObservation)
 from yonixalpha_core.tools import acceptance_247 as acc
 
 NOW = datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc)
@@ -64,6 +65,13 @@ async def test_report_on_the_real_schema():
                                 entry_at=SINCE + 5 * M, exit_at=SINCE + 50 * M, status="closed", realized_pnl=Decimal("-0.1")))
             s.add(SystemEvent(service="paper-trading", event_type="service_started", severity="info", detail={},
                               created_at=SINCE + 30 * M))
+            for i in range(4):  # a crash loop: four starts in one hour
+                s.add(SystemEvent(service="copy-engine", event_type="service_started", severity="info", detail={},
+                                  created_at=SINCE + (10 + 12 * i) * M))
+            # the daily rollup: one row per launchpad and day, overwritten on each write; flap's
+            # last write was 50 minutes ago (it is quiet), fourmeme's 2 minutes ago
+            s.add(LaunchpadActivity(chain="bsc", launchpad="flap", day=NOW.date(), updated_at=NOW - 50 * M))
+            s.add(LaunchpadActivity(chain="bsc", launchpad="fourmeme", day=NOW.date(), updated_at=NOW - 2 * M))
             await s.commit()
             redis = FakeRedis({**{f"yx:hb:{svc}": hb(20) for svc in acc.SERVICES}, "yx:hb:data-evm": hb(400),
                                "yx:pm:last_pass": json.dumps({"at": NOW.isoformat()})})
@@ -81,14 +89,21 @@ async def test_report_on_the_real_schema():
     assert by["closed_positions"]["verdict"] == "ACTIVE" and by["closed_positions"]["count"] == 1
     assert rep["services"]["paper-trading"]["restarts"] == 1 and rep["services"]["data-evm"]["heartbeat"] == "STALE"
     assert rep["restart"]["live_reconciled_at"] is None and rep["position_loop"]["at"] == NOW.isoformat()
+    # rows overwritten in place: only the newest write counts, the 48 minutes between the two rows are no silence
+    assert by["launchpad_probe"]["verdict"] == "ACTIVE" and by["launchpad_probe"]["longest_gap_s"] == 2 * 60
+    assert rep["services"]["copy-engine"]["restarts"] == 4
 
     out, ok = acc.render(rep)
     assert not ok and "RESULT: FAIL" in out and "data-evm" in out and "not running" in out
+    assert "restarts 4   <- restarting repeatedly (more than 3)" in out and "restarts 1   <-" not in out
     assert "FAIL     discovering: Robinhood launches: 0 events" in out
     # with every continuous source producing and every service alive, GAP and NO EVENT do not fail the run
     for d in rep["duties"]:
         if d["verdict"] == "FAIL":
             d["verdict"] = "ACTIVE"
     rep["services"]["data-evm"]["heartbeat"] = "OK"
+    out, ok = acc.render(rep)
+    assert not ok and "restarting repeatedly" in out  # a fresh heartbeat does not hide a crash loop
+    rep["services"]["copy-engine"]["restarts"] = 3  # a deliberate restart that came up twice is not one
     out, ok = acc.render(rep)
     assert ok and "RESULT: PASS" in out and "GAP" in out and "NO EVENT" in out

@@ -13,6 +13,7 @@ and optionally sent to Telegram per kind.
 
 import json
 import os
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -48,6 +49,7 @@ NOTIFICATION_KINDS = [
     "ml_drift", "strategy_disabled", "provider_failure", "infrastructure_update",
 ]
 PREFS_KEY = "notification_prefs"
+_unknown_logged: set[str] = set()
 
 
 def _json(v: Any) -> Any:
@@ -58,7 +60,9 @@ async def publish(redis: Redis | None, event_type: str, data: dict | None = None
     if redis is None:
         return
     if event_type not in EVENT_TYPES:
-        log.warning("events.unknown_type", type=event_type)
+        if event_type not in _unknown_logged:  # once per type and process: copy-engine sent one per copy event
+            _unknown_logged.add(event_type)
+            log.warning("events.unknown_type", type=event_type, note="dropped; logged once per process")
         return
     msg = {"type": event_type, "data": _json(data or {}), "source": source, "at": datetime.now(timezone.utc).isoformat()}
     try:
@@ -161,15 +165,50 @@ async def idle_while_disabled(settings: Any, service: str, reason: str, stop_eve
         await redis.aclose()
 
 
+RESTART_ALERT_STARTS = 3  # starts of one service within RESTART_ALERT_WINDOW that send a Telegram alert
+RESTART_ALERT_WINDOW = 3600
+STARTS_PREFIX = "yx:starts:"
+
+
+async def note_start(redis: Redis | None, service: str, now: float | None = None) -> int:
+    """Records this process start and returns the starts in the last hour.
+    A service killed and restarted by Docker (out of memory, a crash) says
+    nothing itself, so a third start within the hour is sent to Telegram,
+    at most once an hour per service (the throttle is in Redis because every
+    restart is a new process). Server 2026-10-06: copy-engine was killed for
+    memory 318 times in 25.7 h and no alert was sent. Never raises."""
+    if redis is None:
+        return 0
+    try:
+        t = time.time() if now is None else now
+        key = f"{STARTS_PREFIX}{service}"
+        await redis.lpush(key, str(t))
+        await redis.ltrim(key, 0, 49)
+        await redis.expire(key, RESTART_ALERT_WINDOW * 24)
+        recent = sum(1 for x in await redis.lrange(key, 0, -1) if t - float(x) <= RESTART_ALERT_WINDOW)
+        if recent >= RESTART_ALERT_STARTS and await redis.set(f"{key}:alerted", "1", nx=True, ex=RESTART_ALERT_WINDOW):
+            from yonixalpha_core.notify import alert_error
+
+            await alert_error(service, "restarting_repeatedly", {
+                "starts_last_hour": recent,
+                "hint": "a crash loop: check `dmesg -T | grep -i 'out of memory'` and the service log"})
+        return recent
+    except Exception as exc:  # noqa: BLE001 - start bookkeeping must never stop a service
+        log.warning("events.note_start_failed", service=service, error=str(exc))
+        return 0
+
+
 async def heartbeat_loop(settings: Any, service: str, stop_event, detail_fn=None) -> None:
     """Writes this service's heartbeat every 30 s until stop_event is set.
     Owns its own Redis client so services without Redis elsewhere can use
-    it; `detail_fn` (sync or async) adds service-specific fields."""
+    it; `detail_fn` (sync or async) adds service-specific fields. Its start
+    is counted (note_start), so repeated restarts reach Telegram."""
     import asyncio
 
     from yonixalpha_core.db.redis import make_redis
 
     redis = make_redis(settings)
+    await note_start(redis, service)
     try:
         while not stop_event.is_set():
             detail = None

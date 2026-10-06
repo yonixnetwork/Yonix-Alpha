@@ -40,6 +40,7 @@ def utcnow() -> datetime:
 
 async def loop(engine: CopyEngine, stop: asyncio.Event) -> None:
     last = {"evm": 0.0, "manage": 0.0, "adapters": 0.0, "profiles": 0.0, "outcomes": 0.0, "enrich": 0.0}
+    background: dict[str, asyncio.Task] = {}
 
     async def step(name: str, coro):
         try:
@@ -48,6 +49,16 @@ async def loop(engine: CopyEngine, stop: asyncio.Event) -> None:
             engine.status[name] = {"error": f"{type(exc).__name__}: {str(exc)[:160]}"}
             log.error("copy.step_failed", step=name, error=str(exc)[:200])
             await alert_error(SERVICE, f"{name}_failed", engine.status[name])
+
+    def start_background(name: str, make) -> bool:
+        """A long step runs beside the loop, one at a time, so watching the
+        targets never waits for it: the profile rebuild takes minutes once
+        launch_buyers holds a month of launches (about a million rows)."""
+        task = background.get(name)
+        if task is not None and not task.done():
+            return False
+        background[name] = asyncio.create_task(step(name, make()))
+        return True
 
     while not stop.is_set():
         t = time.monotonic()
@@ -66,9 +77,8 @@ async def loop(engine: CopyEngine, stop: asyncio.Event) -> None:
         if t - last["outcomes"] >= OUTCOMES_EVERY:
             last["outcomes"] = t
             await step("outcomes", engine.evaluate_outcomes())
-        if t - last["profiles"] >= PROFILES_EVERY:
+        if t - last["profiles"] >= PROFILES_EVERY and start_background("profiles", engine.rebuild_profiles):
             last["profiles"] = t
-            await step("profiles", engine.rebuild_profiles())
         if t - last["enrich"] >= ENRICH_EVERY:
             last["enrich"] = t
             await step("enrichment", engine.enrich())
@@ -77,6 +87,9 @@ async def loop(engine: CopyEngine, stop: asyncio.Event) -> None:
             await asyncio.wait_for(stop.wait(), timeout=TICK_SECONDS)
         except asyncio.TimeoutError:
             pass
+    for task in background.values():
+        task.cancel()
+    await asyncio.gather(*background.values(), return_exceptions=True)
 
 
 async def run() -> None:
