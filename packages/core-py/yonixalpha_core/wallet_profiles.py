@@ -256,7 +256,9 @@ async def _upsert(session: AsyncSession, chain: str, wallet: str, m: dict[str, A
 
 
 MAX_WALLETS = 2000  # most active wallets profiled per chain and rebuild
-WALLET_BATCH = 100  # wallets whose trades are loaded at once (bounded memory)
+WALLET_BATCH = 100  # at most this many wallets' trades loaded at once
+EVM_ROW_BATCH = 20_000  # and at most this many trades (bounded memory)
+EVM_MAX_TRADES_PER_WALLET = 5_000  # a bot wallet's most recent trades profiled (bounded memory)
 
 
 PAPER_FOLLOW_BUYS = 20  # most recent first buys per token replayed for a VALIDATED wallet
@@ -304,10 +306,14 @@ async def paper_follow(session: AsyncSession, chain: str, wallet: str, rows: lis
 
 
 async def rebuild_evm(session: AsyncSession, chain: str, now: datetime, cfg: ScoreConfig = ScoreConfig(),
-                      days: int = 14, min_trades: int = 3, max_wallets: int = MAX_WALLETS, rpc=None) -> int:
+                      days: int = 14, min_trades: int = 3, max_wallets: int = MAX_WALLETS, rpc=None,
+                      row_batch: int = EVM_ROW_BATCH, max_trades_per_wallet: int = EVM_MAX_TRADES_PER_WALLET) -> int:
     """Profiles the most active wallets over the retained trade history
-    (14 days). Trades are loaded per batch of wallets, never the whole chain
-    at once: BSC alone records close to a million launchpad trades a day.
+    (14 days). Trades are loaded per batch of wallets and of at most
+    `row_batch` trades, as plain rows, never the whole chain at once: BSC
+    alone records close to a million launchpad trades a day. A wallet with
+    more than `max_trades_per_wallet` trades (a bot) is profiled on its most
+    recent ones, which the profile says ("sample").
 
     With `rpc`, every profiled address is classified (address_kinds): a
     CONTRACT keeps its metrics but gets no score, the CONTRACT label and the
@@ -320,22 +326,40 @@ async def rebuild_evm(session: AsyncSession, chain: str, now: datetime, cfg: Sco
     await market_regimes.update(session, chain, now, timedelta(days=days))
     regimes = await market_regimes.load_regimes(session, chain, since)
     native = store.native_quote_trade(t)  # BNB / ETH amounts only: stock-quoted curves are other units
-    wallets = [w for w, in (await session.execute(select(t.trader).where(t.chain == chain, t.at >= since, native)
-                                                   .group_by(t.trader).having(func.count() >= min_trades)
-                                                   .order_by(func.count().desc()).limit(max_wallets))).all()]
+    counts = [(w, int(c)) for w, c in (await session.execute(
+        select(t.trader, func.count()).where(t.chain == chain, t.at >= since, native)
+        .group_by(t.trader).having(func.count() >= min_trades)
+        .order_by(func.count().desc()).limit(max_wallets))).all()]
+    wallets = [w for w, _ in counts]
+    total = dict(counts)
     kinds = await address_kinds.resolve(session, rpc, chain, wallets, now) if rpc is not None else {}
     launches = dict((await session.execute(select(EvmToken.token, EvmToken.created_at).where(
         EvmToken.chain == chain, EvmToken.created_block.is_not(None)))).all())
+    columns = list(t.__table__.columns)
+    small = [(w, c) for w, c in counts if c <= max_trades_per_wallet]
+    batches = [b[i:i + WALLET_BATCH] for b in _row_batches(small, row_batch) for i in range(0, len(b), WALLET_BATCH)]
+    batches += [[w] for w, c in counts if c > max_trades_per_wallet]
     n = 0
-    for i in range(0, len(wallets), WALLET_BATCH):
-        batch = wallets[i:i + WALLET_BATCH]
+    for batch in batches:
+        # plain rows, not ORM objects; a wallet over the cap alone, on its most recent trades
+        # (server 2026-10-06: the 100 most active BSC wallets' 14 days of trades, loaded at once
+        # as ORM objects, took copy-engine to 1.6 GB and the kernel killed it)
         by_wallet: dict[str, list] = defaultdict(list)
-        for row in (await session.execute(select(t).where(t.chain == chain, t.at >= since, t.trader.in_(batch), native))).scalars():
+        q = select(*columns).where(t.chain == chain, t.at >= since, t.trader.in_(batch), native)
+        if len(batch) == 1 and total[batch[0]] > max_trades_per_wallet:
+            q = q.order_by(t.at.desc()).limit(max_trades_per_wallet)
+        for row in (await session.execute(q)).all():
             by_wallet[row.trader].append(row)
         prior = {w: m for w, m in (await session.execute(select(WalletProfile.wallet, WalletProfile.metrics).where(
             WalletProfile.chain == chain, WalletProfile.wallet.in_(list(by_wallet))))).all()}
         for wallet, rows in by_wallet.items():
             m = evm_metrics(rows, launches, cfg, now, days, vcfg, regimes)
+            if total[wallet] > len(rows):
+                m["sample"] = {"trades_in_window": total[wallet], "trades_used": len(rows),
+                               "basis": f"the most recent {len(rows)} trades (bounded per wallet)"}
+                m["pnl"]["notes"] = list(m["pnl"].get("notes") or []) + [
+                    f"profiled on the most recent {len(rows)} of {total[wallet]} trades in the window; a sell "
+                    "of a buy before them counts as unmatched, as at the window's start"]
             m["account"] = {"kind": kinds.get(wallet.lower(), "UNKNOWN")}
             if m["account"]["kind"] == address_kinds.CONTRACT:
                 m["discovery"] = {"stage": "REJECTED", "validation": m["validation"].get("status"),
