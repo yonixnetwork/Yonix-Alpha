@@ -116,10 +116,15 @@ async def solana_checks(session: AsyncSession, redis, key: str, now: datetime) -
         put("EVENTS", migrated > 0, {"migrations_last_24h": migrated})
         put("QUOTE", alive, {"source": "PumpSwap pool reserves (RPC)"})
         put("LIQUIDITY", alive, {"source": "PumpSwap pool reserves (RPC)"})
-    assessed = (await session.execute(select(func.count()).where(
+    # newest-row lookups on indexed timestamps, not counts: these run on every
+    # Solana / Launchpads page load, and the counts read whole multi-GB tables
+    # (server 2026-10-07: /api/chains/solana took 35-48 s)
+    last_assessed = (await session.execute(select(RiskAssessment.evaluated_at).where(
         RiskAssessment.evaluated_at >= now - timedelta(hours=LIVENESS_HOURS),
-        RiskAssessment.engine.in_(("solana_fresh", "solana_momentum", "solana_migration"))))).scalar_one()
-    put("SAFETY", assessed > 0, {"gate_assessments_24h": assessed})
+        RiskAssessment.engine.in_(("solana_fresh", "solana_momentum", "solana_migration")))
+        .order_by(RiskAssessment.evaluated_at.desc()).limit(1))).scalar_one_or_none()
+    put("SAFETY", last_assessed is not None,
+        {"last_gate_assessment_at": last_assessed.isoformat() if last_assessed else None, "window_h": LIVENESS_HOURS})
     route = "pump" if key == "pumpfun" else "pump-amm"
     eo = ExecutionOrder
     rows = dict((await session.execute(select(eo.side, func.count()).where(
@@ -127,8 +132,10 @@ async def solana_checks(session: AsyncSession, redis, key: str, now: datetime) -
     put("BUY", bool(rows.get("BUY")), {"confirmed_live_buys": rows.get("BUY", 0), "route": route})
     put("SELL", bool(rows.get("SELL")), {"confirmed_live_sells": rows.get("SELL", 0), "route": route})
     put("TX_MONITORING", bool(rows), {"confirmed_live_orders": sum(rows.values()), "route": route})
-    mig = (await session.execute(select(func.count()).where(OpportunityOutcome.migrated_at.is_not(None)))).scalar_one()
-    put("MIGRATION_DETECTION", mig > 0, {"ledger_rows_with_migration": mig})
+    mig = (await session.execute(select(OpportunityOutcome.migrated_at).where(OpportunityOutcome.migrated_at.is_not(None))
+                                 .order_by(OpportunityOutcome.decided_at.desc()).limit(1))).scalar_one_or_none()
+    put("MIGRATION_DETECTION", mig is not None,
+        {"latest_ledger_migration_at": mig.isoformat() if mig else None})
     return out
 
 

@@ -185,8 +185,9 @@ async def _solana(session: AsyncSession, spec: LaunchpadSpec, now: datetime) -> 
                            "rollup_since": None}
     if spec.key == "pumpfun":
         o = TokenObservation
-        n, last, first = (await session.execute(select(
-            func.count().filter(o.decided_at >= since), func.max(o.decided_at), func.min(o.decided_at)))).one()
+        # separate index lookups: one count with filter read the whole table
+        n = (await session.execute(select(func.count()).where(o.decided_at >= since))).scalar_one()
+        last, first = (await session.execute(select(func.max(o.decided_at), func.min(o.decided_at)))).one()
         out.update(launches_7d=int(n), last_launch=last, rollup_since=first)
     elif spec.key in _probe_venues():
         lc = LaunchpadCheck

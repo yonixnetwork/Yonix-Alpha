@@ -33,11 +33,11 @@ from yonixalpha_core.logging import get_logger
 log = get_logger("api.review_cache")
 
 PREFIX = "yx:api:cache:"
-TTL_SECONDS = 300
+TTL_SECONDS = 1800  # server 2026-10-07: one result took 6-10 minutes to compute; 7-day aggregates move slowly
 LAST_TTL_SECONDS = 7 * 86400  # the last good result, served while a refresh runs
 ERROR_TTL_SECONDS = 600
 WAIT_SECONDS = 25.0
-LOCK_SECONDS = 15 * 60  # longer than a refresh can take (statement limit, queued behind the others)
+LOCK_SECONDS = 45 * 60  # longer than a refresh can take, queued behind the other keys
 
 _tasks: set[asyncio.Task] = set()
 _slot: asyncio.Semaphore | None = None

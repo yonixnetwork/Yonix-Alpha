@@ -72,7 +72,7 @@ auto-deploys (screenshot 10).
 
 ## M. Database performance / N. API performance
 Fixed: comparison and review in SQL, date bounds, one index (migration 0041, built CONCURRENTLY), single-flight
-cache on the three review endpoints (since the follow-up in section V: computed in the background, 5 minutes fresh),
+cache on the three review endpoints (since the follow-up in section V: computed in the background, 30 minutes fresh),
 25 s statement limit, 10 s pool wait, request IDs, slow-request list.
 
 ## O. Security findings
@@ -133,4 +133,24 @@ Not changed, needs the operator's decision:
 - **7wmm.** Proposed: re-simulate on a second RPC endpoint before treating a sell as failed, and back off after
   repeated identical program errors. Not implemented: it changes working live execution and the root cause is not yet
   verified.
+
+## W. Server findings after deploying aa8c0b3 (2026-10-07 15:20) and the second follow-up
+Measured (`db_health --skip-timings`, `parity_report --days 1`):
+- VERIFIED improved: the paper exit failure rate is 4.35 % measured from 46 live sells (was the 50 % cap); review pages
+  are answered from background results (ledger review 372 s, comparison 621 s, EVM ML 436 s to compute); median copy
+  detection over the last day 119 s on BSC and 78 s on Robinhood (was 301 s / 217 s over 7 days; the day still
+  includes hours before the deploy, so the effect of the index alone is NOT VERIFIED).
+- Still overloaded: load 12.4, 363 MB free, 1.4 GB swap.
+- New hot spots found in pg_stat_activity and the slow-request list:
+  - the wallet-label step (`build_missed`) ran one query per copy target / validated wallet, each reading 7 days of
+    evm_trades (44 s each, in parallel); the ml EVM / wallet step had been RUNNING for 50 minutes;
+  - `/api/chains/solana` took 35-48 s on every refresh: it built every chain's launchpad statuses and then this
+    chain's again, and the Solana checks counted all of opportunity_outcomes (2.6 GB) and 24 h of risk_assessments.
+
+Fixed:
+| Finding | Fix | Verification |
+|---|---|---|
+| One 7-day scan per wallet | One scan per chain for all wallets, same results | VERIFIED: existing missed-winner test passes |
+| Solana page counts | Newest-row lookups on indexed timestamps (same PASS / FAIL); the page builds only its chain's launchpads, once | VERIFIED: new test for both checks; control-center API tests pass |
+| Reviews recomputed continuously | A result stays fresh 30 minutes (was 5); it took 6-10 minutes to compute | Config |
 
