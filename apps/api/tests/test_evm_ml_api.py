@@ -39,7 +39,13 @@ async def test_evm_knowledge_counts_compares_and_keeps_ml_at_zero(app, client, a
         s.add(_sample("0x" + "3" * 40, "WAIT", "IN_SAMPLE", WIN, scored={"out_of_sample": False, "scores": {}}))
         s.add(_sample("0x" + "4" * 40, "WAIT", "NOT_AVAILABLE", {"unknown": "no snapshot at T+5"}))
         await s.commit()
+    # served from the 60 s review cache (audit 2026-10-07): still the earlier answer
+    assert (await client.get("/api/ml/evm", headers=auth_headers)).json()["samples"]["evm_total"] == 0
+    from app.api import review_cache
+    for key in await app.state.redis.keys(review_cache.PREFIX + "*"):
+        await app.state.redis.delete(key)  # the cache expired
     r = (await client.get("/api/ml/evm", headers=auth_headers)).json()
+    assert r["cached_at"]
     n = r["samples"]
     assert (n["evm_total"], n["evm_labelled"], n["traded"], n["rejected"], n["expired_no_entry"]) == (4, 3, 1, 1, 2)
     assert (n["missed_winners"], n["wins"], n["losses"], n["scored"], n["scored_out_of_sample"]) == (2, 0, 1, 2, 1)
@@ -64,6 +70,9 @@ async def test_evm_knowledge_counts_compares_and_keeps_ml_at_zero(app, client, a
                                                                   "fell_10": fell, "rose_10": False, "trades_after": 2},
                                 feature_version="x", label_version="x", created_at=NOW))
         await s.commit()
+    from app.api import review_cache
+    for key in await app.state.redis.keys(review_cache.PREFIX + "*"):
+        await app.state.redis.delete(key)  # the 60 s review cache expired
     x = (await client.get("/api/ml/evm", headers=auth_headers)).json()["exits"]
     assert x["checkpoints"] == 3 and x["labelled"] == 2
     assert x["final"]["SELL"]["fell_10_rate"] == 1.0 and x["final"]["HOLD"] == {**x["final"]["HOLD"], "n": 2, "labelled": 1}

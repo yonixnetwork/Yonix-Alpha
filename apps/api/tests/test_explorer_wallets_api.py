@@ -169,3 +169,28 @@ async def test_manual_evm_buy_is_queued_paper_only_and_refuses_observe_only_venu
     async with app.state.db_session_factory() as s:
         actions = (await s.execute(select(AuditLog.event_type))).scalars().all()
     assert actions.count("manual_trade.evm_buy_requested") == 1
+
+
+async def test_evm_positions_carry_the_unpriced_reason(app, client, auth_headers):
+    """Audit 2026-10-07: a position without a sell quote showed only "stale
+    price"; the reason data-evm recorded is now part of the positions list."""
+    from yonixalpha_core.chains.evm import paper as evm_paper
+
+    async with app.state.db_session_factory() as s:
+        acct = await store.get_paper_account(s, "evm_robinhood")
+        p = PaperPosition(account_id=acct.id, engine="evm_robinhood", symbol="PONS", asset_id=TOK, provider="paper", side="LONG",
+                          entry_price=Decimal("0.00000002"), quantity=Decimal(10 ** 6), initial_quantity=Decimal(10 ** 6),
+                          remaining_quantity=Decimal(10 ** 6), entry_cost_quote=Decimal("0.0025"), take_profit=[],
+                          status="open", entry_at=NOW - timedelta(days=2), last_price=Decimal("0.00000002"),
+                          last_marked_at=NOW - timedelta(days=1), plan={"venue": {"launchpad": "pons_v2", "route": "pons_v2_curve"}})
+        s.add(p)
+        await s.commit()
+        pid = p.id
+    rows = (await client.get("/api/evm/positions?chain=robinhood", headers=auth_headers)).json()["positions"]
+    assert rows[0]["unpriced"] is None and rows[0]["pnl"]["price_status"] == "STALE"
+    await app.state.redis.set(evm_paper.UNPRICED_KEY.format(pid=pid), json.dumps(
+        {"error": "curve closed for sells (graduating / graduated to Uniswap V4)", "at": "2026-10-07T10:00:00+00:00"}))
+    await app.state.redis.set(evm_paper.UNPRICED_SINCE_KEY.format(pid=pid), "2026-10-06T09:00:00+00:00")
+    u = (await client.get("/api/evm/positions?chain=robinhood", headers=auth_headers)).json()["positions"][0]["unpriced"]
+    assert u["reason"].startswith("curve closed for sells") and u["since"] == "2026-10-06T09:00:00+00:00"
+    assert "cannot be marked or exited" in u["effect"]

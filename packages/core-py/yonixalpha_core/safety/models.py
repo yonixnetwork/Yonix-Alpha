@@ -353,6 +353,9 @@ class AssessmentInput:
     # the stop when the target is LIVE. None: no fixed cost modelled.
     fixed_cost_quote: Decimal | None = None
     fixed_cost_detail: dict | None = None
+    # The same fixed costs counted for a PAPER target too
+    # (paper_execution.charge_live_fixed_costs), so paper sizes as LIVE would.
+    paper_fixed_costs: bool = False
     # LONG for spot (Solana); futures strategies may request SHORT.
     side: str = "LONG"
     strategy_levels: StrategyLevels | None = None

@@ -237,6 +237,30 @@ def state_of(p: PaperPosition) -> PositionState:
     )
 
 
+def paper_fixed_fees(detail: dict[str, Any] | None) -> dict[str, Decimal]:
+    """The fixed SOL costs a LIVE round trip pays (live_trading.fixed_trade_costs,
+    carried in the plan when paper_execution.charge_live_fixed_costs counted
+    them): `buy` with the entry, `sell` with every exit (each is its own
+    transaction LIVE), `close` once the position is closed (rent reclaim
+    transaction, or the rent deposit left locked when auto-reclaim is off)."""
+    d = detail or {}
+
+    def num(key: str) -> Decimal:
+        try:
+            return Decimal(str(d.get(key) or 0))
+        except Exception:  # noqa: BLE001
+            return Decimal(0)
+
+    return {"buy": num("buy_network_fee"), "sell": num("sell_network_fee"),
+            "close": num("rent_reclaim_fee") + num("token_account_rent_not_reclaimed")}
+
+
+def _position_fixed_fees(position: PaperPosition) -> dict[str, Decimal]:
+    if getattr(position, "execution_mode", None) == "LIVE":
+        return {}  # LIVE fills already carry what the chain charged
+    return paper_fixed_fees((position.plan or {}).get("fixed_cost_detail")) if (position.plan or {}).get("fixed_cost_quote") else {}
+
+
 async def open_position(
     session: AsyncSession,
     account: PaperAccount,
@@ -281,6 +305,9 @@ async def open_position(
     else:
         margin = Decimal(0)
         cost = size
+    fixed = paper_fixed_fees(plan.fixed_cost_detail) if plan.fixed_cost_quote and kind != "futures" else {}
+    buy_fee = fixed.get("buy", Decimal(0))
+    cost += buy_fee  # the buy transaction's network + priority fee, as LIVE pays it
     if cost > account.cash_balance:
         raise FillError(f"required {cost} exceeds paper cash {account.cash_balance}")
     account.cash_balance -= cost
@@ -307,7 +334,7 @@ async def open_position(
         remaining_quantity=fill.quantity,
         entry_cost_quote=cost,
         proceeds_quote=Decimal(0),
-        fees_paid_quote=fill.fee_quote,
+        fees_paid_quote=fill.fee_quote + buy_fee,
         max_loss_quote=plan.max_loss.value,
         plan={**plan.to_dict(), "venue": venue_info},
         tp_hits=[],
@@ -411,6 +438,7 @@ async def apply_step(
     margin_total = Decimal(venue.get("margin", "0"))
     initial = position.initial_quantity or position.quantity
 
+    fixed = _position_fixed_fees(position) if kind != "futures" else {}
     for qty, reason in result.exits:
         fill = exit_fill(qty, model, price, exit_cost, transfer_fee_bps, reason, side)
         if kind == "futures":
@@ -430,6 +458,9 @@ async def apply_step(
                     model.quote_reserve - gross, model.token_reserve + qty, model.fee_bps,
                     (model.real_quote_reserve - gross) if model.real_quote_reserve is not None else None,
                 )
+        if fixed.get("sell"):  # each LIVE exit is its own sell transaction
+            returned -= fixed["sell"]
+            fees_add += fixed["sell"]
         account.cash_balance += returned
         position.proceeds_quote = (position.proceeds_quote or Decimal(0)) + returned
         position.fees_paid_quote = (position.fees_paid_quote or Decimal(0)) + fees_add
@@ -452,6 +483,17 @@ async def apply_step(
     position.last_marked_at = now
 
     if result.closed:
+        if fixed.get("close"):  # rent reclaim transaction, or the rent left locked
+            account.cash_balance -= fixed["close"]
+            position.proceeds_quote = (position.proceeds_quote or Decimal(0)) - fixed["close"]
+            position.fees_paid_quote = (position.fees_paid_quote or Decimal(0)) + fixed["close"]
+        if fixed:
+            await add_timeline_event(session, "paper_fixed_costs", now,
+                                     {"buy": str(fixed.get("buy")), "sell_per_exit": str(fixed.get("sell")),
+                                      "close": str(fixed.get("close")),
+                                      "why": "the fixed costs a LIVE round trip pays (paper_execution.charge_live_fixed_costs)"},
+                                     candidate_id=position.candidate_id, assessment_id=position.assessment_id,
+                                     position_id=position.id)
         await close_position(session, position, now, result.exits[-1][1] if result.exits else "closed", price)
     return result
 

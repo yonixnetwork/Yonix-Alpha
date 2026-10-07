@@ -138,11 +138,24 @@ function TopbarSummary() {
         {data.env.live_permitted ? "LIVE UNLOCKED" : "LIVE LOCKED"}
       </span>
       {data.kill_switch && <span className="pill pill-danger">KILL SWITCH ON</span>}
-      <Link href="/dashboard/health" className={stateClass(data.system_status)} title="Worst current connection state">
-        {data.system_status}
+      <Link href="/dashboard/health" className={stateClass(data.system_status)}
+        title={`Worst current connection state. ${notConnected(data.connections) || "Every checked connection is CONNECTED."} Open System Health for details.`}>
+        {data.system_status}{data.system_status !== "CONNECTED" && data.connections ? `: ${worstNames(data.connections, data.system_status)}` : ""}
       </Link>
     </>
   );
+}
+
+/** "copy-engine STALE, ml UNKNOWN": every connection not CONNECTED (not-configured modules left out). */
+function notConnected(conns: Record<string, string> | undefined): string {
+  return Object.entries(conns ?? {}).filter(([, st]) => st !== "CONNECTED" && st !== "NOT_CONFIGURED")
+    .map(([name, st]) => `${name} ${st}`).join(", ");
+}
+
+/** The names in the worst state, at most two, for the badge itself. */
+function worstNames(conns: Record<string, string>, worst: string): string {
+  const names = Object.entries(conns).filter(([, st]) => st === worst).map(([name]) => name);
+  return names.length > 2 ? `${names.slice(0, 2).join(", ")} +${names.length - 2}` : names.join(", ");
 }
 
 function Shell({ children }: { children: React.ReactNode }) {

@@ -56,8 +56,8 @@ function Horizons({ o }: { o: Opp }) {
 export default function OpportunityOutcomes() {
   const [days, setDays] = useState(7);
   const cmp = useApi<Compare>("/api/ml/opportunities/compare", { days }, { refreshMs: 60000 });
-  const losses = useApi<{ items: Opp[] }>("/api/ml/opportunities", { losses_only: true, limit: 20 }, { refreshMs: 60000 });
-  const up = useApi<{ items: Opp[] }>("/api/ml/opportunities", { rejected_up: true, limit: 20 }, { refreshMs: 60000 });
+  const losses = useApi<{ items: Opp[] }>("/api/ml/opportunities", { losses_only: true, days, limit: 20 }, { refreshMs: 60000 });
+  const up = useApi<{ items: Opp[] }>("/api/ml/opportunities", { rejected_up: true, days, limit: 20 }, { refreshMs: 60000 });
   return (
     <>
       <Section title="Opportunity outcomes — traded vs not traded"

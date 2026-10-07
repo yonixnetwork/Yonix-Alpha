@@ -38,7 +38,9 @@ async def test_healthy_launch_opens_paper_position_from_gate_plan(db_session, re
     assert cand.state == CandidateState.MANAGING.value
     pos = (await db_session.execute(select(PaperPosition))).scalar_one()
     assert pos.assessment_id is not None and pos.engine == "solana_fresh"
-    assert pos.entry_cost_quote == a.plan.position_size.value
+    # paper is charged the LIVE buy transaction's fee (paper_execution.charge_live_fixed_costs, default on)
+    buy_fee = Decimal(a.plan.fixed_cost_detail["buy_network_fee"])
+    assert a.plan.fixed_cost_quote and pos.entry_cost_quote == a.plan.position_size.value + buy_fee
     venue = pos.plan["venue"]
     assert venue["type"] == "pump_curve" and venue["decimals"] == 6 and venue["kind"] == "spot"
     assert venue["simulator"] and venue["transfer_fee_bps"] is None

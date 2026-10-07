@@ -113,6 +113,16 @@ async def load_controls(session: AsyncSession, redis: Redis, app_settings: Any, 
             state = replace(state, insufficient_gas=(
                 f"wallet {wallet} SOL < fee reserve {live_settings.min_sol_reserve} SOL + this round trip's fixed "
                 f"costs {fixed_cost} SOL"))
+    paper_fixed = False
+    if not live and not live_venue and store.ENGINE_ACCOUNT.get(engine) == "solana":
+        from yonixalpha_core import paper_execution
+
+        if (await paper_execution.load_settings(session)).charge_live_fixed_costs:
+            # What the same round trip would pay LIVE, with the live priority fee setting.
+            from yonixalpha_core.live_trading import fixed_trade_costs, load_live_settings
+
+            fixed_cost, fixed_detail = fixed_trade_costs(await load_live_settings(session))
+            paper_fixed = True
     controls = Controls(
         settings=safety,
         account=state,
@@ -122,7 +132,7 @@ async def load_controls(session: AsyncSession, redis: Redis, app_settings: Any, 
         strategy_mode=strategy_mode,
         live_trading_permitted=store.live_trading_permitted(app_settings),
         manual_approval_granted=approval,
-        fixed_cost_quote=fixed_cost, fixed_cost_detail=fixed_detail,
+        fixed_cost_quote=fixed_cost, fixed_cost_detail=fixed_detail, paper_fixed_costs=paper_fixed,
     )
     return controls, account, settings_meta
 

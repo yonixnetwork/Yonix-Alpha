@@ -86,9 +86,10 @@ class Controls:
     manual_approval_granted: bool = False
     overrides: ManualOverrides = field(default_factory=ManualOverrides)
     # Fixed SOL cost of a LIVE round trip (live_trading.fixed_trade_costs);
-    # None for paper sizing.
+    # for paper sizing only when paper_fixed_costs (paper_execution setting).
     fixed_cost_quote: Decimal | None = None
     fixed_cost_detail: dict | None = None
+    paper_fixed_costs: bool = False
 
 
 def entry_exit_check(trades, now: datetime, creator: str | None, liquidity: Decimal | None,
@@ -279,7 +280,7 @@ def _base_input(engine: str, strategy: str, mint: str, symbol: str, now: datetim
         market=None, token=None, holders=None, flow=None, account=c.account,
         overrides=c.overrides, global_mode=c.global_mode, strategy_mode=c.strategy_mode,
         live_trading_permitted=c.live_trading_permitted, manual_approval_granted=c.manual_approval_granted,
-        fixed_cost_quote=c.fixed_cost_quote, fixed_cost_detail=c.fixed_cost_detail,
+        fixed_cost_quote=c.fixed_cost_quote, fixed_cost_detail=c.fixed_cost_detail, paper_fixed_costs=c.paper_fixed_costs,
     )
 
 

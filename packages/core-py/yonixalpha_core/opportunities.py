@@ -625,23 +625,85 @@ def group_stats(rows: list[OpportunityOutcome]) -> dict[str, Any]:
     return out
 
 
+# A JSON text value Python's Decimal() would accept as a plain number; anything
+# else (text, booleans, empty) is left out of an average, as _avg does.
+NUMERIC_TEXT = r"^\s*[-+]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?\s*$"
+
+
+def _num(text_expr):
+    from sqlalchemy import Numeric, case
+
+    return case((text_expr.regexp_match(NUMERIC_TEXT), text_expr.cast(Numeric)), else_=None)
+
+
+def _q4(v) -> str | None:
+    return None if v is None else _s(Decimal(v).quantize(Decimal("0.0001")))
+
+
 async def comparison(session: AsyncSession, since: datetime) -> dict[str, Any]:
-    rows = (await session.execute(select(OpportunityOutcome).where(OpportunityOutcome.decided_at >= since))).scalars().all()
-    traded = [r for r in rows if r.traded and r.trade_result]
-    winners = [r for r in traded if Decimal(r.trade_result.get("pnl_sol") or 0) > 0]
-    losers = [r for r in traded if Decimal(r.trade_result.get("pnl_sol") or 0) <= 0]
-    rejected = [r for r in rows if not r.traded]
-    rejected_winners = [r for r in rejected if r.peak_pct is not None and r.peak_pct >= REJECTED_WINNER_PEAK_PCT]
-    loss_classes: dict[str, int] = {}
-    for r in losers:
-        c = (r.loss_analysis or {}).get("classification")
-        if c:
-            loss_classes[c] = loss_classes.get(c, 0) + 1
+    """group_stats for winners / losers / traded / rejected / rejected-then-up,
+    aggregated in the database: one row comes back instead of every
+    opportunity of the window (audit 2026-10-07: loading a week of rows into
+    the API process ran past the proxy's 60 s and blocked other pages)."""
+    from sqlalchemy import Text, and_, case, column, func, text, true
+
+    o = OpportunityOutcome
+    base = o.decided_at >= since
+    pnl = func.coalesce(_num(o.trade_result["pnl_sol"].astext), 0)
+    # "r.trade_result" truthy: neither SQL NULL, JSON null nor an empty object
+    traded = and_(o.traded.is_(True), o.trade_result.is_not(None),
+                  o.trade_result.op("<>")(text("'{}'::jsonb")), o.trade_result.op("<>")(text("'null'::jsonb")))
+    groups = {
+        "winning_trades": and_(traded, pnl > 0),
+        "losing_trades": and_(traded, pnl <= 0),
+        "traded": traded,
+        "rejected": o.traded.is_(False),
+        "rejected_later_up": and_(o.traded.is_(False), o.peak_pct.is_not(None), o.peak_pct >= REJECTED_WINNER_PEAK_PCT),
+    }
+    # the snapshot JSON is unpacked once per row (jsonb_to_record) instead of
+    # once per field: it is the large column (benchmark 2026-10-07)
+    snap = func.jsonb_to_record(o.snapshot).table_valued(
+        *[column(f, Text) for f in (*COMPARE_FIELDS, "overall_risk")]).render_derived(name="snap", with_types=True)
+    measures = {f: _num(snap.c[f]) for f in COMPARE_FIELDS}
+    measures["risk_score"] = case(*[(snap.c.overall_risk == k, v) for k, v in RISK_ORDINAL.items()], else_=None)
+    measures["entry_latency_ms"] = _num(o.trade_result["entry_execution"]["decision_to_confirm_ms"].astext)
+    measures["price_vs_decision_pct"] = _num(o.trade_result["entry_execution"]["total_vs_decision_pct"].astext)
+    measures["peak_pct"] = o.peak_pct
+    measures["drawdown_pct"] = o.drawdown_pct
+    measures["seconds_to_migration"] = func.extract("epoch", o.migrated_at - o.decided_at)
+    # each value parsed once per row (subquery), then averaged per group
+    inner = select(*[expr.label(f"m_{m}") for m, expr in measures.items()],
+                   *[cond.label(f"g_{g}") for g, cond in groups.items()],
+                   o.migrated_at.is_not(None).label("migrated"), (o.status == "TRACKING").label("tracking")
+                   ).select_from(o).join(snap, true()).where(base).subquery()
+    cols, names = [func.count(), func.count().filter(inner.c.tracking)], []
+    for g in groups:
+        flag = inner.c[f"g_{g}"]
+        cols += [func.count().filter(flag), func.count().filter(and_(flag, inner.c.migrated))]
+        names.append((g, "n"))
+        names.append((g, "migrated"))
+        for m in measures:
+            cols.append(func.avg(inner.c[f"m_{m}"]).filter(flag))
+            names.append((g, m))
+    row = (await session.execute(select(*cols).select_from(inner))).one()
+    stats: dict[str, dict[str, Any]] = {g: {} for g in groups}
+    for (g, m), v in zip(names, row[2:]):
+        stats[g][m] = v
+    out: dict[str, Any] = {}
+    for g, v in stats.items():
+        n = int(v["n"] or 0)
+        d: dict[str, Any] = {"n": n}
+        for f in (*COMPARE_FIELDS, "risk_score", "entry_latency_ms", "price_vs_decision_pct", "peak_pct", "drawdown_pct"):
+            d[f] = _q4(v[f])
+        d["migrated_share"] = _s((Decimal(int(v["migrated"] or 0)) / n).quantize(Decimal("0.01"))) if n else None
+        d["seconds_to_migration"] = _q4(v["seconds_to_migration"])
+        out[g] = d
+    cls = o.loss_analysis["classification"].astext
+    loss_classes = {c: k for c, k in (await session.execute(
+        select(cls, func.count()).where(base, groups["losing_trades"], cls.is_not(None)).group_by(cls))).all()}
     return {
-        "since": since.isoformat(), "rows": len(rows), "tracking": sum(1 for r in rows if r.status == "TRACKING"),
-        "winning_trades": group_stats(winners), "losing_trades": group_stats(losers),
-        "traded": group_stats(traded), "rejected": group_stats(rejected),
-        "rejected_later_up": group_stats(rejected_winners),
+        "since": since.isoformat(), "rows": int(row[0]), "tracking": int(row[1]),
+        **out,
         "rejected_later_up_threshold_pct": str(REJECTED_WINNER_PEAK_PCT),
         "loss_classes": loss_classes,
         "note": "Averages over rows that have the value; a group with n < 20 is anecdotal. Observation data only — "
@@ -706,9 +768,10 @@ async def review(session: AsyncSession, since: datetime) -> dict[str, Any]:
 
     o = OpportunityOutcome
     base = o.decided_at >= since
-    counts = {}
-    for name in REVIEW_CATEGORIES:
-        counts[name] = (await session.execute(select(func.count()).select_from(o).where(base, category_filter(name)))).scalar_one()
+    # every category in one pass over the window (was one query per category)
+    row = (await session.execute(select(*[func.count().filter(category_filter(n)) for n in REVIEW_CATEGORIES])
+                                 .select_from(o).where(base))).one()
+    counts = {name: int(n) for name, n in zip(REVIEW_CATEGORIES, row)}
     missed = (await session.execute(select(o.reasons, o.stage, o.engine, o.snapshot["market_cap_sol"].astext)
                                     .where(base, category_filter("missed_win")))).all()
     buckets: dict[str, dict[str, int]] = {"rejecting_rule": {}, "stage": {}, "market_cap_at_decision": {}}

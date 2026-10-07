@@ -7,6 +7,7 @@ from redis.asyncio import Redis
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api import review_cache
 from app.api.deps import get_current_username, get_db, get_redis
 from app.api.util import audit, jsonable, user_id
 from app.schemas.common import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, Page
@@ -211,11 +212,16 @@ async def samples(engine: str | None = None, labeled: bool | None = None, limit:
 @router.get("/opportunities")
 async def opportunities_list(traded: bool | None = None, stage: str | None = None, losses_only: bool = False,
                              rejected_up: bool = False, mint: str | None = None, category: str | None = None,
+                             days: int | None = Query(None, ge=1, le=365),
                              limit: int = Query(DEFAULT_PAGE_LIMIT, ge=1, le=MAX_PAGE_LIMIT), offset: int = Query(0, ge=0),
                              db: AsyncSession = Depends(get_db), _: str = Depends(get_current_username)) -> dict:
     """Every recorded opportunity (traded or not) with its decision snapshot,
-    forward horizons, trade result and loss analysis."""
+    forward horizons, trade result and loss analysis. `days` bounds the rows
+    (and the total) to the last N days; the dashboard lists always pass it so
+    the total is not a count over the whole history (audit 2026-10-07)."""
     filters = []
+    if days is not None:
+        filters.append(OpportunityOutcome.decided_at >= datetime.now(timezone.utc) - timedelta(days=days))
     if traded is not None:
         filters.append(OpportunityOutcome.traded.is_(traded))
     if stage:
@@ -234,7 +240,7 @@ async def opportunities_list(traded: bool | None = None, stage: str | None = Non
     total = (await db.execute(select(func.count()).select_from(OpportunityOutcome).where(*filters))).scalar_one()
     rows = (await db.execute(select(OpportunityOutcome).where(*filters).order_by(OpportunityOutcome.decided_at.desc())
                              .limit(limit).offset(offset))).scalars().all()
-    return jsonable({"total": total, "items": [
+    return jsonable({"total": total, "window_days": days, "items": [
         {"id": r.id, "mint": r.mint, "symbol": r.symbol, "engine": r.engine, "stage": r.stage, "decision": r.decision,
          "traded": r.traded, "execution_mode": r.execution_mode, "position_id": r.position_id, "reasons": r.reasons,
          "decided_at": r.decided_at, "snapshot": r.snapshot, "horizons": r.horizons, "peak_pct": r.peak_pct,
@@ -247,30 +253,34 @@ async def opportunities_list(traded: bool | None = None, stage: str | None = Non
 
 @router.get("/ledger-review")
 async def ledger_review(days: int = Query(7, ge=1, le=90), db: AsyncSession = Depends(get_db),
-                        _: str = Depends(get_current_username)) -> dict:
+                        redis: Redis = Depends(get_redis), _: str = Depends(get_current_username)) -> dict:
     """Observed / traded / rejected, counterfactual classes, exit classes,
     recovery cases, signal vs execution quality, snipe latency, and the
     shadow models' holdout metrics. Review data only: nothing here changes a
     live rule or a position size."""
-    since = datetime.now(timezone.utc) - timedelta(days=days)
-    out = await opportunities.review(db, since)
-    shadow = (await db.execute(select(ModelVersion).where(ModelVersion.status == "shadow")
-                               .order_by(ModelVersion.name))).scalars().all()
-    out["shadow_models"] = [{"name": m.name, "version": m.version, "target": (m.metrics or {}).get("target"),
-                             "kind": (m.metrics or {}).get("kind"), "trained_at": m.trained_at,
-                             "train_rows": (m.metrics or {}).get("train_rows"), "split": (m.metrics or {}).get("split"),
-                             "holdout": (m.metrics or {}).get("holdout")} for m in shadow]
-    out["categories"] = list(opportunities.REVIEW_CATEGORIES)
-    return jsonable(out)
+    async def compute() -> dict:
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+        out = await opportunities.review(db, since)
+        shadow = (await db.execute(select(ModelVersion).where(ModelVersion.status == "shadow")
+                                   .order_by(ModelVersion.name))).scalars().all()
+        out["shadow_models"] = [{"name": m.name, "version": m.version, "target": (m.metrics or {}).get("target"),
+                                 "kind": (m.metrics or {}).get("kind"), "trained_at": m.trained_at,
+                                 "train_rows": (m.metrics or {}).get("train_rows"), "split": (m.metrics or {}).get("split"),
+                                 "holdout": (m.metrics or {}).get("holdout")} for m in shadow]
+        out["categories"] = list(opportunities.REVIEW_CATEGORIES)
+        return out
+
+    return await review_cache.cached(redis, f"ledger-review:{days}", compute)
 
 
 @router.get("/opportunities/compare")
 async def opportunities_compare(days: int = Query(7, ge=1, le=90), db: AsyncSession = Depends(get_db),
-                                _: str = Depends(get_current_username)) -> dict:
+                                redis: Redis = Depends(get_redis), _: str = Depends(get_current_username)) -> dict:
     """Winning vs losing trades and traded vs rejected-then-up opportunities:
     averages of the decision-time features. Review data only."""
     since = datetime.now(timezone.utc) - timedelta(days=days)
-    return jsonable(await opportunities.comparison(db, since))
+    return await review_cache.cached(redis, f"opportunities-compare:{days}",
+                                     lambda: opportunities.comparison(db, since))
 
 
 @router.get("/steps")
@@ -290,7 +300,13 @@ async def ml_steps(redis: Redis = Depends(get_redis), _: str = Depends(get_curre
 
 @router.get("/evm")
 async def evm_knowledge(days: int = Query(14, ge=1, le=90), db: AsyncSession = Depends(get_db),
-                        _: str = Depends(get_current_username)) -> dict:
+                        redis: Redis = Depends(get_redis), _: str = Depends(get_current_username)) -> dict:
+    """EVM and wallet-behaviour ML; aggregated over days of samples, so it is
+    served from the short review cache (app.api.review_cache)."""
+    return await review_cache.cached(redis, f"ml-evm:{days}", lambda: _evm_knowledge(db, days))
+
+
+async def _evm_knowledge(db: AsyncSession, days: int) -> dict:
     """EVM and wallet-behaviour ML (master §36-44, §75): what the models have
     learned from (samples by kind), the BUY / WAIT / REJECT comparison of the
     rules, the risk layer, the final action and the shadow ML (§41), and the

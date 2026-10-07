@@ -121,6 +121,16 @@ class Settings(BaseSettings):
     # Logging
     LOG_LEVEL: str = "INFO"
 
+    # Dashboard API: a single database statement is stopped after this long
+    # (Postgres statement_timeout on the api's own connections only) so a slow
+    # page answers with a clear error before the reverse proxy's 60 s limit,
+    # and its connection is freed instead of piling up behind it. Workers keep
+    # no limit. 0 = no limit.
+    API_STATEMENT_TIMEOUT_MS: int = 25_000
+    # Longest wait for a free pooled connection before the request fails with
+    # DB_POOL_EXHAUSTED instead of queueing until the proxy gives up.
+    API_POOL_TIMEOUT_S: int = 10
+
     # Trading safety — both must be true, independently, before any live order
     # can be placed. See docs/SECURITY.md. No engine exists yet in Phase 1, so
     # these are inert here, but the flags and their fail-safe defaults are

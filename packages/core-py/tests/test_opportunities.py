@@ -292,3 +292,60 @@ async def test_ledger_review_counts_categories_buckets_and_latency(db):
     assert r["signal_vs_execution"]["rows"] == 1 and r["signal_vs_execution"]["executable_return_avg_pct"].startswith("31")
     assert r["snipe_latency"]["decision_to_confirm_ms"]["n"] == 2 and r["snipe_latency"]["creation_to_decision_s"]["median"] == 40.0
     assert opp.category_filter("nonsense") is None
+
+
+async def test_sql_comparison_matches_the_python_reference(db):
+    """comparison() now aggregates in the database (audit 2026-10-07, 504s);
+    it must give exactly what group_stats gave over the loaded rows,
+    including text, booleans and missing values in the snapshot."""
+    import random
+
+    rnd = random.Random(7)
+    junk = [None, "abc", True, "", "1e2", " 12.5 ", 3, "-0.75", ".5", "NaNx"]
+    rows = []
+    for i in range(60):
+        traded = i % 3 == 0
+        pnl = rnd.choice(["0.05", "-0.02", "0", None, "x"])
+        snap = {f: rnd.choice(junk + [str(rnd.uniform(-50, 200))]) for f in opp.COMPARE_FIELDS}
+        snap["overall_risk"] = rnd.choice(["LOW", "MODERATE", "HIGH", "CRITICAL", "UNKNOWN", None])
+        tr = None
+        if traded:
+            tr = {} if i % 9 == 0 else {"pnl_sol": pnl, "entry_execution": {
+                "decision_to_confirm_ms": rnd.choice([None, 900, "1500", "bad"]),
+                "total_vs_decision_pct": rnd.choice([None, "4.2", -1.5])}}
+        rows.append(OpportunityOutcome(
+            key=f"p{i}", mint=f"M{i}", engine="solana_fresh", stage="OBSERVATION", decision="EXECUTE" if traded else "REJECT",
+            traded=traded, reasons=[], decided_at=T0 + timedelta(seconds=i), snapshot=snap, trade_result=tr,
+            peak_pct=None if i % 5 == 0 else Decimal(str(round(rnd.uniform(-20, 90), 2))),
+            drawdown_pct=None if i % 4 == 0 else Decimal(str(round(rnd.uniform(-60, 0), 2))),
+            migrated_at=T0 + timedelta(seconds=i + 300 + i * 7) if i % 6 == 0 else None,
+            status=rnd.choice(["TRACKING", "COMPLETE"]),
+            loss_analysis={"classification": rnd.choice(["SIGNAL_FAILURE", "MARKET_REVERSAL"])} if traded and i % 2 else None))
+    db.add_all(rows)
+    await db.commit()
+
+    def num(v):
+        try:
+            return Decimal(str(v)) if v is not None else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    traded = [r for r in rows if r.traded and r.trade_result]
+    winners = [r for r in traded if (num(r.trade_result.get("pnl_sol")) or 0) > 0]
+    losers = [r for r in traded if (num(r.trade_result.get("pnl_sol")) or 0) <= 0]
+    rejected = [r for r in rows if not r.traded]
+    up = [r for r in rejected if r.peak_pct is not None and r.peak_pct >= opp.REJECTED_WINNER_PEAK_PCT]
+    got = await opp.comparison(db, T0 - timedelta(days=1))
+    for name, group in (("winning_trades", winners), ("losing_trades", losers), ("traded", traded),
+                        ("rejected", rejected), ("rejected_later_up", up)):
+        want = opp.group_stats(group)
+        if want["seconds_to_migration"] is not None:  # float seconds in Python, exact numeric in SQL
+            want["seconds_to_migration"] = str(Decimal(want["seconds_to_migration"]).quantize(Decimal("0.0001")))
+        assert got[name] == want, (name, got[name]["n"], want["n"])
+    assert got["rows"] == 60 and got["tracking"] == sum(1 for r in rows if r.status == "TRACKING")
+    want_cls: dict = {}
+    for r in losers:
+        c = (r.loss_analysis or {}).get("classification")
+        if c:
+            want_cls[c] = want_cls.get(c, 0) + 1
+    assert got["loss_classes"] == want_cls

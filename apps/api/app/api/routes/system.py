@@ -173,6 +173,25 @@ def _iso(v: datetime | None) -> str | None:
     return v.isoformat() if v else None
 
 
+@router.get("/slow-requests")
+async def slow_requests(limit: int = Query(50, ge=1, le=200), redis: Redis = Depends(get_redis),
+                        _: str = Depends(get_current_username)) -> dict:
+    """The latest API requests that took 2 s or more or ended in a 5xx
+    (app.request_timing): endpoint, query parameter names, status, duration
+    and request ID. A dashboard "Request failed" names its request ID."""
+    from app.request_timing import SLOW_MS, recent
+
+    items = await recent(redis, limit)
+    by_path: dict[str, dict] = {}
+    for e in items:
+        b = by_path.setdefault(e.get("path") or "?", {"path": e.get("path"), "count": 0, "max_ms": 0, "errors": 0})
+        b["count"] += 1
+        b["max_ms"] = max(b["max_ms"], int(e.get("ms") or 0))
+        b["errors"] += 1 if int(e.get("status") or 0) >= 500 else 0
+    return {"threshold_ms": SLOW_MS, "items": items,
+            "by_path": sorted(by_path.values(), key=lambda b: (-b["errors"], -b["max_ms"]))}
+
+
 @router.get("/updates")
 async def updates(
     db: AsyncSession = Depends(get_db),
