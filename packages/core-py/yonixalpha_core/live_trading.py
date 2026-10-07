@@ -511,10 +511,28 @@ async def apply_outcome(session: AsyncSession, redis: Redis | None, app_settings
                                  candidate_id=position.candidate_id, assessment_id=position.assessment_id, position_id=position.id)
         if curve_gone:
             await switch_to_pumpswap(session, position, now, "bonding-curve sell rejected: curve complete (Pump 6005)")
-        if position.exit_failures >= 2:
+        if position.exit_failures >= 2 and await _exit_alert_due(redis, position):
             await events.notify(session, redis, app_settings, "provider_failure",
                                 f"LIVE exit failing: {position.symbol} ({order.reason})",
-                                f"attempt {position.exit_failures}: {order.error}", "critical", {"position_id": str(position.id)})
+                                f"attempt {position.exit_failures}: {order.error}"
+                                f" (at most one alert per position every {EXIT_ALERT_EVERY_SECONDS // 60} min)",
+                                "critical", {"position_id": str(position.id)})
+
+
+EXIT_ALERT_EVERY_SECONDS = 900
+
+
+async def _exit_alert_due(redis: Redis | None, position: PaperPosition) -> bool:
+    """One "LIVE exit failing" alert per position every 15 minutes, in
+    Redis so it holds across workers and restarts. 2026-10-07: a sell that
+    failed on every try (PumpSwap 6053) alerted on each of 4,843 attempts.
+    Without Redis every failure alerts, as before."""
+    if redis is None:
+        return True
+    try:
+        return bool(await redis.set(f"yx:live:exit_alert:{position.id}", "1", nx=True, ex=EXIT_ALERT_EVERY_SECONDS))
+    except Exception:  # noqa: BLE001 - an alert is never lost to a Redis error
+        return True
 
 
 PUMP_CURVE_COMPLETE = 6005  # Pump program error BondingCurveComplete: the curve migrated to PumpSwap
@@ -581,6 +599,50 @@ async def _reconcile_event(session, kind: str, severity: str, order: ExecutionOr
     session.add(ReconciliationEvent(kind=kind, severity=severity, mint=mint,
                                     position_id=position.id if position else None, order_id=order.id if order else None,
                                     detail=detail))
+
+
+OUTSIDE_EXIT = "sold_outside"  # exit_reason of a position closed because its tokens left the wallet elsewhere
+IN_FLIGHT = ("SIGNED", "SUBMITTED")
+
+
+class CloseOutsideRefused(ValueError):
+    """The position cannot be closed as sold outside (the wallet still holds
+    the token, a sell of ours may be in flight, or it is not a LIVE position)."""
+
+
+async def close_sold_outside(session: AsyncSession, position: PaperPosition, onchain_raw: int, now: datetime,
+                             by: str) -> None:
+    """Closes a LIVE position whose tokens left the wallet outside this
+    system (sold or sent from a wallet app), on the operator's word and only
+    after the caller read the wallet on chain: it must hold none of the
+    token (at most DUST_RAW). Nothing is invented: the exit price and the
+    realized PnL stay empty (unknown), the SOL of any sell this system made
+    earlier (partial take profits) stays in proceeds, and the position's
+    open orders are cancelled. Refused while one of our own sells is signed
+    or submitted, since it may still land."""
+    if position.execution_mode != "LIVE" or position.status not in ("open", "needs_review"):
+        raise CloseOutsideRefused(f"only an open or needs_review LIVE position can be closed this way (it is "
+                                  f"{position.execution_mode} {position.status})")
+    if onchain_raw > DUST_RAW:
+        raise CloseOutsideRefused(f"the wallet still holds {onchain_raw} raw units of this token: sell it instead")
+    orders = (await session.execute(select(ExecutionOrder).where(
+        ExecutionOrder.position_id == position.id, ExecutionOrder.status.in_(("PENDING", *IN_FLIGHT))))).scalars().all()
+    if any(o.status in IN_FLIGHT for o in orders):
+        raise CloseOutsideRefused("a sell of this position is signed or submitted; wait for it to resolve")
+    for o in orders:
+        o.status, o.error = "CANCELLED", "position closed as sold outside the system"
+    # a position that never held tokens (quantity 0) cannot be "closed"; it ends as failed
+    position.status = "closed" if (position.quantity or 0) > 0 else "failed"
+    position.exit_reason, position.exit_at = OUTSIDE_EXIT, now
+    position.exit_price = position.realized_pnl = position.realized_pnl_pct = None
+    position.remaining_quantity = Decimal(0)
+    position.exit_requested, position.pending_order_id = False, None
+    note = ("tokens left the wallet outside this system (sold or moved in a wallet app); exit price and realized PnL "
+            "unknown, never estimated")
+    await add_timeline_event(session, "closed_outside", now, {"by": by, "onchain_raw": onchain_raw, "note": note,
+                                                              "proceeds_recorded_sol": str(position.proceeds_quote or 0)},
+                             candidate_id=position.candidate_id, assessment_id=position.assessment_id, position_id=position.id)
+    await _reconcile_event(session, "position_closed_outside", "info", None, position, {"by": by, "onchain_raw": onchain_raw})
 
 
 RENT_SIDE = "RENT"  # closes the wallet's empty token accounts; their rent deposit returns to the wallet

@@ -301,6 +301,27 @@ async def test_failed_exit_is_retried_with_more_slippage(session_factory, redis_
     assert retry.id != first and retry.slippage_pct == orig.slippage_pct + 10
 
 
+async def test_a_sell_failing_on_every_try_alerts_once_per_quarter_hour(session_factory, redis_client):
+    """2026-10-07: a PumpSwap sell rejected on every try (6053) sent the
+    "LIVE exit failing" alert on each of 4,843 attempts."""
+    from yonixalpha_core.db.models import Notification
+
+    _, _, pid, _, ex, _ = await open_live(session_factory, redis_client)
+    for i in range(5):
+        async with session_factory() as s:
+            p = await s.get(PaperPosition, pid)
+            await live_trading.manage_live_position(s, p, p.stop_loss / 2, None, NOW + timedelta(seconds=5 * i))
+            await s.commit()
+            oid = p.pending_order_id
+        ex.outcomes.append(ExecOutcome("FAILED", f"sig-f{i}", error="simulation failed: {'Custom': 6053}"))
+        await live_trading.process_order(session_factory, redis_client, LIVE_ON, ex, oid)
+    async with session_factory() as s:
+        p = await s.get(PaperPosition, pid)
+        titles = (await s.execute(select(Notification.title))).scalars().all()
+    assert p.exit_failures == 5 and p.status == "open"
+    assert sum(t.startswith("LIVE exit failing") for t in titles) == 1  # from attempt 2; then throttled
+
+
 async def test_restart_with_a_signed_order_resolves_it_without_rebuying(session_factory, redis_client):
     _, _, pid, oid, _ = await enter(session_factory, redis_client)
     # Crash after the signature was persisted, before confirmation was seen.

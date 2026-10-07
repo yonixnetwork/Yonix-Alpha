@@ -225,3 +225,64 @@ export function SellButton({ positionId, symbol, mode, route, description }: {
     </>
   );
 }
+
+/** Closes a LIVE position whose tokens were already sold or moved outside
+ * this system (for example in a wallet app). The server reads the wallet on
+ * chain first and refuses while the wallet still holds the token; the
+ * realized PnL stays unknown. `positionId` omitted: every open or
+ * needs_review LIVE position whose token the wallet no longer holds. */
+export function CloseOutsideButton({ positionId, symbol, onDone }: {
+  positionId?: string; symbol?: string | null; onDone?: () => void;
+}) {
+  const ref = useRef<HTMLDialogElement>(null);
+  const titleId = useId();
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<string | null>(null);
+
+  async function confirm() {
+    setBusy(true); setErr(null);
+    try {
+      if (positionId) {
+        await apiPost(`/api/trade/close-outside/${positionId}?confirm=true`);
+        setResult("Position closed as sold outside the system.");
+      } else {
+        const r = await apiPost<{ closed: { symbol: string }[]; kept: { symbol: string; why: string }[] }>(
+          "/api/trade/close-outside-all", { confirm: "CLOSE SOLD OUTSIDE" });
+        setResult(`Closed ${r.closed.length}: ${r.closed.map((c) => c.symbol).join(", ") || "none"}. ` +
+          (r.kept.length ? `Left open ${r.kept.length}: ${r.kept.map((k) => `${k.symbol} (${k.why})`).join("; ")}` : ""));
+      }
+      onDone?.();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : "Request failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const label = positionId ? "SOLD OUTSIDE" : "CLOSE ALL SOLD OUTSIDE";
+  return (
+    <>
+      <button type="button" className="btn btn-ghost btn-sm"
+        onClick={() => { setErr(null); setResult(null); ref.current?.showModal(); }}>{label}</button>
+      <dialog ref={ref} className="dialog" aria-labelledby={titleId}>
+        <h2 id={titleId} className="dialog-title">Close as sold outside the system</h2>
+        <div className="dialog-body">
+          {err && <div className="error" role="alert">{err}</div>}
+          {result ? <p aria-live="polite">{result}</p> : (
+            <p>
+              {positionId ? <>Close <b>{symbol ?? "this position"}</b></> : <>Close every open or needs-review LIVE position</>}{" "}
+              whose token the wallet no longer holds (sold or moved in a wallet app). The wallet is checked on chain first;
+              a token still in the wallet is not closed. No sell is sent. The exit price and realized PnL are recorded as
+              unknown.
+            </p>
+          )}
+        </div>
+        <div className="btn-row dialog-actions">
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => ref.current?.close()}>{result ? "CLOSE" : "CANCEL"}</button>
+          {!result && <button type="button" className="btn btn-danger btn-sm" disabled={busy} onClick={confirm}>{busy ? "Checking wallet…" : "CONFIRM"}</button>}
+        </div>
+      </dialog>
+    </>
+  );
+}

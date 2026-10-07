@@ -12,7 +12,7 @@ import type { ExecutionOrderRow } from "@/lib/cc";
 import { formatDate, formatDecimal } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
 import RuntimeApply from "@/components/RuntimeApply";
-import { SellButton } from "@/components/ManualTrade";
+import { CloseOutsideButton, SellButton } from "@/components/ManualTrade";
 
 interface LiveStatus {
   locks: Record<string, boolean>;
@@ -274,6 +274,12 @@ export default function LiveExecutionPage() {
       </Section>
 
       <Section title="Live positions">
+        {positions.data && positions.data.some((p) => p.status === "open" || p.status === "needs_review") && (
+          <div className="btn-row">
+            <CloseOutsideButton onDone={positions.reload} />
+            <span className="muted small">for positions already sold or moved in a wallet app</span>
+          </div>
+        )}
         {!positions.data || positions.data.length === 0 ? (
           <div className="muted">No live positions.</div>
         ) : (
@@ -342,6 +348,9 @@ export default function LiveExecutionPage() {
                     {p.status === "open" && !p.exit_requested ? (
                       <SellButton positionId={p.id} symbol={p.symbol} mode="LIVE" route={p.route} />
                     ) : p.exit_requested ? <span className="pill pill-warn">sell requested</span> : null}
+                    {(p.status === "open" || p.status === "needs_review") && (
+                      <div><CloseOutsideButton positionId={p.id} symbol={p.symbol} onDone={positions.reload} /></div>
+                    )}
                   </td>
                 </tr>
               ))}
