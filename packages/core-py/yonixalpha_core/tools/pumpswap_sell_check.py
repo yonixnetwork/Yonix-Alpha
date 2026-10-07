@@ -70,7 +70,9 @@ def compare(real: list[str], ours: list[str], buyback: set[str]) -> list[str]:
 
 async def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--txs", type=int, default=150, help="latest PumpSwap transactions read")
+    ap.add_argument("--txs", type=int, default=100, help="latest transactions read per address")
+    ap.add_argument("--address", action="append", default=[],
+                    help="read transactions of this address (a pool, a mint); repeatable")
     a = ap.parse_args(argv)
     settings = get_settings()
     engine = make_engine(settings)
@@ -88,10 +90,30 @@ async def main(argv: list[str] | None = None) -> int:
         cfg = p.decode_amm_global_config(cfg_raw)
         buyback = set(cfg.buyback_fee_recipients)
         print(f"GlobalConfig {len(cfg_raw)} bytes; buyback recipients: {sorted(buyback)}")
-        sigs = await rpc.call("getSignaturesForAddress", [p.PUMP_AMM, {"limit": a.txs}])
+        # The program's own history is often refused or empty on busy providers (server
+        # 2026-10-07: 0 transactions). Every PumpSwap trade also names one of the buyback
+        # recipients, which have far shorter histories.
+        addresses = a.address + [p.PUMP_AMM] + sorted(buyback)
+        sigs: list[dict] = []
+        for addr in addresses:
+            try:
+                got = await rpc.call("getSignaturesForAddress", [addr, {"limit": a.txs}])
+            except Exception as exc:  # noqa: BLE001
+                print(f"signatures of {addr}: error {type(exc).__name__}: {str(exc)[:120]}")
+                continue
+            ok = [x for x in (got or []) if not x.get("err")]
+            print(f"signatures of {addr}: {len(got or [])} returned, {len(ok)} successful"
+                  + ("" if got else f" (response {str(got)[:60]})"))
+            sigs += ok
+            if len(sigs) >= a.txs:
+                break
         kinds, errors, sells, programs = Counter(), Counter(), [], Counter()
         read = 0
-        for sg in sigs or []:
+        seen: set[str] = set()
+        for sg in sigs[: a.txs * 2]:
+            if sg["signature"] in seen:
+                continue
+            seen.add(sg["signature"])
             if sg.get("err"):
                 continue
             try:
