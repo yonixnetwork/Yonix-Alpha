@@ -163,11 +163,20 @@ async def persist_scan(session: AsyncSession, adapter, res: ScanResult, now: dat
     return counts
 
 
-async def restore_adapter(session: AsyncSession, adapter) -> int:
+async def restore_adapter(session: AsyncSession, adapter, since: datetime | None = None) -> int:
     """Re-registers the curves / pools / factories a launchpad announced
-    earlier, so a restarted service keeps accepting their events."""
-    rows = (await session.execute(select(EvmToken.token, EvmToken.venue, EvmToken.quote_token).where(
-        EvmToken.chain == adapter.spec.chain.value, EvmToken.launchpad == adapter.spec.key))).all()
+    earlier, so a restarted service keeps accepting their events. With
+    `since`, only tokens created or traded since then (a venue gains its pool
+    at migration, and the pool's trades move last_trade_at): both indexed,
+    where the full read is every token of the launchpad (server 2026-10-07:
+    15 s, every minute, inside the copy engine's loop)."""
+    from sqlalchemy import or_
+
+    q = select(EvmToken.token, EvmToken.venue, EvmToken.quote_token).where(
+        EvmToken.chain == adapter.spec.chain.value, EvmToken.launchpad == adapter.spec.key)
+    if since is not None:
+        q = q.where(or_(EvmToken.created_at >= since, EvmToken.last_trade_at >= since))
+    rows = (await session.execute(q)).all()
     n = 0
     for token, venue, quote in rows:
         venue = venue or {}

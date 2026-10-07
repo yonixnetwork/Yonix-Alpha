@@ -6,7 +6,8 @@ Prints, in order:
   1. host load and memory (the containers share the droplet's 2 vCPU / 2 GB)
   2. database connections by state, and every statement running > 2 s
   3. lock waits (who is blocked, by whom)
-  4. the largest tables (estimated rows, total size)
+  4. the largest tables (estimated rows, total size), and how far behind
+     the EVM trade feed is (newest stored trade, scan cursors)
   5. timings of the queries behind the pages that ended in 504 on
      2026-10-07 (ML Review, opportunity outcomes, EVM ML), each in its own
      read-only transaction with a 120 s limit
@@ -183,6 +184,13 @@ async def main(argv: list[str] | None = None) -> int:
             print("\n4. Largest tables")
             for name, est, size in (await s.execute(text(TABLES_SQL), {"n": TABLES_SHOWN})).all():
                 print(f"  {name:32s} ~{max(est, 0):>12,} rows  {mb(size)}")
+            print("\n   EVM trade feed (how far behind data-evm is; copy detection cannot be faster)")
+            for chain in ("bsc", "robinhood"):
+                newest = (await s.execute(text("SELECT max(at) FROM evm_trades WHERE chain = :c"), {"c": chain})).scalar()
+                print(f"  {chain}: newest stored trade " + (f"{(now - newest).total_seconds():,.0f} s old" if newest else "none"))
+            for chain, lp, block, upd in (await s.execute(text(
+                    "SELECT chain, launchpad, last_block, updated_at FROM evm_cursors ORDER BY chain, launchpad"))).all():
+                print(f"    cursor {chain}/{lp}: block {block}, written {(now - upd).total_seconds():,.0f} s ago")
         if not a.skip_timings:
             print("\n5. Timed page queries (read-only, 120 s limit each)")
             for label, fn in timings(now):

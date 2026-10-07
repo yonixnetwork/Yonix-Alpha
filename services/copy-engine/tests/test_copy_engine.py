@@ -434,3 +434,45 @@ async def test_the_per_tick_target_poll_is_served_by_an_index(db_session):
     await db_session.execute(text("SET LOCAL enable_seqscan = off"))
     plan = "\n".join(r[0] for r in (await db_session.execute(text("EXPLAIN " + sql))).all())
     assert "ix_evm_trades_chain_at" in plan, plan
+
+
+async def test_adapter_refresh_reads_only_new_or_traded_tokens_between_full_reads(session_factory, redis_client):
+    """Server 2026-10-07: the refresh read every token of every launchpad
+    (15 s) every minute inside the watch loop. Between hourly full reads it
+    reads only tokens created or traded since the previous refresh."""
+    from types import SimpleNamespace
+
+    from yonixalpha_core.chains.base import Chain
+
+    class Ad:
+        spec = SimpleNamespace(chain=Chain.BSC, key="fourmeme")
+
+        def __init__(self):
+            self.curves = []
+
+        def register_curve(self, curve, token, quote):
+            self.curves.append(token)
+
+    clock = Clock()
+    ad = Ad()
+    eng = CopyEngine(session_factory, redis_client, {"bsc": {"fourmeme": ad}}, clock)
+
+    async def token(t, created, traded=None):
+        async with session_factory() as s:
+            s.add(EvmToken(chain="bsc", token=t, launchpad="fourmeme", created_at=created, created_block=1, category="FRESH",
+                           stage="CURVE", venue={"curve": "0x" + "c" * 40}, stats={}, state={}, last_trade_at=traded))
+            await s.commit()
+
+    old = clock() - timedelta(days=3)
+    await token("0x" + "1" * 40, old, old)
+    assert (await eng.refresh_adapters())["full"] is True and ad.curves == ["0x" + "1" * 40]
+    await token("0x" + "2" * 40, old, old)  # neither created nor traded since: skipped until the next full read
+    await token("0x" + "3" * 40, clock(), None)  # new
+    await token("0x" + "4" * 40, old, clock())  # traded again (e.g. its new pool)
+    ad.curves.clear()
+    clock.t += timedelta(minutes=1)
+    r = await eng.refresh_adapters()
+    assert r["full"] is False and sorted(ad.curves) == ["0x" + "3" * 40, "0x" + "4" * 40]
+    ad.curves.clear()
+    clock.t += timedelta(hours=1)
+    assert (await eng.refresh_adapters())["full"] is True and len(ad.curves) == 4
