@@ -71,8 +71,9 @@ Working as designed: GitHub API, REVIEW ONLY for third-party repositories, PIN B
 auto-deploys (screenshot 10).
 
 ## M. Database performance / N. API performance
-Fixed: comparison and review in SQL, date bounds, one index (migration 0041, built CONCURRENTLY), 60 s single-flight
-cache on the three review endpoints, 25 s statement limit, 10 s pool wait, request IDs, slow-request list.
+Fixed: comparison and review in SQL, date bounds, one index (migration 0041, built CONCURRENTLY), single-flight
+cache on the three review endpoints (since the follow-up in section V: computed in the background, 5 minutes fresh),
+25 s statement limit, 10 s pool wait, request IDs, slow-request list.
 
 ## O. Security findings
 No secret is logged or returned by the new code: the slow-request list records query parameter names only (test).
@@ -100,3 +101,36 @@ authorized), EVM live (locked).
 ## U. Remaining risks
 2 GB droplet memory; ml / copy-engine periodic CPU load; Pons positions without an exit route; live sells retry without
 backoff on deterministic errors; paper still has no latency model.
+
+## V. Server findings after deploying 8ad1d33 (2026-10-07 13:05) and the follow-up fixes
+Measured on the server (`db_health`, `parity_report --days 7`, `pumpswap_window_check`):
+- **Host overloaded.** Load 9.48 on 2 vCPU, 392 MB free of 1 967 MB, 1 172 MB swap in use. The database is far larger
+  than memory: evm_trades 3.5 GB (4.4 M rows), risk_assessments 3.1 GB, opportunity_outcomes 2.5 GB, market_snapshots
+  1.75 GB, copy_events 922 MB. Under this load the review aggregates still ran past 120 s; the ledger category count
+  over all history took 75 s.
+- **Copy trading too late.** TOO_LATE: BSC 270 217, Robinhood 6 648; median detection 300 841 ms (BSC) and 216 923 ms
+  (Robinhood). Found in code: the copy engine's per-second poll compared `lower(trader)`, which no index serves, so every
+  tick on each chain read the whole evm_trades table (matching the 12 s evm_trades statements in pg_stat_activity). The
+  14-day prune and the market-regime windows had the same full scans.
+- **Paper exit failure rate distorted.** "exit 50 % (measured from 6 553 live SELL orders)": 6 450 of those were retries
+  of the one stuck 7wmm sell, each counted as a separate trial, so every paper exit was failed at the 50 % cap.
+- **Paper vs live (7 days).** LIVE 16 trades, 6.2 % win, mean -11.87 %. PAPER 96 trades, 43.8 % win, mean +10.03 %,
+  carried by 17 take_profit_3 exits at about +103 %. These are the numbers before paper charged LIVE fixed costs.
+- **7wmm.** Other traders sold the pool throughout the window with the same accounts as our confirmed sells; our
+  simulations failed. Root cause still NOT VERIFIED (single RPC endpoint, or something in our transaction).
+
+Fixed in this follow-up (tests in the PR):
+| Finding | Fix | Verification |
+|---|---|---|
+| Copy poll / prune / regime full scans | Index `ix_evm_trades_chain_at (chain, at)`, migration 0042, built CONCURRENTLY; the poll is `target_trades()` | VERIFIED: the plan uses the index (test fails without it). Production latency: NOT VERIFIED until `parity_report` runs again |
+| Retries counted as trials | `measured_live_rates` counts one result per position and side: its first final attempt | VERIFIED: 300 retries of one position count once (test) |
+| Review pages past the proxy limit | Computed in a background task on their own two connections (240 s statement limit, one at a time); a request is answered at once from the last result, marked stale while a refresh runs; with no result yet, 503 REVIEW_COMPUTING; the page shows when the numbers were computed | VERIFIED by tests (fresh, stale, computing, failed refresh). Production: NOT VERIFIED (`db_health` section 6 lists each result, its compute time and last error) |
+| db_health too slow to finish | `--skip-timings` for a quick run; the copy poll is timed; review results listed | VERIFIED (test) |
+
+Not changed, needs the operator's decision:
+- **Server size.** Historical ML / trading data may not be deleted (rule), so the data will keep growing past 2 GB of
+  memory. Recommended: resize the droplet (for example 4 vCPU / 8 GB). Until then the review pages show older results.
+- **7wmm.** Proposed: re-simulate on a second RPC endpoint before treating a sell as failed, and back off after
+  repeated identical program errors. Not implemented: it changes working live execution and the root cause is not yet
+  verified.
+

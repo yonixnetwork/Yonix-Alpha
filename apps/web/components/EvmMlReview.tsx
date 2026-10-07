@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Empty, ErrorNotice, Loading, Section, Stat } from "@/components/ui";
+import { ComputedAt, Empty, ErrorNotice, Loading, Section, Stat } from "@/components/ui";
 import { formatDate } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
 
@@ -30,6 +30,7 @@ export default function EvmMlReview() {
               <button key={d} className={days === d ? "btn btn-sm" : "btn btn-ghost btn-sm"} onClick={() => setDays(d)}>{d} days</button>
             ))}
           </div>
+          <ComputedAt data={data} />
           <div className="stat-grid">
             <Stat label="ML contribution" hint={data.contribution.why}>{data.contribution.percent}% ({data.contribution.status})</Stat>
             <Stat label="EVM samples (labelled)">{data.samples.evm_total} ({data.samples.evm_labelled})</Stat>

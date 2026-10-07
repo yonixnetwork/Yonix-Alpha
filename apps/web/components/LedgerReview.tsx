@@ -5,7 +5,7 @@ import {
   Activity, AlertTriangle, Ban, CheckCircle2, Clock, Eye, FlaskConical, LogOut, RefreshCcw, ShieldCheck, Target, TrendingUp, XCircle,
 } from "lucide-react";
 import MarketCap from "@/components/MarketCap";
-import { Empty, ErrorNotice, Loading, Section, Stat, TokenLink } from "@/components/ui";
+import { ComputedAt, Empty, ErrorNotice, Loading, Section, Stat, TokenLink } from "@/components/ui";
 import { formatDate } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
 
@@ -20,7 +20,7 @@ interface Review {
   since: string; counts: Record<string, number>; categories: string[]; note: string;
   missed_win_buckets: Record<string, Record<string, number>>;
   signal_vs_execution: J; snipe_latency: Record<string, { n: number; median: number | null; p90: number | null }>;
-  shadow_models: J[];
+  shadow_models: J[]; cached_at?: string; stale?: boolean; refresh_error?: string;
 }
 
 export const PATH_HORIZONS = ["T+5s", "T+10s", "T+20s", "T+30s", "T+60s", "T+5m", "T+15m", "T+30m", "T+60m"];
@@ -150,6 +150,7 @@ export default function LedgerReview() {
             </div>
             <Rows category={cat} days={days} />
             <p className="muted">{d.note}</p>
+            <ComputedAt data={d} />
           </>
         )}
       </Section>

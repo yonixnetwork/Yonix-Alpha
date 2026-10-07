@@ -85,18 +85,32 @@ async def load_settings(session: AsyncSession) -> PaperExecutionSettings:
 
 
 async def measured_live_rates(session: AsyncSession) -> dict[str, dict[str, Any]]:
-    """Failure rate of LIVE orders per side, from final outcomes only."""
-    rows = (await session.execute(
-        select(ExecutionOrder.side, ExecutionOrder.status, func.count())
-        .where(ExecutionOrder.mode == "LIVE", ExecutionOrder.provider == "pumpportal_local",
-               ExecutionOrder.status.in_(FINAL_STATUSES))
-        .group_by(ExecutionOrder.side, ExecutionOrder.status))).all()
+    """Failure rate of LIVE orders per side, from final outcomes only, counted
+    once per position and side: the first final attempt decides. Retries of
+    one stuck exit are not separate trials (2026-10-07: 6 450 retries of one
+    position's sell, failing on the same program error, had pushed the
+    measured sell failure rate, and with it every paper exit, to the 50 % cap).
+    Orders without a position count individually."""
+    from sqlalchemy import literal_column
+
+    o = ExecutionOrder
+    base = (o.mode == "LIVE", o.provider == "pumpportal_local", o.status.in_(FINAL_STATUSES), o.side.in_(("BUY", "SELL")))
+    first = (select(o.side, o.status)
+             .where(*base, o.position_id.is_not(None))
+             .distinct(o.position_id, o.side)
+             .order_by(o.position_id, o.side, o.created_at)).subquery()
+    loose = select(o.side, o.status).where(*base, o.position_id.is_(None)).subquery()
+    rows = []
+    for sub in (first, loose):
+        rows += (await session.execute(select(sub.c.side, sub.c.status, func.count(literal_column("*")))
+                                       .group_by(sub.c.side, sub.c.status))).all()
     out: dict[str, dict[str, Any]] = {}
     for side in ("BUY", "SELL"):
         total = sum(n for sd, _, n in rows if sd == side)
         failed = sum(n for sd, st, n in rows if sd == side and st != "CONFIRMED")
         pct = (Decimal(failed) * 100 / total).quantize(Decimal("0.01")) if total else None
-        out[side] = {"orders": total, "failed": failed, "failure_pct": pct, "usable": total >= MIN_LIVE_SAMPLE}
+        out[side] = {"orders": total, "failed": failed, "failure_pct": pct, "usable": total >= MIN_LIVE_SAMPLE,
+                     "counted": "first final attempt per position"}
     return out
 
 
