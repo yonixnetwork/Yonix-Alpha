@@ -138,3 +138,20 @@ async def test_exit_checkpoints_train_a_shadow_sell_hold_model_and_are_scored(db
     assert got[0].verdicts["ml"] == IN_SAMPLE and got[-1].verdicts["ml"] in ("SELL", "HOLD")
     assert got[-1].ml_shadow["out_of_sample"] is True and 0 <= got[-1].ml_shadow["P_FELL_10"] <= 1
     assert got[-1].verdicts["final"] == "HOLD"  # the shadow call never changes what the system did
+
+
+@pytest.mark.asyncio
+async def test_missed_winners_run_every_six_hours(db_session, monkeypatch):
+    """Server 2026-10-07: the missed-winner query took 108 s every 30-minute
+    cycle. It now runs once per MISSED_EVERY; its rows are written once each,
+    so a later run loses nothing."""
+    from app import evm_ml
+
+    monkeypatch.setattr(evm_ml, "_missed_at", None)
+    sf = make_session_factory(create_async_engine(os.environ["DATABASE_URL"]))
+    first = await run_evm_cycle(sf, now=T)
+    assert first["missed_winners"] == 0
+    soon = await run_evm_cycle(sf, now=T + timedelta(minutes=30))
+    assert str(soon["missed_winners"]).startswith("next run after")
+    later = await run_evm_cycle(sf, now=T + evm_ml.MISSED_EVERY)
+    assert later["missed_winners"] == 0

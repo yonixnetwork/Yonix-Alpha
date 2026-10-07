@@ -154,3 +154,20 @@ Fixed:
 | Solana page counts | Newest-row lookups on indexed timestamps (same PASS / FAIL); the page builds only its chain's launchpads, once | VERIFIED: new test for both checks; control-center API tests pass |
 | Reviews recomputed continuously | A result stays fresh 30 minutes (was 5); it took 6-10 minutes to compute | Config |
 
+## X. Server findings after deploying b0a5ce6 (2026-10-07 22:00) and the third follow-up
+Measured (`db_health --skip-timings`, `parity_report --days 1`):
+- Load 9.8 / 7.9 / 7.3 (was 12.4 / 10.7 / 10.6). No API request slower than 2 s was recorded after 16:42 (the Solana
+  page last appears at 15:52, before the deploy). Whether the dashboard was open in that time is NOT VERIFIED.
+- Paper exit failure rate 4.26 % (47 live sells); paper charged LIVE fixed costs.
+- Copy detection median over the day: BSC 111 s, Robinhood 64 s. Still far too slow.
+- Still running long: the missed-winner query (108 s, three parallel workers), data-evm's entry pass over evm_tokens
+  (49 s), and the copy engine's launchpad restore (15 s).
+
+Found in code and fixed:
+| Finding | Fix | Verification |
+|---|---|---|
+| The copy engine re-read every token of every launchpad (15 s) every 60 s inside its watch loop, so target trades waited behind it | Full read on start and hourly; otherwise only tokens created or traded since the previous refresh (indexed) | VERIFIED: test (new and re-traded tokens registered, untouched ones skipped until the full read) |
+| data-evm entry pass: no index on evm_tokens.safety_at | Index `ix_evm_tokens_chain_safety_at`, migration 0043, CONCURRENTLY | alembic upgrade + check |
+| Missed-winner query every 30 minutes (108 s) | Once every 6 hours; rows are written once each, none is lost | VERIFIED: test |
+| Copy delay cause unknown (feed or engine) | `db_health` prints the age of the newest stored EVM trade and each scan cursor | VERIFIED: test |
+

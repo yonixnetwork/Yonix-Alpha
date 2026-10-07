@@ -1193,6 +1193,7 @@ class EvmToken(Base):
 for _col in ("symbol", "name"):  # Token Explorer prefix search, migration 0032
     Index(f"ix_evm_tokens_lower_{_col}", func.lower(getattr(EvmToken, _col)).label(f"lower_{_col}"),
           postgresql_ops={f"lower_{_col}": "text_pattern_ops"})
+Index("ix_evm_tokens_chain_safety_at", EvmToken.chain, EvmToken.safety_at)  # data-evm entry pass, migration 0043
 
 
 class EvmWalletFunder(Base):

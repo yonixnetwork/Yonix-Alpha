@@ -49,6 +49,8 @@ E18 = Decimal(10) ** 18
 OUTCOME_BATCH = 200
 SOLANA_HISTORY = timedelta(hours=2, minutes=45)  # the pump stream keeps a mint's trades for 3 hours
 EVM_HISTORY = timedelta(days=13)  # evm_trades are pruned after 14 days
+ADAPTERS_FULL_EVERY = timedelta(hours=1)
+ADAPTERS_MARGIN = timedelta(minutes=5)
 
 
 def target_trades(chain: str, wallets_lower: list[str], since: datetime):
@@ -92,12 +94,26 @@ class CopyEngine:
         self.evm_adapters = evm_adapters  # chain -> launchpad key -> adapter
         self.now = now_fn
         self.status: dict[str, Any] = {}
+        self._adapters_at: datetime | None = None
+        self._adapters_full_at: datetime | None = None
 
-    async def refresh_adapters(self) -> None:
+    async def refresh_adapters(self) -> dict[str, Any]:
+        """Registers launchpad curves / pools for quoting. A full read on the
+        first call and once an hour; otherwise only tokens created or traded
+        since the previous call (with a margin), so this step no longer
+        holds the watch loop up for seconds every minute."""
+        now = self.now()
+        full = self._adapters_full_at is None or now - self._adapters_full_at >= ADAPTERS_FULL_EVERY
+        since = None if full else self._adapters_at - ADAPTERS_MARGIN
+        n = 0
         async with self.session_factory() as session:
             for ads in self.evm_adapters.values():
                 for ad in ads.values():
-                    await store.restore_adapter(session, ad)
+                    n += await store.restore_adapter(session, ad, since=since)
+        self._adapters_at = now
+        if full:
+            self._adapters_full_at = now
+        return {"full": full, "registrations": n}
 
     async def _targets(self, chain: str) -> list[CopyTarget]:
         async with self.session_factory() as session:

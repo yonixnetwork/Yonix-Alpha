@@ -202,6 +202,13 @@ async def _latest(session, stmt, limit: int) -> list:
     return list(reversed((await session.execute(stmt.limit(limit))).all()))
 
 
+# MISSED_WINNER rows cover the last 7 days and are written once each; the
+# query joins every token of the week with its first-hour trades (server
+# 2026-10-07: 108 s, run every 30 minutes). Every 6 hours loses no row.
+MISSED_EVERY = timedelta(hours=6)
+_missed_at: datetime | None = None
+
+
 async def run_evm_cycle(session_factory, now: datetime | None = None) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
     out: dict[str, Any] = {}
@@ -212,8 +219,13 @@ async def run_evm_cycle(session_factory, now: datetime | None = None) -> dict[st
         await session.commit()
     out["wallet_episodes"] = await _drain(session_factory, wallet_labels.build, now, WALLET_BATCH, "tokens",
                                           time.monotonic() + BUILD_BUDGET_S)
+    global _missed_at
     async with session_factory() as session:
-        out["missed_winners"] = await wallet_labels.build_missed(session, now)
+        if _missed_at is None or not timedelta(0) <= now - _missed_at < MISSED_EVERY:
+            out["missed_winners"] = await wallet_labels.build_missed(session, now)
+            _missed_at = now
+        else:
+            out["missed_winners"] = f"next run after {(_missed_at + MISSED_EVERY).isoformat()}"
         out["exit_labels"] = await exit_samples.label_pending(session, now)
         await session.commit()
     async with session_factory() as session:
