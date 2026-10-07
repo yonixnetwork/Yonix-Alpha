@@ -214,6 +214,94 @@ async def sell(position_id: UUID, request: Request, confirm: bool = False, db: A
             "note": "the position manager sells on its next cycle through the current route; status follows below"}
 
 
+async def _wallet_tokens(db: AsyncSession, redis: Redis, settings: Settings) -> dict[str, dict]:
+    """The LIVE wallet's token balances, read on chain now (never from a
+    cache: a position is only closed as sold outside when the chain says the
+    wallet holds none of it). The wallet address comes from the live
+    worker's reconciliation; no key is loaded here."""
+    import httpx
+
+    from yonixalpha_core.solana import rpc_registry
+    from yonixalpha_core.solana.live_exec import wallet_balances
+    from yonixalpha_core.solana.rpc import RpcManager
+
+    raw = await redis.get(live_trading.WALLET_KEY)
+    pubkey = (json.loads(raw) if raw else {}).get("pubkey")
+    if not pubkey:
+        raise HTTPException(503, "the LIVE wallet has not been reconciled yet, so its address is unknown here")
+    specs = await rpc_registry.effective_rpc(db, settings)
+    if not specs:
+        raise HTTPException(503, "no Solana RPC endpoint configured")
+    try:
+        async with httpx.AsyncClient(timeout=20) as http:
+            rpc = RpcManager.create(client=http, primary_url=specs[0]["url"])
+            rpc.replace_endpoints(specs)
+            _lamports, tokens = await wallet_balances(rpc, pubkey)
+    except Exception as exc:  # noqa: BLE001 - no on-chain answer: nothing is closed
+        raise HTTPException(503, f"wallet balances could not be read on chain ({type(exc).__name__}); nothing was closed") from exc
+    return tokens
+
+
+class CloseOutsideAllIn(BaseModel):
+    confirm: str = ""
+
+
+async def _close_outside(db: AsyncSession, p: PaperPosition, tokens: dict[str, dict], username: str) -> None:
+    onchain = int((tokens.get(p.asset_id) or {}).get("amount", 0))
+    await live_trading.close_sold_outside(db, p, onchain, datetime.now(timezone.utc), username)
+
+
+@router.post("/close-outside/{position_id}")
+async def close_outside(position_id: UUID, request: Request, confirm: bool = False, db: AsyncSession = Depends(get_db),
+                        redis: Redis = Depends(get_redis), settings: Settings = Depends(get_settings),
+                        username: str = Depends(get_current_username)) -> dict:
+    """Closes a LIVE position whose tokens were already sold or moved
+    outside this system (for example in a wallet app). The wallet is read on
+    chain first: if it still holds the token, nothing is closed. The exit
+    price and realized PnL stay unknown, never estimated."""
+    if not confirm:
+        raise HTTPException(422, "confirmation required (?confirm=true)")
+    p = await db.get(PaperPosition, position_id)
+    if p is None:
+        raise HTTPException(404, "position not found")
+    tokens = await _wallet_tokens(db, redis, settings)
+    try:
+        await _close_outside(db, p, tokens, username)
+    except live_trading.CloseOutsideRefused as exc:
+        raise HTTPException(409, str(exc)) from exc
+    await audit(db, username, request, "manual_trade.closed_outside", {"position_id": str(p.id), "symbol": p.symbol})
+    await db.commit()
+    await events.publish(redis, "trade.closed", {"position_id": str(p.id), "mode": "LIVE", "reason": p.exit_reason}, "api")
+    return {"position_id": str(p.id), "status": p.status, "exit_reason": p.exit_reason,
+            "note": "closed as sold outside the system; realized PnL unknown"}
+
+
+@router.post("/close-outside-all")
+async def close_outside_all(body: CloseOutsideAllIn, request: Request, db: AsyncSession = Depends(get_db),
+                            redis: Redis = Depends(get_redis), settings: Settings = Depends(get_settings),
+                            username: str = Depends(get_current_username)) -> dict:
+    """Every open or needs_review LIVE position whose token the wallet no
+    longer holds (read on chain now) is closed as sold outside; positions
+    whose token is still in the wallet are left as they are and listed."""
+    if body.confirm != "CLOSE SOLD OUTSIDE":
+        raise HTTPException(422, "confirm must be 'CLOSE SOLD OUTSIDE'")
+    tokens = await _wallet_tokens(db, redis, settings)
+    rows = (await db.execute(select(PaperPosition).where(
+        PaperPosition.execution_mode == "LIVE", PaperPosition.status.in_(("open", "needs_review"))))).scalars().all()
+    closed, kept = [], []
+    for p in rows:
+        try:
+            await _close_outside(db, p, tokens, username)
+            closed.append({"position_id": str(p.id), "symbol": p.symbol})
+        except live_trading.CloseOutsideRefused as exc:
+            kept.append({"position_id": str(p.id), "symbol": p.symbol, "why": str(exc)})
+    await audit(db, username, request, "manual_trade.closed_outside_all", {"closed": len(closed), "kept": len(kept)})
+    await db.commit()
+    if closed:
+        await events.publish(redis, "trade.closed", {"action": "closed_outside", "positions": len(closed)}, "api")
+    return {"closed": closed, "kept": kept}
+
+
 @router.get("/positions/{position_id}")
 async def position_status(position_id: UUID, db: AsyncSession = Depends(get_db), _: str = Depends(get_current_username)) -> dict:
     """Position with PnL and every order (BUY and SELL) with its stage."""
