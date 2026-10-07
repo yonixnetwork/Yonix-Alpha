@@ -2,6 +2,7 @@
 solders, a fake PumpPortal that returns them, and a fake RPC that answers
 like a Solana node. Nothing leaves the process."""
 
+import base64
 import struct
 from decimal import Decimal
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ from solders.instruction import AccountMeta, Instruction
 from solders.keypair import Keypair
 from solders.message import MessageV0
 from solders.pubkey import Pubkey
+from solders.signature import Signature
 from solders.system_program import TransferParams, transfer
 from solders.transaction import VersionedTransaction
 
@@ -245,6 +247,9 @@ async def test_failed_simulation_is_never_sent():
     rpc = FakeRpc(sim_err={"InstructionError": [2, {"Custom": 6002}]})
     out, _ = await run(FakePP(buy_tx()), rpc)
     assert out.status == "FAILED" and "simulation failed" in out.error and "sendTransaction" not in rpc.calls
+    # The unsigned transaction is kept to diagnose program errors (server 2026-10-07, 6053); it carries no signature.
+    kept = VersionedTransaction.from_bytes(base64.b64decode(out.unsigned_tx))
+    assert str(kept.message.account_keys[0]) == WALLET and all(sig == Signature.default() for sig in kept.signatures)
 
 
 async def test_transaction_that_never_lands_expires_after_rebroadcasting():
