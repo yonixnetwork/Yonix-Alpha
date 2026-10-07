@@ -71,7 +71,7 @@ class ExecOutcome:
     stages: list[dict[str, Any]] = field(default_factory=list)
     venue: dict[str, Any] | None = None
     provider: str | None = None
-    unsigned_tx: str | None = None  # base64, kept only when the guard refused it (for diagnosis; unsigned)
+    unsigned_tx: str | None = None  # base64, unsigned; kept when the guard refused it or its simulation failed (diagnosis)
     trade_event: dict[str, Any] | None = None  # our decoded Pump/PumpSwap trade event (execution analysis)
     seen: dict[str, Any] | None = None  # status seen before confirmation (slot, confirmationStatus)
     rpc_calls: list[dict[str, Any]] = field(default_factory=list)
@@ -262,7 +262,8 @@ class SolanaLiveExecutor:
         if sim_value.get("err") is not None:
             stage("SIMULATION_FAILED", error=str(sim_value.get("err"))[:300])
             return ExecOutcome("FAILED", signature, error=f"simulation failed: {sim_value.get('err')}",
-                               logs=list(sim_value.get("logs") or []), stage="SIMULATION_FAILED", **common)
+                               logs=list(sim_value.get("logs") or []), stage="SIMULATION_FAILED",
+                               unsigned_tx=base64.b64encode(bytes(built.tx)).decode(), **common)
         stage("SIMULATED", units=sim_value.get("unitsConsumed"))
 
         outcome = await self._send_and_confirm(wire, signature, req.mint, report.to_dict(), stage)
