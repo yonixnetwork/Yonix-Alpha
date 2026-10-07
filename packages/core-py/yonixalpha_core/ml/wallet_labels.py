@@ -259,10 +259,17 @@ async def build_missed(session, now: datetime, days: int = 7) -> int:
         if p_first and p_max is not None and Decimal(p_max) >= Decimal(str(MISSED_WINNER_UP)) * Decimal(p_first):
             winners[chain].append((token, lp, created))
     holder = func.lower(func.coalesce(EvmTrade.extra["recipient"].astext, EvmTrade.trader))
+    # one pass over the window per chain for all wallets (server 2026-10-07:
+    # one query per wallet read 7 days of evm_trades each time, for an hour)
+    acts_of: dict[tuple[str, str], list] = defaultdict(list)
+    for chain in sorted({c for c, _ in wallets}):
+        ws = sorted(w for c, w in wallets if c == chain)
+        for h, at, lp, token in (await session.execute(select(holder, EvmTrade.at, EvmTrade.launchpad, EvmTrade.token).where(
+                EvmTrade.chain == chain, EvmTrade.at >= since, holder.in_(ws)))).all():
+            acts_of[(chain, h)].append((at, lp, token))
     n = 0
     for chain, w in wallets:
-        acts = (await session.execute(select(EvmTrade.at, EvmTrade.launchpad, EvmTrade.token).where(
-            EvmTrade.chain == chain, holder == w, EvmTrade.at >= since))).all()
+        acts = acts_of.get((chain, w))
         if not acts:
             continue
         for token, lp, launched in missed_winners(w, {t for _, _, t in acts}, [(a, lp_) for a, lp_, _ in acts],

@@ -47,15 +47,17 @@ async def _launchpads(db: AsyncSession, redis: Redis, chain: str | None) -> list
 @router.get("/chains")
 async def chains(db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
                  _: str = Depends(get_current_username)) -> dict:
-    ctl = await controls.load(db)
-    lps = await _launchpads(db, redis, None)
-    return jsonable({"chains": [{"chain": c.value, "name": s.name, "native_symbol": s.native_symbol,
+    return jsonable(_chains_payload(await controls.load(db), await _launchpads(db, redis, None)))
+
+
+def _chains_payload(ctl: dict, lps: list[dict]) -> dict:
+    return {"chains": [{"chain": c.value, "name": s.name, "native_symbol": s.native_symbol,
                                  "account_model": s.account_model, "evm_chain_id": s.evm_chain_id, "explorer": s.explorer,
                                  "notes": s.notes, "enabled": ctl.get(f"chain:{c.value}", {}).get("enabled", True),
                                  "launchpads": [{"key": lp["key"], "name": lp["name"], "status": lp["status"],
                                                  "activity_status": lp["activity_status"], "listed": lp["listed"]}
                                                 for lp in lps if lp["chain"] == c.value]}
-                                for c, s in CHAINS.items()]})
+                                for c, s in CHAINS.items()]}
 
 
 @router.get("/launchpads")
@@ -154,5 +156,8 @@ async def chain_detail(chain: str, db: AsyncSession = Depends(get_db), redis: Re
         c = Chain(chain)
     except ValueError as exc:
         raise HTTPException(404, "unknown chain") from exc
-    all_chains = (await chains(db, redis, username))["chains"]
-    return {**next(x for x in all_chains if x["chain"] == c.value), "launchpads": await _launchpads(db, redis, c.value)}
+    # only this chain's launchpads, built once (they were built for every
+    # chain, then again for this one, on each refresh)
+    lps = await _launchpads(db, redis, c.value)
+    summary = next(x for x in _chains_payload(await controls.load(db), lps)["chains"] if x["chain"] == c.value)
+    return jsonable({**summary, "launchpads": lps})

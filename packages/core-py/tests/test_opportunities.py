@@ -349,3 +349,34 @@ async def test_sql_comparison_matches_the_python_reference(db):
         if c:
             want_cls[c] = want_cls.get(c, 0) + 1
     assert got["loss_classes"] == want_cls
+
+
+async def test_solana_safety_and_migration_checks_use_the_newest_rows(db):
+    """The Solana launchpad checks read the newest assessment / ledger
+    migration instead of counting whole tables (server 2026-10-07: the
+    Solana page took 35-48 s), with the same PASS / FAIL result."""
+    from yonixalpha_core.chains import verification
+    from yonixalpha_core.db.models import RiskAssessment
+
+    now = datetime.now(timezone.utc)
+    res = await verification.solana_checks(db, None, "pumpfun", now)
+    assert res["SAFETY"]["status"] == "FAIL" and res["MIGRATION_DETECTION"]["status"] == "FAIL"
+
+    def ra(key, at, engine="solana_fresh"):
+        return RiskAssessment(idempotency_key=key, engine=engine, strategy="s", asset_id=key, symbol=key, decision="NO_TRADE",
+                              status_label="x", executable=False, execution_target="PAPER", overall_risk="HIGH",
+                              risk_engine_version="1", evaluated_at=at, assessment={})
+    db.add_all([ra("old", now - timedelta(hours=30)), ra("evm", now - timedelta(hours=1), engine="evm_bsc"),
+                OpportunityOutcome(key="m", mint="m", engine="solana_fresh", stage="GATE", decision="REJECT", traded=False,
+                                   reasons=[], decided_at=now - timedelta(hours=2), snapshot={}, horizons={},
+                                   status="COMPLETE", migrated_at=now - timedelta(hours=1))])
+    await db.flush()
+    res = await verification.solana_checks(db, None, "pumpfun", now)
+    assert res["SAFETY"]["status"] == "FAIL"  # only an old one and another engine's
+    assert res["MIGRATION_DETECTION"]["status"] == "PASS"
+    assert res["MIGRATION_DETECTION"]["evidence"]["latest_ledger_migration_at"] == (now - timedelta(hours=1)).isoformat()
+    db.add(ra("new", now - timedelta(hours=3)))
+    await db.flush()
+    res = await verification.solana_checks(db, None, "pumpfun", now)
+    assert res["SAFETY"]["status"] == "PASS"
+    assert res["SAFETY"]["evidence"]["last_gate_assessment_at"] == (now - timedelta(hours=3)).isoformat()
