@@ -145,7 +145,7 @@ async def main(argv: list[str] | None = None) -> int:
             user, mint = real[1], real[3]
             print(f"\nsell {sig}: seller {user}, mint {mint}, sold {struct.unpack_from('<Q', raw, 8)[0]} raw, holds {left} raw")
             v = await venues.resolve(rpc, mint, side="sell")
-            if v.kind != venues.PUMP_AMM or v.decimals is None:
+            if v.kind != venues.PUMP_AMM_VENUE or v.decimals is None:
                 print(f"  our venue resolver says {v.kind}: {v.reason}; not compared")
                 continue
             amount = left // 2 or left
