@@ -41,18 +41,26 @@ class PaperExecutionSettings:
     entry_failure_pct: Decimal = Decimal(0)
     exit_failure_pct: Decimal = Decimal(0)
     use_measured_live_rates: bool = True
+    # Solana paper trades pay what a LIVE round trip pays regardless of size
+    # (live_trading.fixed_trade_costs: buy and sell network + priority fees,
+    # rent reclaim or unreclaimed rent): counted in the risk plan exactly as
+    # for LIVE and charged to the paper book. Off, paper sizes and books as
+    # before (audit 2026-10-07: paper skipped them, so it took trades LIVE
+    # refused and reported a better result than LIVE could get).
+    charge_live_fixed_costs: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {"entry_failure_pct": str(self.entry_failure_pct), "exit_failure_pct": str(self.exit_failure_pct),
-                "use_measured_live_rates": self.use_measured_live_rates}
+                "use_measured_live_rates": self.use_measured_live_rates,
+                "charge_live_fixed_costs": self.charge_live_fixed_costs}
 
 
 def parse_settings(data: dict[str, Any]) -> tuple[PaperExecutionSettings, list[str]]:
     s, errors = PaperExecutionSettings(), []
     for key, value in (data or {}).items():
-        if key == "use_measured_live_rates":
+        if key in ("use_measured_live_rates", "charge_live_fixed_costs"):
             if isinstance(value, bool):
-                s.use_measured_live_rates = value
+                setattr(s, key, value)
             else:
                 errors.append(f"{key}: must be true/false")
         elif key in ("entry_failure_pct", "exit_failure_pct"):

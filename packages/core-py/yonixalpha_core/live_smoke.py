@@ -191,7 +191,10 @@ async def try_entry(session: AsyncSession, redis: Redis | None, app_settings: An
     ready, why = await live_trading.live_readiness(redis, app_settings, now)
     live_inp = replace(inp, account=controls.account, global_mode=GlobalMode.LIVE, strategy_mode=StrategyMode.AUTO,
                        live_trading_permitted=controls.live_trading_permitted, live_ready=ready, live_not_ready_reason=why,
-                       manual_approval_granted=False)
+                       manual_approval_granted=False,
+                       # the LIVE round trip's fixed costs, from the live controls (the paper input may carry none)
+                       fixed_cost_quote=controls.fixed_cost_quote, fixed_cost_detail=controls.fixed_cost_detail,
+                       paper_fixed_costs=False)
     a = assess(live_inp, smoke_settings, versions={**versions, "smoke_test": str(run.id)})
     a.inputs_snapshot = {**evidence, "smoke_test": {"run": str(run.id), "max_sol": str(run.max_sol),
                                                      "wallet_available_sol": str(controls.account.available_balance)}}

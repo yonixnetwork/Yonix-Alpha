@@ -1011,7 +1011,7 @@ def assess(inp: AssessmentInput, settings: SafetySettings, versions: dict[str, A
         strategy_levels=inp.strategy_levels,
         leverage=settings.max_leverage,
         targets=inp.targets,
-        fixed_cost_quote=inp.fixed_cost_quote if _live_target(inp) else None,
+        fixed_cost_quote=inp.fixed_cost_quote if (_live_target(inp) or inp.paper_fixed_costs) else None,
         fixed_cost_detail=inp.fixed_cost_detail,
     )
     findings.extend(plan.findings)

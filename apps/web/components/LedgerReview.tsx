@@ -96,9 +96,9 @@ export function RowAnalysis({ row }: { row: LedgerRow }) {
   );
 }
 
-function Rows({ category }: { category: string }) {
+function Rows({ category, days }: { category: string; days: number }) {
   const [open, setOpen] = useState<string | null>(null);
-  const q = useApi<{ total: number; items: LedgerRow[] }>("/api/ml/opportunities", { category, limit: 25 }, { refreshMs: 60000 });
+  const q = useApi<{ total: number; items: LedgerRow[] }>("/api/ml/opportunities", { category, days, limit: 25 }, { refreshMs: 60000 });
   if (q.error) return <ErrorNotice error={q.error} />;
   if (!q.data) return <Loading />;
   if (q.data.items.length === 0) return <Empty>Nothing in this category yet.</Empty>;
@@ -123,7 +123,7 @@ function Rows({ category }: { category: string }) {
             {open === r.id && <tr><td colSpan={6}><PathView row={r} /><RowAnalysis row={r} /></td></tr>}
           </Fragment>))}</tbody>
       </table>
-      <p className="muted">{q.data.total} in this category.</p>
+      <p className="muted">{q.data.total} in this category over the last {days} days.</p>
     </div>
   );
 }
@@ -148,7 +148,7 @@ export default function LedgerReview() {
                   <Icon size={14} aria-hidden /> {label} <b>{d.counts[k] ?? 0}</b>
                 </button>))}
             </div>
-            <Rows category={cat} />
+            <Rows category={cat} days={days} />
             <p className="muted">{d.note}</p>
           </>
         )}

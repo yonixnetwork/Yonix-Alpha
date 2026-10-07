@@ -3,6 +3,7 @@ safety, launch-window coordination and the last entry decision; per-token
 trades; paper positions; the EVM trading settings (amounts in BNB / ETH) and
 the launch-coordination settings and approvals."""
 
+import json
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -15,6 +16,7 @@ from app.api.deps import get_current_username, get_db, get_redis, get_settings
 from app.api.util import audit, jsonable
 from yonixalpha_core import events, launch_coordination, position_pnl
 from yonixalpha_core.chains.evm import native_price, token_view
+from yonixalpha_core.chains.evm import paper as evm_paper
 from yonixalpha_core.chains.evm import observation as evm_observation
 from yonixalpha_core.chains.evm import settings as evm_settings
 from yonixalpha_core.chains.evm import crosscheck as evm_crosscheck
@@ -95,10 +97,24 @@ async def token_detail(chain: str, token: str, db: AsyncSession = Depends(get_db
                                     "pnl": position_pnl.view(p, datetime.now(timezone.utc))} for p in positions]})
 
 
+async def _unpriced(redis: Redis, pid) -> dict | None:
+    """Why an open position has no sell quote (written by data-evm), or None."""
+    raw, since = await redis.get(evm_paper.UNPRICED_KEY.format(pid=pid)), await redis.get(
+        evm_paper.UNPRICED_SINCE_KEY.format(pid=pid))
+    if not raw and not since:
+        return None
+    try:
+        last = json.loads(raw) if raw else {}
+    except ValueError:
+        last = {}
+    return {"reason": last.get("error") or "unknown", "at": last.get("at"), "since": since,
+            "effect": "no sell quote: the position cannot be marked or exited (stop and take-profit cannot fire)"}
+
+
 @router.get("/positions")
 async def positions(chain: str | None = Query(None, pattern=CHAIN), status: str = Query("open", pattern="^(open|closed)$"),
                     limit: int = Query(100, ge=1, le=500), db: AsyncSession = Depends(get_db),
-                    _: str = Depends(get_current_username)) -> dict:
+                    redis: Redis = Depends(get_redis), _: str = Depends(get_current_username)) -> dict:
     engines = [f"evm_{chain}"] if chain else ["evm_bsc", "evm_robinhood"]
     rows = (await db.execute(select(PaperPosition).where(PaperPosition.engine.in_(engines), PaperPosition.status == status)
                              .order_by(desc(PaperPosition.entry_at)).limit(limit))).scalars().all()
@@ -118,6 +134,7 @@ async def positions(chain: str | None = Query(None, pattern=CHAIN), status: str 
                     "venue": (p.plan or {}).get("venue"), "category": (p.plan or {}).get("category"),
                     "pnl_basis": "marked at the executable sell quote of the remaining tokens (fees and taxes included)",
                     "exit_requested": bool(p.exit_requested), "entry_source": (p.plan or {}).get("entry_source"),
+                    "unpriced": await _unpriced(redis, p.id) if p.status == "open" else None,
                     "pnl": position_pnl.view(p, now)})
     return jsonable({"positions": out, "accounts": [{"name": a.name, "currency": a.quote_currency, "cash": a.cash_balance,
                                                      "starting": a.starting_balance} for a in accounts],

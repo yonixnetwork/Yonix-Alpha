@@ -1,12 +1,15 @@
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from sqlalchemy import exc as sa_exc
 from sqlalchemy import select
 
 from app.api.router import api_router
 from app.config_revision import ConfigRevisionMiddleware
+from app.request_timing import RequestTimingMiddleware, request_id_of
 from yonixalpha_core import config_validation
 from yonixalpha_core.config import get_settings
 from yonixalpha_core.logging import configure_logging, get_logger
@@ -60,7 +63,10 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     configure_logging(settings.LOG_LEVEL)
 
-    engine = make_engine(settings)
+    # The dashboard API's own limits: a stuck statement is stopped before the
+    # reverse proxy's 60 s and a full pool fails fast (yonixalpha_core.config).
+    engine = make_engine(settings, statement_timeout_ms=settings.API_STATEMENT_TIMEOUT_MS,
+                         pool_timeout_s=settings.API_POOL_TIMEOUT_S)
     session_factory = make_session_factory(engine)
     redis = make_redis(settings)
 
@@ -84,9 +90,40 @@ async def lifespan(app: FastAPI):
     log.info("api.shutdown")
 
 
+QUERY_CANCELED = "57014"  # Postgres query_canceled: statement_timeout reached
+
+
+def _is_statement_timeout(exc: Exception) -> bool:
+    orig = getattr(exc, "orig", None)
+    code = getattr(orig, "sqlstate", None) or getattr(getattr(orig, "__cause__", None), "sqlstate", None)
+    return code == QUERY_CANCELED or "statement timeout" in str(exc).lower()
+
+
+def _unavailable(request: Request, code: str, detail: str) -> JSONResponse:
+    rid = request_id_of(request.scope)
+    return JSONResponse(status_code=503, content={"detail": f"{detail} (request {rid})", "code": code, "request_id": rid})
+
+
+async def _db_error(request: Request, exc: sa_exc.DBAPIError) -> JSONResponse:
+    if _is_statement_timeout(exc):
+        secs = get_settings().API_STATEMENT_TIMEOUT_MS // 1000
+        log.warning("api.query_timeout", path=request.url.path, request_id=request_id_of(request.scope))
+        return _unavailable(request, "QUERY_TIMEOUT", f"The database query took longer than {secs} s and was stopped")
+    log.error("api.db_error", path=request.url.path, error=type(getattr(exc, "orig", exc)).__name__,
+              request_id=request_id_of(request.scope))
+    return _unavailable(request, "DB_ERROR", "Database error")
+
+
+async def _pool_timeout(request: Request, exc: sa_exc.TimeoutError) -> JSONResponse:
+    log.warning("api.db_pool_exhausted", path=request.url.path, request_id=request_id_of(request.scope))
+    return _unavailable(request, "DB_POOL_EXHAUSTED", "Every database connection is busy; try again shortly")
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
+    app.add_exception_handler(sa_exc.DBAPIError, _db_error)
+    app.add_exception_handler(sa_exc.TimeoutError, _pool_timeout)
 
     # Innermost: runs after the route committed, before CORS headers are added.
     app.add_middleware(ConfigRevisionMiddleware)
@@ -96,8 +133,10 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
-        expose_headers=["X-Config-Revision"],
+        expose_headers=["X-Config-Revision", "X-Request-ID", "X-Response-Time-Ms"],
     )
+    # Outermost: times the whole request, including CORS and the error handlers.
+    app.add_middleware(RequestTimingMiddleware, redis_getter=lambda scope: getattr(scope["app"].state, "redis", None))
 
     app.include_router(api_router, prefix="/api")
     return app

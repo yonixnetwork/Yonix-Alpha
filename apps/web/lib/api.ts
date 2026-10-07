@@ -31,9 +31,20 @@ export function getRefreshToken(): string | null {
 }
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  constructor(public status: number, message: string, public requestId: string | null = null) {
     super(message);
   }
+}
+
+/** A readable message for a failed response: the API's own detail when it
+ * sent one (it names its request ID), otherwise what the status means. A
+ * 502/504 comes from the reverse proxy, which gives up after 60 s. */
+export function failureMessage(status: number, detail: string | undefined, requestId: string | null): string {
+  if (detail) return detail;
+  const ref = requestId ? ` (request ${requestId})` : "";
+  if (status === 504) return `Request failed (504): the server did not answer within 60 s${ref}. It retries automatically.`;
+  if (status === 502 || status === 503) return `Request failed (${status}): the API is restarting or overloaded${ref}. It retries automatically.`;
+  return `Request failed (${status})${ref}`;
 }
 
 export async function login(username: string, password: string): Promise<TokenPair> {
@@ -78,7 +89,8 @@ export async function apiGet<T>(path: string, params?: Record<string, string | n
   const res = await apiFetch(`${path}${query}`);
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new ApiError(res.status, body.detail ?? `Request failed (${res.status})`);
+    const rid = res.headers.get("x-request-id");
+    throw new ApiError(res.status, failureMessage(res.status, describeDetail(body.detail), rid), rid);
   }
   return res.json() as Promise<T>;
 }

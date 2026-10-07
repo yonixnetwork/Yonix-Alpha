@@ -5,6 +5,7 @@ no duplicate entry, a stop-loss exit at the executable sell quote, the kill
 switch, and evidence recording. Proves the pipeline logic, not real-chain
 behaviour (NOT VERIFIED on chain)."""
 
+import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -668,3 +669,46 @@ async def test_robinhood_pons_pipeline_discovery_safety_entry_exit(session_facto
         p = (await session.execute(select(PaperPosition))).scalar_one()
         assert p.status == "closed" and p.exit_reason == "stop_loss"
         assert p.realized_pnl == p.proceeds_quote - entry_cost and p.realized_pnl < 0
+
+
+async def test_an_unpriced_position_keeps_its_reason_and_alerts_once(session_factory, redis_client, monkeypatch):
+    """Audit 2026-10-07: Robinhood paper positions showed only "stale price"
+    for days. A position without a sell quote cannot be marked or exited:
+    the reason and since-when are kept for the dashboard and one alert goes
+    out after 15 minutes; a quote coming back clears both."""
+    import app.worker as worker_mod
+
+    sent = []
+
+    async def fake_alert(service, event, detail=None, *a, **k):
+        sent.append((event, detail))
+        return True
+
+    monkeypatch.setattr(worker_mod, "alert_error", fake_alert)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    node, lp = fourmeme_node(now)
+    w = ChainWorker("bsc", lp.rpc, [lp], session_factory, redis_client)
+    s = settings()
+    await w.discovery_pass(s, now)
+    await w.safety_pass(s, now)
+    await record_paper_evidence(session_factory, now)
+    assert (await w.entry_pass(s, now))["opened"] == 1
+    async with session_factory() as session:
+        pid = (await session.execute(select(PaperPosition.id))).scalar_one()
+
+    node.on(lp.helper, "trySell(address,uint256)", ValueError("curve closed for sells"))
+    assert (await w.manage_pass(now))["unpriced"] == 1
+    reason = json.loads(await redis_client.get(paper.UNPRICED_KEY.format(pid=pid)))
+    assert "curve closed for sells" in reason["error"]
+    assert await redis_client.get(paper.UNPRICED_SINCE_KEY.format(pid=pid)) == now.isoformat()
+    await w.manage_pass(now + timedelta(minutes=14))
+    assert sent == []  # not yet
+    await w.manage_pass(now + timedelta(minutes=16))
+    await w.manage_pass(now + timedelta(minutes=17))
+    assert [e for e, _ in sent] == ["bsc.position_unpriced"]  # once
+    assert sent[0][1]["since"] == now.isoformat() and "cannot be marked or exited" in sent[0][1]["effect"]
+
+    set_quotes(node, lp, sell_back=Decimal("0.98"))
+    assert (await w.manage_pass(now + timedelta(minutes=18)))["managed"] == 1
+    assert await redis_client.get(paper.UNPRICED_SINCE_KEY.format(pid=pid)) is None
+    assert await redis_client.get(paper.UNPRICED_ALERT_KEY.format(pid=pid)) is None

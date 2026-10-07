@@ -389,6 +389,15 @@ async def open_position(session: AsyncSession, d: EntryDecision, row: EvmToken, 
     return p
 
 
+# Why an open position has no sell quote (data-evm worker), read by the API:
+# the latest reason (10 min TTL), since when it has been unpriced (cleared on
+# the next priced tick) and the once-only alert marker.
+UNPRICED_KEY = "yx:evm:unpriced:{pid}"
+UNPRICED_SINCE_KEY = "yx:evm:unpriced_since:{pid}"
+UNPRICED_ALERT_KEY = "yx:evm:unpriced_alerted:{pid}"
+UNPRICED_ALERT_AFTER_MINUTES = 15
+
+
 async def mark_price(adapter, p: PaperPosition) -> tuple[Decimal | None, Quote]:
     """Effective per-token price of selling the remaining tokens now."""
     remaining = p.remaining_quantity if p.remaining_quantity is not None else p.quantity

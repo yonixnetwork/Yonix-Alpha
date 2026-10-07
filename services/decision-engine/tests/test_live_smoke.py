@@ -94,8 +94,11 @@ async def test_unsafe_token_is_never_bought_and_the_stage_is_recorded(db_session
 
 
 async def test_small_wallet_is_risk_rejected_not_resized(db_session, redis_client):
-    """0.055 SOL minus the 0.05 reserve leaves 0.005: below the 0.01 minimum.
-    The smoke test never lowers a limit to make a buy happen."""
+    """0.055 SOL minus the 0.05 reserve leaves 0.005: too small to trade.
+    The smoke test never lowers a limit to make a buy happen. Since the
+    2026-10-07 audit the LIVE round trip's fixed costs are counted here too
+    (the smoke assessment had reused the paper input without them): at
+    0.005 SOL they alone exceed the stop, so the refusal names that."""
     curve = await seed_healthy_launch(redis_client, NOW)
     await _wallet(db_session, redis_client, "0.3")
     run = await _arm(db_session, redis_client)
@@ -106,7 +109,7 @@ async def test_small_wallet_is_risk_rejected_not_resized(db_session, redis_clien
     await evaluate_with_gate(db_session, redis_client, SMOKE_ENV, Sources(redis_client, FakeRpc(curve)), cand, NOW)
     assert (await db_session.execute(select(ExecutionOrder))).first() is None
     await db_session.refresh(run)
-    assert run.attempts[-1]["stage"] == "RISK_REJECTED" and "SIZE_BELOW_MINIMUM" in run.attempts[-1]["codes"]
+    assert run.attempts[-1]["stage"] == "RISK_REJECTED" and "STOP_INSIDE_COSTS" in run.attempts[-1]["codes"]
 
 
 async def test_expired_run_reports_no_test_execution_candidate(db_session, redis_client):

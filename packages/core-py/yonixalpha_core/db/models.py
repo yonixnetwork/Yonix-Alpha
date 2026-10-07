@@ -1577,7 +1577,8 @@ class CopyEvent(Base):
     __table_args__ = (UniqueConstraint("target_id", "source_event_id", name="uq_copy_events_target_source"),
                       Index("ix_copy_events_target_at", "target_id", "detected_at"),
                       Index("ix_copy_events_outcome_pending", "target_at",
-                            postgresql_where=text("outcome_at IS NULL AND side = 'BUY'")))
+                            postgresql_where=text("outcome_at IS NULL AND side = 'BUY'")),
+                      Index("ix_copy_events_outcome_done", "target_at", postgresql_where=text("outcome IS NOT NULL")))
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     target_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("copy_targets.id", ondelete="CASCADE"), nullable=False)

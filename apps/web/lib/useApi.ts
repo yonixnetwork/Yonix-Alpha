@@ -26,20 +26,33 @@ export function useApi<T>(path: string | null, params?: Params, opts: Options = 
   const [loading, setLoading] = useState(true);
   const paramsKey = JSON.stringify(params ?? {});
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // One request at a time per panel: a poll that fires while the previous
+  // request is still running is skipped instead of stacking a second one on
+  // a slow endpoint (audit 2026-10-07: stacked polls kept the API's
+  // database connections busy until unrelated pages timed out too).
+  // Keyed by path + params, so changing a filter still loads at once.
+  const inFlight = useRef<string | null>(null);
+  const latest = useRef<string | null>(null);  // an older filter's late answer never replaces the newer one
 
   const load = useCallback(async () => {
-    if (!path || opts.skip) return;
+    const key = `${path}?${paramsKey}`;
+    if (!path || opts.skip || inFlight.current === key) return;
+    inFlight.current = key;
+    latest.current = key;
     try {
       const result = await apiGet<T>(path, JSON.parse(paramsKey));
+      if (latest.current !== key) return;
       setData(result);
       setError(null);
     } catch (err) {
+      if (latest.current !== key) return;
       if (err instanceof ApiError && err.status === 401) {
         router.replace("/login");
         return;
       }
       setError(err instanceof ApiError ? err.message : "Failed to load data.");
     } finally {
+      if (inFlight.current === key) inFlight.current = null;
       setLoading(false);
     }
   }, [path, paramsKey, opts.skip, router]);

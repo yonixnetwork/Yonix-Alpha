@@ -74,7 +74,7 @@ function AccountCard({ a, onReset }: { a: PaperAccountOut; onReset: () => void }
 }
 
 interface PaperExecution {
-  settings: { entry_failure_pct: string; exit_failure_pct: string; use_measured_live_rates: boolean };
+  settings: { entry_failure_pct: string; exit_failure_pct: string; use_measured_live_rates: boolean; charge_live_fixed_costs: boolean };
   measured: Record<string, { orders: number; failed: number; failure_pct: string | null; usable: boolean }>;
   entry_pct: string;
   exit_pct: string;
@@ -84,11 +84,12 @@ interface PaperExecution {
 
 function ExecutionFailures() {
   const { data, error, setData } = useApi<PaperExecution>("/api/paper/execution-settings");
-  const [draft, setDraft] = useState<{ entry: string; exit: string; measured: boolean } | null>(null);
+  const [draft, setDraft] = useState<{ entry: string; exit: string; measured: boolean; fixed: boolean } | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   useEffect(() => {
-    if (data) setDraft({ entry: data.settings.entry_failure_pct, exit: data.settings.exit_failure_pct, measured: data.settings.use_measured_live_rates });
+    if (data) setDraft({ entry: data.settings.entry_failure_pct, exit: data.settings.exit_failure_pct, measured: data.settings.use_measured_live_rates,
+      fixed: data.settings.charge_live_fixed_costs });
   }, [data]);
   if (error) return <ErrorNotice error={error} />;
   if (!data || !draft) return null;
@@ -101,6 +102,7 @@ function ExecutionFailures() {
           entry_failure_pct: draft!.entry,
           exit_failure_pct: draft!.exit,
           use_measured_live_rates: draft!.measured,
+          charge_live_fixed_costs: draft!.fixed,
         }),
       );
       setSaved(true);
@@ -144,6 +146,15 @@ function ExecutionFailures() {
             <option value="true">yes</option>
             <option value="false">no</option>
           </select>
+        </div>
+        <div className="form-row">
+          <label htmlFor="pe-fixed">Charge Solana paper trades the fixed costs a LIVE trade pays</label>
+          <select id="pe-fixed" value={String(draft.fixed)} onChange={(e) => setDraft({ ...draft, fixed: e.target.value === "true" })}>
+            <option value="true">yes (recommended: paper sizes, refuses and books as LIVE would)</option>
+            <option value="false">no (paper ignores network / priority fees and rent)</option>
+          </select>
+          <div className="form-hint">The buy and sell network + priority fees and the rent reclaim fee, from the Live settings. Counted in the
+            risk plan (smaller size, FIXED_COSTS_EXCEED_RISK) and charged to the paper book.</div>
         </div>
       </div>
       <ErrorNotice error={saveError} />

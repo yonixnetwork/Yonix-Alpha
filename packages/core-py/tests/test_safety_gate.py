@@ -643,3 +643,19 @@ def test_manufactured_pump_high_applies_its_configured_action_default_warn():
     assert not blocked.executable and "MANUFACTURED_PUMP_PATTERN" in codes(blocked)
     low = decide(healthy(intel=_intel(manufactured_pump={**mp, "risk": "ELEVATED"})))
     assert "MANUFACTURED_PUMP_PATTERN" not in codes(low)
+
+
+def test_paper_counts_the_same_fixed_costs_as_live_when_set():
+    """Audit 2026-10-07 (paper vs live): with paper_execution
+    charge_live_fixed_costs the pipeline passes the LIVE round trip's fixed
+    costs for a PAPER target too; the plan then sizes exactly as LIVE does
+    and refuses what LIVE refuses."""
+    base = decide(_live()).plan
+    fixed = base.max_loss.value * Decimal("0.05")
+    live = decide(_live(fixed_cost_quote=fixed, fixed_cost_detail={"total": str(fixed)})).plan
+    a = decide(healthy(fixed_cost_quote=fixed, fixed_cost_detail={"total": str(fixed)}, paper_fixed_costs=True))
+    assert a.execution_target == ExecutionTarget.PAPER and a.plan.fixed_cost_quote == fixed
+    assert a.plan.position_size.value == live.position_size.value
+    assert a.plan.position_size.inputs["risk_budget_after_fixed_costs"] == a.plan.max_loss.value - fixed
+    over = decide(healthy(fixed_cost_quote=base.max_loss.value * Decimal("1.01"), paper_fixed_costs=True))
+    assert not over.executable and "FIXED_COSTS_EXCEED_RISK" in codes(over)

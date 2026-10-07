@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { Boxes, CircleSlash, ShieldCheck, ShieldQuestion, ShieldX } from "lucide-react";
 import { ObservationPanel, TokenObservations } from "@/components/EvmObservation";
+import { EvmBuyButton } from "@/components/EvmManualTrade";
 import { CoordinationDetail, CoordinationPanel, CoordinationPill } from "@/components/LaunchCoordination";
 import { SellButton } from "@/components/ManualTrade";
 import { PnlOutcome } from "@/components/Pnl";
@@ -60,7 +61,9 @@ function Positions({ chain, unit }: { chain: string; unit: string }) {
       {data && (
         <p className="muted small">
           Account: {data.accounts.map((a: J) => `${a.name} cash ${Number(a.cash).toFixed(4)} ${a.currency}`).join(" · ") || "not created yet"} ·
-          positions are marked at the executable sell quote of the remaining tokens (fees and taxes included)
+          positions are marked at the executable sell quote of the remaining tokens (fees and taxes included).
+          BUY / SELL here are PAPER: LIVE BUY / SELL on {unit === "BNB" ? "BSC" : "Robinhood Chain"} is unavailable because EVM live
+          execution is locked (watch-only) and no EVM trading wallet is configured (Wallets page).
         </p>
       )}
       {data && data.positions.length === 0 && <Empty>No open paper positions on this chain.</Empty>}
@@ -80,7 +83,14 @@ function Positions({ chain, unit }: { chain: string; unit: string }) {
                   <td>{formatDate(p.entry_at)}</td>
                   <td>{Number(p.entry_cost).toFixed(4)} <span className="unit">{unit}</span></td>
                   <td>{p.pnl?.value ? <>{price(p.pnl.value)} <span className="unit">{unit}</span></> : "—"}</td>
-                  <td><PnlOutcome pnl={p.pnl} currency={unit} /></td>
+                  <td><PnlOutcome pnl={p.pnl} currency={unit} />
+                    {p.unpriced && (
+                      <div className="small neg" role="status" title={p.unpriced.effect}>
+                        NO SELL QUOTE{p.unpriced.since ? ` since ${formatDate(p.unpriced.since)}` : ""}: {p.unpriced.reason}
+                        {p.exit_requested ? " (the requested sell waits for a quote)" : ""}
+                      </div>
+                    )}
+                  </td>
                   <td className="small">{p.pnl?.peak_pct != null ? `+${p.pnl.peak_pct}%` : "—"} / <span className={Number(p.pnl?.drawdown_pct) < 0 ? "neg" : ""}>{p.pnl?.drawdown_pct != null ? `${p.pnl.drawdown_pct}%` : "—"}</span></td>
                   <td className="mono small">{price(p.trailing_stop ?? p.stop_loss)}</td>
                   <td className="small">{p.venue?.launchpad} · {p.venue?.route}</td>
@@ -131,7 +141,7 @@ export default function EvmMarkets({ fixedChain, header = true }: { fixedChain?:
         {data && data.tokens.length > 0 && (
           <div className="table-scroll">
             <table className="data-table">
-              <thead><tr><th>Token</th><th>Launchpad</th><th>Category</th><th>Stage</th><th>Buys / sells (5m)</th><th>Buyers</th><th>Buy volume</th><th>Market cap</th><th>Safety</th><th>Coordination</th><th>Entry decision</th><th>Last trade</th></tr></thead>
+              <thead><tr><th>Token</th><th>Launchpad</th><th>Category</th><th>Stage</th><th>Buys / sells (5m)</th><th>Buyers</th><th>Buy volume</th><th>Market cap</th><th>Safety</th><th>Coordination</th><th>Entry decision</th><th>Last trade</th><th>Action</th></tr></thead>
               <tbody>
                 {data.tokens.map((t: J) => (
                   <tr key={t.token} onClick={() => setSelected(selected === t.token ? null : t.token)} style={{ cursor: "pointer" }}
@@ -150,6 +160,9 @@ export default function EvmMarkets({ fixedChain, header = true }: { fixedChain?:
                     <td><CoordinationPill action={t.coordination_action} status={t.coordination_status} /></td>
                     <td className="small"><Decision d={t.entry_decision} /></td>
                     <td>{formatDate(t.last_trade_at)}</td>
+                    <td onClick={(e) => e.stopPropagation()}>
+                      <EvmBuyButton chain={t.chain} token={t.token} disabledReason={null} />
+                    </td>
                   </tr>
                 ))}
               </tbody>

@@ -40,6 +40,8 @@ WALLET_TTL = 600
 WALLET_SECONDS = 60
 QUOTE_LOOKUPS_PER_PASS = 200  # Four.meme tokens without a recorded quote, per safety pass
 QUOTE_LOOKBACK = timedelta(days=14)  # the trade retention
+UNPRICED_KEY, UNPRICED_SINCE_KEY, UNPRICED_ALERT_KEY = paper.UNPRICED_KEY, paper.UNPRICED_SINCE_KEY, paper.UNPRICED_ALERT_KEY
+UNPRICED_ALERT_AFTER = timedelta(minutes=paper.UNPRICED_ALERT_AFTER_MINUTES)
 RPC_OUTAGE_ALERT_SECONDS = 120  # discovery failing on an unavailable RPC this long is alerted
 GAP_MAX_AGE = TRADE_RETENTION  # a skipped range older than this would only be pruned again
 GAP_MAX_ATTEMPTS = 30  # failed backfill chunks before a gap is FAILED (and alerted)
@@ -450,6 +452,8 @@ class ChainWorker:
                     ad = self.adapters.get(key)
                     if ad is None:
                         counts["unpriced"] += 1
+                        await self._note_unpriced(pid, p.symbol or p.asset_id,
+                                                  f"no {self.chain} adapter for launchpad {key!r}: cannot quote a sell", now)
                         continue
                     queued = ct.pending_partial_exit(p.plan)  # a SELL_ONLY copy target sold this token
                     extra = None
@@ -471,9 +475,9 @@ class ChainWorker:
                     await session.commit()
                 if r["status"] == "UNPRICED":
                     counts["unpriced"] += 1
-                    await self.redis.set(f"yx:evm:unpriced:{pid}", json.dumps({"error": r.get("error"), "at": now.isoformat()}),
-                                         ex=600)
+                    await self._note_unpriced(pid, p.symbol or p.asset_id, r.get("error"), now)
                     continue
+                await self.redis.delete(UNPRICED_SINCE_KEY.format(pid=pid), UNPRICED_ALERT_KEY.format(pid=pid))
                 counts["managed"] += 1
                 if r["exits"]:
                     await events.publish(self.redis, "trade.closed" if r["status"] == "CLOSED" else "trade.updated",
@@ -487,6 +491,20 @@ class ChainWorker:
                 log.warning("data-evm.manage_failed", chain=self.chain, position_id=str(pid), error=str(exc)[:160])
                 await alert_error(SERVICE, f"{self.chain}.manage_failed", {"position_id": str(pid), "error": str(exc)[:300]})
         return counts
+
+    async def _note_unpriced(self, pid, label: str, error: str | None, now: datetime) -> None:
+        """A position without a sell quote cannot be marked or exited (its
+        stop cannot fire): the reason and since-when are kept for the
+        dashboard, and one alert goes out once it lasts UNPRICED_ALERT_AFTER."""
+        await self.redis.set(UNPRICED_KEY.format(pid=pid), json.dumps({"error": error, "at": now.isoformat()}), ex=600)
+        since_key = UNPRICED_SINCE_KEY.format(pid=pid)
+        await self.redis.set(since_key, now.isoformat(), nx=True)
+        since = datetime.fromisoformat(await self.redis.get(since_key) or now.isoformat())
+        if now - since >= UNPRICED_ALERT_AFTER and await self.redis.set(UNPRICED_ALERT_KEY.format(pid=pid), "1", nx=True):
+            await alert_error(SERVICE, f"{self.chain}.position_unpriced",
+                              {"position": label, "since": since.isoformat(), "reason": (error or "unknown")[:300],
+                               "effect": "no sell quote: the position cannot be marked or exited (stop and take-profit "
+                                         "cannot fire) until a quote returns"})
 
     # --- evidence -----------------------------------------------------------------------------------
 
