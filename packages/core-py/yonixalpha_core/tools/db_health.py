@@ -10,8 +10,12 @@ Prints, in order:
   5. timings of the queries behind the pages that ended in 504 on
      2026-10-07 (ML Review, opportunity outcomes, EVM ML), each in its own
      read-only transaction with a 120 s limit
-  6. the API's own slow / failed requests (app.request_timing) and the ml
-     service's steps
+  6. the API's own slow / failed requests (app.request_timing), the review
+     pages' background results (apps/api review_cache: when each was
+     computed, how long it took, the last error) and the ml service's steps
+
+Use --skip-timings for a quick run: section 5 can take minutes on a busy
+server.
 
 Written for the 2026-10-07 audit. Nothing is written to the database; the
 timed queries run in READ ONLY transactions.
@@ -34,6 +38,7 @@ from yonixalpha_core.db.redis import make_redis
 
 TABLES_SHOWN = 15
 TIMING_LIMIT_MS = 120_000
+REVIEW_CACHE_PREFIX = "yx:api:cache:"  # apps/api app.api.review_cache.PREFIX
 SLOW_REQUESTS_KEY = "yx:api:slow_requests"  # app.request_timing.SLOW_KEY
 
 
@@ -108,7 +113,7 @@ def timings(now: datetime) -> list[tuple[str, Callable[[Any], Awaitable[Any]]]]:
     from sqlalchemy import func, select
 
     from yonixalpha_core import opportunities
-    from yonixalpha_core.db.models import CopyEvent, OpportunityOutcome, WalletTradeLabel
+    from yonixalpha_core.db.models import CopyEvent, EvmTrade, OpportunityOutcome, WalletTradeLabel
     from yonixalpha_core.ml import evm_samples
 
     week, fortnight = now - timedelta(days=7), now - timedelta(days=14)
@@ -128,6 +133,10 @@ def timings(now: datetime) -> list[tuple[str, Callable[[Any], Awaitable[Any]]]]:
     async def copy_outcomes(s):
         await s.execute(select(func.count()).where(CopyEvent.outcome.is_not(None), CopyEvent.target_at >= fortnight))
 
+    async def copy_poll(s):  # the shape of services/copy-engine target_trades
+        await s.execute(select(EvmTrade.event_id).where(EvmTrade.chain == "bsc", EvmTrade.at >= now - timedelta(minutes=10),
+                                                         func.lower(EvmTrade.trader).in_(["0x" + "0" * 40])))
+
     return [
         ("ML Review: ledger review counts (7 days)", lambda s: opportunities.review(s, week)),
         ("Opportunity outcomes: comparison (7 days)", lambda s: opportunities.comparison(s, week)),
@@ -136,6 +145,7 @@ def timings(now: datetime) -> list[tuple[str, Callable[[Any], Awaitable[Any]]]]:
         ("EVM ML: samples knowledge (14 days)", lambda s: evm_samples.knowledge(s, fortnight)),
         ("EVM ML: wallet label counts (14 days)", wallet_labels),
         ("EVM ML: copy outcomes count (14 days)", copy_outcomes),
+        ("Copy engine: one tick's target poll on BSC (runs every second)", copy_poll),
     ]
 
 
@@ -186,6 +196,23 @@ async def main(argv: list[str] | None = None) -> int:
                 e = json.loads(r)
                 print(f"  {e.get('at', '')[:19]} {e.get('status')} {e.get('ms'):>6} ms {e.get('method')} {e.get('path')} "
                       f"(request {e.get('request_id')})")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  not readable: {type(exc).__name__}")
+        print("\n   review pages, background results (apps/api review_cache)")
+        try:
+            shown = 0
+            async for k in redis.scan_iter(match=REVIEW_CACHE_PREFIX + "*:last", count=200):
+                k = k if isinstance(k, str) else k.decode()
+                base = k.removesuffix(":last")
+                v = json.loads(await redis.get(k) or "{}")
+                fresh = "fresh" if await redis.exists(base) else "stale"
+                running = " refreshing" if await redis.exists(base + ":lock") else ""
+                err = await redis.get(base + ":error")
+                print(f"  {base.removeprefix(REVIEW_CACHE_PREFIX)}: computed {str(v.get('cached_at', ''))[:19]} in "
+                      f"{v.get('compute_ms', '-')} ms, {fresh}{running}" + (f"; last refresh FAILED: {err}" if err else ""))
+                shown += 1
+            if not shown:
+                print("  none yet (computed when a review page is first opened)")
         except Exception as exc:  # noqa: BLE001
             print(f"  not readable: {type(exc).__name__}")
         print("\n   ml service steps")

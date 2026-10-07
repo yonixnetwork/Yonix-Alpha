@@ -10,7 +10,8 @@ class Base(DeclarativeBase):
     pass
 
 
-def make_engine(settings: Settings, *, statement_timeout_ms: int | None = None, pool_timeout_s: int | None = None):
+def make_engine(settings: Settings, *, statement_timeout_ms: int | None = None, pool_timeout_s: int | None = None,
+                pool_size: int = 10, max_overflow: int = 10):
     """statement_timeout_ms / pool_timeout_s: the dashboard API's limits
     (Settings.API_STATEMENT_TIMEOUT_MS / API_POOL_TIMEOUT_S); workers pass
     neither and keep the defaults (no statement limit, 30 s pool wait)."""
@@ -22,8 +23,8 @@ def make_engine(settings: Settings, *, statement_timeout_ms: int | None = None, 
     return create_async_engine(
         settings.database_url,
         pool_pre_ping=True,
-        pool_size=10,
-        max_overflow=10,
+        pool_size=pool_size,
+        max_overflow=max_overflow,
         echo=False,
         **kw,
     )

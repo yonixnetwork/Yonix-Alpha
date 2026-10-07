@@ -143,3 +143,18 @@ export function fmtDuration(seconds: number | null | undefined): string {
   if (seconds < 172800) return `${(seconds / 3600).toFixed(1)} h`;
   return `${(seconds / 86400).toFixed(1)} d`;
 }
+
+/** How old a background-computed review result is (apps/api review_cache):
+ * when it was computed, and whether a newer one is being computed or the
+ * last refresh failed. */
+export function ComputedAt({ data }: { data: { cached_at?: string; stale?: boolean; refresh_error?: string } | null | undefined }) {
+  if (!data?.cached_at) return null;
+  const mins = Math.max(0, Math.round((Date.now() - new Date(data.cached_at).getTime()) / 60000));
+  return (
+    <p className="muted">
+      Computed {new Date(data.cached_at).toLocaleString()} ({mins} min ago).
+      {data.stale && " A newer result is being computed in the background."}
+      {data.refresh_error && <span className="pill pill-warn" title={data.refresh_error}> last refresh failed</span>}
+    </p>
+  );
+}

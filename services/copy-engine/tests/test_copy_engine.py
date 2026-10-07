@@ -418,3 +418,19 @@ async def test_wallet_enrichment_step_is_off_until_switched_on(session_factory, 
     eng = CopyEngine(session_factory, redis_client, {}, clock,
                      settings=SimpleNamespace(NANSEN_API_KEY="nk", MADEONSOL_API_KEY="mk"))
     assert await eng.enrich() == {"profiles": {"status": "OFF"}, "discovery": {"status": "OFF"}}
+
+
+async def test_the_per_tick_target_poll_is_served_by_an_index(db_session):
+    """Server 2026-10-07: the copy poll compared lower(trader), which no index
+    serves, so every tick on each chain read all of evm_trades (4.4 M rows).
+    The (chain, at) index (migration 0042) bounds it to the last minutes."""
+    from sqlalchemy import text
+    from sqlalchemy.dialects import postgresql
+
+    from app.engine import target_trades
+
+    q = target_trades("bsc", [WHALE.lower()], datetime.now(timezone.utc) - timedelta(minutes=10))
+    sql = str(q.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+    await db_session.execute(text("SET LOCAL enable_seqscan = off"))
+    plan = "\n".join(r[0] for r in (await db_session.execute(text("EXPLAIN " + sql))).all())
+    assert "ix_evm_trades_chain_at" in plan, plan

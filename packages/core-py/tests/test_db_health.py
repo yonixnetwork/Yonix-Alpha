@@ -28,6 +28,9 @@ async def _setup():
     await r.delete(db_health.SLOW_REQUESTS_KEY)
     await r.lpush(db_health.SLOW_REQUESTS_KEY, json.dumps({"at": "2026-10-07T10:26:00", "status": 503, "ms": 25012,
                                                           "method": "GET", "path": "/api/ml/evm", "request_id": "abc123"}))
+    await r.delete(db_health.REVIEW_CACHE_PREFIX + "ml-evm:14:last")
+    await r.set(db_health.REVIEW_CACHE_PREFIX + "ml-evm:14:last",
+                json.dumps({"cached_at": "2026-10-07T13:40:00+00:00", "compute_ms": 81234}))
     await r.aclose()
 
 
@@ -38,6 +41,7 @@ def test_runs_read_only_end_to_end(capsys):
     for part in ("1. Host", "load average", "2. Database connections", "max_connections", "3. Lock waits",
                  "4. Largest tables", "opportunity_outcomes", "5. Timed page queries",
                  "ML Review: ledger review counts (7 days):", "EVM ML: copy outcomes count (14 days):",
-                 "503  25012 ms GET /api/ml/evm (request abc123)", "Nothing was written."):
+                 "503  25012 ms GET /api/ml/evm (request abc123)", "Copy engine: one tick's target poll on BSC",
+                 "ml-evm:14: computed 2026-10-07T13:40:00 in 81234 ms, stale", "Nothing was written."):
         assert part in out, part
     assert "FAILED" not in out.split("5. Timed page queries")[1].split("6.")[0]

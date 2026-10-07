@@ -130,6 +130,11 @@ class Settings(BaseSettings):
     # Longest wait for a free pooled connection before the request fails with
     # DB_POOL_EXHAUSTED instead of queueing until the proxy gives up.
     API_POOL_TIMEOUT_S: int = 10
+    # The review pages' aggregates (ML Review, opportunity comparison, EVM ML)
+    # are computed in the background on their own small pool with this longer
+    # limit; a request is answered from the last result meanwhile
+    # (apps/api review_cache). Server 2026-10-07: they took over 120 s under load.
+    API_REVIEW_STATEMENT_TIMEOUT_MS: int = 240_000
 
     # Trading safety — both must be true, independently, before any live order
     # can be placed. See docs/SECURITY.md. No engine exists yet in Phase 1, so

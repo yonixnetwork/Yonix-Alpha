@@ -51,6 +51,13 @@ SOLANA_HISTORY = timedelta(hours=2, minutes=45)  # the pump stream keeps a mint'
 EVM_HISTORY = timedelta(days=13)  # evm_trades are pruned after 14 days
 
 
+def target_trades(chain: str, wallets_lower: list[str], since: datetime):
+    """The targets' trades on one chain since `since`, oldest first. Served by
+    ix_evm_trades_chain_at (migration 0042): it runs every tick per chain."""
+    return select(EvmTrade).where(EvmTrade.chain == chain, EvmTrade.at >= since,
+                                  func.lower(EvmTrade.trader).in_(wallets_lower)).order_by(EvmTrade.at)
+
+
 def evm_copy_engine(chain: str) -> str:
     return f"evm_copy_{chain}"
 
@@ -164,9 +171,7 @@ class CopyEngine:
         by_wallet = {t.wallet.lower(): t for t in targets}
         now = self.now()
         async with self.session_factory() as session:
-            trades = (await session.execute(select(EvmTrade).where(
-                EvmTrade.chain == chain, func.lower(EvmTrade.trader).in_(list(by_wallet)),
-                EvmTrade.at >= now - LOOKBACK).order_by(EvmTrade.at))).scalars().all()
+            trades = (await session.execute(target_trades(chain, list(by_wallet), now - LOOKBACK))).scalars().all()
         n = 0
         for t in trades:
             target = by_wallet[t.trader.lower()]

@@ -251,14 +251,21 @@ async def opportunities_list(traded: bool | None = None, stage: str | None = Non
         for r in rows]})
 
 
+def _review_sessions(request: Request):
+    """The review pool (longer statement limit, app.main), or the request pool
+    where none was set up."""
+    st = request.app.state
+    return getattr(st, "review_session_factory", None) or st.db_session_factory
+
+
 @router.get("/ledger-review")
-async def ledger_review(days: int = Query(7, ge=1, le=90), db: AsyncSession = Depends(get_db),
+async def ledger_review(request: Request, days: int = Query(7, ge=1, le=90),
                         redis: Redis = Depends(get_redis), _: str = Depends(get_current_username)) -> dict:
     """Observed / traded / rejected, counterfactual classes, exit classes,
     recovery cases, signal vs execution quality, snipe latency, and the
     shadow models' holdout metrics. Review data only: nothing here changes a
     live rule or a position size."""
-    async def compute() -> dict:
+    async def compute(db: AsyncSession) -> dict:
         since = datetime.now(timezone.utc) - timedelta(days=days)
         out = await opportunities.review(db, since)
         shadow = (await db.execute(select(ModelVersion).where(ModelVersion.status == "shadow")
@@ -270,17 +277,17 @@ async def ledger_review(days: int = Query(7, ge=1, le=90), db: AsyncSession = De
         out["categories"] = list(opportunities.REVIEW_CATEGORIES)
         return out
 
-    return await review_cache.cached(redis, f"ledger-review:{days}", compute)
+    return await review_cache.cached(redis, f"ledger-review:{days}", compute, _review_sessions(request))
 
 
 @router.get("/opportunities/compare")
-async def opportunities_compare(days: int = Query(7, ge=1, le=90), db: AsyncSession = Depends(get_db),
+async def opportunities_compare(request: Request, days: int = Query(7, ge=1, le=90),
                                 redis: Redis = Depends(get_redis), _: str = Depends(get_current_username)) -> dict:
     """Winning vs losing trades and traded vs rejected-then-up opportunities:
     averages of the decision-time features. Review data only."""
     since = datetime.now(timezone.utc) - timedelta(days=days)
     return await review_cache.cached(redis, f"opportunities-compare:{days}",
-                                     lambda: opportunities.comparison(db, since))
+                                     lambda db: opportunities.comparison(db, since), _review_sessions(request))
 
 
 @router.get("/steps")
@@ -299,11 +306,13 @@ async def ml_steps(redis: Redis = Depends(get_redis), _: str = Depends(get_curre
 
 
 @router.get("/evm")
-async def evm_knowledge(days: int = Query(14, ge=1, le=90), db: AsyncSession = Depends(get_db),
+async def evm_knowledge(request: Request, days: int = Query(14, ge=1, le=90),
                         redis: Redis = Depends(get_redis), _: str = Depends(get_current_username)) -> dict:
     """EVM and wallet-behaviour ML; aggregated over days of samples, so it is
-    served from the short review cache (app.api.review_cache)."""
-    return await review_cache.cached(redis, f"ml-evm:{days}", lambda: _evm_knowledge(db, days))
+    computed in the background and served from the review cache
+    (app.api.review_cache)."""
+    return await review_cache.cached(redis, f"ml-evm:{days}", lambda db: _evm_knowledge(db, days),
+                                     _review_sessions(request))
 
 
 async def _evm_knowledge(db: AsyncSession, days: int) -> dict:

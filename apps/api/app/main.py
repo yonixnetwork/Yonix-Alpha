@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import exc as sa_exc
 from sqlalchemy import select
 
+from app.api import review_cache
 from app.api.router import api_router
 from app.config_revision import ConfigRevisionMiddleware
 from app.request_timing import RequestTimingMiddleware, request_id_of
@@ -68,11 +69,16 @@ async def lifespan(app: FastAPI):
     engine = make_engine(settings, statement_timeout_ms=settings.API_STATEMENT_TIMEOUT_MS,
                          pool_timeout_s=settings.API_POOL_TIMEOUT_S)
     session_factory = make_session_factory(engine)
+    # The review aggregates run in the background on their own two connections
+    # with a longer limit, never on the request pool (app.api.review_cache).
+    review_engine = make_engine(settings, statement_timeout_ms=settings.API_REVIEW_STATEMENT_TIMEOUT_MS,
+                                pool_timeout_s=settings.API_POOL_TIMEOUT_S, pool_size=1, max_overflow=1)
     redis = make_redis(settings)
 
     app.state.settings = settings
     app.state.engine = engine
     app.state.db_session_factory = session_factory
+    app.state.review_session_factory = make_session_factory(review_engine)
     app.state.redis = redis
     # Outbound calls made by the API itself (provider TEST CONNECTION, EVM wallet balances).
     http = httpx.AsyncClient(headers={"User-Agent": "yonixalpha-api"})
@@ -84,8 +90,10 @@ async def lifespan(app: FastAPI):
     log.info("api.startup", app_env=settings.APP_ENV, trading_enabled=settings.TRADING_ENABLED)
     yield
 
+    await review_cache.shutdown()
     await http.aclose()
     await engine.dispose()
+    await review_engine.dispose()
     await redis.aclose()
     log.info("api.shutdown")
 

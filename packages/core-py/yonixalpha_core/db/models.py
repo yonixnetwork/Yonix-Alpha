@@ -1247,7 +1247,8 @@ class EvmTrade(Base):
 
     __tablename__ = "evm_trades"
     __table_args__ = (Index("ix_evm_trades_token_at", "chain", "token", "at"),
-                      Index("ix_evm_trades_trader_at", "trader", "at"))
+                      Index("ix_evm_trades_trader_at", "trader", "at"),
+                      Index("ix_evm_trades_chain_at", "chain", "at"))  # migration 0042
 
     event_id: Mapped[str] = mapped_column(String(96), primary_key=True)
     chain: Mapped[str] = mapped_column(String(16), nullable=False)

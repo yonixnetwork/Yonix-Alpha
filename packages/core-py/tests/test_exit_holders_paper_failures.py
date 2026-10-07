@@ -127,3 +127,38 @@ async def test_historical_excursion_needs_enough_closed_trades(session):
     await session.commit()
     p75, n = await historical_excursion(session, "solana_fresh")
     assert n == 30 and p75 == Decimal("0.22")  # sorted[22] of 0.00..0.29
+
+
+async def test_retries_of_one_stuck_exit_count_once(session):
+    """2026-10-07: 6 450 failed retries of one position's sell had pushed the
+    measured exit failure rate to the 50 % cap. A position's sell counts once,
+    decided by its first final attempt; its later retries are not trials."""
+    from yonixalpha_core.db.models import PaperAccount, PaperPosition
+
+    acct = PaperAccount(name="r", quote_currency="SOL", starting_balance=10, cash_balance=10, reset_at=NOW)
+    session.add(acct)
+    await session.flush()
+    positions = [PaperPosition(symbol="T", provider="paper", side="LONG", entry_price=Decimal(1), quantity=Decimal(1),
+                               stop_loss=Decimal("0.9"), take_profit=[], status="closed", entry_at=NOW, exit_at=NOW,
+                               account_id=acct.id, engine="solana_fresh") for _ in range(20)]
+    session.add_all(positions)
+    await session.flush()
+    k = 0
+    for i, p in enumerate(positions):
+        first = "FAILED" if i == 0 else "CONFIRMED"
+        o = _order(k, "SELL", first)
+        o.position_id, o.created_at = p.id, NOW
+        session.add(o)
+        k += 1
+    for j in range(300):  # the stuck position keeps failing, then one retry confirms
+        o = _order(k, "SELL", "FAILED" if j < 299 else "CONFIRMED")
+        o.position_id, o.created_at = positions[0].id, NOW + timedelta(seconds=j + 1)
+        session.add(o)
+        k += 1
+    for j in range(5):  # orders without a position still count one by one
+        session.add(_order(k, "SELL", "FAILED"))
+        k += 1
+    await session.commit()
+    m = (await paper_execution.measured_live_rates(session))["SELL"]
+    assert (m["orders"], m["failed"]) == (25, 6)
+    assert m["failure_pct"] == Decimal("24.00") and m["usable"]
