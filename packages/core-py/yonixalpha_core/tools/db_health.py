@@ -296,8 +296,11 @@ async def main(argv: list[str] | None = None) -> int:
             from yonixalpha_core.ml import steps
 
             for name, st in sorted((await steps.read(redis)).items()):
-                print(f"  {name}: {st.get('state')} started {str(st.get('started_at', ''))[:19]} "
-                      f"seconds {st.get('seconds', '-')}")
+                line = (f"  {name}: {st.get('state')}, last run {str(st.get('started_at') or '-')[:19]} "
+                        f"({st.get('seconds', '-')} s), last OK {str(st.get('last_ok_at') or '-')[:19]}")
+                if st.get("state") == "SKIPPED":
+                    line += f"\n      skipped {str(st.get('skipped_at') or '')[:19]}: {str(st.get('reason') or '')[:160]}"
+                print(line)
         except Exception as exc:  # noqa: BLE001
             print(f"  not readable: {type(exc).__name__}")
     finally:

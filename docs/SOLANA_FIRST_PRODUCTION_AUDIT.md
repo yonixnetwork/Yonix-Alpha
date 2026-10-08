@@ -227,6 +227,14 @@ Five existing tests now set `SYSTEM_PROFILE=MULTI_CHAIN` or `COPY_TRADING_ENABLE
 
 Results after the deploy: **NOT VERIFIED** until the operator's output is seen. To compare: load, RAM available, swap, Postgres CPU and the Solana decision median, against section 2.
 
+### First deploy (2026-10-08 22:06, operator output)
+
+- `db_health` showed the profile correctly: `system profile SOLANA_ONLY: chains solana; copy trading off; ML scope SOLANA; compose profiles none`, with data-evm and copy-engine listed as DISABLED. **VERIFIED**.
+- But data-evm (40.6 % CPU, 128 MB) and copy-engine were **still running**, and deploy.sh printed neither "System profile" nor "Stopping". Cause: deploy.sh updates itself with `git merge` and bash keeps reading the file it opened, so the previous version's steps ran. Reproduced locally with a two-commit repository. **VERIFIED**.
+- Fix: after pulling, deploy.sh re-runs the pulled version of itself (`DEPLOY_PULLED`). Also verified locally. The next deploy (the old script still runs once, but its steps already include the stop) stops both workers.
+- Solana pipeline at 22:06: 149 launches and 159 decisions in the last hour, median decision 514 ms, load 3.37 with data-evm still at 40 %. Not yet comparable: measure again after the workers stop.
+- ML steps all read SKIPPED. That is the hourly schedule after the restart (each step last ran 21:44). `db_health` now prints the reason and the last OK time.
+
 ## 22. Not done / open
 
 - Server confirmation of the disabled workers and the resource saving: pending the section 21 output.

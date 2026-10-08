@@ -33,9 +33,17 @@ OPTIONAL_SERVICES="data-evm:evm copy-engine:copy"
 active_profiles() { bash scripts/compose-profiles.sh .env; }
 
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-echo "==> Pulling latest ${BRANCH}"
-git fetch origin "${BRANCH}"
-git merge --ff-only "origin/${BRANCH}"
+if [ -z "${DEPLOY_PULLED:-}" ]; then
+    echo "==> Pulling latest ${BRANCH}"
+    git fetch origin "${BRANCH}"
+    git merge --ff-only "origin/${BRANCH}"
+    # Run the deploy steps of the version just pulled: bash keeps reading the
+    # file it opened, so without this a deploy that updates this script runs
+    # the previous version's steps (2026-10-08: the system-profile stop of
+    # data-evm / copy-engine was skipped that way).
+    export DEPLOY_PULLED=1
+    exec bash "${REPO_ROOT}/scripts/deploy.sh" "$@"
+fi
 
 # DEPLOY_PULL=1 also pulls newer base images (python:3.12-slim, node:22-slim,
 # nginx, postgres:16-alpine, redis:7-alpine, certbot): the same major

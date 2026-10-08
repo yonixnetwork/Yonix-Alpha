@@ -114,13 +114,16 @@ FROM paper_positions WHERE engine LIKE 'solana%' AND entry_at >= :since
 GROUP BY 1 ORDER BY 1
 """
 
+# The rule label as ML Review shows it (opportunities.review): the first
+# reason up to its first ":" or " (", at most 60 characters.
 MISSED_SQL = """
-SELECT coalesce(nullif(split_part(reasons->>0, ':', 1), ''), '?') AS rule, count(*) AS n,
-       percentile_cont(0.5) WITHIN GROUP (ORDER BY peak_pct) AS median_peak_pct
+SELECT stage, decision,
+       left(coalesce(nullif(split_part(split_part(reasons->>0, ':', 1), ' (', 1), ''), '?'), 60) AS rule,
+       count(*) AS n, percentile_cont(0.5) WITHIN GROUP (ORDER BY peak_pct) AS median_peak_pct
 FROM opportunity_outcomes
 WHERE decided_at >= :since AND engine LIKE 'solana%' AND traded IS false
   AND analysis->'counterfactual'->>'classification' = 'MISSED_WIN'
-GROUP BY 1 ORDER BY 2 DESC LIMIT 15
+GROUP BY 1, 2, 3 ORDER BY 4 DESC LIMIT 15
 """
 
 FALSE_POSITIVE_SQL = f"""
@@ -213,7 +216,8 @@ async def report(session: AsyncSession, days: int = 7, now: datetime | None = No
                            for r in (await session.execute(text(EXECUTION_SQL), p)).all()],
     }
     if outcomes:
-        out["missed_winners_by_rule"] = [{"rule": r.rule, "count": int(r.n), "median_peak_pct": _f(r.median_peak_pct, 1)}
+        out["missed_winners_by_rule"] = [{"stage": r.stage, "decision": r.decision, "rule": r.rule, "count": int(r.n),
+                                          "median_peak_pct": _f(r.median_peak_pct, 1)}
                                          for r in (await session.execute(text(MISSED_SQL), p)).all()]
         fp: dict[str, dict[str, int]] = {}
         for r in (await session.execute(text(FALSE_POSITIVE_SQL), p)).all():
