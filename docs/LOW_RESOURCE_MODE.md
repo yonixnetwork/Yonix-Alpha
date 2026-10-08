@@ -20,10 +20,25 @@ says NOT MEASURED.
 | Database | evm_trades 3.7 GB, risk_assessments 3.3 GB, opportunity_outcomes 2.8 GB, market_snapshots 1.8 GB, copy_events 0.9 GB, launch_buyers 0.9 GB (about 16 GB in all) |
 | Redis | capped at 256 MB, `volatile-lru` (only keys with a TTL can be evicted; the kill switch has none) |
 
-### Top memory consumers / top CPU consumers
-NOT MEASURED per process: no `docker stats` output yet. Each service reports `rss_mb` in its heartbeat, and with this
-change also `cpu_s`. System Health (Server resources) and `db_health` now print both per service. For the per-container
-view, run `docker stats --no-stream` (command in section 4).
+### Top memory consumers / top CPU consumers (`docker stats --no-stream`, 2026-10-08 13:27, after PR #56)
+One reading, not an average.
+
+| Container | CPU | Memory |
+|---|---|---|
+| copy-engine | 60.7 % | 147 MB |
+| postgres | 37.6 % | 320 MB |
+| data-evm | 27.4 % | 116 MB |
+| api | 20.0 % | 63 MB |
+| engine-solana-discovery | 10.2 % | 48 MB |
+| redis | 9.3 % | 262 MB (its cap is 256 MB of data: it is evicting keys that have a TTL) |
+| paper-trading | 3.2 % | 80 MB |
+| data-solana | 2.0 % | 29 MB |
+| decision-engine | 1.8 % | 45 MB |
+| web, ml (between steps), reverse-proxy, certbot | 0 to 1.2 % | 2 to 18 MB |
+
+The copy engine was the largest CPU user at that moment, ahead of Postgres. The Solana trading services (data-solana,
+discovery, decision-engine, paper-trading) used about 17 % of one CPU together. Each service also reports `rss_mb` and,
+with this change, `cpu_s` in its heartbeat; System Health and `db_health` print both.
 
 ### Top database queries (pg_stat_activity, 2026-10-07)
 | Query | Time | Owner | Status |
@@ -99,16 +114,23 @@ Rollback of this change: set the mode NORMAL and copy trading ACTIVE in the dash
 previous commit. Removing the `command:` lines restores the Postgres defaults.
 
 ## 5. After deployment (to be filled from the measurements; nothing estimated)
-| | Before (2026-10-07 22:00) | After PR #56 | After low-resource mode |
+| | Before (2026-10-07 22:00) | After PR #56 (2026-10-08 13:27) | After low-resource mode |
 |---|---|---|---|
-| RAM available | 345 MB | | |
-| Swap used | 1 298 MB | | |
-| Load 1 / 5 / 15 | 9.82 / 7.95 / 7.30 | | |
-| Statements > 2 s | 9 | | |
-| Dashboard slowest request | 48.5 s (`/api/chains/solana`, before PR #55) | | |
-| 503 / 504 count (slow-request list) | 2 x 503 at 15:54 | | |
-| Solana median decision time | NOT MEASURED (new line in db_health) | | |
-| Copy detection median BSC / Robinhood | 111 s / 64 s | | n/a (suspended) |
+| RAM available | 345 MB | 431 MB | |
+| Swap used | 1 298 MB | 1 459 MB | |
+| Load 1 / 5 / 15 | 9.82 / 7.95 / 7.30 | 6.82 / 7.34 / 7.27 | |
+| Statements > 2 s | 9 | 2 | |
+| EVM / wallet ML step | RUNNING for over 50 min | 1 028 s | |
+| Dashboard slowest request | 48.5 s (`/api/chains/solana`, before PR #55) | 27.0 s (`/api/evm/tokens`); `/api/chains/solana` 4.9 to 8.2 s | |
+| 503 count (last 20 slow requests) | 2 at 15:54 | 3 (`/api/control/execution-funnel`, `/api/evm/coordination/summary`, `/api/evm/observations`) | |
+| EVM trade feed age (BSC / Robinhood) | NOT MEASURED | 59 s / 60 s | |
+| Solana median decision time | NOT MEASURED | NOT MEASURED (the pipeline line ships with this change) | |
+| Copy detection median BSC / Robinhood | 111 s / 64 s | 95 s / 62 s | n/a (suspended) |
+
+Notes on the PR #56 reading. About 60 s of the copy delay is the EVM feed itself: data-evm stores trades about a minute
+after they happen, so copying cannot be faster than that. The Odyssey cursors (Robinhood) are about 4.9 days old; the
+operator marked that venue inactive. Redis is at its memory cap. New slow pages to look at next: `/api/evm/tokens`,
+`/api/evm/observations`, `/api/evm/coordination/summary`, `/api/control/execution-funnel`.
 
 ## 6. For 8 GB later (reassess after measuring)
 `shared_buffers=2GB`, `effective_cache_size=5GB`, `work_mem=16MB`, `maintenance_work_mem=256MB`,
