@@ -1000,6 +1000,12 @@ class OpportunityOutcome(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
+# ML Review lists of losing trades / rejected-then-up (migration 0044)
+Index("ix_opportunity_outcomes_losses", OpportunityOutcome.decided_at,
+      postgresql_where=OpportunityOutcome.loss_analysis.is_not(None))
+Index("ix_opportunity_outcomes_rejected_up", OpportunityOutcome.decided_at,
+      postgresql_where=text("traded IS false AND peak_pct >= 30"))
+
 
 class LaunchBuyer(Base):
     """One early buyer of a launch the system decided on (yonixalpha_core.

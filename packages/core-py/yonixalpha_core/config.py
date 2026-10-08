@@ -155,9 +155,12 @@ class Settings(BaseSettings):
     COPY_MAX_CPU_LOAD: float = 1.0  # load average (1 min) per CPU
     COPY_MAX_SWAP_USAGE_MB: int = 256
     COPY_MAX_DB_LATENCY_MS: int = 250
-    # ML training (not inference) in LOW_RESOURCE mode: at most once per this
-    # many hours, and skipped while the resource level is CRITICAL.
-    ML_TRAINING_INTERVAL_LOW_RESOURCE_H: int = 24
+    # ML training (not inference) in LOW_RESOURCE mode. Memecoin ML (Solana,
+    # BSC, Robinhood) keeps its normal schedule and only waits while the
+    # resource level is CRITICAL (checked again within the hour); copy-trading
+    # wallet ML pauses with copy trading. >0: train at most once per this many
+    # hours instead (operator, 2026-10-08: memecoin ML must keep working).
+    ML_TRAINING_INTERVAL_LOW_RESOURCE_H: int = 0
     # Database connections per worker process (the API sets its own): kept
     # open / extra allowed in bursts. Each Postgres connection is a process.
     DB_POOL_SIZE: int = 5
