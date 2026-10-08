@@ -13,6 +13,11 @@ os.environ.setdefault(
     "DATABASE_URL", "postgresql+asyncpg://yonixalpha:yonixalpha_test_pw@localhost:5432/yonixalpha_test"
 )
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/15")
+# The host resource level (yonixalpha_core.resources) must not depend on how
+# busy the test machine is: nothing here is CRITICAL unless a test says so.
+os.environ.setdefault("RESOURCE_CRITICAL_AVAILABLE_MB", "0")
+os.environ.setdefault("RESOURCE_CRITICAL_LOAD_PER_CPU", "1000")
+os.environ.setdefault("RESOURCE_CRITICAL_MEMORY_PRESSURE_PCT", "101")
 
 from yonixalpha_core.security import hash_password  # noqa: E402
 

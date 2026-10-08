@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
 from sqlalchemy import func, select
@@ -13,6 +14,7 @@ from app.api.util import audit, jsonable, user_id
 from app.schemas.common import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, Page
 from app.schemas.ml import MLStatsOut, ModelVersionOut
 from yonixalpha_core import events, opportunities
+from yonixalpha_core.config import get_settings
 from yonixalpha_core.db.models import DataQualityEvent, MLFeatureSnapshot, ModelVersion, OpportunityOutcome
 from yonixalpha_core.ml import registry
 from yonixalpha_core.ml.gate_features import ACTIVE_MODELS, DRIFT_FLAG_PREFIX, ENGINES_FOR_MODEL, FEATURE_VERSION, FEATURES_FOR_MODEL
@@ -251,6 +253,17 @@ async def opportunities_list(traded: bool | None = None, stage: str | None = Non
         for r in rows]})
 
 
+async def _review(request: Request, redis: Redis, key: str, compute, refresh: bool):
+    """A review result from the background cache (app.api.review_cache):
+    never computed inside the request; 202 while there is none yet."""
+    st = request.app.state
+    settings = getattr(st, "settings", None) or get_settings()
+    reason = await review_cache.defer_reason(st, settings, explicit=refresh)
+    out = await review_cache.cached(redis, key, compute, _review_sessions(request), refresh=refresh,
+                                    defer_reason=reason)
+    return JSONResponse(status_code=202, content=jsonable(out)) if review_cache.pending(out) else out
+
+
 def _review_sessions(request: Request):
     """The review pool (longer statement limit, app.main), or the request pool
     where none was set up."""
@@ -259,7 +272,7 @@ def _review_sessions(request: Request):
 
 
 @router.get("/ledger-review")
-async def ledger_review(request: Request, days: int = Query(7, ge=1, le=90),
+async def ledger_review(request: Request, days: int = Query(7, ge=1, le=90), refresh: bool = Query(False),
                         redis: Redis = Depends(get_redis), _: str = Depends(get_current_username)) -> dict:
     """Observed / traded / rejected, counterfactual classes, exit classes,
     recovery cases, signal vs execution quality, snipe latency, and the
@@ -277,17 +290,17 @@ async def ledger_review(request: Request, days: int = Query(7, ge=1, le=90),
         out["categories"] = list(opportunities.REVIEW_CATEGORIES)
         return out
 
-    return await review_cache.cached(redis, f"ledger-review:{days}", compute, _review_sessions(request))
+    return await _review(request, redis, f"ledger-review:{days}", compute, refresh)
 
 
 @router.get("/opportunities/compare")
-async def opportunities_compare(request: Request, days: int = Query(7, ge=1, le=90),
+async def opportunities_compare(request: Request, days: int = Query(7, ge=1, le=90), refresh: bool = Query(False),
                                 redis: Redis = Depends(get_redis), _: str = Depends(get_current_username)) -> dict:
     """Winning vs losing trades and traded vs rejected-then-up opportunities:
     averages of the decision-time features. Review data only."""
     since = datetime.now(timezone.utc) - timedelta(days=days)
-    return await review_cache.cached(redis, f"opportunities-compare:{days}",
-                                     lambda db: opportunities.comparison(db, since), _review_sessions(request))
+    return await _review(request, redis, f"opportunities-compare:{days}",
+                         lambda db: opportunities.comparison(db, since), refresh)
 
 
 @router.get("/steps")
@@ -301,18 +314,19 @@ async def ml_steps(redis: Redis = Depends(get_redis), _: str = Depends(get_curre
                      "intervals_s": {"solana_training": 3600, "gate_models": 3600, "solana_shadow": 3600,
                                      "ablation": 3600, "frozen_validation": 3600, "evm_wallet_ml": 1800},
                      "note": "Solana steps run one after another every hour; EVM / wallet ML runs in its own loop "
-                             "every 30 minutes, so a slow Solana step cannot hold it up. Absent: not run since the "
-                             "ml service started with this version."})
+                             "every 30 minutes, so a slow Solana step cannot hold it up. In LOW_RESOURCE mode "
+                             "training runs at most once a day and never while the server is CRITICAL; SKIPPED "
+                             "says why (ML inference in the decision engine is not affected). Absent: not run since "
+                             "the ml service started with this version."})
 
 
 @router.get("/evm")
-async def evm_knowledge(request: Request, days: int = Query(14, ge=1, le=90),
+async def evm_knowledge(request: Request, days: int = Query(14, ge=1, le=90), refresh: bool = Query(False),
                         redis: Redis = Depends(get_redis), _: str = Depends(get_current_username)) -> dict:
     """EVM and wallet-behaviour ML; aggregated over days of samples, so it is
     computed in the background and served from the review cache
     (app.api.review_cache)."""
-    return await review_cache.cached(redis, f"ml-evm:{days}", lambda db: _evm_knowledge(db, days),
-                                     _review_sessions(request))
+    return await _review(request, redis, f"ml-evm:{days}", lambda db: _evm_knowledge(db, days), refresh)
 
 
 async def _evm_knowledge(db: AsyncSession, days: int) -> dict:

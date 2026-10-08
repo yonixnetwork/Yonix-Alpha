@@ -43,6 +43,7 @@ def test_runs_read_only_end_to_end(capsys):
                  "ML Review: ledger review counts (7 days):", "EVM ML: copy outcomes count (14 days):",
                  "503  25012 ms GET /api/ml/evm (request abc123)", "Copy engine: one tick's target poll on BSC",
                  "ml-evm:14: computed 2026-10-07T13:40:00 in 81234 ms, stale",
-                 "bsc: newest stored trade none", "EVM trade feed", "Nothing was written."):
+                 "bsc: newest stored trade none", "EVM trade feed", "resource mode LOW_RESOURCE (default)",
+                 "copy trading SUSPENDED", "Solana pipeline, last hour", "decisions 0 (traded 0)", "redis:", "Nothing was written."):
         assert part in out, part
     assert "FAILED" not in out.split("5. Timed page queries")[1].split("6.")[0]

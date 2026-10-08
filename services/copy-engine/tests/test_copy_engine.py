@@ -476,3 +476,37 @@ async def test_adapter_refresh_reads_only_new_or_traded_tokens_between_full_read
     ad.curves.clear()
     clock.t += timedelta(hours=1)
     assert (await eng.refresh_adapters())["full"] is True and len(ad.curves) == 4
+
+
+async def test_copy_policy_follows_the_operating_mode(session_factory, redis_client, monkeypatch):
+    """Default (2026-10-08 low-resource operation): copy trading SUSPENDED,
+    the engine only protects open copy positions. ACTIVE runs everything;
+    THROTTLED drops to protection while the host is CRITICAL; EMERGENCY
+    suspends whatever the copy setting says."""
+    from yonixalpha_core import operating_mode, resources
+
+    from yonixalpha_core.config import Settings
+
+    clock = Clock()
+    eng = CopyEngine(session_factory, redis_client, {}, clock,
+                     settings=Settings(JWT_SECRET="x" * 32, ADMIN_PASSWORD_HASH="x"))
+    monkeypatch.setattr(resources, "level", lambda s, st: (resources.NORMAL, []))
+    pol = await eng.policy(max_age_s=0)
+    assert (pol["status"], pol["run"], pol["resource_mode"]) == ("SUSPENDED", "PROTECT_ONLY", "LOW_RESOURCE")
+
+    async def set_(**kw):
+        async with session_factory() as s:
+            await operating_mode.save(s, username="op", **kw)
+            await s.commit()
+
+    await set_(copy_trading="ACTIVE")
+    assert (await eng.policy(max_age_s=0))["run"] == "FULL"
+    await set_(copy_trading="THROTTLED")
+    assert (await eng.policy(max_age_s=0))["run"] == "THROTTLED"
+    monkeypatch.setattr(resources, "level", lambda s, st: (resources.CRITICAL, ["load"]))
+    assert (await eng.policy(max_age_s=0))["run"] == "PROTECT_ONLY"
+    monkeypatch.setattr(resources, "level", lambda s, st: (resources.NORMAL, []))
+    await set_(copy_trading="ACTIVE", resource_mode="EMERGENCY")
+    pol = await eng.policy(max_age_s=0)
+    assert (pol["status"], pol["run"]) == ("SUSPENDED", "PROTECT_ONLY")
+    assert await eng.open_copy_positions() == 0

@@ -5,6 +5,16 @@
 services:
   postgres:
     restart: unless-stopped
+    # Low-resource settings for the 2 GB / 2 vCPU droplet (2026-10-08,
+    # docs/LOW_RESOURCE_MODE.md). shared_buffers / work_mem /
+    # maintenance_work_mem stay at the Postgres defaults (written out so the
+    # values in force are visible); the rest stop one analytic query from
+    # taking both CPUs (parallel workers, JIT compilation) and tell the
+    # planner how little file cache there really is (the default assumes
+    # 4 GB). Reassess for 8 GB (values in the doc). Changing a value here
+    # restarts Postgres on the next deploy (a few seconds).
+    command: ["postgres", "-c", "shared_buffers=128MB", "-c", "work_mem=4MB", "-c", "maintenance_work_mem=64MB",
+              "-c", "effective_cache_size=512MB", "-c", "max_parallel_workers_per_gather=0", "-c", "jit=off"]
 
   redis:
     restart: unless-stopped

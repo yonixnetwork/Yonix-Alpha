@@ -209,7 +209,13 @@ MISSED_EVERY = timedelta(hours=6)
 _missed_at: datetime | None = None
 
 
-async def run_evm_cycle(session_factory, now: datetime | None = None) -> dict[str, Any]:
+WALLET_PAUSED = "SKIPPED - copy trading SUSPENDED: wallet analytics paused (yonixalpha_core.operating_mode)"
+
+
+async def run_evm_cycle(session_factory, now: datetime | None = None, wallet: bool = True) -> dict[str, Any]:
+    """wallet=False (copy trading SUSPENDED): the wallet-behaviour labels,
+    missed winners and wallet models are skipped; EVM entry / exit samples
+    and models still run."""
     now = now or datetime.now(timezone.utc)
     out: dict[str, Any] = {}
     deadline = time.monotonic() + BUILD_BUDGET_S
@@ -218,10 +224,12 @@ async def run_evm_cycle(session_factory, now: datetime | None = None) -> dict[st
         out["executable_filled"] = await evm_samples.refresh_executable(session)
         await session.commit()
     out["wallet_episodes"] = await _drain(session_factory, wallet_labels.build, now, WALLET_BATCH, "tokens",
-                                          time.monotonic() + BUILD_BUDGET_S)
+                                          time.monotonic() + BUILD_BUDGET_S) if wallet else WALLET_PAUSED
     global _missed_at
     async with session_factory() as session:
-        if _missed_at is None or not timedelta(0) <= now - _missed_at < MISSED_EVERY:
+        if not wallet:
+            out["missed_winners"] = WALLET_PAUSED
+        elif _missed_at is None or not timedelta(0) <= now - _missed_at < MISSED_EVERY:
             out["missed_winners"] = await wallet_labels.build_missed(session, now)
             _missed_at = now
         else:
@@ -239,15 +247,18 @@ async def run_evm_cycle(session_factory, now: datetime | None = None) -> dict[st
                                          evm_samples.FEATURE_NAMES, EVM_BINARY, EVM_REGRESSION, evm_samples.FEATURE_VERSION,
                                          now, [i for *_, i in wins])
         del evm_rows
-        w = WalletTradeLabel
-        wins = await frozen.windows(session, "wallet_entry")
-        w_rows = await _latest(session, select(w.kind, w.outcome, w.entry_at, w.features, w.chain, w.launchpad).where(
-            w.kind == "EPISODE", w.feature_version == wallet_labels.FEATURE_VERSION, frozen.exclude(w.entry_at, wins))
-            .order_by(w.entry_at.desc()), MAX_TRAIN_ROWS)
-        out["wallet_models"] = await _train(session, "shadow_wallet_", [s for s in map(wallet_sample, w_rows) if s],
-                                            wallet_labels.FEATURE_NAMES, WALLET_BINARY, {}, wallet_labels.FEATURE_VERSION,
-                                            now, [i for *_, i in wins])
-        del w_rows
+        if wallet:
+            w = WalletTradeLabel
+            wins = await frozen.windows(session, "wallet_entry")
+            w_rows = await _latest(session, select(w.kind, w.outcome, w.entry_at, w.features, w.chain, w.launchpad).where(
+                w.kind == "EPISODE", w.feature_version == wallet_labels.FEATURE_VERSION, frozen.exclude(w.entry_at, wins))
+                .order_by(w.entry_at.desc()), MAX_TRAIN_ROWS)
+            out["wallet_models"] = await _train(session, "shadow_wallet_", [s for s in map(wallet_sample, w_rows) if s],
+                                                wallet_labels.FEATURE_NAMES, WALLET_BINARY, {},
+                                                wallet_labels.FEATURE_VERSION, now, [i for *_, i in wins])
+            del w_rows
+        else:
+            out["wallet_models"] = WALLET_PAUSED
         x = EvmExitSample
         wins = await frozen.windows(session, "evm_exit")
         x_rows = await _latest(session, select(x.at, x.features, x.labels, x.chain, x.launchpad).where(
