@@ -3,7 +3,7 @@
  * ml/review, paper, tokens). Decimals arrive as strings and stay strings
  * until formatted, so no precision is lost to floats. */
 
-export type ConnState = "CONNECTED" | "DEGRADED" | "STALE" | "UNAVAILABLE" | "NOT CONFIGURED" | "UNKNOWN";
+export type ConnState = "CONNECTED" | "DEGRADED" | "STALE" | "UNAVAILABLE" | "NOT CONFIGURED" | "DISABLED" | "UNKNOWN";
 
 export interface Connection {
   name: string;

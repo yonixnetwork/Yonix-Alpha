@@ -4,6 +4,7 @@ operating_mode).
 
     GET  /system/resources        host, Postgres, Redis and per-service usage,
                                   the resource level and what is paused
+    GET  /system/profile          SOLANA_ONLY / MULTI_CHAIN and what it switches off
     PUT  /system/resource-mode    NORMAL | LOW_RESOURCE | EMERGENCY
     GET  /copy/trading-status     the copy status and whether it may resume
     POST /copy/trading-status     SUSPENDED always; ACTIVE / THROTTLED only
@@ -28,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_username, get_db, get_redis, get_settings
 from app.api.health_state import SERVICES
 from app.api.util import audit, jsonable, user_id
-from yonixalpha_core import operating_mode, resources
+from yonixalpha_core import operating_mode, resources, system_profile
 from yonixalpha_core.config import Settings
 from yonixalpha_core.events import read_heartbeats
 
@@ -88,7 +89,7 @@ async def _redis(redis: Redis) -> dict[str, Any]:
         return {"error": f"{type(exc).__name__}: {str(exc)[:160]}"}
 
 
-async def _workers(redis: Redis) -> list[dict[str, Any]]:
+async def _workers(redis: Redis, settings: Any = None) -> list[dict[str, Any]]:
     """Each service's resident memory and CPU share from its own heartbeat
     (yonixalpha_core.events): CPU share = CPU seconds used between this and
     the previous heartbeat seen here, over the time between them."""
@@ -98,11 +99,12 @@ async def _workers(redis: Redis) -> list[dict[str, Any]]:
     out = []
     for s in SERVICES:
         hb = hbs.get(s)
+        off = system_profile.disabled_reason(settings, s) if settings is not None else None
         if not hb:
-            out.append({"service": s, "heartbeat": None})
+            out.append({"service": s, "heartbeat": None, "disabled": off})
             continue
         row = {"service": s, "heartbeat": hb.get("at"), "rss_mb": hb.get("rss_mb"), "cpu_s": hb.get("cpu_s"),
-               "cpu_pct": None}
+               "cpu_pct": None, "disabled": off}
         p = prev.get(s) or {}
         if hb.get("cpu_s") is not None and hb.get("at"):
             at = datetime.fromisoformat(hb["at"]).timestamp()
@@ -120,13 +122,21 @@ async def _copy_view(db: AsyncSession, settings: Settings, st: dict[str, Any], s
     latency = await _db_latency_ms(db)
     safe, why = resources.copy_resume_check(sample, latency, settings)
     status = st["copy_trading_effective"]
+    enabled = st.get("copy_trading_enabled", True)
+    blocked = why + (["EMERGENCY resource mode"] if st["resource_mode"] == "EMERGENCY" else []) \
+        + ([] if enabled else ["COPY_TRADING_ENABLED=false (system profile)"])
+    ok = not blocked
+    if not enabled:
+        label, reason = "SUSPENDED — DISABLED BY SYSTEM PROFILE", operating_mode.DISABLED_REASON
+    elif status == "SUSPENDED":
+        label, reason = f"{status} — LOW SERVER RESOURCES", operating_mode.SUSPENDED_REASON
+    else:
+        label, reason = status, None
     return {"status": status, "configured": st["copy_trading"], "source": st["copy_trading_source"],
-            "label": f"{status} — LOW SERVER RESOURCES" if status == "SUSPENDED" else status,
-            "reason": operating_mode.SUSPENDED_REASON if status == "SUSPENDED" else None,
+            "enabled": enabled, "label": label, "reason": reason,
             "changed_at": st.get("changed_at"), "changed_by": st.get("changed_by"),
-            "resume": {"safe": safe and st["resource_mode"] != "EMERGENCY",
-                       "recommendation": "OK" if safe and st["resource_mode"] != "EMERGENCY" else "WAIT",
-                       "blocked_by": why + (["EMERGENCY resource mode"] if st["resource_mode"] == "EMERGENCY" else []),
+            "resume": {"safe": ok, "recommendation": "OK" if ok else ("DISABLED" if not enabled else "WAIT"),
+                       "blocked_by": blocked,
                        "auto_resume": False, "db_latency_ms": latency,
                        "thresholds": {"min_free_ram_mb": settings.COPY_RESUME_MIN_FREE_RAM_MB,
                                       "max_cpu_load_per_cpu": settings.COPY_MAX_CPU_LOAD,
@@ -147,8 +157,13 @@ async def system_resources(db: AsyncSession = Depends(get_db), redis: Redis = De
     st = await operating_mode.load(db, settings)
     paused = []
     if st["copy_trading_effective"] == "SUSPENDED":
-        paused.append("copy trading")
+        paused.append("copy trading" + ("" if st.get("copy_trading_enabled", True) else " (COPY_TRADING_ENABLED=false)"))
         paused.append("copy-trading wallet ML")
+    for svc, why in system_profile.disabled_services(settings).items():
+        if svc != "copy-engine":
+            paused.append(f"{svc}: {why}")
+    if system_profile.disabled_reason(settings, "evm_ml"):
+        paused.append("BSC / Robinhood ML (memecoin ML on Solana keeps running)")
     if st["resource_mode"] == "EMERGENCY":
         paused += ["all ML training", "automatic ML Review refreshes"]
     elif st["resource_mode"] == "LOW_RESOURCE" and lvl == resources.CRITICAL:
@@ -164,12 +179,20 @@ async def system_resources(db: AsyncSession = Depends(get_db), redis: Redis = De
         "thresholds": {k: getattr(settings, k) for k in (
             "RESOURCE_WARN_AVAILABLE_MB", "RESOURCE_CRITICAL_AVAILABLE_MB", "RESOURCE_WARN_LOAD_PER_CPU",
             "RESOURCE_CRITICAL_LOAD_PER_CPU", "RESOURCE_WARN_MEMORY_PRESSURE_PCT", "RESOURCE_CRITICAL_MEMORY_PRESSURE_PCT")},
-        "postgres": await _postgres(db), "redis": await _redis(redis), "workers": await _workers(redis),
+        "postgres": await _postgres(db), "redis": await _redis(redis), "workers": await _workers(redis, settings),
         "copy_trading": await _copy_view(db, settings, st, sample),
         "paused_now": paused, "priorities": operating_mode.PRIORITIES,
+        "system_profile": system_profile.describe(settings),
         "note": "host figures are the droplet's (read from /proc); per-service memory and CPU come from each "
                 "service's own heartbeat. CRITICAL pauses priority-3 work only; execution, open positions, exits, "
                 "risk and Solana discovery are never paused."})
+
+
+@router.get("/system/profile")
+async def system_profile_view(settings: Settings = Depends(get_settings), _: str = Depends(get_current_username)) -> dict:
+    """The system profile in force (SOLANA_ONLY / MULTI_CHAIN): enabled
+    chains, the optional workers and why each is off. Set in .env."""
+    return system_profile.describe(settings)
 
 
 @router.put("/system/resource-mode")
@@ -207,6 +230,12 @@ async def set_copy_trading_status(body: CopyStatusIn, request: Request, db: Asyn
     st = await operating_mode.load(db, settings)
     if body.status != "SUSPENDED":
         view = await _copy_view(db, settings, st, resources.sample())
+        if not view["enabled"]:
+            raise HTTPException(409, {"code": "COPY_DISABLED", "recommendation": "DISABLED",
+                                      "message": "copy trading was not resumed: it is switched off for production "
+                                                 "(COPY_TRADING_ENABLED=false in .env); copy-engine is not running",
+                                      "blocked_by": view["resume"]["blocked_by"],
+                                      "thresholds": view["resume"]["thresholds"]})
         if not view["resume"]["safe"]:
             raise HTTPException(409, {"code": "RESUME_UNSAFE", "recommendation": "WAIT",
                                       "message": "copy trading was not resumed: server resources are below the "

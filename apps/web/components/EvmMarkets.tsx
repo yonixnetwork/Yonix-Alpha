@@ -8,6 +8,7 @@ import { EvmBuyButton } from "@/components/EvmManualTrade";
 import { CoordinationDetail, CoordinationPanel, CoordinationPill } from "@/components/LaunchCoordination";
 import { SellButton } from "@/components/ManualTrade";
 import { PnlOutcome } from "@/components/Pnl";
+import ProfileBanner from "@/components/ProfileBanner";
 import { Empty, ErrorNotice, Loading, PageHeader, Section } from "@/components/ui";
 import { formatDate, formatUsdCompact } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
@@ -122,6 +123,7 @@ export default function EvmMarkets({ fixedChain, header = true }: { fixedChain?:
     <div>
       {header && <PageHeader title="EVM Markets" icon={<Boxes size={20} aria-hidden />}
         subtitle="Tokens discovered on BSC and Robinhood Chain launchpads: category, on-chain safety, launch-window coordination and the last entry decision. Paper only; a launchpad trades on paper only after its evidence is verified." />}
+      {header && <ProfileBanner chain={chain} />}
       <div role="tablist" style={{ display: "flex", gap: 8, margin: "12px 0", flexWrap: "wrap" }}>
         {!fixedChain && CHAINS.map(([v, label]) => (
           <button key={v} role="tab" aria-selected={chain === v} className={chain === v ? "btn btn-sm" : "btn btn-ghost btn-sm"} onClick={() => setChain(v)}>{label}</button>

@@ -12,6 +12,7 @@ import time
 
 import httpx
 
+from yonixalpha_core import system_profile
 from yonixalpha_core.chains.base import Chain
 from yonixalpha_core.chains.evm import EVM_LAUNCHPADS, adapter_for
 from yonixalpha_core.chains.evm import settings as evm_settings
@@ -143,6 +144,10 @@ def _streams(settings, session_factory, redis, workers: dict) -> list:
 async def run() -> None:
     settings = get_settings()
     configure_logging(settings.LOG_LEVEL)
+    off = system_profile.disabled_reason(settings, SERVICE)
+    if off:  # SOLANA_ONLY: deploy.sh does not start this worker; started anyway, it only idles
+        await system_profile.idle_while_disabled(settings, SERVICE, off)
+        return
     engine = make_engine(settings)
     session_factory = make_session_factory(engine)
     redis = make_redis(settings)

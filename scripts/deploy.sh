@@ -25,6 +25,13 @@ if [ ! -f .env ]; then
     exit 1
 fi
 
+# System profile (yonixalpha_core.system_profile): which optional workers
+# run. SOLANA_ONLY (default) starts neither data-evm (BSC / Robinhood) nor,
+# with COPY_TRADING_ENABLED=false, copy-engine. Read from .env on every
+# deploy, so a change there takes effect on the next deploy.
+OPTIONAL_SERVICES="data-evm:evm copy-engine:copy"
+active_profiles() { bash scripts/compose-profiles.sh .env; }
+
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 echo "==> Pulling latest ${BRANCH}"
 git fetch origin "${BRANCH}"
@@ -44,6 +51,10 @@ if [ "${DEPLOY_PULL:-0}" = "1" ]; then
     # the built ones get their newer base through `build --pull` below.
     ${COMPOSE} pull --ignore-buildable || echo "    image pull failed (ignored; the build continues)"
 fi
+
+export COMPOSE_PROFILES="$(active_profiles)"
+echo "==> System profile: $(grep -E '^SYSTEM_PROFILE=' .env | tail -1 | cut -d= -f2- || true) (default SOLANA_ONLY);" \
+     "optional workers on: ${COMPOSE_PROFILES:-none}"
 
 echo "==> Building images"
 df -h / | tail -1 | awk '{print "    disk: " $4 " free of " $2}'
@@ -76,6 +87,24 @@ echo "==> Starting/updating the stack"
 # files (e.g. the removed data-binance / engine-binance-futures /
 # execution-futures), so no old image keeps running against the database.
 ${COMPOSE} up -d --remove-orphans
+
+# A worker whose profile is off is still in the compose files, so
+# --remove-orphans keeps it running: stop and remove its container here. Its
+# image, code, tables and history stay; turning the profile back on and
+# deploying starts it again.
+for entry in ${OPTIONAL_SERVICES}; do
+    svc="${entry%%:*}"
+    prof="${entry##*:}"
+    case ",${COMPOSE_PROFILES}," in
+        *",${prof},"*) ;;
+        *)
+            if [ -n "$(docker ps -aq --filter "label=com.docker.compose.service=${svc}")" ]; then
+                echo "==> Stopping ${svc} (off in this system profile)"
+                COMPOSE_PROFILES="${prof}" ${COMPOSE} rm -s -f "${svc}" || echo "    stopping ${svc} failed" >&2
+            fi
+            ;;
+    esac
+done
 
 echo "==> Waiting for api to report healthy"
 ATTEMPTS=0

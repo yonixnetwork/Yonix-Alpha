@@ -44,6 +44,9 @@ export default function ResourcePanel() {
           <div className="notice">
             Resource level: <span className={LEVEL_CLASS[d.level] ?? "pill"}>{d.level}</span>
             {d.level_reasons.length > 0 && <> — {d.level_reasons.join("; ")}</>}
+            {d.system_profile && <div className="small">System profile: <b>{d.system_profile.label}</b> — chains running:{" "}
+              {d.system_profile.enabled_chains.join(", ")}; copy trading {d.system_profile.copy_trading_enabled ? "on" : "off"};
+              ML scope {d.system_profile.ml.model_scope}.</div>}
             {d.paused_now.length > 0 && <div className="small">Paused or reduced now: {d.paused_now.join(", ")}.</div>}
             <div className="small muted">Never paused: {d.priorities.never_paused.join(", ")}.</div>
           </div>
@@ -79,7 +82,7 @@ export default function ResourcePanel() {
               <tbody>{d.workers.map((w: J) => (
                 <tr key={w.service}><td>{w.service}</td><td>{n(w.rss_mb, 0, " MB")}</td>
                   <td title="share of one CPU between its last two heartbeats">{n(w.cpu_pct, 1, "%")}</td>
-                  <td className="small">{w.heartbeat ? formatDate(w.heartbeat) : "none"}</td></tr>))}</tbody>
+                  <td className="small">{w.heartbeat ? formatDate(w.heartbeat) : w.disabled ? <span className="pill pill-off" title={w.disabled}>DISABLED</span> : "none"}</td></tr>))}</tbody>
             </table>
           </div>
           <p className="muted small">{d.note}</p>

@@ -19,7 +19,7 @@ from app.api.deps import get_current_username, get_db, get_redis, get_settings
 from app.api.util import audit, jsonable
 from yonixalpha_core import copy_outcomes as co
 from yonixalpha_core import copy_trading as ct
-from yonixalpha_core import enrichment, events, position_pnl, wallet_validation
+from yonixalpha_core import enrichment, events, position_pnl, system_profile, wallet_validation
 from yonixalpha_core.chains.evm import address_kinds
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import (CopyEvent, CopyPosition, CopyTarget, PaperPosition, PlatformSetting, WalletEnrichment,
@@ -323,6 +323,8 @@ async def _evm_account_kind(db: AsyncSession, settings: Settings, chain: str, wa
 async def add_target(body: TargetIn, request: Request, db: AsyncSession = Depends(get_db),
                      redis: Redis = Depends(get_redis), settings: Settings = Depends(get_settings),
                      username: str = Depends(get_current_username)) -> dict:
+    if body.chain != "solana" and (no := system_profile.refusal(settings, body.chain, "adding a copy target")):
+        raise HTTPException(409, no)
     wallet = _valid_wallet(body.chain, body.wallet)
     s, errors = ct.parse_settings(body.settings)
     if errors:

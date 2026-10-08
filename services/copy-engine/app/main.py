@@ -9,6 +9,7 @@ import signal
 import time
 from datetime import datetime, timezone
 
+from yonixalpha_core import system_profile
 from yonixalpha_core.chains.base import Chain
 from yonixalpha_core.chains.evm import EVM_LAUNCHPADS, adapter_for
 from yonixalpha_core.chains.evm.rpc import make_rpc
@@ -39,6 +40,13 @@ THROTTLED_OUTCOMES_EVERY = 600.0
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def evm_chains(engine: CopyEngine) -> list[str]:
+    """The EVM chains the system profile runs (none in SOLANA_ONLY): copy
+    trading on Solana does not watch BSC / Robinhood targets there."""
+    settings = getattr(engine, "settings", None) or get_settings()
+    return [c for c in system_profile.EVM_CHAINS if system_profile.chain_enabled(settings, c)]
 
 
 async def loop(engine: CopyEngine, stop: asyncio.Event) -> None:
@@ -81,11 +89,11 @@ async def loop(engine: CopyEngine, stop: asyncio.Event) -> None:
                 await step("adapters", engine.refresh_adapters())
         if run != "PROTECT_ONLY" and t - last["evm"] >= (THROTTLED_EVM_EVERY if throttled else EVM_EVERY):
             last["evm"] = t
-            for chain in ("bsc", "robinhood"):
+            for chain in evm_chains(engine):
                 await step(f"{chain}_watch", engine.watch_evm(chain))
         if t - last["manage"] >= MANAGE_EVERY:  # never paused: stop loss / trailing / exits of open copies
             last["manage"] = t
-            for chain in ("bsc", "robinhood"):
+            for chain in evm_chains(engine):
                 await step(f"{chain}_positions", engine.manage_evm(chain))
         if run != "PROTECT_ONLY" and t - last["outcomes"] >= (THROTTLED_OUTCOMES_EVERY if throttled else OUTCOMES_EVERY):
             last["outcomes"] = t
@@ -108,6 +116,10 @@ async def loop(engine: CopyEngine, stop: asyncio.Event) -> None:
 async def run() -> None:
     settings = get_settings()
     configure_logging(settings.LOG_LEVEL)
+    off = system_profile.disabled_reason(settings, SERVICE)
+    if off:  # COPY_TRADING_ENABLED=false: deploy.sh does not start this worker; started anyway, it only idles
+        await system_profile.idle_while_disabled(settings, SERVICE, off)
+        return
     db = make_engine(settings)
     session_factory = make_session_factory(db)
     redis = make_redis(settings)

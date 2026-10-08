@@ -369,13 +369,18 @@ async def _models(session) -> list[ModelVersion]:
 
 
 async def run_validation(session_factory, now: datetime | None = None,
-                         clock: Callable[[], float] = time.monotonic) -> dict[str, Any]:
+                         clock: Callable[[], float] = time.monotonic,
+                         families: tuple[str, ...] = frozen.FAMILIES) -> dict[str, Any]:
+    """`families`: the sample families in scope (frozen.SOLANA_FAMILIES in
+    the SOLANA_ONLY system profile); models of other families are left as
+    they are, neither frozen against nor scored."""
     now = now or datetime.now(timezone.utc)
     deadline = clock() + BUDGET_S
     async with session_factory() as session:
-        frozen_now = await frozen.freeze_due(session, now)
+        frozen_now = await frozen.freeze_due(session, now, families)
         await session.commit()
-    out: dict[str, Any] = {"frozen": frozen_now, "evaluated": 0, "no_unseen_set": 0, "not_available": NOT_AVAILABLE}
+    out: dict[str, Any] = {"frozen": frozen_now, "evaluated": 0, "no_unseen_set": 0, "not_available": NOT_AVAILABLE,
+                           "families": list(families)}
     async with session_factory() as session:
         models = await _models(session)
         sets = (await session.execute(select(MlValidationSet).order_by(MlValidationSet.window_start.desc()))).scalars().all()
@@ -385,6 +390,8 @@ async def run_validation(session_factory, now: datetime | None = None,
     groups: dict[tuple[str, tuple[int, ...]], list[ModelVersion]] = {}
     for m in models:
         fam = frozen.family_of(m.name)
+        if fam not in families:
+            continue
         unseen = [s for s in sets if s.family == fam and never_saw(m, s)][:MAX_SETS_PER_MODEL]
         if not unseen:
             out["no_unseen_set"] += 1  # every frozen window of its family was in its training data

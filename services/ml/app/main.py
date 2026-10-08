@@ -10,8 +10,8 @@ from yonixalpha_core.db.models import SystemEvent
 from yonixalpha_core.db.redis import make_redis
 from yonixalpha_core.logging import configure_logging, get_logger
 from yonixalpha_core.notify import send_telegram_alert
-from yonixalpha_core import update_monitor
-from yonixalpha_core.ml import steps
+from yonixalpha_core import system_profile, update_monitor
+from yonixalpha_core.ml import frozen, steps
 
 from app.ablation import run_ablation
 from app.evm_ml import run_evm_cycle
@@ -139,7 +139,8 @@ async def _training_loop(session_factory, redis, settings, stop_event: asyncio.E
         # model on the sets it never saw. A PASS is what an operator needs before
         # raising a contribution (ml.governance); nothing is raised from here.
         try:
-            val = await steps.timed(redis, "frozen_validation", lambda: run_validation(session_factory), log)
+            fams = frozen.FAMILIES if system_profile.evm_ml_enabled(get_settings()) else frozen.SOLANA_FAMILIES
+            val = await steps.timed(redis, "frozen_validation", lambda: run_validation(session_factory, families=fams), log)
             log.info("validation.completed", frozen=val.get("frozen"), evaluated=val.get("evaluated"))
             if val.get("frozen") or val.get("evaluated"):
                 await _record_system_event(session_factory, "frozen_validation", "info",
@@ -159,8 +160,12 @@ async def _evm_loop(session_factory, redis, stop_event: asyncio.Event) -> None:
     SHADOW models; review only, never read by an entry or exit. Its own
     loop, so a slow Solana step can never hold it up."""
     while not stop_event.is_set():
+        # System profile (yonixalpha_core.system_profile): SOLANA_ONLY trains
+        # no BSC / Robinhood model; memecoin ML on Solana is not affected.
+        off = system_profile.disabled_reason(get_settings(), "evm_ml")
         try:
-            ok, reason, st = await _decide(session_factory, redis, get_settings(), "evm_wallet_ml", EVM_INTERVAL_SECONDS)
+            ok, reason, st = (False, f"SKIPPED - {off}", {}) if off else \
+                await _decide(session_factory, redis, get_settings(), "evm_wallet_ml", EVM_INTERVAL_SECONDS)
         except Exception as exc:  # noqa: BLE001
             ok, reason, st = False, f"SKIPPED - mode / resources unreadable: {type(exc).__name__}", {}
         if not ok:

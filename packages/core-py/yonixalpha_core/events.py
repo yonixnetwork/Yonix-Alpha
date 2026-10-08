@@ -211,7 +211,7 @@ async def note_start(redis: Redis | None, service: str, now: float | None = None
         return 0
 
 
-async def heartbeat_loop(settings: Any, service: str, stop_event, detail_fn=None) -> None:
+async def heartbeat_loop(settings: Any, service: str, stop_event, detail_fn=None, status: str = "ok") -> None:
     """Writes this service's heartbeat every 30 s until stop_event is set.
     Owns its own Redis client so services without Redis elsewhere can use
     it; `detail_fn` (sync or async) adds service-specific fields. Its start
@@ -232,7 +232,7 @@ async def heartbeat_loop(settings: Any, service: str, stop_event, detail_fn=None
                         detail = await detail
                 except Exception as exc:  # noqa: BLE001
                     detail = {"detail_error": str(exc)}
-            await heartbeat(redis, service, detail=detail)
+            await heartbeat(redis, service, status, detail=detail)
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=HEARTBEAT_INTERVAL_SECONDS)
             except asyncio.TimeoutError:

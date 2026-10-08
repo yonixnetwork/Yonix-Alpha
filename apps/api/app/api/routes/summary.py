@@ -125,7 +125,7 @@ async def memecoin_summary(db: AsyncSession = Depends(get_db), redis: Redis = De
         # (e.g. an unused engine) is not a problem.
         "rpc": {k: v["state"] for k, v in solana.items()},
         "problems": {k: {"state": v["state"], "detail": v.get("detail")} for k, v in solana.items()
-                     if v["state"] not in ("CONNECTED", health_state.NOT_CONFIGURED)},
+                     if v["state"] not in ("CONNECTED", *health_state.NOT_COUNTED)},
         "data": {"stream_heartbeat_age_seconds": round(stream_age, 1) if stream_age is not None else None,
                  "state": "LIVE" if stream_age is not None and stream_age < 60 else "STALE" if stream_age is not None else "UNAVAILABLE"},
         "execution": {"state": (rs or {}).get("status", "UNKNOWN"), "reason": (rs or {}).get("reason")},

@@ -11,6 +11,9 @@ UNAVAILABLE     probe failed, heartbeat expired after the service was seen,
 NOT CONFIGURED  the credentials/URL it needs are not set (or live
                 execution is switched off by the environment locks); it
                 does not count against the overall state
+DISABLED        switched off by the system profile (SOLANA_ONLY,
+                COPY_TRADING_ENABLED=false): not started on purpose; does
+                not count against the overall state
 UNKNOWN         configured, but nothing observed yet
 """
 
@@ -22,6 +25,7 @@ from redis.asyncio import Redis
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from yonixalpha_core import system_profile
 from yonixalpha_core.db.models import SystemEvent
 from yonixalpha_core.events import read_heartbeats
 from yonixalpha_core.ml.gate_features import ACTIVE_MODELS, DRIFT_FLAG_PREFIX
@@ -43,7 +47,9 @@ VENUE_OFFLINE_FAILURES = 3
 STREAM_STALE_SECONDS = 60
 STREAM_OFFLINE_SECONDS = 300
 NOT_CONFIGURED = "NOT CONFIGURED"
-STATES = ["CONNECTED", "DEGRADED", "STALE", "UNAVAILABLE", NOT_CONFIGURED, "UNKNOWN"]
+DISABLED = "DISABLED"
+STATES = ["CONNECTED", "DEGRADED", "STALE", "UNAVAILABLE", NOT_CONFIGURED, DISABLED, "UNKNOWN"]
+NOT_COUNTED = (NOT_CONFIGURED, DISABLED)
 _RANK = {"CONNECTED": 0, "UNKNOWN": 1, "STALE": 2, "DEGRADED": 3, "UNAVAILABLE": 4}
 
 
@@ -63,7 +69,7 @@ def conn(name: str, category: str, state: str, detail: str, **extra) -> dict[str
 def worst(states: list[str]) -> str:
     """Worst state; an UNKNOWN dependency keeps the overall from reading
     CONNECTED (nothing is claimed healthy without evidence)."""
-    counted = [s for s in states if s != NOT_CONFIGURED]  # a disabled module never blocks the others
+    counted = [s for s in states if s not in NOT_COUNTED]  # a disabled module never blocks the others
     if not counted:
         return "UNKNOWN"
     return max(counted, key=lambda s: _RANK[s])
@@ -120,6 +126,16 @@ async def connections(db: AsyncSession, redis: Redis, settings: Any) -> list[dic
 
     for s in SERVICES:
         hb = hbs.get(s)
+        off = system_profile.disabled_reason(settings, s)
+        if off:
+            age = _age((hb or {}).get("at"), now)
+            if hb is not None and hb.get("status") == "ok" and age is not None and age <= HEARTBEAT_STALE_SECONDS:
+                out.append(conn(s, "service", "DEGRADED", f"running although the system profile switches it off "
+                                f"({off}): run scripts/deploy.sh to stop it", rss_mb=hb.get("rss_mb"),
+                                last_seen_at=hb.get("at"), profile_disabled=True))
+            else:
+                out.append(conn(s, "service", DISABLED, off, profile_disabled=True, last_seen_at=(hb or {}).get("at")))
+            continue
         if hb is None and s in LEGACY_SERVICES:
             continue  # `--profile legacy` only: not part of the default stack, so not listed unless running
         if hb is not None and hb.get("status") == "disabled":

@@ -11,6 +11,8 @@ const n = (v: any, d = 0, unit = "") => (v === null || v === undefined ? "unknow
 
 /** Copy trading status (yonixalpha_core.operating_mode): SUSPENDED is a
  * deliberate pause to protect trading on a small server, not a failure.
+ * COPY_TRADING_ENABLED=false (system profile) keeps it SUSPENDED and
+ * copy-engine stopped; it is switched back on in .env only.
  * Resume shows the current resources and is refused by the server while
  * they are below the configured thresholds. */
 export default function CopyTradingStatus() {
@@ -46,12 +48,14 @@ export default function CopyTradingStatus() {
       </div>
       <ErrorNotice error={err} />
       <div className="btn-row">
-        {suspended
+        {d.enabled === false
+          ? <span className="muted small">Switched off in .env (COPY_TRADING_ENABLED=false): it cannot be resumed from here.</span>
+          : suspended
           ? <button className="btn btn-sm" onClick={() => { setOpen(!open); void q.reload(); }}>Resume Copy Trading</button>
           : <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => set("SUSPENDED")}>Suspend copy trading</button>}
         {d.status === "ACTIVE" && <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => set("THROTTLED")}>Throttle</button>}
       </div>
-      {open && suspended && (
+      {open && suspended && d.enabled !== false && (
         <div className="notice">
           <div><b>Current server resources</b></div>
           <div className="small">RAM: {n(c.ram_available_mb, 0, " MB")} available of {n(c.ram_total_mb, 0, " MB")} (needs {d.resume.thresholds.min_free_ram_mb} MB)</div>

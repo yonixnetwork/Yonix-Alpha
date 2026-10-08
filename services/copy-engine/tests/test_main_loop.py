@@ -3,13 +3,17 @@ Solana launch buyers) runs beside the loop, so watching the targets goes on
 meanwhile, and only one rebuild runs at a time."""
 
 import asyncio
+from types import SimpleNamespace
 
 from app import main
 
+MULTI_CHAIN = SimpleNamespace(SYSTEM_PROFILE="MULTI_CHAIN", COPY_TRADING_ENABLED=True)
+
 
 class SlowEngine:
-    def __init__(self, run="FULL", open_copies=0):
+    def __init__(self, run="FULL", open_copies=0, settings=MULTI_CHAIN):
         self.status = {}
+        self.settings = settings
         self.solana_passes = 0
         self.rebuilds = 0
         self.release = asyncio.Event()
@@ -108,3 +112,16 @@ async def test_throttled_copy_trading_watches_less_often_without_analytics(monke
     assert eng.calls["watch_evm"] == 2  # once per chain, then not again within the throttled interval
     assert eng.calls["evaluate_outcomes"] == 1 and "enrich" not in eng.calls and eng.rebuilds == 0
     assert eng.solana_passes >= 5 and eng.calls["manage_evm"] >= 10
+
+
+async def test_solana_only_profile_never_watches_or_manages_evm_copies(monkeypatch):
+    """SYSTEM_PROFILE=SOLANA_ONLY: copy trading (if switched on) watches
+    Solana targets only; BSC / Robinhood are neither watched nor managed."""
+    monkeypatch.setattr(main, "TICK_SECONDS", 0.01)
+    for k in ("EVM_EVERY", "MANAGE_EVERY", "OUTCOMES_EVERY", "ADAPTERS_EVERY"):
+        monkeypatch.setattr(main, k, 0.0)
+    engine = SlowEngine(run="FULL", settings=SimpleNamespace(SYSTEM_PROFILE="SOLANA_ONLY", COPY_TRADING_ENABLED=True,
+                                                             CHAIN_BSC_ENABLED=True))
+    await _run(engine)
+    assert engine.solana_passes > 0
+    assert "watch_evm" not in engine.calls and "manage_evm" not in engine.calls

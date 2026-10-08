@@ -58,3 +58,35 @@ async def test_wallet_analytics_pause_with_copy_trading(db_session):
     out = await run_evm_cycle(sf, now=datetime(2026, 10, 8, tzinfo=timezone.utc), wallet=False)
     assert out["wallet_episodes"] == out["missed_winners"] == out["wallet_models"] == WALLET_PAUSED
     assert "evm_models" in out and "exit_models" in out  # EVM entry / exit learning continues
+
+
+@pytest.mark.asyncio
+async def test_solana_only_profile_skips_the_evm_ml_cycle_and_its_frozen_sets(db_session, redis, monkeypatch):
+    """SYSTEM_PROFILE=SOLANA_ONLY: the BSC / Robinhood ML cycle is skipped
+    with the reason (memecoin ML on Solana is not affected), and frozen
+    validation only freezes and scores the Solana families."""
+    import asyncio
+
+    from app.validation import run_validation
+    from yonixalpha_core.db.models import MlValidationSet
+    from yonixalpha_core.ml import frozen
+    from sqlalchemy import select
+
+    sf = make_session_factory(create_async_engine(os.environ["DATABASE_URL"]))
+    monkeypatch.setattr(main, "get_settings", lambda: S)
+    monkeypatch.setattr(main, "EVM_INTERVAL_SECONDS", 0.05)
+    ran = []
+    monkeypatch.setattr(main, "run_evm_cycle", lambda *a, **k: ran.append(1))
+    stop = asyncio.Event()
+    task = asyncio.create_task(main._evm_loop(sf, redis, stop))
+    await asyncio.sleep(0.2)
+    stop.set()
+    await asyncio.wait_for(task, 2)
+    rec = await steps.read_one(redis, "evm_wallet_ml")
+    assert ran == [] and rec["state"] == "SKIPPED" and rec["reason"].startswith("SKIPPED - DISABLED — SOLANA_ONLY MODE")
+
+    out = await run_validation(sf, now=datetime(2026, 10, 8, tzinfo=timezone.utc), families=frozen.SOLANA_FAMILIES)
+    assert out["families"] == list(frozen.SOLANA_FAMILIES)
+    async with sf() as s:
+        fams = set((await s.execute(select(MlValidationSet.family))).scalars())
+    assert fams <= set(frozen.SOLANA_FAMILIES)

@@ -10,7 +10,12 @@ def host(avail=2000, load=0.4, swap=0):
                     "load": {"1m": load, "5m": load, "15m": load}, "pressure": {}, "disk": None, "cpu_busy_pct": None}
 
 
+def copy_on(app):
+    app.state.settings = app.state.settings.model_copy(update={"COPY_TRADING_ENABLED": True})
+
+
 async def test_resources_show_mode_level_and_what_is_paused(client, auth_headers, monkeypatch, app):
+    copy_on(app)
     monkeypatch.setattr(resources, "sample", host(avail=345, load=9.82, swap=1298))
     await app.state.redis.set("yx:hb:paper-trading", '{"at": "2026-10-08T10:00:00+00:00", "rss_mb": 210.5, '
                                                            '"cpu_s": 100.0, "detail": {}}')
@@ -30,6 +35,7 @@ async def test_resources_show_mode_level_and_what_is_paused(client, auth_headers
 
 
 async def test_copy_resume_is_refused_while_resources_are_unsafe(client, auth_headers, monkeypatch, app):
+    copy_on(app)
     monkeypatch.setattr(resources, "sample", host(avail=345, load=9.82, swap=1298))
     s = (await client.get("/api/copy/trading-status", headers=auth_headers)).json()
     assert s["status"] == "SUSPENDED" and s["resume"]["recommendation"] == "WAIT" and s["resume"]["auto_resume"] is False
@@ -55,6 +61,29 @@ async def test_copy_resume_is_refused_while_resources_are_unsafe(client, auth_he
         from sqlalchemy import select
         kinds = (await s.execute(select(AuditLog.event_type))).scalars().all()
     assert "copy.trading_status" in kinds and "system.resource_mode" in kinds
+
+
+async def test_copy_trading_disabled_by_the_profile_is_never_resumed(client, auth_headers, monkeypatch, app):
+    """COPY_TRADING_ENABLED=false (production default): SUSPENDED whatever
+    the dashboard stored, resume refused even with plenty of resources, and
+    the SOLANA_ONLY profile is listed with what it switches off."""
+    monkeypatch.setattr(resources, "sample", host())
+    s = (await client.get("/api/copy/trading-status", headers=auth_headers)).json()
+    assert s["status"] == "SUSPENDED" and s["enabled"] is False and s["label"] == "SUSPENDED — DISABLED BY SYSTEM PROFILE"
+    assert s["resume"]["safe"] is False and s["resume"]["recommendation"] == "DISABLED"
+    r = await client.post("/api/copy/trading-status", json={"status": "ACTIVE"}, headers=auth_headers)
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "COPY_DISABLED"
+    assert (await client.post("/api/copy/trading-status", json={"status": "SUSPENDED"}, headers=auth_headers)).status_code == 200
+    r = (await client.get("/api/system/resources", headers=auth_headers)).json()
+    assert r["system_profile"]["profile"] == "SOLANA_ONLY" and r["system_profile"]["enabled_chains"] == ["solana"]
+    assert r["system_profile"]["compose_profiles"] == []
+    prof = (await client.get("/api/system/profile", headers=auth_headers)).json()
+    assert prof["chains"]["bsc"] == {"enabled": False, "reason": "DISABLED — SOLANA_ONLY MODE"}
+    assert (await client.get("/api/system/profile")).status_code == 401
+    assert any(p.startswith("data-evm: DISABLED — SOLANA_ONLY MODE") for p in r["paused_now"])
+    evm = next(w for w in r["workers"] if w["service"] == "data-evm")
+    assert evm["disabled"].startswith("DISABLED — SOLANA_ONLY MODE")
+    assert next(w for w in r["workers"] if w["service"] == "paper-trading")["disabled"] is None
 
 
 async def test_review_page_is_202_while_its_first_result_waits_for_resources(client, auth_headers, monkeypatch):
