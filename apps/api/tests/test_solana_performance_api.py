@@ -50,6 +50,10 @@ async def test_solana_performance_splits_paper_and_live_with_measured_numbers(ap
                                traded=False, reasons=["LOW_LIQUIDITY: 3 SOL"], decided_at=NOW - timedelta(hours=2),
                                snapshot={}, peak_pct=Decimal(140),
                                analysis={"counterfactual": {"classification": "MISSED_WIN"}}),
+            OpportunityOutcome(key="gate:missed2", mint="Mmissed2", engine="solana_fresh", stage="GATE", decision="REJECT",
+                               traded=False, reasons=["volatility-based stop 36.31% exceeds max_stop_pct 30.00% (noise)"],
+                               decided_at=NOW - timedelta(hours=3), snapshot={}, peak_pct=Decimal(50),
+                               analysis={"counterfactual": {"classification": "MISSED_WIN"}}),
             ExecutionOrder(mode="LIVE", side="BUY", reason="entry", mint="Mlive", provider="pumpportal_local", route="pump",
                            amount="0.05", amount_kind="sol", slippage_pct=Decimal(15), priority_fee_sol=Decimal("0.0001"),
                            idempotency_key="k1", status="CONFIRMED",
@@ -80,7 +84,9 @@ async def test_solana_performance_splits_paper_and_live_with_measured_numbers(ap
     assert lv["overall"]["trades"] == 1 and lv["by_hold"] == {"30s-1m": lv["by_hold"]["30s-1m"]}
     assert lv["overall"]["profit_factor"] == "no losses"
     assert d["entries_by_mode"]["PAPER"]["entries"] == 4 and d["entries_by_mode"]["LIVE"]["exited"] == 1
-    assert d["missed_winners_by_rule"] == [{"rule": "LOW_LIQUIDITY", "count": 1, "median_peak_pct": 140.0}]
+    assert d["missed_winners_by_rule"][0] == {"stage": "GATE", "decision": "REJECT", "rule": "LOW_LIQUIDITY", "count": 1,
+                                              "median_peak_pct": 140.0}
+    assert d["missed_winners_by_rule"][1]["rule"] == "volatility-based stop 36.31% exceeds max_stop_pct 30.00%"
     assert d["false_positives_by_mode"] == {"PAPER": {"BAD_ENTRY": 1, "UNCLASSIFIED": 1}}
     assert d["exit_timing_by_mode"] == {"PAPER": {"POSSIBLY_EARLY": 1}}
     ex = d["execution_live"][0]

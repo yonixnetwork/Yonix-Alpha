@@ -94,6 +94,9 @@ def test_compose_file_puts_the_optional_workers_behind_their_profiles():
         assert block.strip() == f'profiles: ["{prof}"]', svc
     deploy = (REPO / "scripts" / "deploy.sh").read_text()
     assert "compose-profiles.sh" in deploy and "rm -s -f" in deploy
+    # after pulling, deploy.sh runs the pulled version of itself (bash keeps reading the old file otherwise)
+    pull, rest = deploy.split('exec bash "${REPO_ROOT}/scripts/deploy.sh" "$@"', 1)
+    assert "git merge --ff-only" in pull and "DEPLOY_PULLED=1" in pull and "rm -s -f" in rest
     assert all(f"{svc}:{prof}" in deploy for svc, prof in system_profile.COMPOSE_PROFILE.items())
 
 
