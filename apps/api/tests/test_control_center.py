@@ -120,10 +120,16 @@ async def test_health_states_from_evidence(app, client, auth_headers):
     assert c["ml"]["state"] == "UNAVAILABLE"  # ran before, heartbeat gone
     assert c["paper-trading"]["state"] == "UNKNOWN"  # never seen
     assert c["jupiter"]["state"] == "CONNECTED"
-    assert c["data-evm"]["state"] == "UNKNOWN" and c["copy-engine"]["state"] == "UNKNOWN"
+    # SOLANA_ONLY with COPY_TRADING_ENABLED=false (the defaults): switched off on purpose, not a failure
+    assert (c["data-evm"]["state"], c["copy-engine"]["state"]) == ("DISABLED", "DISABLED")
+    assert c["data-evm"]["detail"].startswith("DISABLED — SOLANA_ONLY MODE")
+    assert "COPY_TRADING_ENABLED=false" in c["copy-engine"]["detail"]
     for gone in ("binance", "bybit", "hyperliquid", "mt5", "binance_execution", "data-binance", "execution-futures"):
         assert gone not in c, gone
     assert r.json()["overall"] == "UNAVAILABLE"
+    app.state.settings = app.state.settings.model_copy(update={"SYSTEM_PROFILE": "MULTI_CHAIN", "COPY_TRADING_ENABLED": True})
+    c = {x["name"]: x for x in (await client.get("/api/system/health", headers=auth_headers)).json()["connections"]}
+    assert c["data-evm"]["state"] == "UNKNOWN" and c["copy-engine"]["state"] == "UNKNOWN"  # on, never seen
     obs = await client.get("/api/system/observability", headers=auth_headers)
     assert obs.status_code == 200 and "redis_memory" in obs.json() and obs.json()["position_loop"] is None
     await redis.set("yx:pm:last_pass", json.dumps({"at": datetime.now(timezone.utc).isoformat(), "pass_ms": 40,
@@ -435,6 +441,9 @@ async def test_copy_targets_profiles_and_events(app, client, auth_headers, monke
         return FakeNode()
 
     monkeypatch.setattr(evm_registry, "rpc_for", fake_rpc_for)
+    off = await client.post("/api/copy/targets", json={"chain": "bsc", "wallet": evm}, headers=auth_headers)
+    assert off.status_code == 409 and off.json()["detail"]["code"] == "CHAIN_DISABLED"  # SOLANA_ONLY (default)
+    app.state.settings = app.state.settings.model_copy(update={"SYSTEM_PROFILE": "MULTI_CHAIN"})
     refused = await client.post("/api/copy/targets", json={"chain": "bsc", "wallet": router}, headers=auth_headers)
     assert refused.status_code == 422 and "contract" in refused.json()["detail"]
     async with app.state.db_session_factory() as s:

@@ -10,11 +10,12 @@ count, so a reset really does start a fresh record.
 from datetime import datetime
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_username, get_db
+from yonixalpha_core import solana_performance
 from yonixalpha_core.analytics import ClosedTrade, performance
 from yonixalpha_core.db.models import PaperPosition, RiskAssessment
 from yonixalpha_core.safety import store
@@ -98,3 +99,12 @@ async def performance_report(
                   "Open positions are excluded from every statistic until they close.",
                   "Paper results simulate fills from live books/curves; they are not evidence of live profitability."],
     }
+
+
+@router.get("/solana-performance")
+async def solana_performance_report(days: int = Query(7, ge=1, le=solana_performance.MAX_DAYS), outcomes: bool = True,
+                                    db: AsyncSession = Depends(get_db), _: str = Depends(get_current_username)) -> dict:
+    """Solana PAPER vs LIVE: decisions, entries, closed trades by stage /
+    hold time / entry quality / exit reason, missed winners, false positives
+    and LIVE execution telemetry (yonixalpha_core.solana_performance)."""
+    return await solana_performance.report(db, days, outcomes=outcomes)

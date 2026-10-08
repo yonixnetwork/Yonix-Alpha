@@ -100,7 +100,10 @@ services:
 
   # BSC + Robinhood Chain launchpads: discovery, safety, paper entries and
   # position management (read-only on chain; nothing is signed or sent).
+  # Profile "evm": started only when SYSTEM_PROFILE=MULTI_CHAIN with a BSC or
+  # Robinhood chain on (scripts/compose-profiles.sh, used by deploy.sh).
   data-evm:
+    profiles: ["evm"]
     build:
       context: ../..
       dockerfile: services/data-evm/Dockerfile
@@ -114,7 +117,9 @@ services:
     networks: [yonixalpha]
 
   # Paper copy trading (Solana, BSC, Robinhood Chain) + wallet profiles.
+  # Profile "copy": started only when COPY_TRADING_ENABLED=true.
   copy-engine:
+    profiles: ["copy"]
     build:
       context: ../..
       dockerfile: services/copy-engine/Dockerfile

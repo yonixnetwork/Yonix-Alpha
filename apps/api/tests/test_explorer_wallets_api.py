@@ -149,6 +149,9 @@ async def test_unified_wallet_overview_rows_never_fake_a_balance(app, client, au
 
 async def test_manual_evm_buy_is_queued_paper_only_and_refuses_observe_only_venues(app, client, auth_headers):
     await _seed(app)
+    off = await client.post("/api/trade/evm/buy", json={"chain": "bsc", "token": TOK, "confirm": True}, headers=auth_headers)
+    assert off.status_code == 409 and off.json()["detail"]["code"] == "CHAIN_DISABLED"  # SOLANA_ONLY (default)
+    app.state.settings = app.state.settings.model_copy(update={"SYSTEM_PROFILE": "MULTI_CHAIN"})
     p = (await client.get(f"/api/trade/evm/preview?chain=bsc&token={TOK}", headers=auth_headers)).json()
     assert p["execution_mode"] == "PAPER" and p["observe_only"] is False and p["currency"] == "BNB" and p["gas_reserve"] == "0.002"
     assert (await client.get("/api/trade/evm/preview?chain=bsc&token=0x" + "9" * 40, headers=auth_headers)).status_code == 404
@@ -194,3 +197,25 @@ async def test_evm_positions_carry_the_unpriced_reason(app, client, auth_headers
     u = (await client.get("/api/evm/positions?chain=robinhood", headers=auth_headers)).json()["positions"][0]["unpriced"]
     assert u["reason"].startswith("curve closed for sells") and u["since"] == "2026-10-06T09:00:00+00:00"
     assert "cannot be marked or exited" in u["effect"]
+
+
+async def test_sell_of_an_evm_position_is_refused_while_its_chain_is_off(app, client, auth_headers):
+    """SOLANA_ONLY: data-evm is not running, so a SELL of an open BSC /
+    Robinhood paper position would never be processed: refused with the
+    reason, and the position is left exactly as it was."""
+    async with app.state.db_session_factory() as s:
+        acct = await store.get_paper_account(s, "evm_robinhood")
+        p = PaperPosition(account_id=acct.id, engine="evm_robinhood", symbol="PONS", asset_id=TOK, provider="paper", side="LONG",
+                          entry_price=Decimal("0.00000002"), quantity=Decimal(10 ** 6), initial_quantity=Decimal(10 ** 6),
+                          remaining_quantity=Decimal(10 ** 6), entry_cost_quote=Decimal("0.0025"), take_profit=[],
+                          status="open", entry_at=NOW - timedelta(days=2))
+        s.add(p)
+        await s.commit()
+        pid = p.id
+    r = await client.post(f"/api/trade/sell/{pid}?confirm=true", headers=auth_headers)
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "CHAIN_DISABLED" and r.json()["detail"]["chain"] == "robinhood"
+    async with app.state.db_session_factory() as s:
+        p = await s.get(PaperPosition, pid)
+        assert p.status == "open" and p.exit_requested is False
+    app.state.settings = app.state.settings.model_copy(update={"SYSTEM_PROFILE": "MULTI_CHAIN"})
+    assert (await client.post(f"/api/trade/sell/{pid}?confirm=true", headers=auth_headers)).json()["status"] == "SELL_REQUESTED"

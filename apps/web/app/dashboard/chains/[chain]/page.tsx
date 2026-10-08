@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { ArrowRightLeft, Eye, Layers, Link2, Rocket, Sparkles } from "lucide-react";
 import EvmMarkets from "@/components/EvmMarkets";
+import ProfileBanner from "@/components/ProfileBanner";
 import { Empty, ErrorNotice, Loading, PageHeader, Section } from "@/components/ui";
 import { useApi } from "@/lib/useApi";
 
@@ -19,6 +20,7 @@ export default function ChainPage() {
     <div>
       <PageHeader title={data?.name ?? chain} icon={<Link2 size={20} aria-hidden />}
         subtitle={data ? `${data.notes}${data.evm_chain_id ? ` · chain id ${data.evm_chain_id}` : ""}` : undefined} />
+      <ProfileBanner chain={chain} />
       <ErrorNotice error={error} />
       {loading && !data && <Loading />}
       {data && (

@@ -322,6 +322,36 @@ async def test_a_sell_failing_on_every_try_alerts_once_per_quarter_hour(session_
     assert sum(t.startswith("LIVE exit failing") for t in titles) == 1  # from attempt 2; then throttled
 
 
+async def test_curve_complete_sell_rejection_moves_the_exit_to_pumpswap(session_factory, redis_client):
+    """A bonding-curve sell rejected with Pump 6005 (curve complete) is not
+    an exit failure: the position moves to its post-migration market and the
+    next sell goes to the canonical PumpSwap pool (2026-09-28, NEAR)."""
+    from yonixalpha_core.db.models import TradeTimelineEvent
+    from yonixalpha_core.solana import pumpswap
+
+    _, _, pid, _, ex, _ = await open_live(session_factory, redis_client)
+    async with session_factory() as s:
+        p = await s.get(PaperPosition, pid)
+        await live_trading.manage_live_position(s, p, p.stop_loss / 2, None, NOW)
+        await s.commit()
+        first = await s.get(ExecutionOrder, p.pending_order_id)
+    assert first.route == "pump"
+    ex.outcomes.append(ExecOutcome("FAILED", "sig-6005", error="simulation failed: {'InstructionError': [2, {'Custom': 6005}]}"))
+    await live_trading.process_order(session_factory, redis_client, LIVE_ON, ex, first.id)
+    async with session_factory() as s:
+        p = await s.get(PaperPosition, pid)
+        assert (p.status, p.exit_failures, p.lifecycle, p.execution_route, p.pool) == (
+            "open", 0, "MIGRATED", "pump-amm", pumpswap.canonical_pool(MINT))
+        failed = (await s.execute(select(TradeTimelineEvent).where(TradeTimelineEvent.event_type == "live_exit_failed"))).scalar_one()
+        assert failed.detail["curve_complete"] is True
+        await live_trading.manage_live_position(s, p, p.stop_loss / 2, None, NOW + timedelta(seconds=5))
+        await s.commit()
+        retry = await s.get(ExecutionOrder, p.pending_order_id)
+    assert (retry.side, retry.route, retry.slippage_pct) == ("SELL", "pump-amm", first.slippage_pct)
+    req, _ = live_trading._trade_request(retry, WALLET)
+    assert req.pool == "pump-amm"
+
+
 async def test_restart_with_a_signed_order_resolves_it_without_rebuying(session_factory, redis_client):
     _, _, pid, oid, _ = await enter(session_factory, redis_client)
     # Crash after the signature was persisted, before confirmation was seen.

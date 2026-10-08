@@ -85,7 +85,12 @@ def apply_one(path: str) -> str:
         f.write(merged)
 
     try:
-        proc = subprocess.run(COMPOSE + ["up", "-d"], cwd=REPO, capture_output=True, text=True, timeout=600)
+        # The optional workers (data-evm, copy-engine) of the system profile in
+        # .env, as scripts/deploy.sh starts them; a worker that is off stays off.
+        profiles = subprocess.run(["bash", "scripts/compose-profiles.sh", ENV_FILE], cwd=REPO, capture_output=True,
+                                  text=True, timeout=30).stdout.strip()
+        proc = subprocess.run(COMPOSE + ["up", "-d"], cwd=REPO, capture_output=True, text=True, timeout=600,
+                              env={**os.environ, "COMPOSE_PROFILES": profiles})
         code, output = proc.returncode, proc.stdout + proc.stderr
     except (OSError, subprocess.TimeoutExpired) as exc:
         code, output = -1, f"{type(exc).__name__}: {exc}"

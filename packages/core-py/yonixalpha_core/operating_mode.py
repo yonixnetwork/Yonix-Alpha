@@ -35,6 +35,9 @@ KEY = "operating_mode"
 RESOURCE_MODES = ("NORMAL", "LOW_RESOURCE", "EMERGENCY")
 COPY_STATUSES = ("ACTIVE", "THROTTLED", "SUSPENDED")
 
+DISABLED_REASON = ("Copy trading is switched off for production (COPY_TRADING_ENABLED=false): copy-engine is not "
+                   "started. Copy history, targets and settings are kept; set COPY_TRADING_ENABLED=true and redeploy "
+                   "to turn it back on.")
 SUSPENDED_REASON = ("Server currently running under constrained CPU/RAM capacity. Copy trading has been paused to "
                     "protect token discovery, sniping, live positions, the risk engine and execution.")
 
@@ -63,9 +66,11 @@ async def load(session: AsyncSession, settings: Any) -> dict[str, Any]:
     copy_default = _norm(settings.COPY_TRADING_STATUS, COPY_STATUSES, "SUSPENDED")
     mode = _norm(stored.get("resource_mode"), RESOURCE_MODES, mode_default)
     copy = _norm(stored.get("copy_trading"), COPY_STATUSES, copy_default)
+    enabled = bool(getattr(settings, "COPY_TRADING_ENABLED", False))
     return {"resource_mode": mode, "resource_mode_source": "dashboard" if "resource_mode" in stored else "default",
             "copy_trading": copy, "copy_trading_source": "dashboard" if "copy_trading" in stored else "default",
-            "copy_trading_effective": effective_copy_status(mode, copy),
+            "copy_trading_enabled": enabled,
+            "copy_trading_effective": effective_copy_status(mode, copy, enabled),
             "changed_at": stored.get("changed_at"), "changed_by": stored.get("changed_by"),
             "note": stored.get("note")}
 
@@ -86,9 +91,10 @@ async def save(session: AsyncSession, *, username: str, user_id=None, resource_m
         row.value, row.updated_by = value, user_id
 
 
-def effective_copy_status(mode: str, copy: str) -> str:
-    """EMERGENCY suspends copy trading whatever its own setting."""
-    return "SUSPENDED" if mode == "EMERGENCY" else copy
+def effective_copy_status(mode: str, copy: str, enabled: bool = True) -> str:
+    """COPY_TRADING_ENABLED=false (system profile) and EMERGENCY suspend copy
+    trading whatever its own setting."""
+    return "SUSPENDED" if mode == "EMERGENCY" or not enabled else copy
 
 
 def training_decision(mode: str, level: str, last_run_at: datetime | None, now: datetime, settings: Any,

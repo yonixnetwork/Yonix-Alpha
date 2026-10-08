@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { ArrowRightLeft, Bell, Boxes, Copy, Fingerprint, FlaskRound, Layers, Link2, Brain, ClipboardCheck, Eye, FlaskConical, Filter, Gauge, LayoutDashboard, ListChecks, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Radio, Rocket, Search, Send, Server, Settings, ShieldAlert, SlidersHorizontal, Network, Sparkles, Wallet, WalletCards, Workflow, type LucideIcon } from "lucide-react";
+import { ArrowRightLeft, BarChart3, Bell, Boxes, Copy, Fingerprint, FlaskRound, Layers, Link2, Brain, ClipboardCheck, Eye, FlaskConical, Filter, Gauge, LayoutDashboard, ListChecks, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Radio, Rocket, Search, Send, Server, Settings, ShieldAlert, SlidersHorizontal, Network, Sparkles, Wallet, WalletCards, Workflow, type LucideIcon } from "lucide-react";
 import NotificationsBell from "@/components/NotificationsBell";
 import RuntimeApply from "@/components/RuntimeApply";
 import { modeClass, stateClass } from "@/components/ui";
@@ -49,6 +49,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     title: "Trading",
     items: [
       { href: "/dashboard/paper", label: "Paper Trading", icon: FlaskRound },
+      { href: "/dashboard/performance", label: "Solana Performance", icon: BarChart3 },
       { href: "/dashboard/positions", label: "Positions", icon: Wallet },
       { href: "/dashboard/trades", label: "Trade History", icon: ListChecks },
       { href: "/dashboard/decisions", label: "Decisions", icon: ClipboardCheck },

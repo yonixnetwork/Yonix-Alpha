@@ -180,6 +180,14 @@ async def operating_lines(factory, redis, settings, now: datetime) -> None:
               + (f": {'; '.join(why)}" if why else ""))
     except Exception as exc:  # noqa: BLE001
         print(f"  not readable: {type(exc).__name__}")
+    from yonixalpha_core import system_profile
+
+    prof = system_profile.describe(settings)
+    print(f"  system profile {prof['profile']}: chains {', '.join(prof['enabled_chains'])}; copy trading "
+          f"{'on' if prof['copy_trading_enabled'] else 'off'}; ML scope {prof['ml']['model_scope']}; compose profiles "
+          f"{','.join(prof['compose_profiles']) or 'none'}")
+    for svc, why in system_profile.disabled_services(settings).items():
+        print(f"  {svc}: {why}")
     print("\n   services (heartbeat): memory, CPU seconds since start")
     try:
         services = ["data-solana", "engine-solana-discovery", "decision-engine", "paper-trading", "data-evm",

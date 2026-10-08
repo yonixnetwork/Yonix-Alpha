@@ -489,7 +489,7 @@ async def test_copy_policy_follows_the_operating_mode(session_factory, redis_cli
 
     clock = Clock()
     eng = CopyEngine(session_factory, redis_client, {}, clock,
-                     settings=Settings(JWT_SECRET="x" * 32, ADMIN_PASSWORD_HASH="x"))
+                     settings=Settings(JWT_SECRET="x" * 32, ADMIN_PASSWORD_HASH="x", COPY_TRADING_ENABLED=True))
     monkeypatch.setattr(resources, "level", lambda s, st: (resources.NORMAL, []))
     pol = await eng.policy(max_age_s=0)
     assert (pol["status"], pol["run"], pol["resource_mode"]) == ("SUSPENDED", "PROTECT_ONLY", "LOW_RESOURCE")
@@ -510,3 +510,9 @@ async def test_copy_policy_follows_the_operating_mode(session_factory, redis_cli
     pol = await eng.policy(max_age_s=0)
     assert (pol["status"], pol["run"]) == ("SUSPENDED", "PROTECT_ONLY")
     assert await eng.open_copy_positions() == 0
+    # COPY_TRADING_ENABLED=false (the production default): suspended whatever the dashboard says
+    await set_(copy_trading="ACTIVE", resource_mode="NORMAL")
+    assert (await eng.policy(max_age_s=0))["run"] == "FULL"
+    off = CopyEngine(session_factory, redis_client, {}, clock, settings=Settings(JWT_SECRET="x" * 32, ADMIN_PASSWORD_HASH="x"))
+    pol = await off.policy(max_age_s=0)
+    assert (pol["status"], pol["run"]) == ("SUSPENDED", "PROTECT_ONLY")

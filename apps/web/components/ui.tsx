@@ -25,6 +25,7 @@ const STATE_ICON: Record<ConnState, typeof CheckCircle2> = {
   STALE: Clock,
   UNAVAILABLE: CircleOff,
   "NOT CONFIGURED": MinusCircle,
+  DISABLED: MinusCircle,
   UNKNOWN: CircleDashed,
 };
 

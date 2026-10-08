@@ -20,6 +20,7 @@ from sqlalchemy import and_, func, not_, or_, select
 FREEZE_EVERY = timedelta(days=7)
 LAG = timedelta(days=3)
 FAMILIES = ("evm_entry", "wallet_entry", "evm_exit", "solana_opportunity", "solana_candidate")
+SOLANA_FAMILIES = ("solana_opportunity", "solana_candidate")  # SOLANA_ONLY system profile (ML_MODEL_SCOPE=SOLANA)
 
 # The verdict of a model on a frozen set (services/ml/app/validation.py).
 MIN_N = 100
@@ -78,9 +79,9 @@ def exclude(col, wins: list[tuple[datetime, datetime, int]]):
     return not_(or_(*[and_(col >= a, col < b) for a, b, _ in wins]))
 
 
-async def freeze_due(session, now: datetime) -> list[dict[str, Any]]:
-    """Freezes, for every family whose last freeze is FREEZE_EVERY old (or
-    that has none), the UTC day LAG ago. Caller commits."""
+async def freeze_due(session, now: datetime, families: tuple[str, ...] = FAMILIES) -> list[dict[str, Any]]:
+    """Freezes, for every family (of `families`) whose last freeze is
+    FREEZE_EVERY old (or that has none), the UTC day LAG ago. Caller commits."""
     from sqlalchemy.dialects.postgresql import insert
 
     from yonixalpha_core.db.models import MlValidationSet
@@ -89,7 +90,7 @@ async def freeze_due(session, now: datetime) -> list[dict[str, Any]]:
     day = (now - LAG).date()
     start = datetime.combine(day, time(0), tzinfo=timezone.utc)
     end = start + timedelta(days=1)
-    for family in FAMILIES:
+    for family in families:
         last = (await session.execute(select(func.max(MlValidationSet.frozen_at))
                                       .where(MlValidationSet.family == family))).scalar_one()
         if last is not None and now - last < FREEZE_EVERY:

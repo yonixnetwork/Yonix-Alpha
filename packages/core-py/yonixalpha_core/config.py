@@ -136,6 +136,23 @@ class Settings(BaseSettings):
     # (apps/api review_cache). Server 2026-10-07: they took over 120 s under load.
     API_REVIEW_STATEMENT_TIMEOUT_MS: int = 240_000
 
+    # System profile (yonixalpha_core.system_profile, 2026-10-08): which
+    # chains and features run at all. SOLANA_ONLY (production): only the
+    # Solana stack runs; the BSC / Robinhood worker (data-evm) is not started
+    # and the EVM ML cycle is skipped. MULTI_CHAIN: the CHAIN_* flags decide
+    # (unset = on). COPY_TRADING_ENABLED=false does not start copy-engine.
+    # Nothing is deleted: code, tables, history and settings stay, and the
+    # profile is reversed by changing these values and redeploying.
+    SYSTEM_PROFILE: str = "SOLANA_ONLY"  # SOLANA_ONLY | MULTI_CHAIN
+    CHAIN_SOLANA_ENABLED: bool = True  # the Solana stack holds the live positions: never stopped by the profile
+    CHAIN_BSC_ENABLED: bool | None = None  # MULTI_CHAIN only (unset = on); always off in SOLANA_ONLY
+    CHAIN_ROBINHOOD_ENABLED: bool | None = None  # MULTI_CHAIN only (unset = on); always off in SOLANA_ONLY
+    COPY_TRADING_ENABLED: bool = False
+    # SOLANA | ALL: which chains' outcomes the ML service trains on and which
+    # chains' models it trains (unset: SOLANA in SOLANA_ONLY, ALL otherwise).
+    ML_DATASET_SCOPE: str | None = None
+    ML_MODEL_SCOPE: str | None = None
+
     # Low-resource operation (2026-10-08: 2 GB / 2 vCPU droplet with a 16 GB
     # database). yonixalpha_core.operating_mode. These are the defaults; the
     # dashboard can change the mode and the copy-trading status at runtime

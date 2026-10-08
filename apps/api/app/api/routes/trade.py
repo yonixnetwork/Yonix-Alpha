@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_username, get_db, get_redis, get_settings
 from app.api.util import audit, jsonable
-from yonixalpha_core import events, live_smoke, live_trading, manual_trade
+from yonixalpha_core import events, live_smoke, live_trading, manual_trade, system_profile
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import ExecutionOrder, PaperPosition, RiskAssessment
 from yonixalpha_core.safety import store
@@ -189,7 +189,8 @@ async def recent_requests(db: AsyncSession = Depends(get_db), redis: Redis = Dep
 
 @router.post("/sell/{position_id}")
 async def sell(position_id: UUID, request: Request, confirm: bool = False, db: AsyncSession = Depends(get_db),
-               redis: Redis = Depends(get_redis), username: str = Depends(get_current_username)) -> dict:
+               redis: Redis = Depends(get_redis), settings: Settings = Depends(get_settings),
+               username: str = Depends(get_current_username)) -> dict:
     """Manual SELL of the whole open position through the normal exit path
     (current route, slippage limit, transaction guard). Works whether or
     not any automatic exit is triggering."""
@@ -202,6 +203,8 @@ async def sell(position_id: UUID, request: Request, confirm: bool = False, db: A
         raise HTTPException(409, f"position is {p.status}")
     if p.exit_requested:
         raise HTTPException(409, "a sell is already requested for this position")
+    if (no := system_profile.refusal(settings, system_profile.chain_of_engine(p.engine), "SELL")) is not None:
+        raise HTTPException(409, no)
     now = datetime.now(timezone.utc)
     p.exit_requested = True
     await store.add_timeline_event(db, "operator_exit", now, {"by": username, "note": "manual SELL from the dashboard"},
@@ -378,11 +381,14 @@ async def evm_preview(chain: str, token: str, db: AsyncSession = Depends(get_db)
 
 @router.post("/evm/buy")
 async def evm_buy(body: EvmBuyIn, request: Request, db: AsyncSession = Depends(get_db),
-                  redis: Redis = Depends(get_redis), username: str = Depends(get_current_username)) -> dict:
+                  redis: Redis = Depends(get_redis), settings: Settings = Depends(get_settings),
+                  username: str = Depends(get_current_username)) -> dict:
     from yonixalpha_core.chains.evm import manual as evm_manual
 
     if not body.confirm:
         raise HTTPException(422, "confirmation required (confirm: true)")
+    if (no := system_profile.refusal(settings, body.chain, "BUY")) is not None:
+        raise HTTPException(409, no)
     try:
         req = await evm_manual.create_request(db, redis, body.chain, body.token, username, datetime.now(timezone.utc))
     except evm_manual.ManualTradeError as exc:
