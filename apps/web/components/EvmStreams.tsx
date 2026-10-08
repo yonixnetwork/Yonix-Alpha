@@ -91,7 +91,8 @@ export default function EvmStreams() {
     <Section title="Transaction streams — Robinhood sequencer feed and BSC pending transactions">
       <ErrorNotice error={error} />
       {loading && !data && <Loading />}
-      {data && (
+      {data?.disabled && <p className="small"><span className="pill pill-off">DISABLED</span> {data.note}</p>}
+      {data && !data.disabled && (
         <>
           <p className="muted small">{data.note}</p>
           <div className="table-scroll">

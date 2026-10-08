@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_username, get_db, get_redis, get_settings
 from app.api.util import audit, jsonable
-from yonixalpha_core import events, launch_coordination, position_pnl
+from yonixalpha_core import events, launch_coordination, position_pnl, system_profile
 from yonixalpha_core.chains.evm import native_price, token_view
 from yonixalpha_core.chains.evm import paper as evm_paper
 from yonixalpha_core.chains.evm import observation as evm_observation
@@ -378,12 +378,19 @@ def _pct(vals: list[float], q: float) -> float | None:
 
 @router.get("/streams")
 async def get_streams(db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
-                      _: str = Depends(get_current_username)) -> dict:
+                      settings: Settings = Depends(get_settings), _: str = Depends(get_current_username)) -> dict:
     """Live state of the Robinhood sequencer feed and the BSC pending-transaction
     stream as data-evm last published it, plus, over the last 24 hours, how many
-    copy-target trades a stream saw before confirmed-trade detection and by how much."""
+    copy-target trades a stream saw before confirmed-trade detection and by how much.
+    With the EVM chains off (system profile) nothing runs to report: answered
+    at once, without reading copy events (2026-10-08: 5-14 s per call, polled
+    every 15 s by the RPC page while data-evm was stopped)."""
     row = await db.get(PlatformSetting, evm_streams.SETTINGS_KEY)
     cfg, errors = evm_streams.parse_config(dict(row.value) if row else None)
+    if (off := system_profile.disabled_reason(settings, "evm")) is not None:
+        return jsonable({"settings": cfg.to_dict(), "defaults": evm_streams.StreamConfig().to_dict(), "errors": errors,
+                         "chains": {}, "disabled": off,
+                         "note": f"{off}: data-evm is not running, so no stream is measured."})
     since = datetime.now(timezone.utc) - timedelta(hours=24)
     chains: dict[str, dict] = {}
     for chain in ("robinhood", "bsc"):

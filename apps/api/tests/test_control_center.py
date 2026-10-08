@@ -696,6 +696,9 @@ async def test_evm_streams_state_lead_and_settings(app, client, auth_headers):
     await app.state.redis.set("yx:evm:stream:bsc:pending_tx", json.dumps(
         {"chain": "bsc", "source": "pending_tx", "state": "REFUSED", "url": "wss://bsc.example/***",
          "detail": "the provider refuses pending-transaction subscriptions: method not allowed"}))
+    off = (await client.get("/api/evm/streams", headers=auth_headers)).json()
+    assert off["chains"] == {} and off["disabled"].startswith("DISABLED — SOLANA_ONLY MODE")  # nothing read
+    app.state.settings = app.state.settings.model_copy(update={"SYSTEM_PROFILE": "MULTI_CHAIN"})
     r = (await client.get("/api/evm/streams", headers=auth_headers)).json()
     rh = r["chains"]["robinhood"]
     assert rh["streams"]["sequencer_feed"]["state"] == "CONNECTED" and rh["expected"] == ["sequencer_feed"]

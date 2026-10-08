@@ -90,3 +90,17 @@ async def test_solana_only_profile_skips_the_evm_ml_cycle_and_its_frozen_sets(db
     async with sf() as s:
         fams = set((await s.execute(select(MlValidationSet.family))).scalars())
     assert fams <= set(frozen.SOLANA_FAMILIES)
+
+
+@pytest.mark.asyncio
+async def test_a_skipped_training_run_is_checked_again_when_it_is_due(redis):
+    """Not due yet: wake when the interval ends, not a full hour later.
+    Skipped for resources (or never ran): retry within RETRY_SECONDS."""
+    now = datetime(2026, 10, 8, 22, 27, tzinfo=timezone.utc)
+    assert await main._next_check_s(redis, "solana_training", 3600, now) == main.RETRY_SECONDS  # no record
+    await steps._put(redis, "solana_training", {"state": "OK", "started_at": "2026-10-08T21:44:10+00:00"})
+    assert await main._next_check_s(redis, "solana_training", 3600, now) == 17 * 60 + 10  # due at 22:44:10
+    late = datetime(2026, 10, 8, 22, 44, tzinfo=timezone.utc)
+    assert await main._next_check_s(redis, "solana_training", 3600, late) == 60.0  # at least a minute
+    over = datetime(2026, 10, 8, 23, 0, tzinfo=timezone.utc)
+    assert await main._next_check_s(redis, "solana_training", 3600, over) == main.RETRY_SECONDS  # due: pressure retry
