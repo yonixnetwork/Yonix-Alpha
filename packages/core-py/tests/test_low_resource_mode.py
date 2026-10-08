@@ -50,15 +50,20 @@ def test_copy_resume_needs_every_condition_and_unknown_fails():
 
 
 def test_training_schedule_by_mode_and_level():
-    day = timedelta(hours=1)
-    assert operating_mode.training_decision("NORMAL", "CRITICAL", NOW - 2 * day, NOW, S, day)[0]
-    ok, why = operating_mode.training_decision("LOW_RESOURCE", "CRITICAL", None, NOW, S, day)
+    """Operator, 2026-10-08: memecoin ML keeps its normal schedule in
+    LOW_RESOURCE mode and only waits while the host is CRITICAL."""
+    hour = timedelta(hours=1)
+    assert operating_mode.training_decision("NORMAL", "CRITICAL", NOW - 2 * hour, NOW, S, hour)[0]
+    ok, why = operating_mode.training_decision("LOW_RESOURCE", "CRITICAL", None, NOW, S, hour)
     assert not ok and why.startswith("SKIPPED - RESOURCE PRESSURE")
-    ok, why = operating_mode.training_decision("LOW_RESOURCE", "WARNING", NOW - timedelta(hours=3), NOW, S, day)
+    assert operating_mode.training_decision("LOW_RESOURCE", "WARNING", NOW - timedelta(minutes=61), NOW, S, hour)[0]
+    ok, why = operating_mode.training_decision("LOW_RESOURCE", "NORMAL", NOW - timedelta(minutes=20), NOW, S, hour)
+    assert not ok and "runs every 1:00:00" in why
+    assert operating_mode.training_decision("LOW_RESOURCE", "NORMAL", None, NOW, S, hour)[0]
+    assert not operating_mode.training_decision("EMERGENCY", "NORMAL", None, NOW, S, hour)[0]
+    longer = Settings(JWT_SECRET="x" * 32, ADMIN_PASSWORD_HASH="x", ML_TRAINING_INTERVAL_LOW_RESOURCE_H=24)
+    ok, why = operating_mode.training_decision("LOW_RESOURCE", "NORMAL", NOW - timedelta(hours=3), NOW, longer, hour)
     assert not ok and "runs every 1 day" in why
-    assert operating_mode.training_decision("LOW_RESOURCE", "NORMAL", NOW - timedelta(hours=25), NOW, S, day)[0]
-    assert operating_mode.training_decision("LOW_RESOURCE", "NORMAL", None, NOW, S, day)[0]
-    assert not operating_mode.training_decision("EMERGENCY", "NORMAL", None, NOW, S, day)[0]
 
 
 @pytest_asyncio.fixture

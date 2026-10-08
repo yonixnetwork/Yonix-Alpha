@@ -78,7 +78,7 @@ with this change, `cpu_s` in its heartbeat; System Health and `db_health` print 
 | Copy engine, THROTTLED | EVM watching every 10 s (was 2 s), outcomes every 10 minutes, no profiles or enrichment. Drops to protection only while the host is CRITICAL. Tested |
 | Resource mode | `SYSTEM_RESOURCE_MODE` = NORMAL / LOW_RESOURCE / EMERGENCY (default LOW_RESOURCE). EMERGENCY suspends copy trading and all ML training and review refreshes |
 | Resource level | `yonixalpha_core.resources`: NORMAL / WARNING / CRITICAL from /proc (available memory, load per CPU, Linux memory pressure). Thresholds are `RESOURCE_*` settings. CRITICAL pauses priority-3 work only |
-| ML training | Training, not inference. In LOW_RESOURCE it runs once per `ML_TRAINING_INTERVAL_LOW_RESOURCE_H` (24 h) and never while CRITICAL; the step shows SKIPPED with the reason. Wallet labels, missed winners and wallet models pause with copy trading; EVM entry / exit learning continues. Tested |
+| ML training | Training, not inference. Memecoin ML (Solana, BSC, Robinhood) keeps its normal schedule and waits only while CRITICAL (since 2026-10-08 17:00; first deployed as once a day); the step shows SKIPPED with the reason. Wallet labels, missed winners and wallet models pause with copy trading. Tested |
 | ML Review | Background job with `review_status` CURRENT / STALE / RUNNING / PENDING / FAILED. HTTP 202 while there is no result. Automatic refreshes wait while CRITICAL; the page's Refresh button computes anyway (the operator's decision) except in EMERGENCY. Fresh for 30 minutes. The page shows last calculated, age and status. Tested |
 | Resume control | Copy Trading page: status banner, then "Resume Copy Trading" shows RAM, CPU, swap and database round trip, and the recommendation (WAIT / OK). The server refuses ACTIVE / THROTTLED (409) unless `COPY_RESUME_MIN_FREE_RAM_MB`, `COPY_MAX_CPU_LOAD`, `COPY_MAX_SWAP_USAGE_MB` and `COPY_MAX_DB_LATENCY_MS` all hold. Auto resume is off. Changes are audited. Tested |
 | System Health | "Server resources": mode badge (LOW RESOURCE MODE), level and reasons, RAM / swap / load / CPU / swap rate / pressure / disk, Postgres connections, slow statements, size and settings, Redis memory and keys, memory and CPU per service, what is paused now |
@@ -116,15 +116,15 @@ previous commit. Removing the `command:` lines restores the Postgres defaults.
 ## 5. After deployment (to be filled from the measurements; nothing estimated)
 | | Before (2026-10-07 22:00) | After PR #56 (2026-10-08 13:27) | After low-resource mode |
 |---|---|---|---|
-| RAM available | 345 MB | 431 MB | |
-| Swap used | 1 298 MB | 1 459 MB | |
-| Load 1 / 5 / 15 | 9.82 / 7.95 / 7.30 | 6.82 / 7.34 / 7.27 | |
-| Statements > 2 s | 9 | 2 | |
-| EVM / wallet ML step | RUNNING for over 50 min | 1 028 s | |
-| Dashboard slowest request | 48.5 s (`/api/chains/solana`, before PR #55) | 27.0 s (`/api/evm/tokens`); `/api/chains/solana` 4.9 to 8.2 s | |
-| 503 count (last 20 slow requests) | 2 at 15:54 | 3 (`/api/control/execution-funnel`, `/api/evm/coordination/summary`, `/api/evm/observations`) | |
-| EVM trade feed age (BSC / Robinhood) | NOT MEASURED | 59 s / 60 s | |
-| Solana median decision time | NOT MEASURED | NOT MEASURED (the pipeline line ships with this change) | |
+| RAM available | 345 MB | 431 MB | 590 MB |
+| Swap used | 1 298 MB | 1 459 MB | 1 224 MB |
+| Load 1 / 5 / 15 | 9.82 / 7.95 / 7.30 | 6.82 / 7.34 / 7.27 | 1.82 / 2.26 / 2.57 |
+| Statements > 2 s | 9 | 2 | 2 |
+| EVM / wallet ML step | RUNNING for over 50 min | 1 028 s | skipped (low-resource schedule) |
+| Dashboard slowest request | 48.5 s (`/api/chains/solana`, before PR #55) | 27.0 s (`/api/evm/tokens`); `/api/chains/solana` 4.9 to 8.2 s | 37.0 s (`/api/ml/opportunities`, 503); `/api/evm/tokens` 5.9 to 10.7 s |
+| 503 count (last 20 slow requests) | 2 at 15:54 | 3 (`/api/control/execution-funnel`, `/api/evm/coordination/summary`, `/api/evm/observations`) | 4 (`/api/ml/opportunities` x3, `/api/control/execution-funnel`) |
+| EVM trade feed age (BSC / Robinhood) | NOT MEASURED | 59 s / 60 s | 19 s / 20 s |
+| Solana median decision time | NOT MEASURED | NOT MEASURED (the pipeline line ships with this change) | 1 190 ms; 234 decisions, 206 launches seen in the hour; token age at decision 35.8 s |
 | Copy detection median BSC / Robinhood | 111 s / 64 s | 95 s / 62 s | n/a (suspended) |
 
 Notes on the PR #56 reading. About 60 s of the copy delay is the EVM feed itself: data-evm stores trades about a minute
@@ -136,3 +136,23 @@ operator marked that venue inactive. Redis is at its memory cap. New slow pages 
 `shared_buffers=2GB`, `effective_cache_size=5GB`, `work_mem=16MB`, `maintenance_work_mem=256MB`,
 `max_parallel_workers_per_gather=1` with 4 vCPU (0 with 2), `jit=off`. Copy-trading resume thresholds as they are; the
 mode can go back to NORMAL once the level stays NORMAL for a day.
+
+### After low-resource mode (2026-10-08 17:08, `docker stats --no-stream`, one reading)
+copy-engine 0.08 % CPU / 27 MB (was 60.7 % / 147 MB); data-evm 58.9 % / 128 MB (now the largest CPU user); postgres
+35.5 % / 241 MB; paper-trading 13.7 % / 41 MB; redis 1.7 % / 154 MB (230 MB of data, 283 556 keys, cap 256 MB); every
+other container under 2 %. ML Review results recomputed in 146 to 305 s (were 372 to 621 s). Resource level WARNING
+(memory pressure 6.18 % of the last minute).
+
+### Change after this reading (operator, 2026-10-08)
+"ML should keep working for trading memecoins on every chain and stop only for copy trading." The daily training window
+is removed (`ML_TRAINING_INTERVAL_LOW_RESOURCE_H` default 0). In LOW_RESOURCE mode memecoin ML (Solana training, gate
+models, Solana shadow models, ablation, frozen validation, EVM entry / exit samples and models) keeps its normal hourly
+/ 30-minute schedule and waits only while the level is CRITICAL (checked again within the hour). The copy-trading wallet
+ML (wallet labels, missed winners, wallet models) stays paused while copy trading is suspended.
+
+Also fixed: the ML Review "Losing trades" and "Rejected, later up" lists (503 after 25 s) read a week of
+opportunity_outcomes to find a few rows; migration 0044 adds two partial indexes holding only those rows. Tested: the
+query plans use them.
+
+Still open: `/api/control/execution-funnel` (503), `/api/evm/tokens` (6 to 11 s), data-evm CPU, Redis near its cap.
+

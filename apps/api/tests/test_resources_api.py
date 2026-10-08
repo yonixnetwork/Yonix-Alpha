@@ -63,3 +63,33 @@ async def test_review_page_is_202_while_its_first_result_waits_for_resources(cli
     assert r.status_code == 202 and r.json()["review_status"] == "PENDING" and "CRITICAL" in r.json()["deferred"]
     r = await client.get("/api/ml/ledger-review", params={"days": 7, "refresh": True}, headers=auth_headers)
     assert r.status_code == 200 and r.json()["review_status"] == "CURRENT"  # the operator asked: computed anyway
+
+
+async def test_losing_and_rejected_up_lists_read_their_partial_indexes(client, auth_headers, app):
+    """Server 2026-10-08: these two ML Review lists answered 503 after 25 s
+    scanning a week of opportunity_outcomes. Their filters must match the
+    partial indexes of migration 0044 (created here the same way)."""
+    from sqlalchemy import select, text
+    from sqlalchemy.dialects import postgresql
+
+    from app.api.routes.ml import opportunity_filters
+    from yonixalpha_core.db.models import OpportunityOutcome
+
+    async with app.state.db_session_factory() as s:
+        await s.execute(text("CREATE INDEX IF NOT EXISTS ix_opportunity_outcomes_losses ON opportunity_outcomes "
+                             "(decided_at) WHERE loss_analysis IS NOT NULL"))
+        await s.execute(text("CREATE INDEX IF NOT EXISTS ix_opportunity_outcomes_rejected_up ON opportunity_outcomes "
+                             "(decided_at) WHERE traded IS false AND peak_pct >= 30"))
+        await s.commit()
+        for kw, index in (({"losses_only": True}, "ix_opportunity_outcomes_losses"),
+                          ({"rejected_up": True}, "ix_opportunity_outcomes_rejected_up")):
+            q = select(OpportunityOutcome.id).where(*opportunity_filters(days=7, **kw)) \
+                .order_by(OpportunityOutcome.decided_at.desc()).limit(20)
+            sql = str(q.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+            await s.execute(text("SET LOCAL enable_seqscan = off"))
+            plan = "\n".join(r[0] for r in (await s.execute(text("EXPLAIN " + sql))).all())
+            assert index in plan, plan
+            await s.rollback()
+    for kw in ({"losses_only": True}, {"rejected_up": True}):
+        r = await client.get("/api/ml/opportunities", params={**kw, "days": 7, "limit": 20}, headers=auth_headers)
+        assert r.status_code == 200 and r.json()["total"] == 0

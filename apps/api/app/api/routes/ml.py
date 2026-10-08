@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
-from sqlalchemy import func, select
+from sqlalchemy import Numeric, func, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api import review_cache
@@ -211,6 +211,35 @@ async def samples(engine: str | None = None, labeled: bool | None = None, limit:
                                                 "score": f.ml_score, "at": f.created_at} for f in rows]})
 
 
+def opportunity_filters(*, days: int | None = None, traded: bool | None = None, stage: str | None = None,
+                        losses_only: bool = False, rejected_up: bool = False, mint: str | None = None,
+                        category: str | None = None) -> list:
+    """The /opportunities list filters. losses_only and rejected_up match the
+    partial indexes of migration 0044 exactly (the threshold is rendered as a
+    literal), so those lists read only the matching rows."""
+    filters: list = []
+    if days is not None:
+        filters.append(OpportunityOutcome.decided_at >= datetime.now(timezone.utc) - timedelta(days=days))
+    if traded is not None:
+        filters.append(OpportunityOutcome.traded.is_(traded))
+    if stage:
+        filters.append(OpportunityOutcome.stage == stage)
+    if losses_only:
+        filters.append(OpportunityOutcome.loss_analysis.is_not(None))
+    if rejected_up:
+        # the threshold as a literal, so the partial index of migration 0044 matches
+        filters += [OpportunityOutcome.traded.is_(False), OpportunityOutcome.peak_pct >= literal(
+            opportunities.REJECTED_WINNER_PEAK_PCT, Numeric(14, 4), literal_execute=True)]
+    if mint:
+        filters.append(OpportunityOutcome.mint == mint)
+    if category:
+        f = opportunities.category_filter(category)
+        if f is None:
+            raise HTTPException(422, f"unknown category; one of {', '.join(opportunities.REVIEW_CATEGORIES)}")
+        filters.append(f)
+    return filters
+
+
 @router.get("/opportunities")
 async def opportunities_list(traded: bool | None = None, stage: str | None = None, losses_only: bool = False,
                              rejected_up: bool = False, mint: str | None = None, category: str | None = None,
@@ -221,24 +250,8 @@ async def opportunities_list(traded: bool | None = None, stage: str | None = Non
     forward horizons, trade result and loss analysis. `days` bounds the rows
     (and the total) to the last N days; the dashboard lists always pass it so
     the total is not a count over the whole history (audit 2026-10-07)."""
-    filters = []
-    if days is not None:
-        filters.append(OpportunityOutcome.decided_at >= datetime.now(timezone.utc) - timedelta(days=days))
-    if traded is not None:
-        filters.append(OpportunityOutcome.traded.is_(traded))
-    if stage:
-        filters.append(OpportunityOutcome.stage == stage)
-    if losses_only:
-        filters.append(OpportunityOutcome.loss_analysis.is_not(None))
-    if rejected_up:
-        filters += [OpportunityOutcome.traded.is_(False), OpportunityOutcome.peak_pct >= opportunities.REJECTED_WINNER_PEAK_PCT]
-    if mint:
-        filters.append(OpportunityOutcome.mint == mint)
-    if category:
-        f = opportunities.category_filter(category)
-        if f is None:
-            raise HTTPException(422, f"unknown category; one of {', '.join(opportunities.REVIEW_CATEGORIES)}")
-        filters.append(f)
+    filters = opportunity_filters(days=days, traded=traded, stage=stage, losses_only=losses_only,
+                                  rejected_up=rejected_up, mint=mint, category=category)
     total = (await db.execute(select(func.count()).select_from(OpportunityOutcome).where(*filters))).scalar_one()
     rows = (await db.execute(select(OpportunityOutcome).where(*filters).order_by(OpportunityOutcome.decided_at.desc())
                              .limit(limit).offset(offset))).scalars().all()
@@ -315,8 +328,9 @@ async def ml_steps(redis: Redis = Depends(get_redis), _: str = Depends(get_curre
                                      "ablation": 3600, "frozen_validation": 3600, "evm_wallet_ml": 1800},
                      "note": "Solana steps run one after another every hour; EVM / wallet ML runs in its own loop "
                              "every 30 minutes, so a slow Solana step cannot hold it up. In LOW_RESOURCE mode "
-                             "training runs at most once a day and never while the server is CRITICAL; SKIPPED "
-                             "says why (ML inference in the decision engine is not affected). Absent: not run since "
+                             "memecoin training keeps this schedule but waits while the server is CRITICAL; the "
+                             "copy-trading wallet ML pauses with copy trading; SKIPPED says why (ML inference in "
+                             "the decision engine is not affected). Absent: not run since "
                              "the ml service started with this version."})
 
 

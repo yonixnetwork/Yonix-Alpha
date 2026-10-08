@@ -1,7 +1,6 @@
-"""ML training on the low-resource schedule (2026-10-08): training (not
-inference) runs once a day in LOW_RESOURCE mode and never while the host is
-CRITICAL; a skipped run is recorded with its reason; wallet analytics follow
-the copy-trading status."""
+"""ML training in LOW_RESOURCE mode (2026-10-08): memecoin training keeps
+its normal schedule and waits only while the host is CRITICAL; a skipped run
+is recorded with its reason; copy-trading wallet ML follows the copy status."""
 
 import os
 from datetime import datetime, timedelta, timezone
@@ -40,11 +39,11 @@ async def test_training_waits_for_its_window_and_for_resources(db_session, redis
     assert (await main._decide(sf, redis, S, "solana_training", 3600))[0]  # never ran: due
     await steps.timed(redis, "solana_training", _noop)
     ok, why, _ = await main._decide(sf, redis, S, "solana_training", 3600)
-    assert not ok and "runs every 1 day" in why  # LOW_RESOURCE: once a day
+    assert not ok and "runs every 1:00:00" in why  # LOW_RESOURCE: memecoin ML keeps its hourly schedule
     await steps.skipped(redis, "solana_training", why)
     rec = await steps.read_one(redis, "solana_training")
     assert rec["state"] == "SKIPPED" and rec["reason"] == why and rec["last_ok_at"] and rec["last_state"] == "OK"
-    rec["started_at"] = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+    rec["started_at"] = (datetime.now(timezone.utc) - timedelta(minutes=61)).isoformat()
     await steps._put(redis, "solana_training", rec)
     assert (await main._decide(sf, redis, S, "solana_training", 3600))[0]
 

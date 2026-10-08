@@ -148,9 +148,13 @@ async def system_resources(db: AsyncSession = Depends(get_db), redis: Redis = De
     paused = []
     if st["copy_trading_effective"] == "SUSPENDED":
         paused.append("copy trading")
-    if st["resource_mode"] == "EMERGENCY" or (st["resource_mode"] == "LOW_RESOURCE" and lvl == resources.CRITICAL):
-        paused += ["ML training", "automatic ML Review refreshes"]
-    elif st["resource_mode"] == "LOW_RESOURCE":
+        paused.append("copy-trading wallet ML")
+    if st["resource_mode"] == "EMERGENCY":
+        paused += ["all ML training", "automatic ML Review refreshes"]
+    elif st["resource_mode"] == "LOW_RESOURCE" and lvl == resources.CRITICAL:
+        paused += ["memecoin ML training until the level leaves CRITICAL (checked hourly)",
+                   "automatic ML Review refreshes"]
+    elif st["resource_mode"] == "LOW_RESOURCE" and settings.ML_TRAINING_INTERVAL_LOW_RESOURCE_H > 0:
         paused.append(f"ML training reduced to once every {settings.ML_TRAINING_INTERVAL_LOW_RESOURCE_H} h")
     return jsonable({
         "mode": {"resource_mode": st["resource_mode"], "source": st["resource_mode_source"],

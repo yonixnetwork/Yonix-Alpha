@@ -16,8 +16,9 @@ Priority (what yields first under pressure):
      risk engine, wallet balance, reconciliation, Solana discovery,
      fresh-token monitoring, migration detection
   2. kept: signals, momentum, token safety, market data, ML inference, dashboard
-  3. reduced / paused: copy trading, ML training, wallet analytics,
-     missed-winner calculations, historical reviews
+  3. reduced / paused: copy trading and its wallet ML / analytics, missed-
+     winner calculations, historical reviews; memecoin ML training waits only
+     while the host is CRITICAL
 Nothing in this module is read by priority-1 code.
 """
 
@@ -43,8 +44,9 @@ PRIORITIES = {
                      "fresh-token monitoring", "migration detection"],
     "kept": ["signal generation", "momentum detection", "token safety", "market data", "ML inference", "dashboard",
              "paper trading"],
-    "reduced_or_paused": ["copy trading", "ML training", "wallet analytics", "missed-winner calculations",
-                          "historical reviews (ML Review)"],
+    "reduced_or_paused": ["copy trading", "copy-trading wallet ML and analytics", "missed-winner calculations",
+                          "historical reviews (ML Review) while CRITICAL",
+                          "memecoin ML training only while CRITICAL (retried within the hour)"],
 }
 
 
@@ -91,16 +93,18 @@ def effective_copy_status(mode: str, copy: str) -> str:
 
 def training_decision(mode: str, level: str, last_run_at: datetime | None, now: datetime, settings: Any,
                       normal_interval: timedelta) -> tuple[bool, str]:
-    """Whether a background ML training step may run now, and why not.
-    NORMAL: its usual interval. LOW_RESOURCE: once per
-    ML_TRAINING_INTERVAL_LOW_RESOURCE_H, never while CRITICAL. EMERGENCY:
-    never. Inference is not affected (it runs in the decision engine)."""
+    """Whether a memecoin ML training step may run now, and why not.
+    NORMAL: its usual interval. LOW_RESOURCE: its usual interval too
+    (ML_TRAINING_INTERVAL_LOW_RESOURCE_H > 0 lengthens it), but not while the
+    host is CRITICAL (checked again on the next wake). EMERGENCY: never.
+    Inference is not affected (it runs in the decision engine). Copy-trading
+    wallet ML is decided by the copy status, not here."""
     if mode == "EMERGENCY":
         return False, "SKIPPED - EMERGENCY resource mode: ML training paused"
     if mode == "LOW_RESOURCE" and level == "CRITICAL":
         return False, "SKIPPED - RESOURCE PRESSURE: host resource level CRITICAL"
-    interval = timedelta(hours=settings.ML_TRAINING_INTERVAL_LOW_RESOURCE_H) if mode == "LOW_RESOURCE" \
-        else normal_interval
+    extra = getattr(settings, "ML_TRAINING_INTERVAL_LOW_RESOURCE_H", 0) or 0
+    interval = timedelta(hours=extra) if mode == "LOW_RESOURCE" and extra > 0 else normal_interval
     if last_run_at is not None and timedelta(0) <= now - last_run_at < interval:
         return False, (f"SKIPPED - {mode}: runs every {interval}; next after "
                        f"{(last_run_at + interval).isoformat(timespec='seconds')}")
