@@ -69,6 +69,25 @@ async def _decide(session_factory, redis, settings, anchor_step: str, normal_s: 
     return ok, reason, st
 
 
+RETRY_SECONDS = 900  # skipped for resources (CRITICAL) or an unreadable state: checked again after this
+
+
+async def _next_check_s(redis, anchor_step: str, interval_s: int, now: datetime | None = None) -> float:
+    """Seconds until a skipped training run is due again: when it waits for its
+    interval, until the interval ends (at least a minute); otherwise (resource
+    pressure) RETRY_SECONDS; never more than the interval. 2026-10-08: it slept
+    a full hour after every skip, so a restart just before the hour was up
+    pushed training back nearly two hours (last run 21:44, checked 22:27, next
+    check 23:27)."""
+    now = now or datetime.now(timezone.utc)
+    rec = await steps.read_one(redis, anchor_step) or {}
+    try:
+        due = (datetime.fromisoformat(rec["started_at"]) + timedelta(seconds=interval_s) - now).total_seconds()
+    except (KeyError, TypeError, ValueError):
+        return float(min(RETRY_SECONDS, interval_s))
+    return float(min(interval_s, max(60.0, due) if due > 0 else RETRY_SECONDS))
+
+
 async def _training_loop(session_factory, redis, settings, stop_event: asyncio.Event) -> None:
     """Solana training, gate models, shadow models, the ablation and the
     frozen-set validation: hourly in NORMAL mode, on the low-resource
@@ -82,9 +101,10 @@ async def _training_loop(session_factory, redis, settings, stop_event: asyncio.E
         if not ok:
             for name in TRAINING_STEPS:
                 await steps.skipped(redis, name, reason)
-            log.info("training_loop.skipped", reason=reason)
+            wait = await _next_check_s(redis, "solana_training", TRAIN_INTERVAL_SECONDS)
+            log.info("training_loop.skipped", reason=reason, next_check_s=round(wait))
             try:
-                await asyncio.wait_for(stop_event.wait(), timeout=TRAIN_INTERVAL_SECONDS)
+                await asyncio.wait_for(stop_event.wait(), timeout=wait)
             except asyncio.TimeoutError:
                 pass
             continue

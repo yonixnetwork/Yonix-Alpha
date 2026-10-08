@@ -235,6 +235,31 @@ Results after the deploy: **NOT VERIFIED** until the operator's output is seen. 
 - Solana pipeline at 22:06: 149 launches and 159 decisions in the last hour, median decision 514 ms, load 3.37 with data-evm still at 40 %. Not yet comparable: measure again after the workers stop.
 - ML steps all read SKIPPED. That is the hourly schedule after the restart (each step last ran 21:44). `db_health` now prints the reason and the last OK time.
 
+### Second deploy (2026-10-08 23:08, operator output): after
+
+deploy.sh printed "Stopping data-evm" and "Stopping copy-engine". `docker ps` no longer lists either. **VERIFIED** on the server.
+
+| | 22:06 (data-evm still running) | 23:08 (SOLANA_ONLY in force) |
+|---|---|---|
+| Load 1 / 5 / 15 min | 3.37 / 3.69 / 3.06 | 0.40 / 0.31 / 0.55 |
+| Resource level | WARNING (load, memory pressure) | NORMAL |
+| RAM available / swap used | 451 MB / 993 MB | 471 MB / 925 MB |
+| Postgres CPU | 48.9 % | 26.7 % |
+| data-evm / copy-engine | 40.6 % + 0.2 %, 163 MB | not running |
+| Solana launches / decisions, last hour | 149 / 159 | 780 / 771 |
+| Median decision time | 514 ms | 186 ms |
+| Median token age at decision | 34.9 s | 19.0 s |
+
+Notes:
+
+- These are single readings. Market activity also changes the launch count, so the throughput gain is measured, but not all of it is attributable to the change. The load, Postgres and decision-time drop happened with the worker stop.
+- paper-trading read 38 % CPU in that one docker stats sample. Its heartbeat shows 135 s of CPU over about 45 minutes (about 5 %), so the sample caught a management pass.
+
+Found in this reading and fixed:
+
+- The RPC page polled `/api/evm/streams` every 15 s, each call taking 5–14 s and reading up to 10 000 copy events. It is now answered at once with DISABLED while the EVM chains are off.
+- A skipped ML training run slept a full hour before checking again. After the restart, training last ran at 21:44, was checked at 22:27 ("next after 22:44"), and would only have been checked again at 23:27. It now wakes when the run is due (at least 1 minute; resource retries every 15 minutes).
+
 ## 22. Not done / open
 
 - Server confirmation of the disabled workers and the resource saving: pending the section 21 output.
