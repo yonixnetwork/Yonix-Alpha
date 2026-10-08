@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { ChevronDown, ChevronRight, Copy, Plus, Power, Timer, Trash2 } from "lucide-react";
+import CopyTradingStatus from "@/components/CopyTradingStatus";
 import { PnlOutcome } from "@/components/Pnl";
 import { Empty, ErrorNotice, Loading, Money, PageHeader, Section } from "@/components/ui";
 import { apiDelete, apiPatch, apiPost } from "@/lib/api";
@@ -252,6 +253,7 @@ export default function CopyTradingPage() {
     <div>
       <PageHeader title="Copy Trading" icon={<Copy size={20} aria-hidden />}
         subtitle="Paper only. A target's trade is a candidate: every copied buy still passes the kill switch, trading controls, the Solana gate or the EVM launchpad evidence and safety checks, the chase guard and the risk plan." />
+      <CopyTradingStatus />
       <Targets />
       <Positions />
       <Outcomes />

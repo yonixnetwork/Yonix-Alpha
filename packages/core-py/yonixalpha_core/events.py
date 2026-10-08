@@ -74,6 +74,18 @@ async def publish(redis: Redis | None, event_type: str, data: dict | None = None
         log.warning("events.publish_failed", type=event_type, error=str(exc))
 
 
+def _cpu_s() -> float | None:
+    """CPU seconds this process has used (user + system): System Health
+    turns two heartbeats into a CPU share per service."""
+    try:
+        import resource
+
+        u = resource.getrusage(resource.RUSAGE_SELF)
+        return round(u.ru_utime + u.ru_stime, 1)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _rss_mb() -> float | None:
     try:
         with open("/proc/self/statm") as f:
@@ -86,7 +98,8 @@ def _rss_mb() -> float | None:
 async def heartbeat(redis: Redis | None, service: str, status: str = "ok", detail: dict | None = None) -> None:
     if redis is None:
         return
-    body = {"at": datetime.now(timezone.utc).isoformat(), "status": status, "rss_mb": _rss_mb(), "detail": _json(detail or {})}
+    body = {"at": datetime.now(timezone.utc).isoformat(), "status": status, "rss_mb": _rss_mb(), "cpu_s": _cpu_s(),
+            "detail": _json(detail or {})}
     try:
         await redis.set(f"{HEARTBEAT_PREFIX}{service}", json.dumps(body), ex=HEARTBEAT_TTL_SECONDS)
     except Exception as exc:  # noqa: BLE001

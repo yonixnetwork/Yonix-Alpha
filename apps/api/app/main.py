@@ -67,7 +67,7 @@ async def lifespan(app: FastAPI):
     # The dashboard API's own limits: a stuck statement is stopped before the
     # reverse proxy's 60 s and a full pool fails fast (yonixalpha_core.config).
     engine = make_engine(settings, statement_timeout_ms=settings.API_STATEMENT_TIMEOUT_MS,
-                         pool_timeout_s=settings.API_POOL_TIMEOUT_S)
+                         pool_timeout_s=settings.API_POOL_TIMEOUT_S, pool_size=10, max_overflow=10)
     session_factory = make_session_factory(engine)
     # The review aggregates run in the background on their own two connections
     # with a longer limit, never on the request pool (app.api.review_cache).

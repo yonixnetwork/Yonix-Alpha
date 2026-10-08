@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { ComputedAt, Empty, ErrorNotice, Loading, Section, Stat } from "@/components/ui";
+import { Empty, ErrorNotice, Loading, ReviewStatus, Section, Stat, reviewReady } from "@/components/ui";
+import { apiGet } from "@/lib/api";
 import { formatDate } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
 
@@ -18,19 +19,21 @@ const VERDICT_PILL: Record<string, string> = { BUY: "pill pill-ok", ALLOW: "pill
  * shadow models' out-of-sample metrics. ML contribution is 0 %. */
 export default function EvmMlReview() {
   const [days, setDays] = useState(14);
-  const { data, error, loading } = useApi<J>("/api/ml/evm", { days }, { refreshMs: 120000 });
+  const { data, error, loading, reload } = useApi<J>("/api/ml/evm", { days }, { refreshMs: 120000 });
+  const refresh = () => { void apiGet("/api/ml/evm", { days, refresh: true }).catch(() => undefined).then(() => reload()); };
   return (
     <Section title="EVM and wallet-behaviour ML (shadow)">
       <ErrorNotice error={error} />
       {loading && !data && <Loading />}
-      {data && (
+      {data && !reviewReady(data) && <ReviewStatus data={data} onRefresh={refresh} />}
+      {data && reviewReady(data) && (
         <>
           <div className="btn-row">
             {[7, 14, 30].map((d) => (
               <button key={d} className={days === d ? "btn btn-sm" : "btn btn-ghost btn-sm"} onClick={() => setDays(d)}>{d} days</button>
             ))}
           </div>
-          <ComputedAt data={data} />
+          <ReviewStatus data={data} onRefresh={refresh} />
           <div className="stat-grid">
             <Stat label="ML contribution" hint={data.contribution.why}>{data.contribution.percent}% ({data.contribution.status})</Stat>
             <Stat label="EVM samples (labelled)">{data.samples.evm_total} ({data.samples.evm_labelled})</Stat>

@@ -144,6 +144,10 @@ export function describeDetail(detail: unknown): string | undefined {
   if (typeof detail === "string") return detail;
   if (Array.isArray(detail)) return detail.map((d) => (typeof d === "object" && d && "msg" in d ? String(d.msg) : String(d))).join("; ");
   if (typeof detail === "object" && detail && "errors" in detail) return (detail as { errors: string[] }).errors.join("; ");
+  if (typeof detail === "object" && detail && "message" in detail) {
+    const d = detail as { message: string; blocked_by?: string[] };
+    return d.blocked_by?.length ? `${d.message}: ${d.blocked_by.join("; ")}` : d.message;
+  }
   return JSON.stringify(detail);
 }
 

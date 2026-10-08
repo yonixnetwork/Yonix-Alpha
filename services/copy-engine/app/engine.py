@@ -50,6 +50,7 @@ OUTCOME_BATCH = 200
 SOLANA_HISTORY = timedelta(hours=2, minutes=45)  # the pump stream keeps a mint's trades for 3 hours
 EVM_HISTORY = timedelta(days=13)  # evm_trades are pruned after 14 days
 ADAPTERS_FULL_EVERY = timedelta(hours=1)
+POLICY_EVERY_S = 15.0
 ADAPTERS_MARGIN = timedelta(minutes=5)
 
 
@@ -96,6 +97,47 @@ class CopyEngine:
         self.status: dict[str, Any] = {}
         self._adapters_at: datetime | None = None
         self._adapters_full_at: datetime | None = None
+        self._policy: dict[str, Any] | None = None
+        self._policy_at = 0.0
+
+    async def policy(self, max_age_s: float = POLICY_EVERY_S) -> dict[str, Any]:
+        """What the copy engine may do now (yonixalpha_core.operating_mode):
+          FULL          ACTIVE: every step at its usual interval
+          THROTTLED     THROTTLED: target watching and outcomes at longer
+                        intervals; no wallet profiles, enrichment
+          PROTECT_ONLY  SUSPENDED (or THROTTLED while the host is CRITICAL,
+                        or EMERGENCY mode): only the copy positions already
+                        open are managed (stop loss, trailing, exits)
+        Read at most every max_age_s; a read failure keeps PROTECT_ONLY."""
+        t = time.monotonic()
+        if self._policy is not None and t - self._policy_at < max_age_s:
+            return self._policy
+        from yonixalpha_core import operating_mode, resources
+        from yonixalpha_core.config import get_settings
+
+        settings = self.settings or get_settings()
+        try:
+            async with self.session_factory() as session:
+                st = await operating_mode.load(session, settings)
+            lvl, why = resources.level(resources.sample(), settings)
+            status = st["copy_trading_effective"]
+            run = {"ACTIVE": "FULL", "THROTTLED": "THROTTLED"}.get(status, "PROTECT_ONLY")
+            if run == "THROTTLED" and lvl == resources.CRITICAL:
+                run = "PROTECT_ONLY"
+            pol = {"status": status, "resource_mode": st["resource_mode"], "resource_level": lvl,
+                   "level_reasons": why, "run": run}
+        except Exception as exc:  # noqa: BLE001 - unknown state: protect positions, nothing else
+            pol = {"status": "SUSPENDED", "run": "PROTECT_ONLY", "error": f"{type(exc).__name__}: {str(exc)[:160]}"}
+        pol["read_at"] = self.now().isoformat()
+        self._policy, self._policy_at = pol, t
+        return pol
+
+    async def open_copy_positions(self) -> int:
+        """Open EVM copy positions (what PROTECT_ONLY still manages)."""
+        async with self.session_factory() as session:
+            return int((await session.execute(select(func.count()).select_from(PaperPosition).where(
+                PaperPosition.engine.in_([evm_copy_engine(c) for c in ("bsc", "robinhood")]),
+                PaperPosition.status == "open"))).scalar_one())
 
     async def refresh_adapters(self) -> dict[str, Any]:
         """Registers launchpad curves / pools for quoting. A full read on the

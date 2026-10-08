@@ -32,6 +32,9 @@ ADAPTERS_EVERY = 60.0
 PROFILES_EVERY = 600.0
 ENRICH_EVERY = 600.0  # Nansen / MadeOnSol (off unless switched on, inside a daily call budget)
 OUTCOMES_EVERY = 60.0
+# THROTTLED copy trading (yonixalpha_core.operating_mode)
+THROTTLED_EVM_EVERY = 10.0
+THROTTLED_OUTCOMES_EVERY = 600.0
 
 
 def utcnow() -> datetime:
@@ -39,7 +42,8 @@ def utcnow() -> datetime:
 
 
 async def loop(engine: CopyEngine, stop: asyncio.Event) -> None:
-    last = {"evm": 0.0, "manage": 0.0, "adapters": 0.0, "profiles": 0.0, "outcomes": 0.0, "enrich": 0.0}
+    # -inf: every step is due on the first pass, however long the host has been up
+    last = {k: float("-inf") for k in ("evm", "manage", "adapters", "profiles", "outcomes", "enrich")}
     background: dict[str, asyncio.Task] = {}
 
     async def step(name: str, coro):
@@ -62,24 +66,33 @@ async def loop(engine: CopyEngine, stop: asyncio.Event) -> None:
 
     while not stop.is_set():
         t = time.monotonic()
-        await step("solana", engine.watch_solana())
+        # Copy trading status (yonixalpha_core.operating_mode): SUSPENDED runs
+        # nothing but the protection of copy positions already open.
+        pol = await engine.policy()
+        run = pol["run"]
+        engine.status["copy_trading"] = pol
+        throttled = run == "THROTTLED"
+        if run != "PROTECT_ONLY":
+            await step("solana", engine.watch_solana())
         if t - last["adapters"] >= ADAPTERS_EVERY:
             last["adapters"] = t
-            await step("adapters", engine.refresh_adapters())
-        if t - last["evm"] >= EVM_EVERY:
+            # quotes for open copy positions need their launchpad venues registered
+            if run != "PROTECT_ONLY" or await engine.open_copy_positions():
+                await step("adapters", engine.refresh_adapters())
+        if run != "PROTECT_ONLY" and t - last["evm"] >= (THROTTLED_EVM_EVERY if throttled else EVM_EVERY):
             last["evm"] = t
             for chain in ("bsc", "robinhood"):
                 await step(f"{chain}_watch", engine.watch_evm(chain))
-        if t - last["manage"] >= MANAGE_EVERY:
+        if t - last["manage"] >= MANAGE_EVERY:  # never paused: stop loss / trailing / exits of open copies
             last["manage"] = t
             for chain in ("bsc", "robinhood"):
                 await step(f"{chain}_positions", engine.manage_evm(chain))
-        if t - last["outcomes"] >= OUTCOMES_EVERY:
+        if run != "PROTECT_ONLY" and t - last["outcomes"] >= (THROTTLED_OUTCOMES_EVERY if throttled else OUTCOMES_EVERY):
             last["outcomes"] = t
             await step("outcomes", engine.evaluate_outcomes())
-        if t - last["profiles"] >= PROFILES_EVERY and start_background("profiles", engine.rebuild_profiles):
+        if run == "FULL" and t - last["profiles"] >= PROFILES_EVERY and start_background("profiles", engine.rebuild_profiles):
             last["profiles"] = t
-        if t - last["enrich"] >= ENRICH_EVERY:
+        if run == "FULL" and t - last["enrich"] >= ENRICH_EVERY:
             last["enrich"] = t
             await step("enrichment", engine.enrich())
         engine.status["ok_at"] = utcnow().isoformat()

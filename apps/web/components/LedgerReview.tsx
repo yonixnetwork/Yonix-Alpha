@@ -5,7 +5,8 @@ import {
   Activity, AlertTriangle, Ban, CheckCircle2, Clock, Eye, FlaskConical, LogOut, RefreshCcw, ShieldCheck, Target, TrendingUp, XCircle,
 } from "lucide-react";
 import MarketCap from "@/components/MarketCap";
-import { ComputedAt, Empty, ErrorNotice, Loading, Section, Stat, TokenLink } from "@/components/ui";
+import { Empty, ErrorNotice, Loading, ReviewStatus, Section, Stat, TokenLink, reviewReady } from "@/components/ui";
+import { apiGet } from "@/lib/api";
 import { formatDate } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
 
@@ -20,7 +21,8 @@ interface Review {
   since: string; counts: Record<string, number>; categories: string[]; note: string;
   missed_win_buckets: Record<string, Record<string, number>>;
   signal_vs_execution: J; snipe_latency: Record<string, { n: number; median: number | null; p90: number | null }>;
-  shadow_models: J[]; cached_at?: string; stale?: boolean; refresh_error?: string;
+  shadow_models: J[]; cached_at?: string; age_s?: number; review_status?: string; refreshing?: boolean;
+  deferred?: string; refresh_error?: string; error?: string; message?: string;
 }
 
 export const PATH_HORIZONS = ["T+5s", "T+10s", "T+20s", "T+30s", "T+60s", "T+5m", "T+15m", "T+30m", "T+60m"];
@@ -134,13 +136,14 @@ export default function LedgerReview() {
   const [days, setDays] = useState(7);
   const [cat, setCat] = useState("missed_win");
   const r = useApi<Review>("/api/ml/ledger-review", { days }, { refreshMs: 60000 });
-  const d = r.data;
+  const d = r.data && reviewReady(r.data) ? r.data : null;
+  const refresh = () => { void apiGet("/api/ml/ledger-review", { days, refresh: true }).catch(() => undefined).then(() => r.reload()); };
   return (
     <>
       <Section title="Ledger review — every decision and what it was worth"
         actions={<select value={days} onChange={(e) => setDays(Number(e.target.value))} aria-label="Period">
           {[1, 7, 30].map((x) => <option key={x} value={x}>last {x} day{x > 1 ? "s" : ""}</option>)}</select>}>
-        {r.error ? <ErrorNotice error={r.error} /> : !d ? <Loading /> : (
+        {r.error ? <ErrorNotice error={r.error} /> : r.data && !d ? <ReviewStatus data={r.data} onRefresh={refresh} /> : !d ? <Loading /> : (
           <>
             <div className="chip-row" role="tablist" aria-label="Categories">
               {CATS.map(([k, label, Icon]) => (
@@ -150,7 +153,7 @@ export default function LedgerReview() {
             </div>
             <Rows category={cat} days={days} />
             <p className="muted">{d.note}</p>
-            <ComputedAt data={d} />
+            <ReviewStatus data={d} onRefresh={refresh} />
           </>
         )}
       </Section>

@@ -1,6 +1,7 @@
 import asyncio
 import os
 import signal
+from datetime import datetime, timedelta, timezone
 
 from yonixalpha_core.config import get_settings
 from yonixalpha_core.events import heartbeat_loop
@@ -44,11 +45,49 @@ async def _record_system_event(session_factory, event_type: str, severity: str, 
         )
 
 
+TRAINING_STEPS = ("solana_training", "gate_models", "solana_shadow", "ablation", "frozen_validation")
+
+
+async def _decide(session_factory, redis, settings, anchor_step: str, normal_s: int) -> tuple[bool, str, dict]:
+    """Whether the background training steps may run now
+    (yonixalpha_core.operating_mode.training_decision): NORMAL mode on their
+    usual interval; LOW_RESOURCE once per ML_TRAINING_INTERVAL_LOW_RESOURCE_H
+    and never while the host is CRITICAL; EMERGENCY never. The last run is
+    read from the step record, so a restart does not start a run early.
+    Inference (the decision engine) is never affected."""
+    from yonixalpha_core import operating_mode, resources
+
+    async with session_factory() as session:
+        st = await operating_mode.load(session, settings)
+    lvl, why = resources.level(resources.sample(), settings)
+    rec = await steps.read_one(redis, anchor_step) or {}
+    last = datetime.fromisoformat(rec["started_at"]) if rec.get("started_at") else None
+    ok, reason = operating_mode.training_decision(st["resource_mode"], lvl, last, datetime.now(timezone.utc), settings,
+                                                  timedelta(seconds=normal_s))
+    if not ok and lvl == resources.CRITICAL and why:
+        reason += f" ({'; '.join(why)})"
+    return ok, reason, st
+
+
 async def _training_loop(session_factory, redis, settings, stop_event: asyncio.Event) -> None:
     """Solana training, gate models, shadow models, the ablation and the
-    frozen-set validation, hourly.
+    frozen-set validation: hourly in NORMAL mode, on the low-resource
+    schedule otherwise (_decide); a skipped run is recorded with its reason.
     Each step is timed in Redis (yonixalpha_core.ml.steps) for ML Review."""
     while not stop_event.is_set():
+        try:
+            ok, reason, _ = await _decide(session_factory, redis, settings, "solana_training", TRAIN_INTERVAL_SECONDS)
+        except Exception as exc:  # noqa: BLE001 - no reading: background work waits
+            ok, reason = False, f"SKIPPED - mode / resources unreadable: {type(exc).__name__}"
+        if not ok:
+            for name in TRAINING_STEPS:
+                await steps.skipped(redis, name, reason)
+            log.info("training_loop.skipped", reason=reason)
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=TRAIN_INTERVAL_SECONDS)
+            except asyncio.TimeoutError:
+                pass
+            continue
         try:
             async def train():
                 async with session_factory() as session:
@@ -121,7 +160,20 @@ async def _evm_loop(session_factory, redis, stop_event: asyncio.Event) -> None:
     loop, so a slow Solana step can never hold it up."""
     while not stop_event.is_set():
         try:
-            evm = await steps.timed(redis, "evm_wallet_ml", lambda: run_evm_cycle(session_factory), log)
+            ok, reason, st = await _decide(session_factory, redis, get_settings(), "evm_wallet_ml", EVM_INTERVAL_SECONDS)
+        except Exception as exc:  # noqa: BLE001
+            ok, reason, st = False, f"SKIPPED - mode / resources unreadable: {type(exc).__name__}", {}
+        if not ok:
+            await steps.skipped(redis, "evm_wallet_ml", reason)
+            log.info("evm_ml.skipped", reason=reason)
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=EVM_INTERVAL_SECONDS)
+            except asyncio.TimeoutError:
+                pass
+            continue
+        wallet = st.get("copy_trading_effective") != "SUSPENDED"  # wallet analytics belong to copy trading
+        try:
+            evm = await steps.timed(redis, "evm_wallet_ml", lambda: run_evm_cycle(session_factory, wallet=wallet), log)
             log.info("evm_ml.completed", result=evm)
             await _record_system_event(session_factory, "evm_ml_cycle", "info", evm)
         except Exception as exc:  # noqa: BLE001

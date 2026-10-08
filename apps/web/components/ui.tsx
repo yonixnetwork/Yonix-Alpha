@@ -144,17 +144,37 @@ export function fmtDuration(seconds: number | null | undefined): string {
   return `${(seconds / 86400).toFixed(1)} d`;
 }
 
-/** How old a background-computed review result is (apps/api review_cache):
- * when it was computed, and whether a newer one is being computed or the
- * last refresh failed. */
-export function ComputedAt({ data }: { data: { cached_at?: string; stale?: boolean; refresh_error?: string } | null | undefined }) {
-  if (!data?.cached_at) return null;
-  const mins = Math.max(0, Math.round((Date.now() - new Date(data.cached_at).getTime()) / 60000));
+export type ReviewMeta = {
+  cached_at?: string; age_s?: number; review_status?: string; refreshing?: boolean; deferred?: string;
+  refresh_error?: string; error?: string; message?: string;
+};
+
+/** True once a background-computed review result exists (apps/api
+ * review_cache); before that the response carries only its status. */
+export const reviewReady = (d: ReviewMeta | null | undefined): boolean => !!d?.cached_at;
+
+/** A background-computed review result's status (apps/api review_cache):
+ * when it was calculated, its age and CURRENT / STALE, or RUNNING / PENDING
+ * / FAILED while there is none. Refresh asks for a new calculation. */
+export function ReviewStatus({ data, onRefresh }: { data: ReviewMeta | null | undefined; onRefresh?: () => void }) {
+  if (!data) return null;
+  const st = data.review_status ?? (data.cached_at ? "CURRENT" : "UNKNOWN");
+  if (!data.cached_at) {
+    return (
+      <div className={st === "FAILED" ? "error" : "notice"} role="status">
+        Status: <b>{st}</b> — {st === "FAILED" ? data.error : data.deferred ? `waiting: ${data.deferred}` : data.message}
+        {onRefresh && st !== "RUNNING" && <> <button className="btn btn-ghost btn-sm" onClick={onRefresh}>Calculate now</button></>}
+      </div>
+    );
+  }
+  const mins = Math.max(0, Math.round((data.age_s ?? (Date.now() - new Date(data.cached_at).getTime()) / 1000) / 60));
   return (
-    <p className="muted">
-      Computed {new Date(data.cached_at).toLocaleString()} ({mins} min ago).
-      {data.stale && " A newer result is being computed in the background."}
+    <p className="muted small">
+      Last calculated: {new Date(data.cached_at).toLocaleTimeString()} · Age: {mins} min · Status: <b>{st}</b>
+      {data.refreshing && " (a newer result is being calculated in the background)"}
+      {data.deferred && ` (refresh waiting: ${data.deferred})`}
       {data.refresh_error && <span className="pill pill-warn" title={data.refresh_error}> last refresh failed</span>}
+      {onRefresh && !data.refreshing && <> <button className="btn btn-ghost btn-sm" onClick={onRefresh}>Refresh</button></>}
     </p>
   );
 }

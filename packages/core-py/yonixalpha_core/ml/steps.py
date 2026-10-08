@@ -58,6 +58,16 @@ async def timed(redis, step: str, fn: Callable[[], Awaitable[Any]], log=None) ->
     return result
 
 
+async def skipped(redis, step: str, reason: str) -> None:
+    """Records a step that did not run and why (low-resource schedule or
+    resource pressure), keeping when it last ran and last succeeded."""
+    prev = await read_one(redis, step) or {}
+    await _put(redis, step, {**{k: prev.get(k) for k in ("started_at", "finished_at", "seconds", "last_ok_at",
+                                                         "peak_rss_mb")},
+                             "state": "SKIPPED", "skipped_at": _now(), "reason": reason,
+                             "last_state": prev.get("last_state") if prev.get("state") == "SKIPPED" else prev.get("state")})
+
+
 async def read_one(redis, step: str) -> dict[str, Any] | None:
     if redis is None:
         return None

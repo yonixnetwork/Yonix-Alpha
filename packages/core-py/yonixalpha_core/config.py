@@ -136,6 +136,33 @@ class Settings(BaseSettings):
     # (apps/api review_cache). Server 2026-10-07: they took over 120 s under load.
     API_REVIEW_STATEMENT_TIMEOUT_MS: int = 240_000
 
+    # Low-resource operation (2026-10-08: 2 GB / 2 vCPU droplet with a 16 GB
+    # database). yonixalpha_core.operating_mode. These are the defaults; the
+    # dashboard can change the mode and the copy-trading status at runtime
+    # (stored in platform_settings), never past the resume thresholds below.
+    SYSTEM_RESOURCE_MODE: str = "LOW_RESOURCE"  # NORMAL | LOW_RESOURCE | EMERGENCY
+    COPY_TRADING_STATUS: str = "SUSPENDED"  # ACTIVE | THROTTLED | SUSPENDED
+    # Resource level (yonixalpha_core.resources): WARNING / CRITICAL when any
+    # of these is crossed. CRITICAL pauses background (priority 3) work only.
+    RESOURCE_WARN_AVAILABLE_MB: int = 400
+    RESOURCE_CRITICAL_AVAILABLE_MB: int = 200
+    RESOURCE_WARN_LOAD_PER_CPU: float = 1.5
+    RESOURCE_CRITICAL_LOAD_PER_CPU: float = 3.0
+    RESOURCE_WARN_MEMORY_PRESSURE_PCT: float = 5.0  # Linux PSI memory "some" avg60
+    RESOURCE_CRITICAL_MEMORY_PRESSURE_PCT: float = 20.0
+    # Copy trading may only be resumed while all of these hold.
+    COPY_RESUME_MIN_FREE_RAM_MB: int = 1024
+    COPY_MAX_CPU_LOAD: float = 1.0  # load average (1 min) per CPU
+    COPY_MAX_SWAP_USAGE_MB: int = 256
+    COPY_MAX_DB_LATENCY_MS: int = 250
+    # ML training (not inference) in LOW_RESOURCE mode: at most once per this
+    # many hours, and skipped while the resource level is CRITICAL.
+    ML_TRAINING_INTERVAL_LOW_RESOURCE_H: int = 24
+    # Database connections per worker process (the API sets its own): kept
+    # open / extra allowed in bursts. Each Postgres connection is a process.
+    DB_POOL_SIZE: int = 5
+    DB_MAX_OVERFLOW: int = 10
+
     # Trading safety — both must be true, independently, before any live order
     # can be placed. See docs/SECURITY.md. No engine exists yet in Phase 1, so
     # these are inert here, but the flags and their fail-safe defaults are

@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { ComputedAt, Empty, ErrorNotice, Loading, Section, TokenLink } from "@/components/ui";
+import { Empty, ErrorNotice, Loading, ReviewStatus, Section, TokenLink, reviewReady } from "@/components/ui";
+import { apiGet } from "@/lib/api";
 import { formatDate } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
 
@@ -9,7 +10,8 @@ type Group = Record<string, string | number | null> & { n: number };
 interface Compare {
   since: string; rows: number; tracking: number; note: string; rejected_later_up_threshold_pct: string;
   winning_trades: Group; losing_trades: Group; traded: Group; rejected: Group; rejected_later_up: Group;
-  loss_classes: Record<string, number>; cached_at?: string; stale?: boolean; refresh_error?: string;
+  loss_classes: Record<string, number>; cached_at?: string; age_s?: number; review_status?: string; refreshing?: boolean;
+  deferred?: string; refresh_error?: string; error?: string; message?: string;
 }
 interface Opp {
   id: string; mint: string; symbol: string | null; engine: string; stage: string; decision: string; traded: boolean;
@@ -56,6 +58,7 @@ function Horizons({ o }: { o: Opp }) {
 export default function OpportunityOutcomes() {
   const [days, setDays] = useState(7);
   const cmp = useApi<Compare>("/api/ml/opportunities/compare", { days }, { refreshMs: 60000 });
+  const refresh = () => { void apiGet("/api/ml/opportunities/compare", { days, refresh: true }).catch(() => undefined).then(() => cmp.reload()); };
   const losses = useApi<{ items: Opp[] }>("/api/ml/opportunities", { losses_only: true, days, limit: 20 }, { refreshMs: 60000 });
   const up = useApi<{ items: Opp[] }>("/api/ml/opportunities", { rejected_up: true, days, limit: 20 }, { refreshMs: 60000 });
   return (
@@ -63,7 +66,9 @@ export default function OpportunityOutcomes() {
       <Section title="Opportunity outcomes — traded vs not traded"
         actions={<select value={days} onChange={(e) => setDays(Number(e.target.value))} aria-label="Period">
           {[1, 7, 30].map((d) => <option key={d} value={d}>last {d} day{d > 1 ? "s" : ""}</option>)}</select>}>
-        {cmp.error ? <ErrorNotice error={cmp.error} /> : !cmp.data ? <Loading /> : cmp.data.rows === 0 ? (
+        {cmp.error ? <ErrorNotice error={cmp.error} /> : !cmp.data ? <Loading /> : !reviewReady(cmp.data) ? (
+          <ReviewStatus data={cmp.data} onRefresh={refresh} />
+        ) : cmp.data.rows === 0 ? (
           <Empty>No opportunities recorded yet. Every observation rejection, gate rejection/expiry and entry is recorded from now on.</Empty>
         ) : (
           <>
@@ -78,7 +83,7 @@ export default function OpportunityOutcomes() {
             <p className="muted">{cmp.data.rows} recorded ({cmp.data.tracking} still being tracked). &quot;Rejected, later up&quot; = peak
               ≥ {cmp.data.rejected_later_up_threshold_pct}% within 30 minutes of the decision. Loss classes:{" "}
               {Object.entries(cmp.data.loss_classes).map(([c, n]) => `${c} ${n}`).join(", ") || "none yet"}. {cmp.data.note}</p>
-            <ComputedAt data={cmp.data} />
+            <ReviewStatus data={cmp.data} onRefresh={refresh} />
           </>
         )}
       </Section>

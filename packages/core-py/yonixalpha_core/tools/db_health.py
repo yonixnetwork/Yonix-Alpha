@@ -150,6 +150,65 @@ def timings(now: datetime) -> list[tuple[str, Callable[[Any], Awaitable[Any]]]]:
     ]
 
 
+PIPELINE_SQL = """
+SELECT count(*),
+       percentile_cont(0.5) WITHIN GROUP (ORDER BY (snapshot->>'decision_eval_ms')::float)
+           FILTER (WHERE snapshot->>'decision_eval_ms' ~ '^[0-9]+(\\.[0-9]+)?$'),
+       percentile_cont(0.5) WITHIN GROUP (ORDER BY (snapshot->>'age_seconds')::float)
+           FILTER (WHERE snapshot->>'age_seconds' ~ '^[0-9]+(\\.[0-9]+)?$'),
+       count(*) FILTER (WHERE traded)
+FROM opportunity_outcomes WHERE decided_at >= :since
+"""
+
+
+async def operating_lines(factory, redis, settings, now: datetime) -> None:
+    """Low-resource operation (2026-10-08): the mode, copy status and resource
+    level; each service's memory and CPU time from its heartbeat; Redis
+    memory; the Solana pipeline over the last hour (decisions, decision time,
+    token age at decision) and the pump stream. The before / after figures."""
+    from yonixalpha_core import operating_mode, resources
+    from yonixalpha_core.events import read_heartbeats
+    from yonixalpha_core.solana import pump_stream
+
+    print("\n   operating mode")
+    try:
+        async with factory() as s:
+            st = await operating_mode.load(s, settings)
+        lvl, why = resources.level(resources.sample(), settings)
+        print(f"  resource mode {st['resource_mode']} ({st['resource_mode_source']}), copy trading "
+              f"{st['copy_trading_effective']} ({st['copy_trading_source']}), resource level {lvl}"
+              + (f": {'; '.join(why)}" if why else ""))
+    except Exception as exc:  # noqa: BLE001
+        print(f"  not readable: {type(exc).__name__}")
+    print("\n   services (heartbeat): memory, CPU seconds since start")
+    try:
+        services = ["data-solana", "engine-solana-discovery", "decision-engine", "paper-trading", "data-evm",
+                    "copy-engine", "ml"]
+        for svc, hb in (await read_heartbeats(redis, services)).items():
+            print(f"  {svc:24s} " + (f"{hb.get('rss_mb')} MB  cpu {hb.get('cpu_s', '-')} s  at {str(hb.get('at'))[:19]}"
+                                     if hb else "no heartbeat"))
+        info = await redis.info("memory")
+        print(f"  redis: {info.get('used_memory', 0) / 2**20:.1f} MB used of max "
+              f"{(info.get('maxmemory', 0) / 2**20) or 0:.0f} MB ({info.get('maxmemory_policy')}), keys {await redis.dbsize()}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  not readable: {type(exc).__name__}")
+    print("\n   Solana pipeline, last hour")
+    try:
+        hb = await pump_stream.heartbeat(redis)
+        launches = await redis.zcount(pump_stream.RECENT, now.timestamp() - 3600, now.timestamp())
+        print(f"  pump stream heartbeat {f'{(now - hb).total_seconds():,.0f} s ago' if hb else 'none'}, "
+              f"launches seen {launches}")
+        async with factory() as s:
+            await s.execute(text("SET TRANSACTION READ ONLY"))
+            n, eval_ms, age_s, traded = (await s.execute(text(PIPELINE_SQL), {"since": now - timedelta(hours=1)})).one()
+            await s.rollback()
+        print(f"  decisions {n} (traded {traded}); median decision time "
+              f"{'-' if eval_ms is None else f'{eval_ms:,.0f} ms'}; median token age at decision "
+              f"{'-' if age_s is None else f'{age_s:,.1f} s'}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  not readable: {type(exc).__name__}: {str(exc)[:120]}")
+
+
 async def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--skip-timings", action="store_true", help="only the cheap checks (activity, locks, sizes)")
@@ -164,6 +223,7 @@ async def main(argv: list[str] | None = None) -> int:
     for line in host_lines():
         print("  " + line)
     try:
+        await operating_lines(factory, redis, settings, now)
         async with factory() as s:
             print("\n2. Database connections")
             for state, n in (await s.execute(text(
