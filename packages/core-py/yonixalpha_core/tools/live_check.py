@@ -119,6 +119,7 @@ async def main(argv: list[str] | None = None) -> int:
     now = datetime.now(timezone.utc)
     since = now - timedelta(hours=args.hours)
     blockers: list[str] = []
+    live_buys = 0
     try:
         print("1. Environment locks (.env)")
         locks = {"TRADING_ENABLED": bool(settings.TRADING_ENABLED), "LIVE_TRADING_ENABLED": bool(settings.LIVE_TRADING_ENABLED),
@@ -227,6 +228,7 @@ async def main(argv: list[str] | None = None) -> int:
 
             print(f"\n5. LIVE orders, last {args.hours} h")
             orders = (await s.execute(text(ORDERS_SQL), {"since": since})).all()
+            live_buys = sum(r[2] for r in orders if r[0] == "BUY" and r[1] == "CONFIRMED")
             for r in orders:
                 print(f"  {r[0]} {r[1]}: {r[2]} (latest {str(r[3])[:19]})")
             if not orders:
@@ -239,6 +241,8 @@ async def main(argv: list[str] | None = None) -> int:
             print("  LIVE is NOT trading because:")
             for b in blockers:
                 print(f"   - {b}")
+        elif live_buys:
+            print(f"  LIVE is trading: {live_buys} live buy(s) confirmed in the last {args.hours} h (section 5).")
         else:
             print("  every switch allows LIVE and the wallet can pay. If no live order was placed, no token passed every "
                   "safety check yet (section 4 lists why they were refused).")
