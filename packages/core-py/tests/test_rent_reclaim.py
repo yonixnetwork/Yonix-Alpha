@@ -141,6 +141,32 @@ async def test_nothing_to_close_sends_nothing_and_a_failed_simulation_sends_noth
     assert out.status == "FAILED" and out.stage == "SIMULATION_FAILED" and chain.sent == []
 
 
+async def test_a_blockhash_the_simulating_node_has_not_seen_yet_is_simulated_again():
+    """2026-10-09 server: two reclaims failed with BlockhashNotFound (blockhash from one provider, simulated on
+    another a slot behind). The same signed transaction is re-simulated after a short wait; nothing is sent
+    before a clean simulation, and a persistent BlockhashNotFound still fails without sending."""
+    class Lagging(Chain):
+        misses = 2
+
+        async def call(self, method, params=None):
+            if method == "simulateTransaction" and self.misses:
+                self.misses -= 1
+                self.calls.append(method)
+                return {"value": {"err": "BlockhashNotFound", "logs": []}}
+            return await super().call(method, params)
+
+    chain = Lagging([token_acc(new(), new())])
+    chain.fill = (WALLET, "x", RENT - 15_000, 0)
+    out = await executor(chain).close_token_accounts(None, set(), _noop)
+    assert out.status == "CONFIRMED", out.error
+    assert [s["stage"] for s in out.stages].count("SIMULATION_BLOCKHASH_NOT_FOUND") == 2 and len(chain.sent) == 1
+
+    chain = Lagging([token_acc(new(), new())])
+    chain.misses = 99
+    out = await executor(chain).close_token_accounts(None, set(), _noop)
+    assert out.status == "FAILED" and "BlockhashNotFound" in out.error and chain.sent == []
+
+
 async def test_only_the_requested_token_is_closed_after_an_exit():
     target, other = new(), new()
     chain = Chain([token_acc(new(), target), token_acc(new(), other)])

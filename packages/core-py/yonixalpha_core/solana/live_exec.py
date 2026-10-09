@@ -42,6 +42,8 @@ log = get_logger("core.live_exec")
 
 LAMPORTS = Decimal(1_000_000_000)
 CONFIRM_TIMEOUT_SECONDS = 75  # a blockhash stays valid ~60-90 s
+RECLAIM_BLOCKHASH_RETRIES = 3
+RECLAIM_BLOCKHASH_WAIT_SECONDS = 1.0
 REBROADCAST_SECONDS = 3
 POLL_SECONDS = 1.0
 MAX_VENUE_REBUILDS = 2  # a venue that keeps changing between build and sign is not traded
@@ -320,8 +322,16 @@ class SolanaLiveExecutor:
         await on_signed(signature)
         stage("TRANSACTION_SIGNED", signature=signature)
         try:
-            sim = await self.rpc.call("simulateTransaction", [wire, {"encoding": "base64", "sigVerify": True,
-                                                                     "commitment": "confirmed"}])
+            for attempt in range(RECLAIM_BLOCKHASH_RETRIES + 1):
+                sim = await self.rpc.call("simulateTransaction", [wire, {"encoding": "base64", "sigVerify": True,
+                                                                         "commitment": "confirmed"}])
+                # The blockhash came from one provider; the node that simulated may be a slot or two behind
+                # and not know it yet (seen 2026-10-09). Re-simulating the same signed transaction is
+                # read-only: nothing has been sent.
+                if ((sim or {}).get("value") or {}).get("err") != "BlockhashNotFound" or attempt == RECLAIM_BLOCKHASH_RETRIES:
+                    break
+                stage("SIMULATION_BLOCKHASH_NOT_FOUND", attempt=attempt + 1)
+                await self._sleep(RECLAIM_BLOCKHASH_WAIT_SECONDS)
         except Exception as exc:  # noqa: BLE001
             stage("SIMULATION_UNAVAILABLE", error=type(exc).__name__)
             return ExecOutcome("FAILED", signature, error=f"simulation unavailable: {type(exc).__name__}",
