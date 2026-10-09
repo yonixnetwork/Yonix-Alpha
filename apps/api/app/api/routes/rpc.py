@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_username, get_db, get_redis, get_settings
 from app.api.util import audit, jsonable, require_password
-from yonixalpha_core import provider_roles, runtime_config, secretbox
+from yonixalpha_core import provider_roles, runtime_config, secretbox, system_profile
 from yonixalpha_core.chains.evm import rpc_registry as evm_registry
 from yonixalpha_core.chains.evm import streams as evm_streams
 from yonixalpha_core.config import Settings
@@ -523,6 +523,8 @@ async def plan_health(db: AsyncSession = Depends(get_db), redis: Redis = Depends
         for role, n in per_service.items():
             fallbacks["solana"][role] = fallbacks["solana"].get(role, 0) + n
     for chain in evm_registry.EVM_CHAINS:
+        if not system_profile.chain_enabled(settings, chain):  # a chain switched off by the profile has nothing to upgrade
+            continue
         rows = await evm_registry.endpoints(db, settings, chain)
         live = await evm_live(redis, chain)
         findings += provider_roles.evm_findings(chain, rows, live)

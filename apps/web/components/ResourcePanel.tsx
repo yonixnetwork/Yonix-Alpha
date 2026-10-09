@@ -79,7 +79,7 @@ export default function ResourcePanel() {
           <div className="table-scroll">
             <table className="data-table">
               <thead><tr><th>Service</th><th>Memory</th><th>CPU</th><th>Heartbeat</th></tr></thead>
-              <tbody>{d.workers.map((w: J) => (
+              <tbody>{d.workers.filter((w: J) => !w.disabled).map((w: J) => (
                 <tr key={w.service}><td>{w.service}</td><td>{n(w.rss_mb, 0, " MB")}</td>
                   <td title="share of one CPU between its last two heartbeats">{n(w.cpu_pct, 1, "%")}</td>
                   <td className="small">{w.heartbeat ? formatDate(w.heartbeat) : w.disabled ? <span className="pill pill-off" title={w.disabled}>DISABLED</span> : "none"}</td></tr>))}</tbody>

@@ -40,7 +40,7 @@ from app.schemas.control import (
     SettingsVersionOut,
     TimelineEventOut,
 )
-from yonixalpha_core import config_validation, execution_funnel, kill_switch
+from yonixalpha_core import config_validation, execution_funnel, kill_switch, system_profile
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import (
     AuditLog,
@@ -530,9 +530,11 @@ async def _account_out(db: AsyncSession, redis: Redis, acct: PaperAccount) -> Pa
 
 @router.get("/paper/accounts", response_model=list[PaperAccountOut])
 async def paper_accounts(db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
-                         _: str = Depends(get_current_username)):
+                         settings: Settings = Depends(get_settings), _: str = Depends(get_current_username)):
     out = []
     for name in store.ACTIVE_PAPER_ACCOUNTS:
+        if not system_profile.account_enabled(settings, name):  # switched off by the system profile
+            continue
         acct = await store.get_paper_account(db, name)
         out.append(await _account_out(db, redis, acct))
     await db.commit()

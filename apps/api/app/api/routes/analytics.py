@@ -10,13 +10,16 @@ count, so a reset really does start a fresh record.
 from datetime import datetime
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from redis.asyncio import Redis
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_username, get_db
-from yonixalpha_core import solana_performance
+from app.api.deps import get_current_username, get_db, get_redis, get_settings
+from app.api.routes.ml import _review
+from yonixalpha_core import solana_performance, system_profile
 from yonixalpha_core.analytics import ClosedTrade, performance
+from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import PaperPosition, RiskAssessment
 from yonixalpha_core.safety import store
 
@@ -49,10 +52,11 @@ async def performance_report(
     until: datetime | None = None,
     include_before_reset: bool = False,
     db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
     _: str = Depends(get_current_username),
 ) -> dict:
     out = []
-    names = [account] if account else list(store.ACTIVE_PAPER_ACCOUNTS)
+    names = [account] if account else [n for n in store.ACTIVE_PAPER_ACCOUNTS if system_profile.account_enabled(settings, n)]
     for name in names:
         if name not in store.ACTIVE_PAPER_ACCOUNTS:
             raise HTTPException(404, f"unknown account; one of {list(store.ACTIVE_PAPER_ACCOUNTS)}")
@@ -102,9 +106,16 @@ async def performance_report(
 
 
 @router.get("/solana-performance")
-async def solana_performance_report(days: int = Query(7, ge=1, le=solana_performance.MAX_DAYS), outcomes: bool = True,
-                                    db: AsyncSession = Depends(get_db), _: str = Depends(get_current_username)) -> dict:
+async def solana_performance_report(request: Request, days: int = Query(7, ge=1, le=solana_performance.MAX_DAYS),
+                                    outcomes: bool = True, refresh: bool = Query(False),
+                                    redis: Redis = Depends(get_redis), _: str = Depends(get_current_username)) -> dict:
     """Solana PAPER vs LIVE: decisions, entries, closed trades by stage /
     hold time / entry quality / exit reason, missed winners, false positives
-    and LIVE execution telemetry (yonixalpha_core.solana_performance)."""
-    return await solana_performance.report(db, days, outcomes=outcomes)
+    and LIVE execution telemetry (yonixalpha_core.solana_performance).
+    Computed in the background like ML Review (app.api.review_cache): a week
+    of decisions took longer than the 25 s request limit on the server
+    (2026-10-09); 202 until the first result is ready."""
+    async def compute(db: AsyncSession) -> dict:
+        return await solana_performance.report(db, days, outcomes=outcomes)
+
+    return await _review(request, redis, f"solana-performance:{days}:{int(outcomes)}", compute, refresh)

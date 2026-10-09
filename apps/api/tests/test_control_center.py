@@ -71,6 +71,9 @@ async def seed_closed(app, account: str, engine: str, pnls: list[str], strategy:
 async def test_performance_analytics_per_currency_and_excludes_open(app, client, auth_headers):
     await seed_closed(app, "solana", "solana_fresh", ["10", "-5", "0", "20"], strategy="solana_fresh")
     await seed_closed(app, "evm_bsc", "evm_bsc", ["0.5"])
+    off = (await client.get("/api/analytics/performance", headers=auth_headers)).json()
+    assert {a["account"] for a in off["accounts"]} == {"solana"}  # SOLANA_ONLY: switched-off chains / copy are not shown
+    app.state.settings = app.state.settings.model_copy(update={"SYSTEM_PROFILE": "MULTI_CHAIN", "COPY_TRADING_ENABLED": True})
     r = await client.get("/api/analytics/performance", headers=auth_headers)
     assert r.status_code == 200
     accts = {a["account"]: a for a in r.json()["accounts"]}
@@ -152,6 +155,11 @@ async def test_disabled_services_report_not_configured_and_legacy_services_are_h
 
 async def test_summary_topbar(app, client, auth_headers):
     await seed_closed(app, "evm_bsc", "evm_bsc", ["0.01"])
+    off = (await client.get("/api/summary", headers=auth_headers)).json()
+    assert [a["name"] for a in off["accounts"]] == ["solana"] and off["open_positions"] == 0  # SOLANA_ONLY
+    pos = (await client.get("/api/paper/positions?status=open", headers=auth_headers)).json()
+    assert not [p for p in (pos["items"] if isinstance(pos, dict) else pos) if p["engine"] == "evm_bsc"]
+    app.state.settings = app.state.settings.model_copy(update={"SYSTEM_PROFILE": "MULTI_CHAIN", "COPY_TRADING_ENABLED": True})
     r = await client.get("/api/summary", headers=auth_headers)
     b = r.json()
     bsc = next(a for a in b["accounts"] if a["name"] == "evm_bsc")
@@ -342,6 +350,12 @@ async def test_ml_ablation_reports_not_run_then_the_stored_result(app, client, a
 
 async def test_launchpads_status_is_evidence_based_and_controls_are_audited(app, client, auth_headers):
     from yonixalpha_core import kill_switch
+    off = (await client.get("/api/launchpads", headers=auth_headers)).json()
+    assert {x["chain"] for x in off["launchpads"]} == {"solana"}  # SOLANA_ONLY: BSC / Robinhood launchpads hidden
+    assert {c["chain"] for c in (await client.get("/api/chains", headers=auth_headers)).json()["chains"]} == {"solana"}
+    assert {x["chain"] for x in (await client.get("/api/launchpads?all=true", headers=auth_headers)).json()["launchpads"]} \
+        == {"solana", "bsc", "robinhood"}  # still there when asked for
+    app.state.settings = app.state.settings.model_copy(update={"SYSTEM_PROFILE": "MULTI_CHAIN", "COPY_TRADING_ENABLED": True})
     r = (await client.get("/api/launchpads", headers=auth_headers)).json()
     lp = {x["key"]: x for x in r["launchpads"]}
     assert lp["noxa"]["status"] == "DISABLED" and "launches" in lp["noxa"]["why"]

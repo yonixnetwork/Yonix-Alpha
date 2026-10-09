@@ -211,6 +211,9 @@ async def samples(engine: str | None = None, labeled: bool | None = None, limit:
                                                 "score": f.ml_score, "at": f.created_at} for f in rows]})
 
 
+OPPORTUNITY_COUNT_CAP = 1000
+
+
 def opportunity_filters(*, days: int | None = None, traded: bool | None = None, stage: str | None = None,
                         losses_only: bool = False, rejected_up: bool = False, mint: str | None = None,
                         category: str | None = None) -> list:
@@ -252,10 +255,14 @@ async def opportunities_list(traded: bool | None = None, stage: str | None = Non
     the total is not a count over the whole history (audit 2026-10-07)."""
     filters = opportunity_filters(days=days, traded=traded, stage=stage, losses_only=losses_only,
                                   rejected_up=rejected_up, mint=mint, category=category)
-    total = (await db.execute(select(func.count()).select_from(OpportunityOutcome).where(*filters))).scalar_one()
+    # Counted up to OPPORTUNITY_COUNT_CAP: an exact count of a 100 000-row category read that many large rows
+    # (2026-10-09: 503 after 25 s); the exact totals per category are in the cached ledger review.
+    capped = select(OpportunityOutcome.id).where(*filters).limit(OPPORTUNITY_COUNT_CAP + 1).subquery()
+    total = (await db.execute(select(func.count()).select_from(capped))).scalar_one()
     rows = (await db.execute(select(OpportunityOutcome).where(*filters).order_by(OpportunityOutcome.decided_at.desc())
                              .limit(limit).offset(offset))).scalars().all()
-    return jsonable({"total": total, "window_days": days, "items": [
+    return jsonable({"total": min(total, OPPORTUNITY_COUNT_CAP), "total_capped": total > OPPORTUNITY_COUNT_CAP,
+                     "window_days": days, "items": [
         {"id": r.id, "mint": r.mint, "symbol": r.symbol, "engine": r.engine, "stage": r.stage, "decision": r.decision,
          "traded": r.traded, "execution_mode": r.execution_mode, "position_id": r.position_id, "reasons": r.reasons,
          "decided_at": r.decided_at, "snapshot": r.snapshot, "horizons": r.horizons, "peak_pct": r.peak_pct,

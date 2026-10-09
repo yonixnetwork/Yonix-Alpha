@@ -245,12 +245,14 @@ async def evaluate_with_gate(
             await session.commit()
             return a
         try:
+            drift = await paper_execution.measured_live_drift(session)
             position = await paper_engine.open_position(
                 session, account, a, row.id, candidate, inp.liquidity_model, inp.quote,
                 inp.token.transfer_fee_bps if inp.token else None, now,
                 venue={"type": adapter, "kind": "spot", "decimals": inp.token.decimals if inp.token else None,
                        **provenance["venue"]},
                 max_slippage_bps=controls.settings.max_slippage_bps,
+                entry_drift_pct=drift["buy_pct"],  # what a LIVE buy loses before it lands (measured)
             )
             position.execution_mode, position.source, position.lifecycle = "PAPER", "PUMPFUN", lifecycle
             position.execution_provider = live_trading.PAPER_PROVIDER

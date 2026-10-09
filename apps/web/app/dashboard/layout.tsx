@@ -10,9 +10,12 @@ import { modeClass, stateClass } from "@/components/ui";
 import { getAccessToken, logout } from "@/lib/api";
 import type { SummaryOut } from "@/lib/cc";
 import { EventsProvider, useLiveStatus } from "@/lib/events";
+import { accountOn, useProfile } from "@/lib/profile";
 import { useApi } from "@/lib/useApi";
 
-type NavItem = { href: string; label: string; icon: LucideIcon };
+// `needs`: the chain or feature the page belongs to; left out of the menu
+// while the system profile switches it off (lib/profile).
+type NavItem = { href: string; label: string; icon: LucideIcon; needs?: "bsc" | "robinhood" | "evm" | "copy" };
 
 // YONIXALPHA: Solana, BSC and Robinhood Chain memecoin trading. Legacy
 // futures / forex / grid pages are not part of this navigation.
@@ -22,8 +25,8 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     title: "Chains",
     items: [
       { href: "/dashboard/chains/solana", label: "Solana", icon: Link2 },
-      { href: "/dashboard/chains/bsc", label: "BSC", icon: Link2 },
-      { href: "/dashboard/chains/robinhood", label: "Robinhood Chain", icon: Link2 },
+      { href: "/dashboard/chains/bsc", label: "BSC", icon: Link2, needs: "bsc" },
+      { href: "/dashboard/chains/robinhood", label: "Robinhood Chain", icon: Link2, needs: "robinhood" },
     ],
   },
   {
@@ -33,7 +36,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
       { href: "/dashboard/solana/observing", label: "Observation", icon: Eye },
       { href: "/dashboard/solana/migrated", label: "Migrated", icon: ArrowRightLeft },
       { href: "/dashboard/solana/momentum", label: "Momentum", icon: Rocket },
-      { href: "/dashboard/evm", label: "EVM Markets", icon: Boxes },
+      { href: "/dashboard/evm", label: "EVM Markets", icon: Boxes, needs: "evm" },
       { href: "/dashboard/tokens", label: "Token Explorer", icon: Search },
       { href: "/dashboard/launchpads", label: "Launchpads", icon: Layers },
     ],
@@ -41,8 +44,8 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   {
     title: "Wallet intelligence",
     items: [
-      { href: "/dashboard/copy", label: "Copy Trading", icon: Copy },
-      { href: "/dashboard/smart-wallets", label: "Smart Wallets", icon: Fingerprint },
+      { href: "/dashboard/copy", label: "Copy Trading", icon: Copy, needs: "copy" },
+      { href: "/dashboard/smart-wallets", label: "Smart Wallets", icon: Fingerprint, needs: "copy" },
     ],
   },
   {
@@ -88,6 +91,13 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
 
 const COLLAPSE_KEY = "yonixalpha_nav_collapsed";
 
+function navShown(p: ReturnType<typeof useProfile>, item: NavItem): boolean {
+  if (!item.needs) return true;
+  if (item.needs === "copy") return p.copyOn;
+  if (item.needs === "evm") return p.evmOn;
+  return p.chainOn(item.needs);
+}
+
 function isActive(pathname: string, href: string): boolean {
   if (href === "/dashboard" || href === "/dashboard/ml" || href === "/dashboard/tokens") return pathname === href;
   return pathname === href || pathname.startsWith(href + "/");
@@ -108,12 +118,13 @@ function TopbarSummary() {
     refreshMs: 30000,
     reloadOn: ["balance.updated", "trade.created", "trade.closed", "system.health.updated", "notification.created"],
   });
+  const profile = useProfile();
   if (!data) return <span className="muted">…</span>;
   return (
     <>
       <div className="balances" aria-label="Paper balances">
         {data.accounts
-          .filter((a) => ["solana", "live_solana", "evm_bsc", "evm_robinhood"].includes(a.name))
+          .filter((a) => ["solana", "live_solana", "evm_bsc", "evm_robinhood"].includes(a.name) && accountOn(profile, a.name))
           .map((a) => {
             const pnl = Number(a.realized_pnl_today);
             return (
@@ -164,6 +175,7 @@ function Shell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const profile = useProfile();
 
   useEffect(() => {
     if (!getAccessToken()) router.replace("/login");
@@ -234,7 +246,8 @@ function Shell({ children }: { children: React.ReactNode }) {
       <div className="dash-body">
         {drawerOpen && <div className="drawer-backdrop" onClick={() => setDrawerOpen(false)} aria-hidden />}
         <nav className={`side-nav ${collapsed ? "collapsed" : ""} ${drawerOpen ? "open" : ""}`} aria-label="Main">
-          {NAV_GROUPS.map((group) => (
+          {NAV_GROUPS.map((group) => ({ ...group, items: group.items.filter((i) => navShown(profile, i)) }))
+            .filter((group) => group.items.length > 0).map((group) => (
             <div key={group.title || "root"} className="nav-group">
               {group.title && <div className="nav-group-title">{group.title}</div>}
               {group.items.map((item) => {

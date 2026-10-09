@@ -1005,6 +1005,15 @@ Index("ix_opportunity_outcomes_losses", OpportunityOutcome.decided_at,
       postgresql_where=OpportunityOutcome.loss_analysis.is_not(None))
 Index("ix_opportunity_outcomes_rejected_up", OpportunityOutcome.decided_at,
       postgresql_where=text("traded IS false AND peak_pct >= 30"))
+# ML Review lists by counterfactual / exit category and recovery (migration 0045)
+Index("ix_opportunity_outcomes_cf_class", text("((analysis -> 'counterfactual') ->> 'classification')"),
+      OpportunityOutcome.decided_at, postgresql_where=text("((analysis -> 'counterfactual') ->> 'classification') IS NOT NULL"))
+Index("ix_opportunity_outcomes_exit_class", text("(post_exit ->> 'classification')"), OpportunityOutcome.decided_at,
+      postgresql_where=text("(post_exit ->> 'classification') IS NOT NULL"))
+Index("ix_opportunity_outcomes_recovery", OpportunityOutcome.decided_at,
+      postgresql_where=text("(labels ->> 'recovery') = 'true'"))
+# An engine's newest decision (strategy pages, migration 0045)
+Index("ix_risk_assessments_engine_evaluated_at", RiskAssessment.engine, RiskAssessment.evaluated_at)
 
 
 class LaunchBuyer(Base):

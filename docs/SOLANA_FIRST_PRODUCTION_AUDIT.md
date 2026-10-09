@@ -268,3 +268,21 @@ Found in this reading and fixed:
 - Manual BUY override (task #138): **BLOCKED** (unchanged).
 - EVM live (task #178): off and locked (unchanged).
 - ML stage names: mapped (section 11), not renamed.
+
+## 23. Screenshot fixes, 2026-10-09
+
+| Problem (screenshot) | Root cause | Fix | Status |
+|---|---|---|---|
+| System Health: "Application error: a client-side exception" | `/api/system/resources` reused the name `why` as the loop variable over the disabled services, so `level_reasons` became a string and the page crashed rendering it | loop variable renamed; test asserts `level_reasons` is a non-empty list | VERIFIED (test + local browser, no page error) |
+| ML Review, "Rejection justified" / "Correct rejections": 25 s timeout | category filters on JSON fields (`analysis.counterfactual.classification`, `post_exit.classification`, `labels.recovery`) had no index, and the page counted every matching row | migration 0045: three partial expression indexes; filters written as the exact indexed expressions; count capped at 1000 (`total_capped`, shown as "1000+") | VERIFIED locally (EXPLAIN uses each index); server timing NOT VERIFIED until `page_timings` is run |
+| Solana Performance, 7 days: 25 s timeout | report computed inside the request | computed in the background (`review_cache`, as ML Review); the page shows "being prepared" then the result | VERIFIED locally |
+| Fresh / Migrated / Momentum pages slow or empty | the strategy page asked for the newest decision with `engine = x OR strategy = x` over the whole `risk_assessments` table (multi-GB) | two indexed `ORDER BY evaluated_at DESC LIMIT 1` lookups; new index `ix_risk_assessments_engine_evaluated_at` | VERIFIED locally; server NOT VERIFIED |
+| BSC, Robinhood, copy trading still in the UI | the UI did not read the system profile | nav items, chain tabs, launchpads, accounts (top bar, paper accounts, performance), positions, wallets, RPC, ML Review EVM block and provider plan health follow `/api/system/profile`; switched-off services and DISABLED launchpads are not listed. Nothing deleted: `MULTI_CHAIN` / `COPY_TRADING_ENABLED=true` shows them again, `?all=true` lists every chain / launchpad | VERIFIED (tests + local browser) |
+| LIVE not trading for 24 h | not diagnosed on the server yet | `python -m yonixalpha_core.tools.live_check` prints every switch on the path to a live order and a verdict | NOT VERIFIED until run on the server |
+| Paper more profitable than LIVE | paper filled at the decision price; LIVE lands seconds later after the price moved | paper fills now also pay the median adverse price move measured on confirmed LIVE orders (buys: decision -> build -> landing; sells: expected vs received), once 20 orders of a side are measured; a favourable median is never credited; setting `charge_measured_live_drift` (on). Fixed costs (fees, priority fee, rent) were already charged as LIVE | VERIFIED by tests; the size of the drift on the server depends on how many LIVE orders carry diagnostics (NOT VERIFIED) |
+
+Server commands: `$C exec api python -m app.page_timings` (each page's API time),
+`$C exec api python -m yonixalpha_core.tools.live_check` (why LIVE is / is not trading),
+`$C run --rm decision-engine python -m yonixalpha_core.tools.rpc_check --capabilities` (RPC).
+Migration 0045 builds its indexes CONCURRENTLY; on a large database build them with psql
+before deploying so the API start does not exceed the deploy health wait.

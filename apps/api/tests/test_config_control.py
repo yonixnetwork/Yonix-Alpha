@@ -284,6 +284,9 @@ async def test_provider_roles_and_plan_health(app, client, auth_headers):
         {"url": "https://bsc-rpc.publicnode.com", "state": "OK", "ok": 500, "errors": 0, "rate_limited": 60,
          "logs_span": 10, "unsupported_methods": []}], "role_fallbacks": {"WALLET_DATA": 3}}))
     ph = (await client.get("/api/rpc/plan-health", headers=auth_headers)).json()
+    assert not [f for f in ph["findings"] if f["chain"] != "solana"] and set(ph["role_coverage"]) == {"solana"}  # SOLANA_ONLY
+    app.state.settings = app.state.settings.model_copy(update={"SYSTEM_PROFILE": "MULTI_CHAIN"})
+    ph = (await client.get("/api/rpc/plan-health", headers=auth_headers)).json()
     bsc = [f for f in ph["findings"] if f["chain"] == "bsc"]
     caps = {f["capability"] for f in bsc if f["severity"] == "UPGRADE_REQUIRED"}
     assert {"production RPC", "eth_getLogs block range", "throughput"} <= caps

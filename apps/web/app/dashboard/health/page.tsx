@@ -49,7 +49,8 @@ export default function HealthPage() {
             {live.lastEventAt && <> (last event {formatDate(live.lastEventAt)})</>}
           </div>
           {CATEGORY_ORDER.map((cat) => {
-            const items = data.connections.filter((c) => c.category === cat);
+            // a service switched off by the system profile is listed once in Server resources, not as a row here
+            const items = data.connections.filter((c) => c.category === cat && c.state !== "DISABLED");
             if (!items.length) return null;
             return (
               <Section key={cat} title={CATEGORY_LABEL[cat] ?? cat}>

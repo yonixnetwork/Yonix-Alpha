@@ -3,14 +3,15 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from redis.asyncio import Redis
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_username, get_db, get_redis
+from app.api.deps import get_current_username, get_db, get_redis, get_settings
 from app.api.util import audit, jsonable
 from app.schemas.common import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, Page
 from app.schemas.paper import PaperPositionOut
-from yonixalpha_core import execution_analysis, events, paper_execution, position_pnl
+from yonixalpha_core import execution_analysis, events, paper_execution, position_pnl, system_profile
+from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import (
     ExecutionOrder, PaperAccount, PaperOrder, PaperPosition, PlatformSetting, RiskAssessment, TradeTimelineEvent,
 )
@@ -28,9 +29,13 @@ async def list_positions(
     limit: int = Query(DEFAULT_PAGE_LIMIT, ge=1, le=MAX_PAGE_LIMIT),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
     _: str = Depends(get_current_username),
 ) -> Page[PaperPositionOut]:
     filters = []
+    hidden = system_profile.hidden_engines(settings)
+    if engine is None and hidden:  # positions of chains the profile switches off (frozen, not managed)
+        filters.append(or_(PaperPosition.engine.is_(None), PaperPosition.engine.not_in(hidden)))
     if status_filter is not None:
         filters.append(PaperPosition.status == status_filter)
     if engine is not None:
