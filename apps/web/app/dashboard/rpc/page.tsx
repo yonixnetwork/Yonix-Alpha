@@ -127,9 +127,6 @@ function EvmProviders({ busy, run }: { busy: boolean; run: (fn: () => Promise<un
       <p className="muted">{data.note}</p>
       <EvmStreams />
       <ExternalSafety />
-      <Section title="X narrative intelligence (optional, shadow)">
-        <XNarrativeSettings />
-      </Section>
       <EvmDetection />
       <Section title="Where to get an RPC — one provider for Solana, BSC and Robinhood Chain">
         <p className="small">{data.guide.summary}</p>
@@ -331,6 +328,11 @@ export default function RpcPage() {
       </Section>
 
       {profile.evmOn && <EvmProviders busy={busy} run={run} />}
+
+      {/* Solana-only feature: kept outside EvmProviders, which is hidden while EVM chains are off. */}
+      <Section title="X narrative intelligence (optional, shadow)">
+        <XNarrativeSettings />
+      </Section>
 
       <Section title="Capability matrix — what each provider actually serves">
         <div className="table-scroll">
