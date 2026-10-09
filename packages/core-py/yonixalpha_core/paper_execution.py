@@ -12,6 +12,14 @@ to every entry and exit attempt:
   tick at *that* price, which is where the real cost of a failed exit shows
   up (a stop that fills later, lower).
 
+Price drift (2026-10-09): a paper fill happens at the price the decision
+saw; a live order lands seconds later, after other traders moved the price
+(buys pay more, sells receive less). Every confirmed LIVE order records that
+movement (execution_analysis: decision -> build -> landing for buys, expected
+vs received for sells). With at least MIN_LIVE_SAMPLE measured orders of a
+side, the median adverse movement is charged to every paper fill of that
+side (charge_measured_live_drift); a favourable median is never credited.
+
 Rates are never invented. The operator sets them (DB, dashboard; default
 0%). Once at least MIN_LIVE_SAMPLE live orders of a side have a final
 outcome, the rate measured from `execution_orders` is used instead (unless
@@ -33,6 +41,8 @@ from yonixalpha_core.db.models import ExecutionOrder, PlatformSetting
 SETTINGS_KEY = "paper_execution"
 MIN_LIVE_SAMPLE = 20
 MAX_FAILURE_PCT = Decimal(50)
+MAX_DRIFT_PCT = Decimal(25)
+DRIFT_SAMPLE = 200  # newest measured orders per side
 FINAL_STATUSES = ("CONFIRMED", "FAILED", "EXPIRED")  # CANCELLED orders never reached the chain
 
 
@@ -48,17 +58,20 @@ class PaperExecutionSettings:
     # before (audit 2026-10-07: paper skipped them, so it took trades LIVE
     # refused and reported a better result than LIVE could get).
     charge_live_fixed_costs: bool = True
+    # The price LIVE loses between decision and landing (module docstring).
+    charge_measured_live_drift: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {"entry_failure_pct": str(self.entry_failure_pct), "exit_failure_pct": str(self.exit_failure_pct),
                 "use_measured_live_rates": self.use_measured_live_rates,
-                "charge_live_fixed_costs": self.charge_live_fixed_costs}
+                "charge_live_fixed_costs": self.charge_live_fixed_costs,
+                "charge_measured_live_drift": self.charge_measured_live_drift}
 
 
 def parse_settings(data: dict[str, Any]) -> tuple[PaperExecutionSettings, list[str]]:
     s, errors = PaperExecutionSettings(), []
     for key, value in (data or {}).items():
-        if key in ("use_measured_live_rates", "charge_live_fixed_costs"):
+        if key in ("use_measured_live_rates", "charge_live_fixed_costs", "charge_measured_live_drift"):
             if isinstance(value, bool):
                 setattr(s, key, value)
             else:
@@ -127,6 +140,76 @@ async def effective_rates(session: AsyncSession) -> dict[str, Any]:
         else:
             out[f"{kind}_pct"] = configured
             out[f"{kind}_source"] = "operator setting"
+    return out
+
+
+def _dec(v: Any) -> Decimal | None:
+    try:
+        d = Decimal(str(v))
+    except Exception:  # noqa: BLE001
+        return None
+    return d if d.is_finite() else None
+
+
+def buy_drift_pct(diagnostics: dict[str, Any] | None) -> Decimal | None:
+    """Market movement against a confirmed LIVE buy before it landed, in %:
+    decision -> build, then build -> just before our trade (our own impact
+    and the fees are not in it: paper charges those itself)."""
+    comp = (((diagnostics or {}).get("price") or {}).get("components_pct")) or {}
+    a, b = _dec(comp.get("decision_to_build_pct")), _dec(comp.get("build_to_landing_pct"))
+    if a is None and b is None:
+        return None
+    return ((1 + (a or Decimal(0)) / 100) * (1 + (b or Decimal(0)) / 100) - 1) * 100
+
+
+def sell_drift_pct(diagnostics: dict[str, Any] | None, amount: str | None, decimals: Any) -> Decimal | None:
+    """How much less a confirmed LIVE sell received than its decision expected,
+    in % (network fee added back: paper charges it separately)."""
+    d = diagnostics or {}
+    expected = _dec((d.get("decision") or {}).get("price_sol"))
+    price = d.get("price") or {}
+    all_in, fee = _dec(price.get("all_in_price_sol")), _dec(price.get("network_fee_sol")) or Decimal(0)
+    raw, dec = _dec(amount), _dec(decimals)
+    if not expected or expected <= 0 or all_in is None or raw is None or dec is None or raw <= 0:
+        return None
+    tokens = raw / (Decimal(10) ** int(dec))
+    return (1 - (all_in + fee / tokens) / expected) * 100
+
+
+def _median(values: list[Decimal]) -> Decimal:
+    v = sorted(values)
+    n = len(v)
+    return v[n // 2] if n % 2 else (v[n // 2 - 1] + v[n // 2]) / 2
+
+
+async def measured_live_drift(session: AsyncSession) -> dict[str, Any]:
+    """{'buy_pct', 'sell_pct', 'buy_n', 'sell_n', 'source'}: the median adverse
+    price movement of the newest DRIFT_SAMPLE measured confirmed LIVE orders
+    per side, clamped to [0, MAX_DRIFT_PCT]; None while fewer than
+    MIN_LIVE_SAMPLE orders of that side are measured, or when switched off."""
+    s = await load_settings(session)
+    out: dict[str, Any] = {"buy_pct": None, "sell_pct": None, "buy_n": 0, "sell_n": 0,
+                           "source": "switched off" if not s.charge_measured_live_drift else None}
+    if not s.charge_measured_live_drift:
+        return out
+    o = ExecutionOrder
+    rows = (await session.execute(select(o.side, o.diagnostics, o.amount, o.limits).where(
+        o.mode == "LIVE", o.status == "CONFIRMED", o.side.in_(("BUY", "SELL")))
+        .order_by(o.created_at.desc()).limit(DRIFT_SAMPLE * 4))).all()
+    buys: list[Decimal] = []
+    sells: list[Decimal] = []
+    for side, diag, amount, limits in rows:
+        if side == "BUY" and len(buys) < DRIFT_SAMPLE and (v := buy_drift_pct(diag)) is not None:
+            buys.append(v)
+        elif side == "SELL" and len(sells) < DRIFT_SAMPLE and \
+                (v := sell_drift_pct(diag, amount, (limits or {}).get("decimals"))) is not None:
+            sells.append(v)
+    for key, values in (("buy", buys), ("sell", sells)):
+        out[f"{key}_n"] = len(values)
+        if len(values) >= MIN_LIVE_SAMPLE:
+            out[f"{key}_pct"] = min(max(_median(values), Decimal(0)), MAX_DRIFT_PCT).quantize(Decimal("0.0001"))
+    out["source"] = (f"median of {out['buy_n']} live buys / {out['sell_n']} live sells "
+                     f"(at least {MIN_LIVE_SAMPLE} needed per side)")
     return out
 
 

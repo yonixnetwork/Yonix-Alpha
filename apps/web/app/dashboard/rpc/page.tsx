@@ -11,6 +11,7 @@ import RuntimeApply from "@/components/RuntimeApply";
 import { ErrorNotice, Loading, PageHeader, Section, Stat } from "@/components/ui";
 import { apiDelete, apiPatch, apiPost, apiPut, ApiError } from "@/lib/api";
 import { formatDate } from "@/lib/format";
+import { useProfile } from "@/lib/profile";
 import { useApi } from "@/lib/useApi";
 
 interface TestResult { status: string; detail: string; latency_ms: number | null; tested_at: string }
@@ -147,6 +148,7 @@ function EvmProviders({ busy, run }: { busy: boolean; run: (fn: () => Promise<un
  * its real health from what the running services saw, test/add/edit/
  * reorder/disable — applied by the services without a restart. */
 export default function RpcPage() {
+  const profile = useProfile();
   const { data, error, reload } = useApi<Listing>("/api/rpc/providers", undefined, { refreshMs: 5000 });
   const [form, setForm] = useState(EMPTY);
   const [busy, setBusy] = useState(false);
@@ -324,7 +326,7 @@ export default function RpcPage() {
           the built-in public endpoints (900+).</p>
       </Section>
 
-      <EvmProviders busy={busy} run={run} />
+      {profile.evmOn && <EvmProviders busy={busy} run={run} />}
 
       <Section title="Capability matrix — what each provider actually serves">
         <div className="table-scroll">

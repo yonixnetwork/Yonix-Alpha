@@ -10,12 +10,13 @@ from redis.asyncio import Redis
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_username, get_db, get_redis
+from app.api.deps import get_current_username, get_db, get_redis, get_settings
 from app.api.util import audit, jsonable
-from yonixalpha_core import events, kill_switch
+from yonixalpha_core import events, kill_switch, system_profile
 from yonixalpha_core.chains import activity, controls, verification
 from yonixalpha_core.chains.base import CHECKS, Chain
 from yonixalpha_core.chains.registry import CHAINS, LAUNCHPADS
+from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import PaperPosition
 
 router = APIRouter(tags=["chains"])
@@ -45,9 +46,16 @@ async def _launchpads(db: AsyncSession, redis: Redis, chain: str | None) -> list
 
 
 @router.get("/chains")
-async def chains(db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
+async def chains(all_chains: bool = Query(False, alias="all"), db: AsyncSession = Depends(get_db),
+                 redis: Redis = Depends(get_redis), settings: Settings = Depends(get_settings),
                  _: str = Depends(get_current_username)) -> dict:
-    return jsonable(_chains_payload(await controls.load(db), await _launchpads(db, redis, None)))
+    """The chains with their launchpads; chains the system profile switches
+    off are left out unless ?all=true."""
+    lps = [lp for lp in await _launchpads(db, redis, None) if all_chains or system_profile.chain_enabled(settings, lp["chain"])]
+    out = _chains_payload(await controls.load(db), lps)
+    if not all_chains:
+        out["chains"] = [c for c in out["chains"] if system_profile.chain_enabled(settings, c["chain"])]
+    return jsonable(out)
 
 
 def _chains_payload(ctl: dict, lps: list[dict]) -> dict:
@@ -61,9 +69,12 @@ def _chains_payload(ctl: dict, lps: list[dict]) -> dict:
 
 
 @router.get("/launchpads")
-async def launchpads(chain: str | None = Query(None, pattern="^(solana|bsc|robinhood)$"), db: AsyncSession = Depends(get_db),
-                     redis: Redis = Depends(get_redis), _: str = Depends(get_current_username)) -> dict:
-    return jsonable({"launchpads": await _launchpads(db, redis, chain), "checks": list(CHECKS),
+async def launchpads(chain: str | None = Query(None, pattern="^(solana|bsc|robinhood)$"),
+                     all_chains: bool = Query(False, alias="all"), db: AsyncSession = Depends(get_db),
+                     redis: Redis = Depends(get_redis), settings: Settings = Depends(get_settings),
+                     _: str = Depends(get_current_username)) -> dict:
+    lps = [lp for lp in await _launchpads(db, redis, chain) if all_chains or system_profile.chain_enabled(settings, lp["chain"])]
+    return jsonable({"launchpads": lps, "checks": list(CHECKS),
                      "statuses": ["LIVE", "PAPER_ONLY", "DEGRADED", "UNVERIFIED", "DISABLED"],
                      "activity_statuses": ["ACTIVE", "QUIET", "DEGRADED", "UNVERIFIED", "INACTIVE", "DISABLED"],
                      "note": "status is computed from recorded evidence on the real chain, never set by hand; "

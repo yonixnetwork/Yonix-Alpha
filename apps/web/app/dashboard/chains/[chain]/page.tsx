@@ -13,6 +13,10 @@ const STATUS_CLASS: Record<string, string> = {
   LIVE: "pill pill-ok", PAPER_ONLY: "pill pill-warn", DEGRADED: "pill pill-danger", UNVERIFIED: "pill pill-off", DISABLED: "pill pill-off",
 };
 
+// Launchpads that cannot trade (observe-only venues, status DISABLED) are left
+// out: the dashboard lists only working parts.
+const working = (lps: J[]) => lps.filter((lp) => lp.status !== "DISABLED");
+
 export default function ChainPage() {
   const { chain } = useParams<{ chain: string }>();
   const { data, error, loading } = useApi<J>(`/api/chains/${chain}`, undefined, { refreshMs: 60000, reloadOn: ["controls.updated"] });
@@ -29,12 +33,12 @@ export default function ChainPage() {
             Trading switch: <span className={data.enabled ? "pill pill-ok" : "pill pill-danger"}>{data.enabled ? "ON" : "OFF"}</span>{" "}
             <Link href="/dashboard/launchpads" className="small"><Layers size={14} aria-hidden /> change on Launchpads</Link>
           </p>
-          {data.launchpads.length === 0 ? <Empty>No launchpads registered.</Empty> : (
+          {working(data.launchpads).length === 0 ? <Empty>No working launchpads.</Empty> : (
             <div className="table-scroll">
               <table className="data-table">
                 <thead><tr><th>Launchpad</th><th>Status</th><th>Why</th><th>Operator mode</th><th>Lifecycle</th></tr></thead>
                 <tbody>
-                  {data.launchpads.map((lp: J) => (
+                  {working(data.launchpads).map((lp: J) => (
                     <tr key={lp.key}>
                       <td>{lp.name}</td>
                       <td><span className={STATUS_CLASS[lp.status] ?? "pill pill-off"}>{lp.status === "PAPER_ONLY" ? "PAPER" : lp.status}</span></td>

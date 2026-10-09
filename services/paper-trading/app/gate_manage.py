@@ -250,6 +250,7 @@ async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterC
                                 rpc_min_interval_seconds: float = 0) -> dict[str, int]:
     counts = {"managed": 0, "closed": 0, "unpriced": 0}
     rates = None  # paper execution failure rates, loaded once per pass when needed
+    drift: dict = {}  # measured LIVE price drift (paper_execution), loaded with the rates
     async with session_factory() as session:
         # pending_entry (LIVE buy not yet confirmed) and needs_review
         # positions are not "open" and are therefore never managed here.
@@ -297,6 +298,7 @@ async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterC
                     extra = copy_exit  # the larger of exit intelligence and the mirrored sell, never both
                 if rates is None:
                     rates = await paper_execution.effective_rates(session)
+                    drift = await paper_execution.measured_live_drift(session)
                 if rates["exit_pct"] > 0 and p.exit_failures < MAX_SIMULATED_EXIT_FAILURES:
                     exiting, s = _would_exit(p, price, extra)
                     key = f"exit:{p.id}:{len(p.tp_hits or [])}:{p.exit_failures}"
@@ -322,6 +324,7 @@ async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterC
                 result = await paper_engine.apply_step(
                     session, p, account, price, model, None if source.startswith("jupiter") else tfee, now,
                     exit_cost_bps=exit_cost, extra_exit=extra,
+                    exit_drift_pct=drift.get("sell_pct"),  # what a LIVE sell loses before it lands (measured)
                 )
                 if result.exits:
                     p.exit_failures = 0

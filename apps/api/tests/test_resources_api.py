@@ -22,6 +22,8 @@ async def test_resources_show_mode_level_and_what_is_paused(client, auth_headers
     r = (await client.get("/api/system/resources", headers=auth_headers)).json()
     assert r["mode"]["resource_mode"] == "LOW_RESOURCE" and r["mode"]["label"] == "LOW RESOURCE MODE"
     assert r["host"]["memory"]["available_mb"] == 345
+    # 2026-10-09: the profile loop overwrote these with a string and System Health crashed on .join
+    assert r["level"] == "WARNING" and isinstance(r["level_reasons"], list) and r["level_reasons"]
     assert "copy trading" in r["paused_now"] and r["copy_trading"]["status"] == "SUSPENDED"
     assert r["copy_trading"]["label"] == "SUSPENDED — LOW SERVER RESOURCES"
     assert r["postgres"]["connections"] and "shared_buffers" in r["postgres"]["settings"]
@@ -122,3 +124,47 @@ async def test_losing_and_rejected_up_lists_read_their_partial_indexes(client, a
     for kw in ({"losses_only": True}, {"rejected_up": True}):
         r = await client.get("/api/ml/opportunities", params={**kw, "days": 7, "limit": 20}, headers=auth_headers)
         assert r.status_code == 200 and r.json()["total"] == 0
+
+
+async def test_category_lists_read_their_expression_indexes_and_count_is_capped(client, auth_headers, app, monkeypatch):
+    """Server 2026-10-09: "Rejection justified" / "Correct rejections" lists
+    answered 503 after 25 s (the category is inside the analysis JSON). Each
+    category filter must use the expression index of migration 0045, and the
+    list's total is counted only up to OPPORTUNITY_COUNT_CAP."""
+    from datetime import datetime, timezone
+
+    from sqlalchemy import select, text
+    from sqlalchemy.dialects import postgresql
+
+    from app.api.routes import ml as ml_routes
+    from app.api.routes.ml import opportunity_filters
+    from yonixalpha_core.db.models import OpportunityOutcome
+
+    async with app.state.db_session_factory() as s:
+        for category, index in (("missed_win", "ix_opportunity_outcomes_cf_class"),
+                                ("correct_rejection", "ix_opportunity_outcomes_cf_class"),
+                                ("rejection_justified_drawdown", "ix_opportunity_outcomes_cf_class"),
+                                ("counterfactual_unknown", "ix_opportunity_outcomes_cf_class"),
+                                ("premature_exit", "ix_opportunity_outcomes_exit_class"),
+                                ("recovery", "ix_opportunity_outcomes_recovery")):
+            q = select(OpportunityOutcome.id).where(*opportunity_filters(days=7, category=category)) \
+                .order_by(OpportunityOutcome.decided_at.desc()).limit(25)
+            sql = str(q.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+            await s.execute(text("SET LOCAL enable_seqscan = off"))
+            plan = "\n".join(r[0] for r in (await s.execute(text("EXPLAIN " + sql))).all())
+            assert index in plan, (category, plan)
+            await s.rollback()
+        now = datetime.now(timezone.utc)
+        s.add_all([OpportunityOutcome(key=f"k{i}", mint=f"M{i}", engine="solana_fresh", stage="GATE", decision="REJECT",
+                                      traded=False, decided_at=now, snapshot={},
+                                      analysis={"counterfactual": {"classification": "CORRECT_REJECTION"}})
+                   for i in range(5)])
+        await s.commit()
+    monkeypatch.setattr(ml_routes, "OPPORTUNITY_COUNT_CAP", 3)
+    r = (await client.get("/api/ml/opportunities", params={"category": "correct_rejection", "days": 7, "limit": 2},
+                          headers=auth_headers)).json()
+    assert (r["total"], r["total_capped"], len(r["items"])) == (3, True, 2)
+    monkeypatch.setattr(ml_routes, "OPPORTUNITY_COUNT_CAP", 1000)
+    r = (await client.get("/api/ml/opportunities", params={"category": "correct_rejection", "days": 7},
+                          headers=auth_headers)).json()
+    assert (r["total"], r["total_capped"]) == (5, False)

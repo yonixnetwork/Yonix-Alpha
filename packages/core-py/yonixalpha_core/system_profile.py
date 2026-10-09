@@ -122,6 +122,25 @@ def refusal(settings: Any, chain: str, action: str) -> dict[str, Any] | None:
                        "chain is switched back on."}
 
 
+def account_enabled(settings: Any, name: str) -> bool:
+    """Whether a paper account belongs to a running part: evm_<chain> needs its
+    chain, evm_copy_<chain> its chain and copy trading, copy_solana copy
+    trading; every other (Solana) account always."""
+    if name.startswith("evm_copy_"):
+        return chain_enabled(settings, name[len("evm_copy_"):]) and copy_enabled(settings)
+    if name.startswith("evm_"):
+        return chain_enabled(settings, name[len("evm_"):])
+    if name == "copy_solana":
+        return copy_enabled(settings)
+    return True
+
+
+def hidden_engines(settings: Any) -> list[str]:
+    """Position engines of chains the profile switches off (their positions
+    are frozen, not managed): left out of the dashboard's lists and counts."""
+    return [f"evm_{p}{c}" for c in EVM_CHAINS for p in ("", "copy_") if not account_enabled(settings, f"evm_{p}{c}")]
+
+
 def compose_profiles(settings: Any) -> list[str]:
     """The compose profiles deploy.sh turns on (scripts/compose-profiles.sh
     applies the same rules to .env)."""

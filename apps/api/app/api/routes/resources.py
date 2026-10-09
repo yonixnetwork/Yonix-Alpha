@@ -159,9 +159,9 @@ async def system_resources(db: AsyncSession = Depends(get_db), redis: Redis = De
     if st["copy_trading_effective"] == "SUSPENDED":
         paused.append("copy trading" + ("" if st.get("copy_trading_enabled", True) else " (COPY_TRADING_ENABLED=false)"))
         paused.append("copy-trading wallet ML")
-    for svc, why in system_profile.disabled_services(settings).items():
+    for svc, off in system_profile.disabled_services(settings).items():  # not `why`: that is the level's reasons
         if svc != "copy-engine":
-            paused.append(f"{svc}: {why}")
+            paused.append(f"{svc}: {off}")
     if system_profile.disabled_reason(settings, "evm_ml"):
         paused.append("BSC / Robinhood ML (memecoin ML on Solana keeps running)")
     if st["resource_mode"] == "EMERGENCY":

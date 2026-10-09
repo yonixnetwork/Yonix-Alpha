@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api import health_state
 from app.api.deps import get_current_username, get_db, get_redis, get_settings
-from yonixalpha_core import kill_switch, live_trading, position_pnl
+from yonixalpha_core import kill_switch, live_trading, position_pnl, system_profile
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import ExecutionOrder, ModelVersion, Notification, PaperPosition, TradingCandidate
 from yonixalpha_core.safety import store
@@ -36,6 +36,8 @@ async def summary(db: AsyncSession = Depends(get_db), redis: Redis = Depends(get
     killed = await kill_switch.is_engaged(redis)
     accounts = []
     for name in store.ACTIVE_PAPER_ACCOUNTS:
+        if not system_profile.account_enabled(settings, name):  # a chain / feature the profile switches off
+            continue
         acct = await store.get_paper_account(db, name)
         state = await store.account_state(db, acct, None, now, killed)
         today, total = (await db.execute(select(

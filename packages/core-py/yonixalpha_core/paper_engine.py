@@ -274,6 +274,7 @@ async def open_position(
     venue: dict[str, Any] | None = None,
     fill_model=None,
     max_slippage_bps: Decimal | None = None,
+    entry_drift_pct: Decimal | None = None,
 ) -> PaperPosition:
     """Opens the paper position an executable assessment describes. Refuses
     anything the gate didn't clear for PAPER, and never spends more than the
@@ -298,6 +299,11 @@ async def open_position(
                 f"{max_slippage_bps / 100:.2f}% slippage limit — order not filled"
             )
 
+    drift = entry_drift_pct if entry_drift_pct and entry_drift_pct > 0 and kind != "futures" and side == "LONG" else None
+    if drift:  # the measured LIVE price move before a buy lands (paper_execution): fewer tokens for the same SOL
+        qty = fill.quantity / (1 + drift / 100)
+        fill = Fill(qty, fill.quote_amount, fill.fee_quote, size / qty, fill.reason, fill.impact_bps)
+
     if kind == "futures":
         leverage = plan.leverage if plan.leverage and plan.leverage > 0 else Decimal(1)
         margin = fill.quote_amount / leverage
@@ -314,7 +320,8 @@ async def open_position(
 
     first_tp = plan.take_profits[0].price.value if plan.take_profits else None
     venue_info = {**(venue or {}), "kind": kind, "transfer_fee_bps": transfer_fee_bps, "margin": str(margin),
-                  "notional": str(fill.quote_amount), "simulator": PAPER_SIMULATOR_VERSION}
+                  "notional": str(fill.quote_amount), "simulator": PAPER_SIMULATOR_VERSION,
+                  **({"live_drift_pct": str(drift)} if drift else {})}
     position = PaperPosition(
         candidate_id=candidate.id if candidate else None,
         symbol=assessment.symbol[:64],
@@ -403,6 +410,7 @@ async def apply_step(
     now: datetime,
     exit_cost_bps: Decimal | None = None,
     extra_exit: tuple[Decimal, str] | None = None,
+    exit_drift_pct: Decimal | None = None,
 ) -> StepResult:
     """Marks `position` at `price`, fills whatever manage_step (or an
     operator exit request / an exit-intelligence REDUCE in `extra_exit`)
@@ -452,6 +460,9 @@ async def apply_step(
         else:
             returned = fill.quote_amount
             fees_add = fill.fee_quote
+            if exit_drift_pct and exit_drift_pct > 0 and side == "LONG":
+                # the measured LIVE price move before a sell lands (paper_execution): less SOL received
+                returned = returned * (1 - exit_drift_pct / 100)
             if model is not None and isinstance(model, ConstantProductModel):
                 gross = fill.quote_amount + fill.fee_quote
                 model = ConstantProductModel(
@@ -466,7 +477,8 @@ async def apply_step(
         position.fees_paid_quote = (position.fees_paid_quote or Decimal(0)) + fees_add
         await add_timeline_event(session, f"paper_exit.{reason}", now,
                                  {"quantity": str(qty), "returned": str(returned), "fill_price": str(fill.price),
-                                  "impact_bps": str(fill.impact_bps)},
+                                  "impact_bps": str(fill.impact_bps),
+                                  **({"live_drift_pct": str(exit_drift_pct)} if exit_drift_pct and kind != "futures" else {})},
                                  candidate_id=position.candidate_id, assessment_id=position.assessment_id, position_id=position.id)
     for kind_evt, detail in result.events:
         if kind_evt.startswith("trailing") or kind_evt == "stop_to_breakeven":

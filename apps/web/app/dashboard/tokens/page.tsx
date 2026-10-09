@@ -6,6 +6,7 @@ import { Search } from "lucide-react";
 import ExplorerActions from "@/components/ExplorerActions";
 import { Empty, ErrorNotice, Loading, PageHeader, Section } from "@/components/ui";
 import { formatDate } from "@/lib/format";
+import { useProfile } from "@/lib/profile";
 import { useApi } from "@/lib/useApi";
 
 type J = Record<string, any>;
@@ -56,6 +57,7 @@ function SearchResults({ q, chain }: { q: string; chain: string }) {
 }
 
 export default function TokenExplorerPage() {
+  const profile = useProfile();
   const [q, setQ] = useState("");
   const [chain, setChain] = useState("");
   const [query, setQuery] = useState("");
@@ -77,7 +79,7 @@ export default function TokenExplorerPage() {
           onKeyDown={(e) => { if (e.key === "Enter") go(); }} />
         <label className="sr-only" htmlFor="chain">Chain</label>
         <select id="chain" value={chain} onChange={(e) => setChain(e.target.value)}>
-          {CHAINS.map(([v, label]) => <option key={v || "all"} value={v}>{label}</option>)}
+          {CHAINS.filter(([v]) => !v || profile.chainOn(v)).map(([v, label]) => <option key={v || "all"} value={v}>{label}</option>)}
         </select>
         <button className="btn" type="button" onClick={go}>Search</button>
       </div>

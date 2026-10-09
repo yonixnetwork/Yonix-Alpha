@@ -5,6 +5,7 @@ import { CheckCircle2, CircleDashed, Layers, OctagonX, Power, ShieldCheck, XCirc
 import { Empty, ErrorNotice, Loading, PageHeader, Section } from "@/components/ui";
 import { apiPost, apiPut } from "@/lib/api";
 import { formatDate } from "@/lib/format";
+import { useProfile } from "@/lib/profile";
 import { useApi } from "@/lib/useApi";
 
 type J = Record<string, any>;
@@ -30,7 +31,15 @@ function CheckIcon({ status }: { status: string }) {
   return <CircleDashed size={14} aria-label="not run" className="muted" />;
 }
 
+// A switch of a chain / feature the system profile turns off is left out.
+function switchShown(p: ReturnType<typeof useProfile>, key: string): boolean {
+  if (key === "copy") return p.copyOn;
+  if (key.startsWith("chain:")) return p.chainOn(key.slice("chain:".length));
+  return true;
+}
+
 function Controls() {
+  const profile = useProfile();
   const { data, error, reload } = useApi<J>("/api/controls", undefined, { reloadOn: ["controls.updated", "kill_switch.updated"] });
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -52,7 +61,7 @@ function Controls() {
           <p className="muted small">{data.note}. Global kill switch: <span className={data.kill_switch.engaged ? "pill pill-danger" : "pill pill-ok"}>
             {data.kill_switch.engaged ? `ENGAGED — ${data.kill_switch.reason ?? ""}` : "off"}</span></p>
           <div className="stat-grid">
-            {Object.entries(data.switches as Record<string, J>).map(([k, v]) => (
+            {Object.entries(data.switches as Record<string, J>).filter(([k]) => switchShown(profile, k)).map(([k, v]) => (
               <div key={k} className="stat">
                 <div className="stat-label">{SWITCH_LABEL[k] ?? k}</div>
                 <div className="stat-value">
@@ -79,12 +88,17 @@ function Controls() {
   );
 }
 
+// Launchpads that cannot trade (observe-only venues, status DISABLED) are left
+// out: the dashboard lists only working parts. Chains the profile switches off
+// are already left out by the API.
 function shown(lps: J[], list: string): J[] {
-  if (list === "all") return lps;
-  return lps.filter((lp) => (list === "listed" ? lp.listed : !lp.listed));
+  const working = lps.filter((lp) => lp.status !== "DISABLED");
+  if (list === "all") return working;
+  return working.filter((lp) => (list === "listed" ? lp.listed : !lp.listed));
 }
 
 export default function LaunchpadsPage() {
+  const profile = useProfile();
   const [chain, setChain] = useState("");
   const [list, setList] = useState("listed");
   const { data, error, loading, reload } = useApi<J>("/api/launchpads", chain ? { chain } : undefined, { refreshMs: 60000, reloadOn: ["controls.updated"] });
@@ -98,7 +112,7 @@ export default function LaunchpadsPage() {
         subtitle="Status is computed from evidence recorded on the real chain. A launchpad trades live only after a verified buy and sell." />
       <Controls />
       <div className="tabs" role="tablist" style={{ display: "flex", gap: 8, margin: "12px 0" }}>
-        {CHAIN_TABS.map(([v, label]) => (
+        {CHAIN_TABS.filter(([v]) => !v || profile.chainOn(v)).map(([v, label]) => (
           <button key={v} role="tab" aria-selected={chain === v} className={chain === v ? "btn btn-sm" : "btn btn-ghost btn-sm"} onClick={() => setChain(v)}>{label}</button>
         ))}
       </div>

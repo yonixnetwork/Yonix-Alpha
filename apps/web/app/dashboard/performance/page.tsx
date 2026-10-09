@@ -2,7 +2,8 @@
 
 import { useState } from "react";
 import { BarChart3 } from "lucide-react";
-import { Empty, ErrorNotice, Loading, PageHeader, Section, Stat } from "@/components/ui";
+import { Empty, ErrorNotice, Loading, PageHeader, ReviewStatus, Section, Stat, reviewReady } from "@/components/ui";
+import { apiGet } from "@/lib/api";
 import { useApi } from "@/lib/useApi";
 
 type J = Record<string, any>;
@@ -36,7 +37,9 @@ function Breakdown({ title, rows }: { title: string; rows: Record<string, J> | u
  * yonixalpha_core.solana_performance): measured from stored rows only. */
 export default function SolanaPerformancePage() {
   const [days, setDays] = useState(7);
-  const { data, error, loading } = useApi<J>("/api/analytics/solana-performance", { days }, { refreshMs: 120000 });
+  const q = useApi<J>("/api/analytics/solana-performance", { days }, { refreshMs: 60000 });
+  const data = q.data && reviewReady(q.data) ? q.data : null;
+  const refresh = () => { void apiGet("/api/analytics/solana-performance", { days, refresh: true }).catch(() => undefined).then(() => q.reload()); };
   const modes = Object.keys(data?.trades_by_mode ?? {});
   return (
     <div>
@@ -45,8 +48,9 @@ export default function SolanaPerformancePage() {
       <div className="btn-row" role="group" aria-label="Window">
         {DAYS.map((d) => <button key={d} className={d === days ? "btn btn-sm" : "btn btn-ghost btn-sm"} onClick={() => setDays(d)}>{d} day{d > 1 ? "s" : ""}</button>)}
       </div>
-      <ErrorNotice error={error} />
-      {loading && !data && <Loading />}
+      <ErrorNotice error={q.error} />
+      {q.data && !data && <ReviewStatus data={q.data} onRefresh={refresh} />}
+      {q.loading && !q.data && <Loading />}
       {data && (
         <>
           <Section title="Decisions and entries">
@@ -107,6 +111,7 @@ export default function SolanaPerformancePage() {
             <ul className="small">{Object.entries(data.definitions as Record<string, string>).map(([k, d]) => <li key={k}><b>{k}</b>: {d}</li>)}</ul>
           </details>
           <p className="muted small">{data.note}</p>
+          <ReviewStatus data={data} onRefresh={refresh} />
         </>
       )}
     </div>

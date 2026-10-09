@@ -28,7 +28,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import literal_column, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -713,13 +713,20 @@ async def comparison(session: AsyncSession, since: datetime) -> dict[str, Any]:
 
 # --- ledger v2 review ----------------------------------------------------------------------
 
+# The category values exactly as the expression indexes of migration 0045 are
+# written (`->` / `->>` with literal keys): SQLAlchemy's JSON subscripts render
+# as `analysis['counterfactual']` with bound keys, which no index matches.
+CF_CLASS_SQL = literal_column("(opportunity_outcomes.analysis -> 'counterfactual' ->> 'classification')")
+EXIT_CLASS_SQL = literal_column("(opportunity_outcomes.post_exit ->> 'classification')")
+RECOVERY_SQL = literal_column("(opportunity_outcomes.labels ->> 'recovery')")
+
+
 def category_filter(name: str):
     """SQL filter for one review category (None for an unknown name)."""
     from sqlalchemy import Numeric, and_
 
     o = OpportunityOutcome
-    cf = o.analysis["counterfactual"]["classification"].astext
-    exit_cls = o.post_exit["classification"].astext
+    cf, exit_cls, recovery = CF_CLASS_SQL, EXIT_CLASS_SQL, RECOVERY_SQL
     pnl = o.trade_result["pnl_sol"].astext.cast(Numeric)
     return {
         "observed": o.id.is_not(None),
@@ -736,7 +743,7 @@ def category_filter(name: str):
         "late_exit": exit_cls == "POSSIBLY_LATE",
         "good_exit": exit_cls == "GOOD_EXIT",
         "risk_correct_exit": exit_cls == "RISK_CORRECT",
-        "recovery": o.labels["recovery"].astext == "true",
+        "recovery": recovery == "true",
         "tracking": o.status == "TRACKING",
     }.get(name)
 

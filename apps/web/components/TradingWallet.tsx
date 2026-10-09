@@ -2,6 +2,7 @@
 
 import { ErrorNotice, Loading, Section } from "@/components/ui";
 import { formatDate, formatUsdCompact } from "@/lib/format";
+import { useProfile } from "@/lib/profile";
 import { useApi } from "@/lib/useApi";
 
 type J = Record<string, any>;
@@ -28,6 +29,7 @@ function Amount({ row, k }: { row: J; k: string }) {
 /** The YonixAlpha Trading Wallet (master §56-58): one wallet, a Solana account and an EVM account (BSC + Robinhood). */
 export default function TradingWallet() {
   const { data, error, loading } = useApi<J>("/api/wallets/overview", undefined, { refreshMs: 30000 });
+  const profile = useProfile();
   return (
     <Section title="YonixAlpha Trading Wallet">
       <ErrorNotice error={error} />
@@ -38,14 +40,14 @@ export default function TradingWallet() {
           <div className="stat-grid">
             <div className="stat"><div className="stat-label">Solana account (SOL)</div>
               <div className="stat-value small mono">{data.accounts.solana.address ?? "not synced"}</div></div>
-            <div className="stat"><div className="stat-label">EVM account (BSC: BNB, Robinhood Chain: ETH)</div>
+            {profile.evmOn && <div className="stat"><div className="stat-label">EVM account (BSC: BNB, Robinhood Chain: ETH)</div>
               <div className="stat-value small mono">{data.accounts.evm.address ?? "not configured"}</div>
-              <div className="form-hint">{data.accounts.evm.status}</div></div>
+              <div className="form-hint">{data.accounts.evm.status}</div></div>}
           </div>
           <div className="table-scroll">
             <table className="data-table">
               <thead><tr><th>Chain</th><th>Mode</th><th>Status</th>{COLS.map(([k, l]) => <th key={k}>{l}</th>)}<th>Updated</th></tr></thead>
-              <tbody>{(data.rows as J[]).map((r) => (
+              <tbody>{(data.rows as J[]).filter((r) => profile.chainOn(r.chain)).map((r) => (
                 <tr key={r.chain + r.mode}>
                   <td>{CHAIN[r.chain] ?? r.chain}<div className="muted small">{r.account}</div></td>
                   <td>{r.mode}</td>

@@ -13,6 +13,7 @@ import { Empty, ErrorNotice, Loading, PageHeader, Section, Stat } from "@/compon
 import { apiPost } from "@/lib/api";
 import type { ModelReview, ModelSummary } from "@/lib/cc";
 import { formatDate } from "@/lib/format";
+import { useProfile } from "@/lib/profile";
 import { useApi } from "@/lib/useApi";
 
 const METRICS: [string, string][] = [
@@ -144,6 +145,7 @@ function ModelCard({ m, reload }: { m: ModelReview; reload: () => void }) {
 }
 
 export default function MLReviewPage() {
+  const profile = useProfile();
   const review = useApi<ModelReview[]>("/api/ml/review", undefined, { reloadOn: ["ml.model.updated"], refreshMs: 60000 });
   const preds = useApi<any[]>("/api/ml/predictions", { limit: 50 }, { reloadOn: ["ml.prediction.updated"] });
   const quality = useApi<Record<string, any>>("/api/ml/data-quality", { limit: 50 });
@@ -211,7 +213,7 @@ export default function MLReviewPage() {
       <OpportunityOutcomes />
       <MlGovernance />
       <MlSteps />
-      <EvmMlReview />
+      {profile.evmOn && <EvmMlReview />}
     </div>
   );
 }

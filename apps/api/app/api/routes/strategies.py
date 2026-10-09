@@ -9,12 +9,13 @@ environment flags; live execution exists only for the Pump.fun strategies
 (yonixalpha_core.live_trading).
 """
 
+from datetime import datetime
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from redis.asyncio import Redis
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_username, get_db, get_redis
@@ -59,8 +60,16 @@ async def _describe(db: AsyncSession, e: Entry) -> dict:
     open_n = (await db.execute(select(func.count()).select_from(base.where(PaperPosition.status == "open").subquery()))).scalar_one()
     stats = performance([ClosedTrade(p.realized_pnl or Decimal(0), p.realized_pnl_pct, p.fees_paid_quote or Decimal(0),
                                      p.entry_at, p.exit_at or p.entry_at) for p in closed])
-    last = (await db.execute(select(func.max(RiskAssessment.evaluated_at)).where(
-        or_(RiskAssessment.strategy == e.name, RiskAssessment.engine == e.name)))).scalar_one()
+    # Newest decision of this engine, read from (engine, evaluated_at) (migration 0045). It was
+    # max() over `strategy = X OR engine = X`: strategy has no index, so the OR read the
+    # 3.6 GB table and the Fresh / Migrated / Momentum pages stopped at the 25 s limit (2026-10-09).
+    async def newest(col) -> datetime | None:
+        return (await db.execute(select(RiskAssessment.evaluated_at).where(col == e.name)
+                                 .order_by(RiskAssessment.evaluated_at.desc()).limit(1))).scalar_one_or_none()
+
+    last = await newest(RiskAssessment.engine)
+    if last is None and e.engine != e.name:  # a strategy run by a shared engine
+        last = await newest(RiskAssessment.strategy)
     out.update(currency=acct.quote_currency if acct else None, open_positions=open_n, last_decision_at=last,
                trades=stats["trades"], win_rate=stats["win_rate"], total_pnl=stats["total_pnl"],
                profit_factor=stats["profit_factor"], max_drawdown=stats["max_drawdown"])
