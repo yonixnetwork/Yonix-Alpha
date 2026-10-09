@@ -33,6 +33,7 @@ from yonixalpha_core.ml.gate_features import FEATURE_VERSION
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import TradingCandidate
 from yonixalpha_core.logging import get_logger
+from yonixalpha_core.notify import alert_error
 from yonixalpha_core.safety import pipeline, store
 from yonixalpha_core.safety.gate import CURVE_ENGINES, Assessment, assess
 from yonixalpha_core.safety.models import FinalDecision, GlobalMode, StrategyMode
@@ -223,6 +224,9 @@ async def evaluate_with_gate(
         except ValueError as exc:
             await store.add_timeline_event(session, "live_entry_refused", now, {"reason": str(exc)},
                                            candidate_id=candidate.id, assessment_id=row.id)
+            # The gate said yes but no order was placed (e.g. the wallet cannot pay the size): Telegram,
+            # throttled per event by notify.
+            await alert_error("decision-engine", "live_entry_refused", {"symbol": a.symbol, "reason": str(exc)})
             apply_transition(candidate, CandidateState.REJECTED, reason=f"live entry refused: {exc}")
             if operator is not None:
                 operator["result"] = {"status": "BLOCKED", "stage": "LIVE_ENTRY_REFUSED", "reason": str(exc)}

@@ -286,3 +286,36 @@ Server commands: `$C exec api python -m app.page_timings` (each page's API time)
 `$C run --rm decision-engine python -m yonixalpha_core.tools.rpc_check --capabilities` (RPC).
 Migration 0045 builds its indexes CONCURRENTLY; on a large database build them with psql
 before deploying so the API start does not exceed the deploy health wait.
+
+## 24. Server findings, 2026-10-09 (after deploy ed076c8)
+
+Measured on the server (page_timings, live_check, rpc_check, discovery log):
+
+- Every page answers in under 3.1 s (was 25 s timeouts). VERIFIED on the server.
+- LIVE: every switch is on (env locks, global LIVE, all three strategies AUTO, Pump.fun and
+  PumpSwap LIVE, worker ready). The wallet holds 0.051425166 SOL and keeps a 0.05 SOL reserve
+  for exit fees, so 0.0014 SOL is free: no buy is possible. The 13 executable decisions of the
+  last 24 h went to PAPER, so they were made before LIVE was fully on. VERIFIED from the
+  live_check output. Fix: the operator adds SOL to the trading wallet. Nothing moves funds.
+- RPC: Helius and Alchemy both answer every read method (rpc_check). The Helius WebSocket
+  refused the discovery connection with HTTP 429, so discovery runs on the Alchemy WebSocket.
+- Fresh tokens: from 11:04 to 11:07 the stream's `create` counter stayed at 392 711 while
+  trades kept arriving (about 80 per minute). The decoder matches the current official
+  pump.fun IDL (CreateEvent discriminator and field order checked on 2026-10-09; trailing
+  fields are tolerated). So the WebSocket delivers part of the program's events and, in that
+  window, none of the launches. Root cause of the loss on the provider side: NOT VERIFIED.
+
+Changes:
+
+| Change | What it does | Status |
+|---|---|---|
+| `stream_guard.gap_fill` (discovery, every 15 s) | a launch PumpPortal announced that the stream has not delivered after 15 s is read from its own create transaction (getTransaction); its CreateEvent (log line or emit_cpi inner instruction) is ingested. Every field comes from the chain; a transaction without a CreateEvent for that mint adds nothing. At most 20 per pass, each mint once | VERIFIED by tests; server effect NOT VERIFIED |
+| `stream_guard.stream_problem` + `SolanaWsClient.request_reconnect` | no event for 60 s, or under 50 % of 10+ announced launches delivered in 10 min: the WebSocket is reconnected (next provider) and a Telegram alert is sent, at most every 10 min | VERIFIED by tests |
+| gap-filled events keep their own counters (`create_gap_filled`) and never refresh the stream heartbeat | the watchdog cannot be fooled by the gap fill | VERIFIED by tests |
+| Telegram alert `live_entry_refused` | the gate said yes but no live order was placed (e.g. the size exceeds balance minus reserve) | VERIFIED by code path; throttled by notify |
+| `live_check` | prints free SOL (balance minus reserve), the time and target of each executable decision, mode changes, and refusals at order time | VERIFIED locally |
+| `tools.stream_check` | one minute of stream vs PumpPortal launches, delivered share, verdict | VERIFIED locally |
+
+Not changed: no safety check, size, reserve or loss limit. There is no cap on the number of
+trades per day (only the daily loss limit). `max_open_positions` (default 3, up to 50) is set
+per strategy on the Risk page.

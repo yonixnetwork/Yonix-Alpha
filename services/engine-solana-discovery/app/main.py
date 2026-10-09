@@ -15,7 +15,7 @@ from yonixalpha_core.safety import store
 from sqlalchemy import select
 
 from yonixalpha_core.db.models import PaperPosition
-from yonixalpha_core.solana import pump_stream, pumpportal_ws
+from yonixalpha_core.solana import pump_stream, pumpportal_ws, stream_guard
 from yonixalpha_core.solana.pumpfun import PUMP_PROGRAM_ID
 from yonixalpha_core.solana.rpc import RpcManager
 from yonixalpha_core.solana.rpc_registry import WsUrls
@@ -29,6 +29,7 @@ log = get_logger("engine-solana-discovery.main")
 HEALTH_CHECK_INTERVAL_SECONDS = 30
 FUNNEL_INTERVAL_SECONDS = 10
 STATS_LOG_EVERY = 6  # funnel runs
+GUARD_INTERVAL_SECONDS = 15
 
 
 async def _record_system_event(session_factory, event_type: str, severity: str, detail: dict | None = None) -> None:
@@ -54,6 +55,31 @@ async def _health_check_loop(rpc: RpcManager, session_factory, stop_event: async
             )
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=HEALTH_CHECK_INTERVAL_SECONDS)
+        except asyncio.TimeoutError:
+            pass
+
+
+async def _stream_guard_loop(redis, rpc, ws_client: SolanaWsClient, session_factory, stop_event: asyncio.Event) -> None:
+    """Fills launches the WebSocket missed from their own transactions and
+    reconnects the WebSocket (next provider) when it is silent or lossy
+    (yonixalpha_core.solana.stream_guard)."""
+    last_reconnect = 0.0
+    while not stop_event.is_set():
+        try:
+            await stream_guard.gap_fill(redis, rpc)
+            problem = await stream_guard.stream_problem(redis)
+            now = asyncio.get_running_loop().time()
+            if problem and now - last_reconnect >= stream_guard.RECONNECT_COOLDOWN:
+                last_reconnect = now
+                reconnected = ws_client.request_reconnect()
+                log.warning("stream.unhealthy", problem=problem, reconnected=reconnected)
+                await _record_system_event(session_factory, "pump_stream_unhealthy", "error",
+                                           {"problem": problem, "action": "WebSocket reconnected to the next provider"
+                                            if reconnected else "WebSocket not connected; reconnect pending"})
+        except Exception as exc:  # noqa: BLE001 - the guard never stops discovery
+            log.error("stream_guard.failed", error=str(exc))
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=GUARD_INTERVAL_SECONDS)
         except asyncio.TimeoutError:
             pass
 
@@ -149,6 +175,7 @@ async def run() -> None:
 
         async def stream_stats() -> dict:
             return {**await pump_stream.stats(redis), "pumpportal_coverage": await pumpportal_ws.coverage(redis),
+                    "stream_coverage": await stream_guard.stream_coverage(redis),
                     "pumpportal_heartbeat": await pumpportal_ws.heartbeat(redis)}
 
         stop_event = asyncio.Event()
@@ -164,6 +191,7 @@ async def run() -> None:
                 heartbeat_loop(settings, "engine-solana-discovery", stop_event, stream_stats),
                 ws_client.run(stop_event),
                 pumpportal.run(stop_event),
+                _stream_guard_loop(redis, rpc, ws_client, session_factory, stop_event),
                 _health_check_loop(rpc, session_factory, stop_event),
                 _funnel_loop(redis, session_factory, stop_event),
                 run_watcher("engine-solana-discovery", settings, session_factory, stop_event, rpc=rpc, ws_urls=next_ws_url,

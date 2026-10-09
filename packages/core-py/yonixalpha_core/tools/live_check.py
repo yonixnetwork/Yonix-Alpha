@@ -23,6 +23,7 @@ import argparse
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 from sqlalchemy import text
 
@@ -35,6 +36,9 @@ from yonixalpha_core.db.redis import make_redis
 from yonixalpha_core.safety import store
 
 ENGINES = ("solana_fresh", "solana_migration", "solana_momentum")
+# Below this much SOL above the reserve no buy is possible: a buy's own
+# network + priority fee and the token account rent alone cost ~0.002 SOL.
+MIN_USEFUL_FREE_SOL = Decimal("0.005")
 
 DECISIONS_SQL = """
 SELECT engine, coalesce(execution_target, '?') AS target, executable, count(*)
@@ -55,6 +59,23 @@ GROUP BY 1 ORDER BY 2 DESC
 ORDERS_SQL = """
 SELECT side, status, count(*), max(created_at) FROM execution_orders
 WHERE mode = 'LIVE' AND created_at >= :since GROUP BY 1, 2 ORDER BY 1, 2
+"""
+
+EXECUTABLE_SQL = """
+SELECT evaluated_at, engine, coalesce(execution_target, '?'), left(coalesce(symbol, ''), 16)
+FROM risk_assessments WHERE evaluated_at >= :since AND engine LIKE 'solana%' AND executable
+ORDER BY evaluated_at DESC LIMIT 20
+"""
+
+MODE_CHANGES_SQL = """
+SELECT created_at, event_type, left(coalesce(detail::text, ''), 160) FROM audit_logs
+WHERE created_at >= :since AND event_type ILIKE '%mode%' ORDER BY created_at DESC LIMIT 15
+"""
+
+REFUSED_SQL = """
+SELECT left(coalesce(detail ->> 'reason', ''), 160) AS reason, count(*), max(occurred_at)
+FROM trade_timeline_events WHERE occurred_at >= :since AND event_type = 'live_entry_refused'
+GROUP BY 1 ORDER BY 2 DESC LIMIT 10
 """
 
 LAST_ERROR_SQL = """
@@ -128,6 +149,12 @@ async def main(argv: list[str] | None = None) -> int:
             print(f"  ready for a live order: {yes(ready)}{(' — ' + why) if why else ''}")
             if not ready:
                 blockers.append(f"live worker not ready: {why}")
+            if wallet.get("sol") is not None:
+                free = Decimal(str(wallet["sol"])) - live_settings.min_sol_reserve
+                print(f"  free to trade (balance minus reserve): {free} SOL")
+                if free < MIN_USEFUL_FREE_SOL:
+                    blockers.append(f"the wallet has only {max(free, Decimal(0))} SOL above the {live_settings.min_sol_reserve} SOL "
+                                    "reserve: not enough for a buy. Add SOL to the trading wallet")
 
             print(f"\n4. Gate decisions, last {args.hours} h (engine, target, executable, count)")
             rows = (await s.execute(text(DECISIONS_SQL), {"since": since})).all()
@@ -144,6 +171,22 @@ async def main(argv: list[str] | None = None) -> int:
             codes = (await s.execute(text(MODE_CODES_SQL), {"since": since})).all()
             if codes:
                 print("  mode / readiness findings: " + ", ".join(f"{c} {n}" for c, n in codes))
+            ex_rows = (await s.execute(text(EXECUTABLE_SQL), {"since": since})).all()
+            if ex_rows:
+                print("  executable decisions (newest first):")
+                for r in ex_rows:
+                    print(f"    {str(r[0])[:19]}  {r[1]:<18} -> {r[2]:<6} {r[3]}")
+            changes = (await s.execute(text(MODE_CHANGES_SQL), {"since": since})).all()
+            if changes:
+                print("  mode changes in the same hours (newest first):")
+                for r in changes:
+                    print(f"    {str(r[0])[:19]}  {r[1]}: {r[2]}")
+            refused = (await s.execute(text(REFUSED_SQL), {"since": since})).all()
+            if refused:
+                print("  live buys refused after the gate said yes:")
+                for r in refused:
+                    print(f"    {r[1]}x (latest {str(r[2])[:19]}): {r[0]}")
+                blockers.append(f"{sum(r[1] for r in refused)} live buy(s) refused at order time (reasons above)")
 
             print(f"\n5. LIVE orders, last {args.hours} h")
             orders = (await s.execute(text(ORDERS_SQL), {"since": since})).all()

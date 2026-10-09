@@ -83,16 +83,18 @@ def _ts(fields: dict[str, Any]) -> int | None:
     return int(ts) if isinstance(ts, int) and ts > 0 else None
 
 
-async def ingest_logs(redis: Redis, logs: list[str], signature: str | None, received_at: datetime) -> dict[str, int]:
+async def ingest_logs(redis: Redis, logs: list[str], signature: str | None, received_at: datetime,
+                      from_stream: bool = True) -> dict[str, int]:
     """Decodes every pump.fun event in one transaction's logs and writes it.
     Returns counts per event kind (plus "skipped_non_sol"), which the
     caller aggregates into STATS so an operator can see whether decoding
     works on the live stream at all."""
     counts: dict[str, int] = {}
     pipe = redis.pipeline(transaction=False)
-    pipe.set(HEARTBEAT, received_at.isoformat())
-    pipe.set(STREAM_STARTED, int(received_at.timestamp()), nx=True)
-    pipe.hincrby(STATS, "notifications", 1)
+    if from_stream:  # a gap-filled transaction (stream_guard) is not a sign of a live stream
+        pipe.set(HEARTBEAT, received_at.isoformat())
+        pipe.set(STREAM_STARTED, int(received_at.timestamp()), nx=True)
+        pipe.hincrby(STATS, "notifications", 1)
     for kind, f in decode_log_events(logs):
         mint = f.get("mint")
         if not mint:
@@ -158,7 +160,7 @@ async def ingest_logs(redis: Redis, logs: list[str], signature: str | None, rece
             pipe.expire(curve_key(mint), CURVE_TTL)
             pipe.zadd(MIGRATED, {mint: ts or int(received_at.timestamp())})
     for kind, n in counts.items():
-        pipe.hincrby(STATS, kind, n)
+        pipe.hincrby(STATS, kind if from_stream else f"{kind}_gap_filled", n)
     await pipe.execute()
     return counts
 
