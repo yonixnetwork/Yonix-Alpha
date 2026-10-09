@@ -27,31 +27,14 @@ jobs:
           - services/decision-engine
           - services/ml
           - services/paper-trading
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: yonixalpha
-          POSTGRES_PASSWORD: yonixalpha_test_pw
-          POSTGRES_DB: yonixalpha_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U yonixalpha -d yonixalpha_test"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     steps:
       - uses: actions/checkout@v4
+
+      # Postgres 16 and Redis 7 on localhost:5432 / localhost:6379. Started
+      # by a script instead of a `services:` block so a Docker Hub pull
+      # failure is retried and falls back to the official-image mirror.
+      - name: Start Postgres and Redis
+        run: bash .github/scripts/start-test-services.sh
 
       - uses: actions/setup-python@v5
         with:
@@ -93,7 +76,7 @@ jobs:
       # Every other project's conftest.py connects with real credentials
       # (postgresql+asyncpg://yonixalpha:yonixalpha_test_pw@localhost:5432/yonixalpha_test,
       # redis://localhost:6379/15) as its own os.environ.setdefault(...)
-      # default — matched exactly by the service containers above — so no
+      # default — matched exactly by the containers started above — so no
       # DATABASE_URL/REDIS_URL overrides are needed for the Test step
       # below. Alembic is different: it reads Settings.database_url
       # directly (migrations/env.py), which without DATABASE_URL set
