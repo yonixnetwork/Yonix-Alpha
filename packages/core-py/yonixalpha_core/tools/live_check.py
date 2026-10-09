@@ -39,6 +39,7 @@ ENGINES = ("solana_fresh", "solana_migration", "solana_momentum")
 # Below this much SOL above the reserve no buy is possible: a buy's own
 # network + priority fee and the token account rent alone cost ~0.002 SOL.
 MIN_USEFUL_FREE_SOL = Decimal("0.005")
+RECENT_HOURS = 2
 
 DECISIONS_SQL = """
 SELECT engine, coalesce(execution_target, '?') AS target, executable, count(*)
@@ -76,6 +77,25 @@ REFUSED_SQL = """
 SELECT left(coalesce(detail ->> 'reason', ''), 160) AS reason, count(*), max(occurred_at)
 FROM trade_timeline_events WHERE occurred_at >= :since AND event_type = 'live_entry_refused'
 GROUP BY 1 ORDER BY 2 DESC LIMIT 10
+"""
+
+LAST_LIVE_SWITCH_SQL = """
+SELECT max(created_at) FROM audit_logs WHERE event_type = 'global_mode.changed' AND detail ->> 'to' = 'LIVE'
+"""
+
+RECENT_SQL = """
+SELECT engine, count(*), count(*) FILTER (WHERE executable) FROM risk_assessments
+WHERE evaluated_at >= :since AND engine LIKE 'solana%' GROUP BY 1 ORDER BY 1
+"""
+
+BLOCKERS_SQL = """
+SELECT f->>'code' AS code, count(*) AS n
+FROM (SELECT assessment FROM risk_assessments
+      WHERE evaluated_at >= :since AND engine LIKE 'solana%' AND NOT executable
+      ORDER BY evaluated_at DESC LIMIT 5000) r,
+     jsonb_array_elements(r.assessment -> 'findings') f
+WHERE f->>'action' IN ('NO_TRADE', 'REJECT', 'WAIT')
+GROUP BY 1 ORDER BY 2 DESC LIMIT 12
 """
 
 LAST_ERROR_SQL = """
@@ -165,9 +185,14 @@ async def main(argv: list[str] | None = None) -> int:
             live_exec = sum(r[3] for r in rows if r[1] == "LIVE" and r[2])
             paper_exec = sum(r[3] for r in rows if r[1] == "PAPER" and r[2])
             print(f"  executable decisions sent to LIVE: {live_exec}, to PAPER: {paper_exec}")
-            if paper_exec and not live_exec:
-                blockers.append(f"{paper_exec} executable decision(s) went to PAPER: the mode / lock / readiness above "
-                                "was not all set when they were made")
+            switched = (await s.execute(text(LAST_LIVE_SWITCH_SQL))).scalar()
+            if switched is not None:
+                print(f"  global mode last switched to LIVE at {str(switched)[:19]}")
+            paper_after = sum(1 for r in (await s.execute(text(EXECUTABLE_SQL), {"since": since})).all()
+                              if r[2] == "PAPER" and (switched is None or r[0] > switched))
+            if paper_after and not live_exec:
+                blockers.append(f"{paper_after} executable decision(s) went to PAPER after the switch to LIVE: the mode / "
+                                "lock / readiness above was not all set when they were made")
             codes = (await s.execute(text(MODE_CODES_SQL), {"since": since})).all()
             if codes:
                 print("  mode / readiness findings: " + ", ".join(f"{c} {n}" for c, n in codes))
@@ -181,6 +206,18 @@ async def main(argv: list[str] | None = None) -> int:
                 print("  mode changes in the same hours (newest first):")
                 for r in changes:
                     print(f"    {str(r[0])[:19]}  {r[1]}: {r[2]}")
+            recent_since = now - timedelta(hours=RECENT_HOURS)
+            print(f"\n  last {RECENT_HOURS} h: tokens checked per strategy (checked / passed every check)")
+            recent = (await s.execute(text(RECENT_SQL), {"since": recent_since})).all()
+            for r in recent:
+                print(f"    {r[0]:<18} {r[1]:>6} / {r[2]}")
+            if not recent:
+                print("    none: no token reached the gate (is discovery running? see stream_check)")
+            reasons = (await s.execute(text(BLOCKERS_SQL), {"since": recent_since})).all()
+            if reasons:
+                print(f"  why tokens were refused, last {RECENT_HOURS} h (a token can have several reasons):")
+                for code, n in reasons:
+                    print(f"    {code:<34} {n}")
             refused = (await s.execute(text(REFUSED_SQL), {"since": since})).all()
             if refused:
                 print("  live buys refused after the gate said yes:")
@@ -203,8 +240,8 @@ async def main(argv: list[str] | None = None) -> int:
             for b in blockers:
                 print(f"   - {b}")
         else:
-            print("  every switch allows LIVE. If no live order was placed, no token passed the gate as executable "
-                  "(see section 4 and the Execution Funnel page for the reasons).")
+            print("  every switch allows LIVE and the wallet can pay. If no live order was placed, no token passed every "
+                  "safety check yet (section 4 lists why they were refused).")
     finally:
         await redis.aclose()
         await engine.dispose()
