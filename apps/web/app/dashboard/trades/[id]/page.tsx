@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { Crosshair } from "lucide-react";
 import ExecutionDiagnostics from "@/components/ExecutionDiagnostics";
+import ExitPlan from "@/components/ExitPlan";
 import { PnlDetails } from "@/components/Pnl";
 import { ErrorNotice, Loading, Money, PageHeader, Section, Stat } from "@/components/ui";
 import type { TradeDetail } from "@/lib/cc";
@@ -44,6 +45,7 @@ export default function TradeDetailPage() {
       <Section title="PnL">
         <PnlDetails pnl={p.pnl} currency={cur ?? undefined} />
       </Section>
+      {String(p.engine ?? "").startsWith("solana") && <ExitPlan positionId={id} />}
       <div className="stat-grid">
         <Stat label="Entry">{formatDecimal(p.entry_price, 10)}</Stat>
         <Stat label={p.status === "open" ? "Last" : "Exit"}>{formatDecimal(p.status === "open" ? p.last_price : p.exit_price, 10)}</Stat>

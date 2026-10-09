@@ -168,6 +168,64 @@ function ExecutionFailures() {
   );
 }
 
+type ExitProtection = { mode: string; min_sale_fee_multiple: string; min_remainder_fee_multiple: string; modes: string[] };
+
+function ExitProtectionSettings() {
+  const { data, error, setData } = useApi<ExitProtection>("/api/paper/exit-protection");
+  const [draft, setDraft] = useState<ExitProtection | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+  useEffect(() => { if (data) setDraft(data); }, [data]);
+  if (error) return <ErrorNotice error={error} />;
+  if (!data || !draft) return null;
+  async function save() {
+    setSaveError(null);
+    setSaved(false);
+    try {
+      setData(await apiPut<ExitProtection>("/api/paper/exit-protection", {
+        mode: draft!.mode, min_sale_fee_multiple: draft!.min_sale_fee_multiple,
+        min_remainder_fee_multiple: draft!.min_remainder_fee_multiple,
+      }));
+      setSaved(true);
+    } catch (err) {
+      setSaveError(err instanceof ApiError ? err.message : "Save failed.");
+    }
+  }
+  return (
+    <div className="card">
+      <p className="muted">
+        Partial take-profits never leave a remainder too small to sell: a leftover of dust or worth less than a few sell fees
+        is sold together with the take-profit, and a take-profit worth less than a few sell fees waits for the next exit.
+        Stop loss, trailing stop and manual / emergency exits are never changed. In PAPER mode LIVE exits are only checked
+        and the would-be change is recorded on the position.
+      </p>
+      <div className="form-grid">
+        <div className="form-row">
+          <label htmlFor="xp-mode">Mode</label>
+          <select id="xp-mode" value={draft.mode} onChange={(e) => setDraft({ ...draft, mode: e.target.value })}>
+            {data.modes.map((m) => <option key={m} value={m}>{m}</option>)}
+          </select>
+        </div>
+        <div className="form-row">
+          <label htmlFor="xp-sale">A partial sale must return at least N sell fees</label>
+          <input id="xp-sale" inputMode="decimal" value={draft.min_sale_fee_multiple}
+            onChange={(e) => setDraft({ ...draft, min_sale_fee_multiple: e.target.value })} />
+        </div>
+        <div className="form-row">
+          <label htmlFor="xp-rem">A remainder must be worth at least N sell fees</label>
+          <input id="xp-rem" inputMode="decimal" value={draft.min_remainder_fee_multiple}
+            onChange={(e) => setDraft({ ...draft, min_remainder_fee_multiple: e.target.value })} />
+        </div>
+      </div>
+      <ErrorNotice error={saveError} />
+      {saved && <div><RuntimeApply inline /></div>}
+      <div className="btn-row" style={{ marginTop: 12 }}>
+        <button className="btn btn-sm" onClick={save}>Save</button>
+      </div>
+    </div>
+  );
+}
+
 export default function PaperTradingPage() {
   const { data: accounts, error, reload } = useApi<PaperAccountOut[]>("/api/control/paper/accounts", undefined, {
     reloadOn: ["balance.updated", "trade.closed"],
@@ -187,6 +245,9 @@ export default function PaperTradingPage() {
       </Section>
       <Section title="Simulated execution failures">
         <ExecutionFailures />
+      </Section>
+      <Section title="Sellable-amount protection (partial exits)">
+        <ExitProtectionSettings />
       </Section>
       <Section title="Performance analytics">
         <PerformancePanel />

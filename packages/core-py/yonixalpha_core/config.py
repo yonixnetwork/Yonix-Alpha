@@ -96,6 +96,13 @@ class Settings(BaseSettings):
     # Local Transaction API, which needs no key: YonixAlpha signs locally.
     PUMPPORTAL_API_KEY: Optional[SecretStr] = None
 
+    # X narrative intelligence (x_narrative, SHADOW): official X API v2 recent
+    # search, pay-per-use. Off unless BOTH this flag and the dashboard switch
+    # are on and a bearer token is set. The token never leaves the server
+    # (not logged, not returned by the API, not sent to the browser).
+    X_NARRATIVE_ENABLED: bool = False
+    X_API_BEARER_TOKEN: Optional[SecretStr] = None
+
     # Telegram (wired up Phase 11 — yonixalpha_core.notify.send_telegram_alert)
     TELEGRAM_BOT_TOKEN: Optional[str] = None
     TELEGRAM_CHAT_ID: Optional[str] = None

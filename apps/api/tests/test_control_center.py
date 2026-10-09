@@ -749,3 +749,54 @@ async def test_contract_profiles_are_hidden_unless_asked_for(app, client, auth_h
     assert sorted(p["wallet"][2:4] for p in shown) == ["c2", "c3"]  # unknown kind (older profiles) still shown
     every = (await client.get("/api/wallets/profiles?chain=bsc&include_contracts=true", headers=auth_headers)).json()
     assert len(every["profiles"]) == 3 and "routers" in every["note"]
+
+
+async def test_exit_protection_settings_and_position_exit_plan(app, client, auth_headers):
+    """Sellable-amount protection (2026-10-10): settings validated and audited; the exit plan of a position
+    lays the remaining take-profits over the whole position in raw units, the last level taking any dust."""
+    r = (await client.get("/api/paper/exit-protection", headers=auth_headers)).json()
+    assert r["mode"] == "PAPER" and "PAPER_AND_LIVE" in r["modes"]
+    bad = await client.put("/api/paper/exit-protection", json={"mode": "NOPE"}, headers=auth_headers)
+    assert bad.status_code == 422
+    ok = await client.put("/api/paper/exit-protection", json={"min_sale_fee_multiple": "4"}, headers=auth_headers)
+    assert ok.status_code == 200 and ok.json()["min_sale_fee_multiple"] == "4" and ok.json()["mode"] == "PAPER"
+    async with app.state.db_session_factory() as s:
+        acct = await store.get_paper_account(s, "solana")
+        tps = [{"price": {"value": "2"}, "exit_fraction": "0.4"}, {"price": {"value": "3"}, "exit_fraction": "0.3"},
+               {"price": {"value": "4"}, "exit_fraction": "0.3"}]
+        p = PaperPosition(account_id=acct.id, engine="solana_fresh", symbol="DUST", asset_id="Dust1111", provider="paper",
+                          side="LONG", entry_price=Decimal(1), quantity=Decimal("1.000001"),
+                          initial_quantity=Decimal("1.000001"), remaining_quantity=Decimal("1.000001"), take_profit=[],
+                          status="open", entry_at=NOW, last_price=Decimal("1.5"), last_marked_at=NOW,
+                          plan={"take_profits": tps, "venue": {"kind": "spot", "type": "pump_curve", "decimals": 6}})
+        s.add(p)
+        await s.commit()
+        pid = str(p.id)
+    v = (await client.get(f"/api/paper/positions/{pid}/exit-plan", headers=auth_headers)).json()
+    assert v["initial_raw"] == 1_000_001 and v["remaining_raw"] == 1_000_001 and v["decimals"] == 6
+    levels = v["schedule"]["levels"]
+    assert [lv["sell_raw"] for lv in levels] == [400_000, 300_000, 300_001]  # TP3 takes the 1 raw unit of dust
+    assert v["schedule"]["left_for_trailing_or_stop"]["raw"] == 0 and v["changes"] == [] and v["last_failed_exit"] is None
+    assert (await client.get("/api/paper/positions/00000000-0000-0000-0000-000000000000/exit-plan",
+                             headers=auth_headers)).status_code == 404
+
+
+async def test_x_narrative_status_settings_and_token_view(app, client, auth_headers):
+    """X narrative (SHADOW): NOT_CONFIGURED without a token, never a fake healthy status; settings validated;
+    a token with no lookup shows NO X DATA; the bearer token never appears in a response."""
+    from pydantic import SecretStr
+
+    r = (await client.get("/api/x-narrative/status", headers=auth_headers)).json()
+    assert r["provider_status"] == "NOT_CONFIGURED" and r["token_configured"] is False and "SHADOW" in r["mode"]
+    assert (await client.put("/api/x-narrative/settings", json={"provider": "scraper"}, headers=auth_headers)).status_code == 422
+    ok = await client.put("/api/x-narrative/settings", json={"enabled": True, "max_daily_budget_usd": "2"},
+                          headers=auth_headers)
+    assert ok.status_code == 200 and ok.json()["enabled"] is True and ok.json()["max_daily_budget_usd"] == "2"
+    app.state.settings = app.state.settings.model_copy(update={"X_NARRATIVE_ENABLED": True,
+                                                               "X_API_BEARER_TOKEN": SecretStr("bearer-must-not-leak")})
+    st = await client.get("/api/x-narrative/status", headers=auth_headers)
+    assert st.json()["provider_status"] == "ENABLED" and "bearer-must-not-leak" not in st.text
+    mint = "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr"
+    tv = await client.get(f"/api/x-narrative/tokens/{mint}", headers=auth_headers)
+    assert tv.json()["state"] == "NO X DATA" and tv.json()["observations"] == [] and "bearer-must-not-leak" not in tv.text
+    assert (await client.get("/api/x-narrative/tokens/short", headers=auth_headers)).status_code == 422

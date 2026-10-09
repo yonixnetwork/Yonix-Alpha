@@ -31,7 +31,7 @@ from redis.asyncio import Redis
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yonixalpha_core import events, execution_analysis, paper_engine
+from yonixalpha_core import events, execution_analysis, exit_plan, paper_engine
 from yonixalpha_core.db.models import (
     ExecutionOrder, PaperAccount, PaperPosition, PlatformSetting, ReconciliationEvent, TradeTimelineEvent, TradingCandidate,
 )
@@ -856,6 +856,39 @@ async def reconcile(session_factory, redis: Redis | None, app_settings: Any, exe
     return report
 
 
+@dataclass
+class ProtectedExit:
+    check: Any
+    applied: bool
+    decimals: int
+    remaining_raw: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**self.check.to_dict(), "applied": self.applied}
+
+
+async def _exit_protection(session: AsyncSession, p: PaperPosition, qty: Decimal, reason: str, price: Decimal,
+                           now: datetime) -> ProtectedExit | None:
+    """Sellable-amount check (exit_plan) for one LIVE sale. Applied only in
+    mode PAPER_AND_LIVE; otherwise the would-be change is recorded on the
+    timeline (shadow) and the sale goes out as before."""
+    decimals = ((p.plan or {}).get("venue") or {}).get("decimals")
+    if decimals is None or price is None or price <= 0:
+        return None
+    dec = int(decimals)
+    cfg = await exit_plan.load_settings(session)
+    live = await load_live_settings(session)
+    remaining_raw = exit_plan.to_raw(p.remaining_quantity or Decimal(0), dec)
+    check = exit_plan.check_exit(remaining_raw, exit_plan.to_raw(qty, dec), reason, price / Decimal(10) ** dec,
+                                 BASE_FEE_SOL + live.priority_fee_sol, cfg)
+    applied = cfg.applies(live=True)
+    if check.changed:
+        await add_timeline_event(session, f"exit_protection.{check.action.lower()}" + ("" if applied else ".shadow"), now,
+                                 {"exit_reason": reason, "applied": applied, **check.to_dict()}, candidate_id=p.candidate_id,
+                                 assessment_id=p.assessment_id, position_id=p.id)
+    return ProtectedExit(check, applied and check.changed, dec, remaining_raw)
+
+
 async def manage_live_position(session: AsyncSession, p: PaperPosition, price: Decimal, model, now: datetime,
                                extra_exit: tuple[Decimal, str] | None = None) -> dict[str, Any]:
     """One management tick for an open LIVE position, using exactly the
@@ -882,6 +915,17 @@ async def manage_live_position(session: AsyncSession, p: PaperPosition, price: D
     qty, reason = result.exits[0]
     if reason in ("stop_loss", "trailing_stop", "manual_exit") or (result.closed and len(result.exits) == 1):
         qty = p.remaining_quantity or Decimal(0)  # a full exit sells everything the position holds
+    protected = await _exit_protection(session, p, qty, reason, price, now)
+    out["exit_protection"] = protected.to_dict() if protected is not None else None
+    if protected is not None and protected.applied:
+        if protected.check.action == exit_plan.DEFERRED:
+            # The level counts as reached; its tokens stay in the position and leave with a later exit.
+            idx = int(reason.rsplit("_", 1)[1]) - 1 if reason.startswith("take_profit_") else None
+            if idx is not None:
+                p.tp_hits = sorted(set((p.tp_hits or []) + [idx]))
+            return out
+        qty = exit_plan.from_raw(protected.check.sell_raw, protected.decimals) \
+            if protected.check.sell_raw < protected.remaining_raw else (p.remaining_quantity or Decimal(0))
     expected = None
     if model is not None:
         c = paper_engine.close_fill(model, qty, "LONG")

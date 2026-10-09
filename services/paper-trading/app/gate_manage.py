@@ -32,7 +32,7 @@ from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yonixalpha_core import copy_trading as ct
-from yonixalpha_core import events, live_trading, paper_engine, paper_execution
+from yonixalpha_core import events, exit_plan, live_trading, paper_engine, paper_execution
 from yonixalpha_core.db.models import PaperAccount, PaperPosition, RiskAssessment
 from yonixalpha_core.exit_intel import ExitConfig, solana_exit_decision
 from yonixalpha_core.safety.store import LEGACY_ENGINES, LEGACY_PROVIDERS, add_timeline_event, load_settings
@@ -251,6 +251,7 @@ async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterC
     counts = {"managed": 0, "closed": 0, "unpriced": 0}
     rates = None  # paper execution failure rates, loaded once per pass when needed
     drift: dict = {}  # measured LIVE price drift (paper_execution), loaded with the rates
+    protection = None  # exit_plan settings, loaded with the rates
     async with session_factory() as session:
         # pending_entry (LIVE buy not yet confirmed) and needs_review
         # positions are not "open" and are therefore never managed here.
@@ -299,6 +300,7 @@ async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterC
                 if rates is None:
                     rates = await paper_execution.effective_rates(session)
                     drift = await paper_execution.measured_live_drift(session)
+                    protection = await exit_plan.load_settings(session)
                 if rates["exit_pct"] > 0 and p.exit_failures < MAX_SIMULATED_EXIT_FAILURES:
                     exiting, s = _would_exit(p, price, extra)
                     key = f"exit:{p.id}:{len(p.tp_hits or [])}:{p.exit_failures}"
@@ -325,6 +327,7 @@ async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterC
                     session, p, account, price, model, None if source.startswith("jupiter") else tfee, now,
                     exit_cost_bps=exit_cost, extra_exit=extra,
                     exit_drift_pct=drift.get("sell_pct"),  # what a LIVE sell loses before it lands (measured)
+                    exit_protection=protection,  # sellable-amount protection (exit_plan)
                 )
                 if result.exits:
                     p.exit_failures = 0
