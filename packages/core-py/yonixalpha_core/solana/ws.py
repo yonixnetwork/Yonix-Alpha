@@ -2,6 +2,7 @@ import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 import websockets
 from websockets.exceptions import ConnectionClosed
@@ -34,6 +35,17 @@ class SolanaWsClient:
     max_backoff_seconds: float = 30.0
     initial_backoff_seconds: float = 1.0
     _next_id: int = field(default=0, init=False)
+    _ws: Any = field(default=None, init=False)
+
+    def request_reconnect(self) -> bool:
+        """Closes the current connection; run() reconnects at once to the
+        next URL of url_provider (stream_guard: a silent or lossy stream).
+        Returns False when nothing is connected."""
+        ws = self._ws
+        if ws is None:
+            return False
+        asyncio.get_running_loop().create_task(ws.close())
+        return True
 
     async def run(self, stop_event: asyncio.Event) -> None:
         backoff = self.initial_backoff_seconds
@@ -41,6 +53,7 @@ class SolanaWsClient:
             url = self.url_provider()
             try:
                 async with websockets.connect(url) as ws:
+                    self._ws = ws
                     log.info("ws.connected", url=redact_url(url))
                     await self._resubscribe(ws)
                     backoff = self.initial_backoff_seconds  # reset after a clean connect
@@ -66,6 +79,7 @@ class SolanaWsClient:
                 await alert_error("solana-ws", "ws.unexpected_error",
                                   {"url": redact_url(url), "error": redact_text(f"{type(exc).__name__}: {exc}", [url])})
 
+            self._ws = None
             if stop_event.is_set():
                 break
 
