@@ -1632,3 +1632,30 @@ class CopyPosition(Base):
     token: Mapped[str] = mapped_column(String(64), nullable=False)
     target_tokens: Mapped[Decimal] = mapped_column(Numeric(78, 0), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class XNarrativeObservation(Base):
+    """One X narrative lookup for one Solana mint (x_narrative, SHADOW).
+    Derived numbers, post IDs and links only (no post text: X Developer
+    Policy). `observed_at` is when the lookup ran: a decision may only use
+    observations made at or before it (x_narrative.features_at)."""
+
+    __tablename__ = "x_narrative_observations"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    mint: Mapped[str] = mapped_column(String(64), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    query: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    identity_confidence: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)
+    narrative_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 2), nullable=True)
+    social_data_quality: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    onchain_score: Mapped[Decimal | None] = mapped_column(Numeric(12, 4), nullable=True)
+    combined_score: Mapped[Decimal | None] = mapped_column(Numeric(12, 4), nullable=True)
+    posts_returned: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    features: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    evidence: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    decision_context: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (Index("ix_x_narrative_observations_mint_observed_at", "mint", "observed_at"),)

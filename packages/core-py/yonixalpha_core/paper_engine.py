@@ -41,6 +41,9 @@ log = get_logger("core.paper_engine")
 PAPER_SIMULATOR_VERSION = "2.0.0"
 LABEL_SOURCE = "paper_engine_realized_pnl"
 DUST = Decimal("1e-9")
+# One sell's network + default priority fee (live_trading.BASE_FEE_SOL + priority_fee_sol default): the sell
+# fee exit protection measures against when the paper position charges no LIVE fixed costs.
+DEFAULT_SELL_FEE_SOL = Decimal("0.000105")
 
 
 class FillError(ValueError):
@@ -411,6 +414,7 @@ async def apply_step(
     exit_cost_bps: Decimal | None = None,
     extra_exit: tuple[Decimal, str] | None = None,
     exit_drift_pct: Decimal | None = None,
+    exit_protection=None,
 ) -> StepResult:
     """Marks `position` at `price`, fills whatever manage_step (or an
     operator exit request / an exit-intelligence REDUCE in `extra_exit`)
@@ -434,6 +438,9 @@ async def apply_step(
             if s.remaining_quantity <= DUST:
                 s.remaining_quantity = Decimal(0)
                 result.closed = True
+
+    if exit_protection is not None and exit_protection.applies(live=False) and venue_kind(position) != "futures":
+        await _protect_exits(session, position, s, result, price, exit_protection, now)
 
     if model is not None:
         exit_cost = None
@@ -508,6 +515,43 @@ async def apply_step(
                                      position_id=position.id)
         await close_position(session, position, now, result.exits[-1][1] if result.exits else "closed", price)
     return result
+
+
+async def _protect_exits(session: AsyncSession, position: PaperPosition, s: PositionState, result: StepResult,
+                         price: Decimal, settings, now: datetime) -> None:
+    """Sellable-amount protection (exit_plan) on this step's sales, in raw
+    units: a dust / uneconomic remainder is folded into the sale, a partial
+    take-profit worth less than a few sell fees is deferred to the next exit.
+    Full exits are never changed. Needs the token's decimals; without them
+    nothing is changed."""
+    from yonixalpha_core import exit_plan
+
+    decimals = ((position.plan or {}).get("venue") or {}).get("decimals")
+    if not result.exits or decimals is None or price is None or price <= 0:
+        return
+    dec = int(decimals)
+    before = s.remaining_quantity + sum(q for q, _ in result.exits)
+    left = exit_plan.to_raw(before, dec)
+    fee = _position_fixed_fees(position).get("sell") or DEFAULT_SELL_FEE_SOL
+    per_raw = price / Decimal(10) ** dec
+    kept, sold = [], Decimal(0)
+    for qty, reason in result.exits:
+        c = exit_plan.check_exit(left, exit_plan.to_raw(qty, dec), reason, per_raw, fee, settings)
+        if c.changed:
+            await add_timeline_event(session, f"exit_protection.{c.action.lower()}", now,
+                                     {"exit_reason": reason, **c.to_dict()}, candidate_id=position.candidate_id,
+                                     assessment_id=position.assessment_id, position_id=position.id)
+        if c.sell_raw <= 0:
+            continue
+        q = before - sold if c.sell_raw >= left else exit_plan.from_raw(c.sell_raw, dec)
+        kept.append((q, reason))
+        sold += q
+        left -= c.sell_raw
+    result.exits[:] = kept
+    s.remaining_quantity = max(Decimal(0), before - sold)
+    if s.remaining_quantity <= DUST:
+        s.remaining_quantity = Decimal(0)
+    result.closed = s.remaining_quantity == 0
 
 
 async def close_position(session: AsyncSession, position: PaperPosition, now: datetime, reason: str, price: Decimal | None) -> None:

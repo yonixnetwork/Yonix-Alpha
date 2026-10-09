@@ -10,7 +10,7 @@ from app.api.deps import get_current_username, get_db, get_redis, get_settings
 from app.api.util import audit, jsonable
 from app.schemas.common import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, Page
 from app.schemas.paper import PaperPositionOut
-from yonixalpha_core import execution_analysis, events, paper_execution, position_pnl, system_profile
+from yonixalpha_core import events, execution_analysis, exit_plan, live_trading, paper_execution, position_pnl, system_profile
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import (
     ExecutionOrder, PaperAccount, PaperOrder, PaperPosition, PlatformSetting, RiskAssessment, TradeTimelineEvent,
@@ -177,3 +177,50 @@ async def put_execution_settings(body: dict, request: Request, db: AsyncSession 
     await audit(db, username, request, "paper_execution.updated", {"before": current, "after": s.to_dict()})
     await db.commit()
     return jsonable(await paper_execution.effective_rates(db))
+
+
+@router.get("/exit-protection")
+async def get_exit_protection(db: AsyncSession = Depends(get_db), _: str = Depends(get_current_username)) -> dict:
+    """Sellable-amount protection (exit_plan): mode OFF / PAPER (default: paper exits changed, LIVE exits only
+    recorded) / PAPER_AND_LIVE, and the fee multiples it measures against."""
+    return {**(await exit_plan.load_settings(db)).to_dict(), "modes": list(exit_plan.MODES)}
+
+
+@router.put("/exit-protection")
+async def put_exit_protection(body: dict, request: Request, db: AsyncSession = Depends(get_db),
+                              username: str = Depends(get_current_username)) -> dict:
+    current = (await exit_plan.load_settings(db)).to_dict()
+    s, errors = exit_plan.parse_settings({**current, **body})
+    if errors:
+        raise HTTPException(422, {"errors": errors})
+    row = await db.get(PlatformSetting, exit_plan.SETTINGS_KEY)
+    if row is None:
+        db.add(PlatformSetting(key=exit_plan.SETTINGS_KEY, value=s.to_dict()))
+    else:
+        row.value = s.to_dict()
+    await audit(db, username, request, "exit_protection.updated", {"before": current, "after": s.to_dict()})
+    await db.commit()
+    return {**s.to_dict(), "modes": list(exit_plan.MODES)}
+
+
+@router.get("/positions/{position_id}/exit-plan")
+async def position_exit_plan(position_id: UUID, db: AsyncSession = Depends(get_db),
+                             _: str = Depends(get_current_username)) -> dict:
+    """What the position will sell at each remaining take-profit, what the trailing stop / stop loss is left
+    with, every exit-plan change recorded for it, and the last failed exit. Read-only."""
+    p = await db.get(PaperPosition, position_id)
+    if p is None:
+        raise HTTPException(404, "position not found")
+    settings = await exit_plan.load_settings(db)
+    live = await live_trading.load_live_settings(db)
+    view = exit_plan.position_view(p, settings, live_trading.BASE_FEE_SOL + live.priority_fee_sol)
+    rows = (await db.execute(select(TradeTimelineEvent).where(
+        TradeTimelineEvent.position_id == p.id, TradeTimelineEvent.event_type.like("exit_protection.%"))
+        .order_by(TradeTimelineEvent.occurred_at.desc()).limit(20))).scalars().all()
+    view["changes"] = [{"at": r.occurred_at, "event": r.event_type, "detail": r.detail} for r in rows]
+    failed = (await db.execute(select(ExecutionOrder).where(
+        ExecutionOrder.position_id == p.id, ExecutionOrder.side == "SELL", ExecutionOrder.status.in_(("FAILED", "EXPIRED")))
+        .order_by(ExecutionOrder.created_at.desc()).limit(1))).scalar_one_or_none()
+    view["last_failed_exit"] = {"at": failed.created_at, "status": failed.status, "error": (failed.error or "")[:300]} \
+        if failed else None
+    return jsonable(view)

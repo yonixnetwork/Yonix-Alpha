@@ -29,6 +29,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yonixalpha_core import deployer_intel, execution_analysis, live_smoke, live_trading, opportunities, paper_engine, paper_execution
+from yonixalpha_core import x_narrative
 from yonixalpha_core.ml.gate_features import FEATURE_VERSION
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import TradingCandidate
@@ -188,6 +189,16 @@ async def evaluate_with_gate(
             requested_at = None
     decision_ctx = execution_analysis.decision_context(inp, evidence, a, eval_started, time.time(), lifecycle, requested_at)
     meta = await pump_stream.load_meta(redis, mint) or {}
+    if getattr(settings, "X_NARRATIVE_ENABLED", False):  # absent (tests, old settings) = off
+        # X narrative (SHADOW): queued for a later lookup by a background pass; nothing here waits for it.
+        try:
+            sig = inp.signal
+            await x_narrative.enqueue(redis, mint, meta.get("name"), meta.get("symbol"), {
+                "assessment_id": str(row.id), "decided_at": now.isoformat(), "engine": engine,
+                "qualified": bool(sig is not None and sig.qualified), "executable": a.executable,
+                "onchain_score": str(round(sig.strength * 100, 2)) if sig is not None else None})
+        except Exception as exc:  # noqa: BLE001 - enrichment never affects the decision
+            log.warning("x_narrative.enqueue_failed", error=type(exc).__name__)
     decision_ctx["token_created_at"] = int(meta["created_at"]) if meta.get("created_at") else None
     decision_ctx["discovered_at"] = candidate.created_at.isoformat() if candidate.created_at else None
     provenance = {"source": "PUMPFUN", "lifecycle": lifecycle, "pool": pool, "strategy": a.strategy, "decision": decision_ctx,

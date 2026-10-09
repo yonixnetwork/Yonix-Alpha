@@ -29,6 +29,7 @@ from app.api.routes import (
     trade,
     wallets,
     ws,
+    x_narrative,
 )
 
 api_router = APIRouter()
@@ -60,3 +61,4 @@ api_router.include_router(explorer.router)
 api_router.include_router(ws.router)
 api_router.include_router(research.router)
 api_router.include_router(resources.router)
+api_router.include_router(x_narrative.router)

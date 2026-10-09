@@ -6,7 +6,7 @@ from uuid import UUID
 import httpx
 from sqlalchemy import select
 
-from yonixalpha_core import manual_trade
+from yonixalpha_core import manual_trade, x_narrative
 from yonixalpha_core.config import get_settings
 from yonixalpha_core.events import heartbeat_loop
 from yonixalpha_core.db.base import make_engine, make_session_factory
@@ -182,6 +182,9 @@ async def run() -> None:
             heartbeat_loop(settings, "decision-engine", stop_event, lambda: {"venues": venue_health_snapshot()}),
             run_watcher("decision-engine", settings, session_factory, stop_event, rpc=sources.rpc if sources else None,
                         redis=redis),
+            # X narrative (SHADOW, off unless X_NARRATIVE_ENABLED + dashboard switch + bearer token): looks up queued
+            # candidates in the background; evaluation never waits for it.
+            x_narrative.run_forever(session_factory, redis, settings, stop_event),
         )
     finally:
         await _record_system_event(session_factory, "service_stopped", "info")

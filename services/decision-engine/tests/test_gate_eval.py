@@ -286,3 +286,22 @@ async def test_invalid_saved_risk_settings_block_the_entry(db_session, redis_cli
     assert a.decision.value == "NO_TRADE"
     assert any(f.code == "TRADING_CONTROL_OFF" and "failed validation" in f.message for f in a.findings), a.reasons
     assert (await db_session.execute(select(PaperPosition))).first() is None
+
+
+async def test_x_narrative_on_only_queues_the_candidate_and_changes_no_decision(db_session, redis_client):
+    """X narrative (SHADOW): with the switch on, the gate decides exactly as without it, opens the same paper
+    position, and only queues the mint for a later background lookup (nothing waits for X)."""
+    import json as _json
+
+    from yonixalpha_core import x_narrative
+
+    curve = await seed_healthy_launch(redis_client, NOW)
+    cand = await make_candidate(db_session)
+    env = SimpleNamespace(**vars(ENV), X_NARRATIVE_ENABLED=True, X_API_BEARER_TOKEN=None)
+    a = await evaluate_with_gate(db_session, redis_client, env, Sources(redis_client, FakeRpc(curve)), cand, NOW)
+    assert a.decision.value == "EXECUTE", a.reasons  # same decision as test_healthy_launch_opens_paper_position_from_gate_plan
+    assert (await db_session.execute(select(PaperPosition))).scalar_one() is not None
+    queued = await redis_client.zrange(x_narrative.QUEUE, 0, -1)
+    assert queued == [MINT]
+    meta = _json.loads(await redis_client.get(x_narrative.QUEUE_META.format(mint=MINT)))
+    assert meta["qualified"] is True and meta["executable"] is True and meta["engine"] == "solana_fresh"
