@@ -116,6 +116,10 @@ async def ingest_logs(redis: Redis, logs: list[str], signature: str | None, rece
                 "signature": signature or "",
                 "is_mayhem_mode": 1 if f.get("is_mayhem_mode") else 0,
                 "initial_real_token_reserves": int(f.get("real_token_reserves") or 0),
+                # Entry latency (entry_timing): when this process received the
+                # create event, and whether the live stream or a gap fill did.
+                "received_at": f"{received_at.timestamp():.3f}",
+                "received_via": "stream" if from_stream else "gap_fill",
             }
             pipe.hset(meta_key(mint), mapping=meta)
             pipe.expire(meta_key(mint), META_TTL)

@@ -1659,3 +1659,42 @@ class XNarrativeObservation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (Index("ix_x_narrative_observations_mint_observed_at", "mint", "observed_at"),)
+
+
+class EntrySignal(Base):
+    """The first moment an entry strategy (shadow) or a baseline wanted a
+    token (entry_intel), with what was known then, and its outcome once
+    labelled (entry_outcomes). One row per (mint, strategy). `decided_at`
+    is the decision time; `features` hold only data at or before it, the
+    outcome only data after it (`outcome_at` says when it became known)."""
+
+    __tablename__ = "entry_signals"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    mint: Mapped[str] = mapped_column(String(64), nullable=False)
+    strategy: Mapped[str] = mapped_column(String(40), nullable=False)
+    lifecycle: Mapped[str] = mapped_column(String(16), nullable=False)  # FRESH | MIGRATED
+    decision: Mapped[str] = mapped_column(String(16), nullable=False)  # CANDIDATE | BASELINE
+    phase: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
+    evidence_level: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    size_factor: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)
+    ml_probability: Mapped[Decimal | None] = mapped_column(Numeric(8, 6), nullable=True)
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    launch_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    price_raw: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    features: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    reasons: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    evidence: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    candidate_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    outcome: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    outcome_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    label_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("mint", "strategy", name="uq_entry_signals_mint_strategy"),
+        Index("ix_entry_signals_decided_at", "decided_at"),
+        Index("ix_entry_signals_strategy_decided_at", "strategy", "decided_at"),
+        Index("ix_entry_signals_unlabelled", "decided_at", postgresql_where=text("outcome_at IS NULL")),
+    )

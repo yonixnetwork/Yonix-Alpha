@@ -4,9 +4,9 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import case, select
 
-from yonixalpha_core import manual_trade, x_narrative
+from yonixalpha_core import gate_events, manual_trade, x_narrative
 from yonixalpha_core.config import get_settings
 from yonixalpha_core.events import heartbeat_loop
 from yonixalpha_core.db.base import make_engine, make_session_factory
@@ -27,7 +27,12 @@ from app.gate_eval import evaluate_with_gate, is_gate_candidate
 
 log = get_logger("decision-engine.main")
 
-EVAL_INTERVAL_SECONDS = 15
+EVAL_INTERVAL_SECONDS = 15  # legacy (non-gate) candidates: unchanged cadence
+# Gate candidates: the loop wakes as soon as the funnel pushes a new
+# candidate (gate_events.GATE_WAKE) and otherwise every GATE_LOOP_SECONDS;
+# each candidate keeps its own pacing (30 s timer, or a meaningful event
+# after event_min_interval_seconds), so this costs no extra RPC by itself.
+GATE_LOOP_SECONDS = 5
 SERVICE_NAME = "decision-engine"
 EVALUABLE_STATES = [
     CandidateState.DISCOVERED.value, CandidateState.OBSERVING.value, CandidateState.ANALYZING.value,
@@ -89,10 +94,20 @@ async def _manual_loop(session_factory, redis, settings, stop_event: asyncio.Eve
 
 
 async def _evaluation_loop(session_factory, redis, settings, stop_event: asyncio.Event, sources: Sources | None = None) -> None:
+    loop = asyncio.get_running_loop()
+    last_legacy = 0.0
     while not stop_event.is_set():
+        legacy_due = loop.time() - last_legacy >= EVAL_INTERVAL_SECONDS
+        if legacy_due:
+            last_legacy = loop.time()
         try:
             async with session_factory() as session:
-                result = await session.execute(select(TradingCandidate.id).where(TradingCandidate.state.in_(EVALUABLE_STATES)))
+                # Newly discovered candidates first, newest first: a fresh
+                # token's first evaluation never waits behind older ones.
+                result = await session.execute(
+                    select(TradingCandidate.id).where(TradingCandidate.state.in_(EVALUABLE_STATES))
+                    .order_by(case((TradingCandidate.state == CandidateState.DISCOVERED.value, 0), else_=1),
+                              TradingCandidate.created_at.desc()))
                 candidate_ids = result.scalars().all()
 
             evaluated = 0
@@ -112,6 +127,8 @@ async def _evaluation_loop(session_factory, redis, settings, stop_event: asyncio
                                 continue
                             await evaluate_with_gate(session, redis, settings, sources, candidate, datetime.now(timezone.utc))
                         else:
+                            if not legacy_due:
+                                continue
                             await evaluate_candidate(session, redis, settings, candidate, datetime.now(timezone.utc))
                     await diagnostics.clear_failures(redis, candidate_id)
                     evaluated += 1
@@ -131,10 +148,9 @@ async def _evaluation_loop(session_factory, redis, settings, stop_event: asyncio
             log.error("evaluation_loop.failed", error=str(exc))
             await _record_system_event(session_factory, "evaluation_loop_failed", "error", {"error": str(exc)})
 
-        try:
-            await asyncio.wait_for(stop_event.wait(), timeout=EVAL_INTERVAL_SECONDS)
-        except asyncio.TimeoutError:
-            pass
+        woken = await gate_events.wait_for_wake(redis, stop_event, GATE_LOOP_SECONDS)
+        if woken:
+            log.info("evaluation_loop.woken", candidates=len(woken))
 
 
 async def run() -> None:

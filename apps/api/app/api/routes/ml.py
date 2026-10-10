@@ -332,7 +332,8 @@ async def ml_steps(redis: Redis = Depends(get_redis), _: str = Depends(get_curre
 
     return jsonable({"steps": await steps.read(redis),
                      "intervals_s": {"solana_training": 3600, "gate_models": 3600, "solana_shadow": 3600,
-                                     "ablation": 3600, "frozen_validation": 3600, "evm_wallet_ml": 1800},
+                                     "ablation": 3600, "frozen_validation": 3600, "entry_timing": 3600,
+                                     "evm_wallet_ml": 1800},
                      "note": "Solana steps run one after another every hour; EVM / wallet ML runs in its own loop "
                              "every 30 minutes, so a slow Solana step cannot hold it up. In LOW_RESOURCE mode "
                              "memecoin training keeps this schedule but waits while the server is CRITICAL; the "

@@ -14,6 +14,7 @@ from yonixalpha_core import system_profile, update_monitor
 from yonixalpha_core.ml import frozen, steps
 
 from app.ablation import run_ablation
+from app.entry_ml import run_entry_cycle
 from app.evm_ml import run_evm_cycle
 from app.gate_ml import run_cycle
 from app.shadow_ml import run_shadow_cycle
@@ -45,7 +46,7 @@ async def _record_system_event(session_factory, event_type: str, severity: str, 
         )
 
 
-TRAINING_STEPS = ("solana_training", "gate_models", "solana_shadow", "ablation", "frozen_validation")
+TRAINING_STEPS = ("solana_training", "gate_models", "solana_shadow", "ablation", "frozen_validation", "entry_timing")
 
 
 async def _decide(session_factory, redis, settings, anchor_step: str, normal_s: int) -> tuple[bool, str, dict]:
@@ -168,6 +169,18 @@ async def _training_loop(session_factory, redis, settings, stop_event: asyncio.E
         except Exception as exc:  # noqa: BLE001
             log.error("validation.failed", error=str(exc))
             await _record_system_event(session_factory, "frozen_validation_failed", "error", {"error": str(exc)[:500]})
+
+        # Entry-timing model on the early-entry signals (entry_ml): SHADOW only,
+        # scored on the frozen test period; never activated.
+        try:
+            async def entry():
+                async with session_factory() as session:
+                    return await run_entry_cycle(session)
+            ent = await steps.timed(redis, "entry_timing", entry, log)
+            log.info("entry_ml.completed", result=ent)
+        except Exception as exc:  # noqa: BLE001
+            log.error("entry_ml.failed", error=str(exc))
+            await _record_system_event(session_factory, "entry_ml_failed", "error", {"error": str(exc)[:500]})
 
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=TRAIN_INTERVAL_SECONDS)

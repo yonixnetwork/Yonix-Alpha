@@ -44,6 +44,7 @@ BUY_EVENT_DISC = bytes([103, 244, 82, 31, 44, 245, 119, 119])
 SELL_EVENT_DISC = bytes([62, 47, 55, 10, 165, 3, 220, 42])
 LAMPORTS = Decimal(1_000_000_000)
 TRADE_CACHE_TTL = 3600
+POOL_FEE_KEY = "yx:pumpswap:fee:"  # latest fee (bps) a pool charged, from its own trade events
 
 
 class PoolUnavailable(Exception):
@@ -253,6 +254,10 @@ async def recent_pool_trades(rpc, redis, pool: str, limit: int = 25) -> list[Poo
                      t.fee_bps, t.pool] for t in trades_from_logs(logs, pool)]
             if redis is not None:
                 await redis.set(key, json.dumps(rows), ex=TRADE_CACHE_TTL)
+                if rows and rows[-1][7]:
+                    # The fee the pool actually charged (entry_store labels
+                    # migrated-token signals with it; never assumed).
+                    await redis.set(POOL_FEE_KEY + pool, int(rows[-1][7]), ex=6 * 3600)
         for r in rows:
             out.append(PoolTrade(datetime.fromisoformat(r[0]), r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8]))
     return sorted(out, key=lambda t: t.at)

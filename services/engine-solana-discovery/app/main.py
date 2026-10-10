@@ -22,12 +22,17 @@ from yonixalpha_core.solana.rpc_registry import WsUrls
 from yonixalpha_core.runtime_watch import run_watcher
 from yonixalpha_core.solana.ws import SolanaWsClient
 
-from app.funnel import run_funnel
+from app import entry_shadow
+from app.funnel import create_strategy_candidate, fast_pass, run_funnel
 
 log = get_logger("engine-solana-discovery.main")
 
 HEALTH_CHECK_INTERVAL_SECONDS = 30
 FUNNEL_INTERVAL_SECONDS = 10
+# Between full funnel runs, a fast pass promotes launches whose observation
+# window just ended (app.funnel.fast_pass): promotion ~1-2 s after the
+# window instead of up to FUNNEL_INTERVAL_SECONDS later.
+FAST_PASS_INTERVAL_SECONDS = 2
 STATS_LOG_EVERY = 6  # funnel runs
 GUARD_INTERVAL_SECONDS = 15
 
@@ -86,22 +91,31 @@ async def _stream_guard_loop(redis, rpc, ws_client: SolanaWsClient, session_fact
 
 async def _funnel_loop(redis, session_factory, stop_event: asyncio.Event) -> None:
     runs = 0
+    last_full = 0.0
+    loop = asyncio.get_running_loop()
     while not stop_event.is_set():
+        full = loop.time() - last_full >= FUNNEL_INTERVAL_SECONDS
         try:
             async with session_factory() as session:
                 settings, _ = await store.load_settings(session, "solana_fresh")
                 momentum_settings, _ = await store.load_settings(session, "solana_momentum")
-            counts = await run_funnel(redis, session_factory, settings, datetime.now(timezone.utc), momentum_settings)
-            runs += 1
-            if counts["promoted"] or counts["migrations"]:
-                log.info("funnel.run", **counts)
-            if runs % STATS_LOG_EVERY == 0:
-                log.info("stream.stats", heartbeat=str(await pump_stream.heartbeat(redis)), **await pump_stream.stats(redis))
+            if full:
+                last_full = loop.time()
+                counts = await run_funnel(redis, session_factory, settings, datetime.now(timezone.utc), momentum_settings)
+                runs += 1
+                if counts["promoted"] or counts["migrations"]:
+                    log.info("funnel.run", **counts)
+                if runs % STATS_LOG_EVERY == 0:
+                    log.info("stream.stats", heartbeat=str(await pump_stream.heartbeat(redis)), **await pump_stream.stats(redis))
+            else:
+                counts = await fast_pass(redis, session_factory, settings, datetime.now(timezone.utc))
+                if counts["promoted"]:
+                    log.info("funnel.fast_pass", **counts)
         except Exception as exc:  # noqa: BLE001
             log.error("funnel.failed", error=str(exc))
             await _record_system_event(session_factory, "funnel_failed", "error", {"error": str(exc)})
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=FUNNEL_INTERVAL_SECONDS)
+            await asyncio.wait_for(stop_event.wait(), timeout=FAST_PASS_INTERVAL_SECONDS)
         except asyncio.TimeoutError:
             pass
 
@@ -194,6 +208,7 @@ async def run() -> None:
                 _stream_guard_loop(redis, rpc, ws_client, session_factory, stop_event),
                 _health_check_loop(rpc, session_factory, stop_event),
                 _funnel_loop(redis, session_factory, stop_event),
+                entry_shadow.run(redis, session_factory, rpc, settings, stop_event, create_strategy_candidate),
                 run_watcher("engine-solana-discovery", settings, session_factory, stop_event, rpc=rpc, ws_urls=next_ws_url,
                             redis=redis),
             )

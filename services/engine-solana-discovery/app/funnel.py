@@ -27,7 +27,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yonixalpha_core import deployer_intel, events, opportunities, wallet_intel
+from yonixalpha_core import deployer_intel, entry_intel, entry_store, entry_timing, events, gate_events, opportunities, wallet_intel
 from yonixalpha_core.db.models import Token, TokenEvent, TokenObservation, TradingCandidate
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.safety.settings import SafetySettings
@@ -57,6 +57,43 @@ MOMENTUM_MIN_AGE_SECONDS = 30 * 60  # default of SafetySettings.momentum_min_age
 MOMENTUM_ACTIVE_WITHIN_SECONDS = 120
 MOMENTUM_MIN_TX_ACCELERATION = 1.5
 MOMENTUM_REPROMOTE_SECONDS = 3600
+FAST_PASS_SLACK_SECONDS = 4
+
+
+async def fast_pass(redis: Redis, session_factory, settings: SafetySettings, now: datetime) -> dict[str, int]:
+    """Promotion for launches whose observation window just ended, between
+    full funnel runs. Same rules (observation.evaluate), same budget."""
+    counts = {"considered": 0, "prefilter_failed": 0, "promoted": 0, "budget_full": 0, "observing": 0,
+              "continue_monitoring": 0, "rejected": 0, "expired": 0, "migration_detected": 0}
+    window = int(settings.fresh_observation_seconds)
+    open_mints = await pump_stream.open_for_observation(redis, now, window + FAST_PASS_SLACK_SECONDS + 5)
+    only = matured(open_mints, now, window)
+    if not only:
+        return counts
+    async with session_factory() as session:
+        active = await active_candidate_count(session)
+    await observe_fresh(redis, session_factory, settings, now, counts, active, only=only)
+    pipe = redis.pipeline(transaction=False)
+    for k, v in counts.items():
+        if v:
+            pipe.hincrby(FUNNEL, k, v)
+    pipe.hincrby(FUNNEL, "fast_pass_runs", 1)
+    await pipe.execute()
+    return counts
+
+
+async def create_strategy_candidate(session: AsyncSession, mint: str, meta: dict[str, str], now: datetime,
+                                    strategy: str) -> TradingCandidate | None:
+    """An entry strategy in PAPER mode: a gate candidate whose entry can
+    only be a PAPER trade (detail.paper_only). The safety gate runs every
+    check as for any other candidate. Respects the gate budget."""
+    from yonixalpha_core.safety import store
+
+    settings, _ = await store.load_settings(session, "solana_fresh")
+    if await active_candidate_count(session) >= settings.max_active_candidates:
+        return None
+    return await create_candidate(session, "discovery", mint, meta, now, f"entry strategy {strategy} (PAPER mode)",
+                                  {"entry_strategy": strategy, "paper_only": True})
 
 
 def prefilter(trades: list, now: datetime, created_ts: int, settings: SafetySettings) -> tuple[bool, dict[str, Any]]:
@@ -221,14 +258,44 @@ async def _store_observations(session_factory, rows: list[dict], now: datetime, 
         await session.commit()
 
 
+def matured(open_mints: list[tuple[str, int]], now: datetime, window: int, slack: int = FAST_PASS_SLACK_SECONDS) -> set[str]:
+    """Mints whose first observation window ended in the last `slack`
+    seconds: the fast pass promotes them right away instead of waiting for
+    the next full funnel run (up to FUNNEL_INTERVAL_SECONDS later)."""
+    t = now.timestamp()
+    return {m for m, created in open_mints if window <= t - created <= window + slack}
+
+
+async def _promoted_side_effects(redis: Redis, session, mint: str, cand, now: datetime, meta: dict) -> None:
+    """Gate wake (evaluate now, not at the next timer tick), the latency
+    timeline, and the CURRENT_PROMOTE baseline (same labeller as the
+    entry strategies). Evidence only: a failure never blocks promotion."""
+    try:
+        await gate_events.wake(redis, cand.id)
+        await entry_timing.mark(redis, mint, "first_candidate_at:CURRENT_PROMOTE", now.timestamp())
+        trades = await pump_stream.load_trades(redis, mint)
+        last = max(trades, key=lambda t: t.at) if trades else None
+        price = last.virtual_sol / last.virtual_token if last is not None and last.virtual_token else None
+        launch = datetime.fromtimestamp(int(meta["created_at"]), tz=timezone.utc) if meta.get("created_at") else None
+        await entry_store.record_baseline(session, redis, mint=mint, strategy=entry_intel.CURRENT_PROMOTE, decided_at=now,
+                                          price_raw=price, launch_at=launch,
+                                          detail={"trades_total": len([t for t in trades if t.at <= now])})
+        await session.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("funnel.promote_side_effects_failed", mint=mint, error=f"{type(exc).__name__}: {exc}"[:200])
+
+
 async def observe_fresh(redis: Redis, session_factory, settings: SafetySettings, now: datetime, counts: dict[str, int],
-                        active: int) -> int:
+                        active: int, only: set[str] | None = None) -> int:
     """FRESH_OBSERVING for every new launch: see solana.observation. Returns
-    the updated number of active gate candidates."""
+    the updated number of active gate candidates. `only`: the fast pass
+    (just-matured mints); capacity trimming is left to the full pass."""
     rows: list[dict] = []
     live: list[tuple[int, str, dict, observation.ObservationReport]] = []
     open_mints = await pump_stream.open_for_observation(redis, now, max(settings.fresh_max_monitoring_seconds,
                                                                         settings.fresh_observation_seconds) + 60)
+    if only is not None:
+        open_mints = [(m, c) for m, c in open_mints if m in only]
     for mint, created_ts in open_mints:
         counts["considered"] += 1
         meta = await pump_stream.load_meta(redis, mint) or {}
@@ -257,6 +324,8 @@ async def observe_fresh(redis: Redis, session_factory, settings: SafetySettings,
                 cand = await create_candidate(session, "discovery", mint, meta, now,
                                               "observation window passed: " + report.reasons[-1][:200],
                                               {"prefilter": stats, "observation": json.loads(json.dumps(report.to_dict(), default=str))})
+                if cand is not None:
+                    await _promoted_side_effects(redis, session, mint, cand, now, meta)
             await _finalize(redis, rows, mint, meta, report, now, cand.id if cand else None)
             if cand is not None:
                 active += 1
@@ -278,7 +347,7 @@ async def observe_fresh(redis: Redis, session_factory, settings: SafetySettings,
 
     # Capacity: beyond fresh_max_monitored_tokens, the least active tokens
     # past their first window stop being monitored (recorded as NO_TRADE).
-    if len(live) > settings.fresh_max_monitored_tokens:
+    if only is None and len(live) > settings.fresh_max_monitored_tokens:
         extra = len(live) - settings.fresh_max_monitored_tokens
         for _, mint, meta, report in sorted((x for x in live if x[3].outcome == observation.CONTINUE_MONITORING),
                                             key=lambda x: x[0])[:extra]:

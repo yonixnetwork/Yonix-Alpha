@@ -29,7 +29,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yonixalpha_core import deployer_intel, execution_analysis, live_smoke, live_trading, opportunities, paper_engine, paper_execution
-from yonixalpha_core import x_narrative
+from yonixalpha_core import entry_intel, entry_store, entry_timing, gate_events, x_narrative
 from yonixalpha_core.ml.gate_features import FEATURE_VERSION
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import TradingCandidate
@@ -52,6 +52,20 @@ GATE_STATES = [
     CandidateState.DISCOVERED.value, CandidateState.OBSERVING.value, CandidateState.ANALYZING.value,
     CandidateState.WAITING_FOR_LIQUIDITY.value, CandidateState.WAITING_FOR_APPROVAL.value,
 ]
+
+
+_EE_CACHE: dict = {"at": 0.0, "cfg": None}
+
+
+async def _entry_config(session: AsyncSession) -> entry_intel.EntryConfig:
+    """Event re-evaluation settings (entry_intelligence), cached 30 s."""
+    if _EE_CACHE["cfg"] is None or time.time() - _EE_CACHE["at"] > 30:
+        try:
+            _EE_CACHE["cfg"] = (await entry_store.load_settings(session))["config"]
+        except Exception:  # noqa: BLE001 - unreadable: defaults (event re-evaluation on, 10 s)
+            _EE_CACHE["cfg"] = entry_intel.EntryConfig()
+        _EE_CACHE["at"] = time.time()
+    return _EE_CACHE["cfg"]
 
 
 def is_gate_candidate(candidate: TradingCandidate) -> bool:
@@ -95,9 +109,22 @@ async def evaluate_with_gate(
     eval_started = time.time()
 
     # Per-candidate pacing: each evaluation costs several RPC/HTTP calls.
-    # A manual request is evaluated when it is made.
+    # A manual request is evaluated when it is made. A meaningful market
+    # event since the last evaluation (gate_events) may bring the next one
+    # forward to event_min_interval_seconds; the 30 s fallback is unchanged.
+    trigger = "manual" if operator is not None else "timer"
     if operator is None and not await redis.set(f"yx:gate:pace:{candidate.id}", "1", nx=True, ex=REEVALUATE_EVERY_SECONDS):
-        return None
+        ecfg = await _entry_config(session)
+        events: list[str] = []
+        if ecfg.event_reevaluation:
+            try:
+                events = await gate_events.due_by_event(redis, candidate.id, mint, ecfg.event_min_interval_seconds)
+            except Exception:  # noqa: BLE001 - no event data: the timer decides
+                events = []
+        if not events:
+            return None
+        await redis.set(f"yx:gate:pace:{candidate.id}", "1", ex=REEVALUATE_EVERY_SECONDS)
+        trigger = "event: " + "; ".join(events)[:200]
 
     if engine in CURVE_ENGINES:
         stream_curve = await pump_stream.load_curve(redis, mint)
@@ -133,7 +160,9 @@ async def evaluate_with_gate(
         # stricter finding still blocks).
         strategy_mode, approval = StrategyMode.MANUAL, True
     live_intent = (await store.load_global_mode(session) == GlobalMode.LIVE and strategy_mode in (StrategyMode.AUTO, StrategyMode.MANUAL)
-                   and store.live_trading_permitted(settings))
+                   and store.live_trading_permitted(settings)
+                   # An entry strategy in PAPER mode (entry_store) can never place a live order.
+                   and not (candidate.detail or {}).get("paper_only"))
     controls, account, settings_meta = await pipeline.load_controls(session, redis, settings, engine, strategy_mode, mint, now,
                                                                     approval, live=live_intent,
                                                                     source="manual" if operator is not None else "sniper")
@@ -171,6 +200,7 @@ async def evaluate_with_gate(
     a.inputs_snapshot = {**evidence, "ml": ml_info}
 
     key = store.assessment_key(engine, mint, f"manual-{operator['id']}" if operator is not None
+                               else f"e{int(now.timestamp())}" if trigger.startswith("event")
                                else str(int(now.timestamp()) // REEVALUATE_EVERY_SECONDS))
     row, created = await store.persist_assessment(session, a, candidate.id, key)
     if not created:
@@ -201,6 +231,9 @@ async def evaluate_with_gate(
             log.warning("x_narrative.enqueue_failed", error=type(exc).__name__)
     decision_ctx["token_created_at"] = int(meta["created_at"]) if meta.get("created_at") else None
     decision_ctx["discovered_at"] = candidate.created_at.isoformat() if candidate.created_at else None
+    decision_ctx["trigger"] = trigger
+    if (candidate.detail or {}).get("entry_strategy"):
+        decision_ctx["entry_strategy"] = candidate.detail["entry_strategy"]
     provenance = {"source": "PUMPFUN", "lifecycle": lifecycle, "pool": pool, "strategy": a.strategy, "decision": decision_ctx,
                   "model_version": a.versions.get("ml_model"), "feature_version": FEATURE_VERSION,
                   "venue": {"pool": pool, "creator": evidence.get("creator") or None,
@@ -327,10 +360,30 @@ async def evaluate_with_gate(
                 execution_mode=opened.execution_mode if opened is not None else None)
         except Exception as exc:  # noqa: BLE001 - observation data never blocks a decision
             log.warning("gate.opportunity_record_failed", mint=mint, error=f"{type(exc).__name__}: {exc}")
+    if opened is not None:
+        # The existing pipeline's entry, labelled like the entry strategies
+        # (CURRENT_GATE_ENTRY baseline). Evidence only.
+        try:
+            async with session.begin_nested():
+                await entry_store.record_baseline(
+                    session, redis, mint=mint, strategy=entry_intel.CURRENT_GATE_ENTRY, decided_at=now,
+                    price_raw=(float(inp.market.price) * 1e9 / 10 ** inp.token.decimals
+                               if inp.market is not None and inp.market.price and inp.token is not None
+                               and inp.token.decimals is not None else None),
+                    detail={"engine": engine, "mode": opened.execution_mode, "trigger": trigger,
+                            "entry_strategy": (candidate.detail or {}).get("entry_strategy")})
+        except Exception as exc:  # noqa: BLE001
+            log.warning("gate.entry_baseline_failed", mint=mint, error=f"{type(exc).__name__}: {exc}"[:200])
     await session.commit()
     if live_opened is not None:
         await pipeline.after_entry(session, redis, settings, a, live_opened)
         await session.commit()
+    try:
+        await gate_events.remember(redis, candidate.id, mint)
+        if a.executable:
+            await entry_timing.mark(redis, mint, "risk_completed_at", time.time())
+    except Exception:  # noqa: BLE001 - timing evidence only
+        pass
     log.info("gate.decision", candidate_id=str(candidate.id), mint=mint, engine=engine, decision=a.decision.value,
              status=a.status_label, target=a.execution_target.value,
              size=str(a.plan.position_size.value) if a.plan.position_size else None, errors=evidence.get("errors"))

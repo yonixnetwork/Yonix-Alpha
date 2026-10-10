@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { ArrowRightLeft, BarChart3, Bell, Boxes, Copy, Fingerprint, FlaskRound, Layers, Link2, Brain, ClipboardCheck, Eye, FlaskConical, Filter, Gauge, LayoutDashboard, ListChecks, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Radio, Rocket, Search, Send, Server, Settings, ShieldAlert, SlidersHorizontal, Network, Sparkles, Wallet, WalletCards, Workflow, type LucideIcon } from "lucide-react";
+import { ArrowRightLeft, BarChart3, Bell, Boxes, Copy, Fingerprint, FlaskRound, Layers, Link2, Brain, ClipboardCheck, Eye, FlaskConical, Filter, Gauge, LayoutDashboard, ListChecks, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Radio, Rocket, Search, Send, Server, Settings, ShieldAlert, SlidersHorizontal, Network, Sparkles, Timer, Wallet, WalletCards, Workflow, type LucideIcon } from "lucide-react";
 import NotificationsBell from "@/components/NotificationsBell";
 import RuntimeApply from "@/components/RuntimeApply";
 import { modeClass, stateClass } from "@/components/ui";
@@ -36,6 +36,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
       { href: "/dashboard/solana/observing", label: "Observation", icon: Eye },
       { href: "/dashboard/solana/migrated", label: "Migrated", icon: ArrowRightLeft },
       { href: "/dashboard/solana/momentum", label: "Momentum", icon: Rocket },
+      { href: "/dashboard/entry-intel", label: "Entry Intelligence", icon: Timer },
       { href: "/dashboard/evm", label: "EVM Markets", icon: Boxes, needs: "evm" },
       { href: "/dashboard/tokens", label: "Token Explorer", icon: Search },
       { href: "/dashboard/launchpads", label: "Launchpads", icon: Layers },
