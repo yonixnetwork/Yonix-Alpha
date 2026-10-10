@@ -50,6 +50,9 @@ async def test_split_by_marker_mode_stage_and_costs(sf):
             pos(after, "-0.006", plan={"venue": {"decimals": 6, "live_drift_pct": "2.5"}, "fixed_cost_quote": "0.0003"}),
             pos(after, "0.002", mode="LIVE", engine="solana_momentum"),
             pos(after, "0", status="open")]
+    # LIVE: cost basis 2x the market fill (fees + rent on a tiny buy); marks are market prices
+    rows[5].entry_price, rows[5].plan = rows[5].entry_price * 2, {"venue": {"decimals": 6},
+                                                                  "fill": {"market_price": str(rows[5].entry_price)}}
     async with sf() as s:
         s.add_all(rows)
         await s.flush()
@@ -61,7 +64,8 @@ async def test_split_by_marker_mode_stage_and_costs(sf):
     b, a = r["by_window_stage"]["before #X | PAPER | FRESH"], r["by_window_stage"]["after #X | PAPER | FRESH"]
     assert b["trades"] == 3 and abs(b["net_sol"] - 0.015) < 1e-9 and abs(b["profit_factor"] - 4.0) < 1e-9
     assert a["trades"] == 2 and a["win_rate"] == 0 and a["profit_factor"] == 0 and abs(a["max_drawdown_sol"] - 0.012) < 1e-9
-    assert r["by_window_stage"]["after #X | LIVE | MOMENTUM"]["trades"] == 1
+    live = r["by_window_stage"]["after #X | LIVE | MOMENTUM"]
+    assert live["trades"] == 1 and abs(live["avg_mfe_pct"] - 0.3) < 1e-9  # vs the market fill, not the cost basis
     c = r["costs_by_window"]["after #X | PAPER"]
     assert c["share_charged_live_fixed_costs"] == 1 and c["share_charged_live_drift"] == 1
     assert abs(c["median_entry_drift_charged_pct"] - 0.025) < 1e-9 and abs(c["median_cost_drag_pct"] - 0.02) < 1e-9

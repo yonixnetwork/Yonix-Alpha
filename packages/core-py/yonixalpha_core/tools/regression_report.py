@@ -15,7 +15,7 @@ positions are counted, never valued). Sections:
      stage (FRESH / NEAR_MIGRATION / MIGRATED / MOMENTUM, as
      solana_performance defines them)
   3. per window x mode: what the trades paid. price move = exit price /
-     entry price - 1 as recorded; cost drag = price move - net PnL %. For
+     market entry price - 1 (a LIVE fill's market price, not its cost basis); cost drag = price move - net PnL %. For
      PAPER, the share of trades charged LIVE fixed costs (PR #53) and the
      measured LIVE price drift (PR #62): these make paper honestly worse
      without any strategy change
@@ -62,6 +62,8 @@ SELECT coalesce(pp.execution_mode, 'PAPER') AS mode, coalesce(pp.engine, '?') AS
        coalesce(pp.exit_reason, '?') AS exit_reason, pp.realized_pnl AS pnl, pp.realized_pnl_pct AS pnl_pct,
        pp.fees_paid_quote AS fees, pp.entry_cost_quote AS cost, pp.entry_at, pp.exit_at, pp.created_at,
        pp.entry_price, pp.exit_price, pp.highest_price, pp.lowest_price, pp.exit_failures,
+       CASE WHEN pp.plan->'fill'->>'market_price' ~ '{NUM}' THEN (pp.plan->'fill'->>'market_price')::numeric
+            ELSE pp.entry_price END AS market_entry,
        pp.plan->>'fixed_cost_quote' AS fixed_cost, pp.plan->'venue'->>'live_drift_pct' AS live_drift,
        CASE WHEN pp.engine = 'solana_momentum' THEN 'MOMENTUM'
             WHEN o.snapshot->>'migrated' = 'true' OR pp.plan->>'lifecycle' = 'MIGRATED'
@@ -107,8 +109,10 @@ def metrics(rows: list[dict]) -> dict[str, Any]:
     loss_pct = [r["pnl_pct"] for r in rows if (r["pnl"] or 0) <= 0 and r["pnl_pct"] is not None]
     cost = [r["cost"] for r in rows if r["cost"]]
     fee_share = [r["fees"] / r["cost"] for r in rows if r["cost"] and r["fees"] is not None]
-    mfe = [r["highest_price"] / r["entry_price"] - 1 for r in rows if r["entry_price"] and r["highest_price"]]
-    mae = [r["lowest_price"] / r["entry_price"] - 1 for r in rows if r["entry_price"] and r["lowest_price"]]
+    # Marks are market prices: compare them with the market price of the fill
+    # (a LIVE cost basis includes fees and new-account rent, 30-110% on a tiny buy).
+    mfe = [r["highest_price"] / r["market_entry"] - 1 for r in rows if r["market_entry"] and r["highest_price"]]
+    mae = [r["lowest_price"] / r["market_entry"] - 1 for r in rows if r["market_entry"] and r["lowest_price"]]
     hold = [(r["exit_at"] - r["entry_at"]).total_seconds() for r in rows if r["exit_at"] and r["entry_at"]]
     cum = peak = mdd = 0.0
     for r in sorted(rows, key=lambda x: x["exit_at"]):
@@ -133,8 +137,8 @@ def metrics(rows: list[dict]) -> dict[str, Any]:
 
 
 def costs(rows: list[dict]) -> dict[str, Any]:
-    moves = [(r["exit_price"] / r["entry_price"] - 1, r["pnl_pct"]) for r in rows
-             if r["entry_price"] and r["exit_price"] and r["pnl_pct"] is not None]
+    moves = [(r["exit_price"] / r["market_entry"] - 1, r["pnl_pct"]) for r in rows
+             if r["market_entry"] and r["exit_price"] and r["pnl_pct"] is not None]
     out: dict[str, Any] = {"trades": len(rows)}
     if moves:
         out["median_price_move_pct"] = statistics.median(m for m, _ in moves)
@@ -169,7 +173,8 @@ async def build(session, days: int, splits: list[tuple[datetime, str]], now: dat
     rows = []
     for r in (await session.execute(text(ROWS_SQL), p)).mappings().all():
         d = dict(r)
-        for k in ("pnl", "pnl_pct", "fees", "cost", "entry_price", "exit_price", "highest_price", "lowest_price"):
+        for k in ("pnl", "pnl_pct", "fees", "cost", "entry_price", "exit_price", "highest_price", "lowest_price",
+                  "market_entry"):
             d[k] = _f(d[k])
         rows.append(d)
     splits = sorted(splits)
