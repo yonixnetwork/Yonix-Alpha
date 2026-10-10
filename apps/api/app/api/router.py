@@ -30,6 +30,7 @@ from app.api.routes import (
     wallets,
     ws,
     x_narrative,
+    entry_intel,
 )
 
 api_router = APIRouter()
@@ -62,3 +63,4 @@ api_router.include_router(ws.router)
 api_router.include_router(research.router)
 api_router.include_router(resources.router)
 api_router.include_router(x_narrative.router)
+api_router.include_router(entry_intel.router)
