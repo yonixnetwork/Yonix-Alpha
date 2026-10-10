@@ -1,6 +1,6 @@
 # Trading regression investigation and strategy recovery
 
-Status (2026-10-10): **PHASE 1, AUDIT IN PROGRESS.** No strategy, threshold,
+Status (2026-10-10): **PHASE 1 AUDIT DONE: causes located (section 1); corrections proposed.** No strategy, threshold,
 size, risk limit or exit rule was changed by this investigation. Nothing
 below is a profitability claim. Sections marked PENDING need the server
 measurements listed in section 9.
@@ -9,33 +9,104 @@ measurements listed in section 9.
 
 | Action | How | Effect | Verified |
 |---|---|---|---|
-| Stop new LIVE auto-entries | Operator: Settings > Global mode > PAPER | The gate's `live_intent` requires global mode LIVE (`decision-engine/app/gate_eval.py`), so no new LIVE buy is created. | PENDING (operator action) |
+| Stop new LIVE auto-entries | Operator: Settings > Global mode > PAPER | The gate's `live_intent` requires global mode LIVE (`decision-engine/app/gate_eval.py`), so no new LIVE buy is created. | DONE by the operator 2026-10-10 |
 | Keep protecting open LIVE positions | Nothing to change | The live worker (`paper-trading/app/live_worker.py`) and exit management check only the environment locks (`live_trading_permitted`), not the global mode. Stops, take-profits, trailing stops and sellable-amount checks keep running. | Code-traced |
 | Do NOT use the kill switch or the .env locks for this | - | The kill switch cancels queued BUYs only, but closing the .env locks would also stop LIVE exits. | Code-traced |
 | Paper and shadow keep running | Nothing to change | Paper trading and the entry-intelligence shadow pass are unaffected by the global mode. | Code-traced |
 
 ## 1. Root cause: evidence and confidence
 
-**Not yet established.** The audit has so far produced the change timeline
-(section 3) and four hypotheses. Each one says what evidence would confirm
-or reject it. The regression report (`tools/regression_report.py`, section
-9) produces that evidence from the production database.
+Evidence: `regression_report --days 21` and three read-only queries run on
+the production server on 2026-10-10 (211 closed Solana trades since
+2026-09-19; the outputs are in the session record). Findings, in order of
+effect:
 
-| # | Hypothesis | Evidence for (so far) | Would be confirmed by | Would be rejected by |
-|---|---|---|---|---|
-| H1 | LIVE loses mainly to fixed costs: positions are tiny | Server 2026-10-09: LIVE buys of 0.0014-0.01 SOL. One round trip costs about 0.00022 SOL in network and priority fees with rent reclaim on (`live_trading.fixed_trade_costs`), which is 7-16% of a 0.0014-0.003 SOL trade, before the 1.25% pump.fun fee each side and price drift | Section 3 of the report: median cost drag for LIVE well above the median price move; LIVE losses concentrated in the smallest size band | LIVE price moves themselves negative at entry, with costs small |
-| H2 | Late entries: bought after most of the move | Server 2026-10-10 `entry_timing`: 8 of 32 entries were 50%+ above the first detection price; gate wait median 1,001 s for entered tokens; about 5,000 data failures per day from an RPC backoff overflow (fixed in PR #70) | Report MFE small and MAE large for losers; loss share higher in tokens with long detection-to-entry | Losers with large MFE (good entries, bad exits) |
-| H3 | PAPER "got worse" because its accounting became honest, not because the strategy changed | PR #53 (merged 2026-10-07) charges paper the LIVE fixed costs and sizes paper as LIVE would; PR #62 (2026-10-09) charges the measured LIVE price drift to paper fills | Report section 3: the share of paper trades charged fixed costs / drift jumps at those markers, and the price move before costs is unchanged | Paper price moves (before costs) also deteriorate at the marker |
-| H4 | An exit change turned winners into losers | PR #66 (2026-10-09) defers partial take-profits worth less than 3 sell fees (paper only by default) | Report section 4: `take_profit_*` share falls and `stop_loss` share rises after #66 for PAPER; `exit_protection.deferred` timeline events exist | No exit-protection events (the server showed none on 2026-10-09) and an unchanged exit mix |
+**R1. LIVE has never been profitable in the 21-day window. This is not a
+regression. Confidence: high.** Every day since 2026-09-28 is negative:
+72 closed LIVE trades, win rate 11% (8 of 72), profit factor below 0.1,
+net -0.048 SOL. Every stage loses (FRESH, NEAR_MIGRATION, MIGRATED, MOMENTUM).
+The median LIVE size is 0.0036-0.0073 SOL, and the smallest band (<0.005
+SOL, 46 trades) loses the most. Contributing causes, from the same data:
+fixed network and priority fees of about 0.00022 SOL per round trip plus
+the 1.25% curve fee each side (median fees 5-11% of size); entries
+4-1000+ s after the signal (`entry_timing`, 2026-10-10); and a paper / LIVE
+gap (R3).
 
-Confidence: none of H1-H4 is confirmed. H1 and H2 have direct server
-evidence of their preconditions; H3 is certain as an accounting change, but
-its share of the observed deterioration is unmeasured; H4 is unlikely given
-that no exit-protection events were recorded.
+**R2. The recent PAPER losses are the momentum strategy, not a code
+change. Confidence: high for the location; medium for "why now".**
+
+- Over 21 days, PAPER `solana_momentum` lost: 27 trades, profit factor
+  0.60, -0.22 SOL. LIVE `solana_momentum` lost too: 33 trades, profit
+  factor 0.05.
+- PAPER `solana_migration` was profitable: 84 trades, profit factor 2.41,
+  +0.10 SOL. So was PAPER `solana_fresh`: 28 trades, profit factor 1.63,
+  +0.03 SOL.
+- On 2026-10-10, 17 paper momentum trades lost -0.37 SOL. Most of that
+  came in three hours (09:00, 12:00 and 14:00 UTC), on paper positions of
+  about 0.2 SOL each. That is about 20 times the size of fresh and
+  migrated paper positions (risk-based sizing on tighter momentum stops).
+- The gate did not get looser. About 0.5% of momentum evaluations were
+  approved on 2026-10-08 and on 2026-10-10 alike. The NUMBER of momentum
+  evaluations rose about tenfold from 2026-10-09 13:00 UTC (about 80/h to
+  500-1000/h), so the same rule produced more entries.
+
+The rise in volume starts before #66, #69 and #70. It was not caused by
+the event re-evaluation of #69: event-triggered momentum entries did
+better (8 trades, 4 wins, -0.064 SOL) than timer-triggered ones (9 trades,
+1 win, -0.305 SOL).
+
+**R3. PAPER is still more optimistic than LIVE. Confidence: medium.**
+
+- PAPER fresh trades won 64% of the time (28 trades); LIVE fresh trades
+  won 18% (22 trades).
+- No PAPER trade in the window was charged the measured LIVE price drift
+  (#62): the share is 0% in every window. Either fewer than 20 LIVE buys
+  carry a measurable drift, or their median was not adverse. Which one is
+  PENDING (`paper_execution` effective rates).
+- PAPER is charged the LIVE fixed costs since #53 (77-100% of PAPER trades
+  after it), but at a 0.01-0.2 SOL size those costs are 2-7% of the
+  position, against 5-11% for LIVE.
+
+**Ruled out:**
+
+- #53 and #62 (paper accounting): PAPER stayed positive after them.
+- #66 (exit protection): no exit-protection events were recorded.
+- #69 (event re-evaluation): its entries did better, as above.
+- #70 (RPC fix): the volume rise came first.
+- The 33 "open" LIVE positions are failed buys with 0 SOL in them, so no
+  exposure is stuck.
+- LIVE sell failures in the last 2 days are 278 retries of one position
+  (program error 6053, the known pool-specific failure recorded in
+  `YONIXALPHA_FULL_AUDIT_REPORT.md`), plus 23 retries of another (6004),
+  2 positions with 3012, and 6 BlockhashNotFound.
+
+**Measurement correction:** the first regression report compared LIVE
+marks with the LIVE cost basis, which includes fees and new-account rent
+(30-110% of a tiny buy), so LIVE MFE / MAE looked negative. The tool now
+compares marks with the market price of the fill (`plan.fill.market_price`).
 
 ## 2. Before / after performance
 
-PENDING: `regression_report` sections 1-2 (per day, per window x mode x stage).
+| Group | Trades | Win rate | Net SOL | Profit factor |
+|---|---|---|---|---|
+| PAPER migration, 21 d | 84 | 39% | +0.103 | 2.41 |
+| PAPER fresh, 21 d | 28 | 64% | +0.034 | 1.63 |
+| PAPER momentum, 21 d | 27 | 37% | -0.220 | 0.60 |
+| PAPER momentum, 2026-10-10 only | 17 | 29% | -0.369 | 0.13 |
+| LIVE all, 21 d | 72 | 11% | -0.048 | below 0.1 |
+
+All groups are from closed trades and realized PnL. Groups under 20
+trades are anecdotal.
+
+### Proposed corrections (smallest first)
+
+| # | Correction | Kind | Status |
+|---|---|---|---|
+| C1 | Global mode PAPER: no new LIVE buys; exits keep running | Operator | DONE (operator, 2026-10-10) |
+| C2 | Strategy `solana_momentum` to PAPER (or OFF), so it cannot trade LIVE when LIVE returns | Operator setting, no code | RECOMMENDED |
+| C3 | Refuse a LIVE entry whose fixed round-trip costs exceed a set share of its size (NO_TRADE, a tightening, never a size increase) | Code, tested, shadow-reported first | PROPOSED |
+| C4 | Paper / LIVE parity: find why measured LIVE drift is not charged to paper; if the sample is too small, use the stream price after the measured LIVE latency (measured, not invented) | Code | PROPOSED |
+| C5 | Strategy registry and the category strategies of the recovery plan, in SHADOW against the existing pipeline, before any of them may trade | Code | NEXT PHASE |
 
 ## 3. Changes identified in Git (trading, sizing, paper accounting)
 
@@ -104,6 +175,12 @@ the global mode can be switched back by the operator.
 
 ## 10. Recommendation on LIVE auto-entry
 
-**Keep LIVE auto-entry OFF** (global mode PAPER) until section 1 has a
-confirmed cause, and until any strategy that is to trade LIVE has passed the
-out-of-sample gates defined in section 6 of the next phase.
+**Keep LIVE auto-entry OFF** (global mode PAPER). LIVE has not been
+profitable in any of the 21 days measured (R1). It may be reconsidered only
+after:
+
+- C3 is in place;
+- a strategy shows a positive net expectancy after realistic costs on an
+  out-of-sample period, with at least 30 trades;
+- paper / LIVE parity (C4) is understood;
+- the operator approves explicitly.
