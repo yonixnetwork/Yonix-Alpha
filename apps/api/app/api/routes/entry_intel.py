@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_username, get_db, get_redis
 from app.api.util import audit, jsonable
 from yonixalpha_core import entry_eval, entry_intel as ei, entry_parity, entry_store, entry_timing
+from yonixalpha_core import strategy_registry as reg
 from yonixalpha_core.db.models import EntrySignal, ModelVersion, PlatformSetting, TradingCandidate
 
 router = APIRouter(prefix="/entry-intel", tags=["entry-intel"])
@@ -97,6 +98,59 @@ async def evaluation(days: int = Query(30, ge=1, le=365), db: AsyncSession = Dep
                                              await entry_store.paper_results(db)),
                      "note": "chronological splits; the frozen test period never moves; a strategy is promoted only by "
                              "the operator and only after beating the existing pipeline (CURRENT_GATE_ENTRY) out of sample"})
+
+
+@router.get("/strategies")
+async def strategies(days: int = Query(14, ge=1, le=90), db: AsyncSession = Depends(get_db),
+                     redis: Redis = Depends(get_redis), _: str = Depends(get_current_username)) -> dict:
+    """The strategy registry with each strategy's mode, readiness and
+    measured performance (executable returns after fees, impact, latency and
+    fixed costs, from the shared labeller), its most frequent blocking
+    reasons and the demotion check. Bounded: the labelled rows of the window
+    (at most 20000), one indexed query of 60 rows per strategy in PAPER."""
+    s = await entry_store.load_settings(db)
+    now = _now()
+    since = now - timedelta(days=days)
+    rows = await entry_store.labelled_rows(db, since)
+    frozen_row = await db.get(PlatformSetting, entry_eval.FREEZE_SETTING)
+    comp = entry_eval.comparison(rows, frozen_row.value if frozen_row else None, s["modes"],
+                                 await entry_store.paper_results(db))
+    counts = await entry_store.counts(db, since)
+    by: dict[str, list[float]] = {}
+    for r in rows:
+        v = (r.get("outcome") or {}).get("executable_return_pct")
+        if v is not None:
+            by.setdefault(r["strategy"], []).append(float(v))
+    out = []
+    for spec in reg.SPECS:
+        name = spec.recorded_as
+        c = comp["strategies"].get(name) or {}
+        m = c.get("all") or {}
+        out.append({**spec.to_dict(), "version_full": reg.version_of(name), "mode": s["modes"].get(name, "SHADOW"),
+                    "readiness": c.get("readiness"), "signals": (counts.get(name) or {}).get("signals", 0),
+                    "labelled": (counts.get(name) or {}).get("labelled", 0),
+                    "with_return": m.get("with_executable_return", 0), "win_rate": m.get("win_rate"),
+                    "expectancy_pct": m.get("mean_return_pct"), "median_return_pct": m.get("median_return_pct"),
+                    "profit_factor": m.get("profit_factor"), "bad_entry_rate": m.get("bad_entry_rate"),
+                    "late_entry_rate": m.get("late_entry_rate"), "max_drawdown_pct_points": m.get("max_drawdown_pct_points"),
+                    "deterioration": reg.deterioration(by.get(name, [])),
+                    "top_reasons": await reg.top_reasons(redis, name, now)})
+    baselines = {}
+    for name in (ei.CURRENT_GATE_ENTRY, ei.NAIVE_SAMPLE, ei.MIGRATED_NO_TRADE):
+        m = (comp["strategies"].get(name) or {}).get("all") or {}
+        baselines[name] = {k: m.get(k) for k in ("signals", "with_executable_return", "win_rate", "mean_return_pct",
+                                                 "median_return_pct", "profit_factor", "bad_entry_rate")}
+    passed = await redis.hgetall("yx:ee:pass")
+    return jsonable({
+        "days": days, "strategies": out, "baselines": baselines, "routes": await reg.route_stats(redis, now),
+        "last_evaluation_at": passed.get("last_pass_at") if passed else None,
+        "categories": {k: list(v) for k, v in ei.CATEGORY_STRATEGIES.items()},
+        "rules": {"routing": "one strategy per token, from its category; none qualifies: NO_TRADE; a routed token is "
+                             "never routed again (no re-entry after a loss)",
+                  "promotion": "manual only (operator); LIVE use of these strategies is not available",
+                  "demotion": reg.deterioration([])["rule"],
+                  "units": "percent of a reference-size trade after fees, impact, latency and fixed costs"},
+    })
 
 
 @router.get("/latency")

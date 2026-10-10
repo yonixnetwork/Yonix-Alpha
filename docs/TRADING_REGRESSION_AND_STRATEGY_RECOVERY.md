@@ -1,9 +1,11 @@
 # Trading regression investigation and strategy recovery
 
-Status (2026-10-10): **PHASE 1 AUDIT DONE: causes located (section 1); corrections proposed.** No strategy, threshold,
-size, risk limit or exit rule was changed by this investigation. Nothing
-below is a profitability claim. Sections marked PENDING need the server
-measurements listed in section 9.
+Status (2026-10-10): **Audit done (section 1). Corrections C3, C4 and C5
+implemented and tested; LIVE auto-entry stays OFF (section 10).** No entry
+threshold of the existing pipeline, size, risk limit, slippage, priority fee
+or exit rule was loosened. C3 only refuses trades. Nothing below is a
+profitability claim. Sections marked PENDING need the server measurements
+listed in section 9.
 
 ## 0. Protection applied first
 
@@ -104,9 +106,9 @@ trades are anecdotal.
 |---|---|---|---|
 | C1 | Global mode PAPER: no new LIVE buys; exits keep running | Operator | DONE (operator, 2026-10-10) |
 | C2 | Strategy `solana_momentum` to PAPER (or OFF), so it cannot trade LIVE when LIVE returns | Operator setting, no code | RECOMMENDED |
-| C3 | Refuse a LIVE entry whose fixed round-trip costs exceed a set share of its size (NO_TRADE, a tightening, never a size increase) | Code, tested, shadow-reported first | PROPOSED |
-| C4 | Paper / LIVE parity: find why measured LIVE drift is not charged to paper; if the sample is too small, use the stream price after the measured LIVE latency (measured, not invented) | Code | PROPOSED |
-| C5 | Strategy registry and the category strategies of the recovery plan, in SHADOW against the existing pipeline, before any of them may trade | Code | NEXT PHASE |
+| C3 | Refuse a LIVE entry whose fixed round-trip costs exceed `max_fixed_cost_pct` (default 2%, ceiling 10%) of its size: NO_TRADE `FIXED_COSTS_TOO_HIGH`, never a size increase | Code (`safety/planning.py`, `safety/settings.py`) | DONE, tested |
+| C4 | Paper buys on the pump curve land after the measured LIVE delay and are filled at the stream price of that moment (section 5.3) | Code (`paper_execution.py`, `gate_eval.py`, `gate_manage.py`) | DONE, tested |
+| C5 | Strategy registry, category strategies and one-per-token routing, all in SHADOW; promotion manual, demotion automatic (section 5) | Code (`strategy_registry.py`, `entry_intel.py`, `entry_shadow.py`) | DONE, tested; SHADOW |
 
 ## 3. Changes identified in Git (trading, sizing, paper accounting)
 
@@ -139,10 +141,85 @@ solana.com and the pump docs was blocked from the build container on
 
 ## 5. Strategy definitions
 
-PENDING. No new strategy will be routed to execution before section 1 is
-answered. Existing shadow strategies (EARLY_ACCELERATION,
-MOMENTUM_CONTINUATION, SMART_WALLET_CONFIRMATION, migrated variants) only
-record signals.
+All new strategies start in SHADOW: they record signals, and the same
+labeller measures each signal's executable return (after fees, impact, the
+measured LIVE latency and fixed costs). None of them can create a LIVE order
+in this release; in PAPER mode a routed signal becomes a PAPER-only gate
+candidate and every safety, risk and sellability check still applies. The
+existing pipeline stays the champion (`CURRENT_GATE_ENTRY`).
+
+### 5.1 Registry (`yonixalpha_core/strategy_registry.py`)
+
+| Code | Recorded as | Category | Signal (what makes it different) |
+|---|---|---|---|
+| F1 | EARLY_ACCELERATION | FRESH | net SOL inflow per 10 s accelerating, new buyers, no single-wallet push |
+| F2 | EARLY_DEMAND_CONFIRMATION | FRESH | buyer breadth broadening and 30 s net buy pressure; ignores price and inflow acceleration |
+| F3 | SELECTIVE_EARLY_BREAKOUT | FRESH | new high above the range before the last 10 s, after a real (>= 5%) pullback, backed by new buyers |
+| M1 | MIGRATED_DELAYED_CONFIRMATION | MIGRATION | >= 120 s after migration, price held, pool SOL above the start |
+| M2 | MIGRATED_CONTINUATION | MIGRATION | new pool high with rising pool SOL |
+| M3 | MIGRATED_PULLBACK | MIGRATION | >= 10% pullback, +3% off the low, rising pool SOL |
+| P1 | MOMENTUM_CONTINUATION | MOMENTUM | healthy continuation phase, 60 s inflow, buyers outgrowing sellers |
+| P2 | BREAKOUT_RETEST | MOMENTUM | 5-20% below the high, a bounce off the retest low, inflow rising again; not a chase |
+| P3 | MOMENTUM_RECOVERY | MOMENTUM | 25-70% below the high, sell volume falling below buys, new buyers, a confirmed turn; NO_TRADE while still falling with sellers in control |
+| SW | SMART_WALLET_CONFIRMATION | any | corroboration only: evaluated on the routed candidate, never selects or trades alone |
+
+Each record has a version (`F2.v1/early-2026.10.2`: strategy version and
+feature version), stored with every signal (`evidence.strategy_version`).
+M1-M3 are the existing migrated variants, measured from PumpSwap pool
+reserves; they stay SHADOW-only. The tests show the strategies fire on
+different patterns (F2 where F1 waits on a decelerating inflow; F3 at an age
+where F1 and F2 refuse; P2 and P3 on a shallow and a deep pullback).
+
+### 5.2 Routing (`entry_intel.route`, `entry_shadow.shadow_pass`)
+
+1. Safety and data checks are part of every strategy (creator sold,
+   scripted buys, dump, stale stream, round-trip cost): a failure is NO_TRADE.
+2. Category: FRESH up to 600 s of age, MOMENTUM after, MIGRATION for
+   migrated tokens (which only the pool variants measure).
+3. Every strategy is evaluated independently; only the category's
+   strategies can be routed.
+4. Among the qualifying ones, the highest score is selected; every other
+   strategy's decision and first reason is recorded with it.
+5. None qualifies: NO_TRADE.
+6. The paper route is the same router over the strategies in PAPER mode
+   only. A token gets at most one routed paper candidate, ever (Redis claim
+   `yx:ee:route:{mint}`, 3 days, kept even when no candidate could be
+   created). So a loss never leads to another strategy re-entering the
+   token, and the gate's own one-open-candidate rule is a second guard.
+7. Blocking reasons are counted per strategy and day (`yx:ee:why:`, numbers
+   normalized, 3 days), routing outcomes per day (`yx:ee:routes:`).
+
+### 5.3 Paper entry delay (C4)
+
+The server data showed no paper trade charged the measured LIVE drift. A
+paper buy on the pump curve is now scheduled at the decision and filled when
+the measured LIVE delay (median decision-to-confirm of the newest confirmed
+LIVE buys, or the stated default) has passed, at the stream price of that
+moment: quantities and prices are scaled by the price move between the
+decision and the landing time. Without stream trades in that interval the
+decision fill is kept and marked unmeasured. Migrated (PumpSwap) paper trades
+keep the measured drift charge. Setting: Paper > execution, "Paper buys on
+the pump curve land after the measured LIVE delay" (on by default).
+
+### 5.4 Promotion and demotion
+
+- Promotion: manual only, by the operator, audited. The readiness states of
+  `entry_eval` (frozen test period, champion comparison, forward period,
+  paper results) are shown; nothing is promoted automatically.
+- Demotion: automatic, PAPER to SHADOW only, every 10 minutes: at least 30
+  labelled executable returns among the strategy's newest 60 signals AND the
+  upper bound of the 95% confidence interval of their mean below 0. One or
+  two losses cannot trigger it; a noisy record with a slightly negative mean
+  does not either. Each demotion writes `entry_intel.strategy_demoted` to the
+  audit log with its evidence.
+
+### 5.5 Dashboard
+
+Entry Intelligence > "Strategy portfolio and performance, last 14 days":
+code, title, category, version, mode, readiness, signals, labelled, win
+rate, expectancy, profit factor, bad-entry rate, the demotion check, the top
+blocking reasons and the baselines (`CURRENT_GATE_ENTRY`, `NAIVE_SAMPLE`,
+`MIGRATED_NO_TRADE`). API: `GET /api/entry-intel/strategies`.
 
 ## 6. Test methodology and results
 
@@ -151,12 +228,41 @@ record signals.
   exit mix.
 - RPC backoff overflow: `tests/test_rpc_rate_limits.py::test_a_long_429_streak_still_cools_down_instead_of_overflowing`
   reproduces the server error before the fix (PR #70).
+- C3: `tests/test_safety_gate.py::test_a_trade_too_small_to_pay_its_fixed_costs_is_refused_never_enlarged`
+  (refused at 3% fixed costs, accepted at a 10% limit with the size not
+  increased, PAPER not refused), `test_max_fixed_cost_pct_is_bounded`, and
+  `test_fixed_costs_shrink_a_risk_bound_live_size_on_a_small_wallet` (the
+  small-wallet LIVE trade is now refused by default).
+- C4: `tests/test_paper_entry_delay.py` (scaling, unmeasured fallback, settle
+  once), `paper-trading/tests/test_gate_manage.py::test_paper_buy_is_held_until_it_lands_then_filled_at_the_landing_price`,
+  `decision-engine/tests/test_entry_gate.py` (scheduled after the measured
+  latency; switching it off keeps the immediate fill).
+- C5: `tests/test_strategy_registry.py` (distinct signals per strategy,
+  category routing, highest score wins, NO_TRADE when none qualifies, smart
+  wallets never select, registry coverage, demotion never on one or two
+  losses, only reliably losing PAPER strategies demoted, only the newest
+  window counts); `engine-solana-discovery/tests/test_entry_shadow.py` (two
+  PAPER strategies on one token open one candidate, the token is never
+  routed again after its trade closed, SHADOW never trades, reason counters,
+  demotion with audit); `apps/api/tests/test_entry_intel_api.py` (the
+  strategies view).
+- The ML entry-timing training reads at most the newest 50 000 labelled
+  signals (it read the whole table before), since six strategies now record.
 
 ## 7. Net performance after realistic costs
 
 PENDING (no claim).
 
 ## 8. Remaining risks and limitations
+
+- The new strategies have no measured record yet. Their thresholds are
+  first choices, set before any of their signals was labelled; they must not
+  be tuned on the frozen test period.
+- The operator lowered `min_position_size_quote` in the database risk
+  settings. C3 now refuses LIVE trades that are too small for their fixed
+  costs whatever that minimum is.
+- `solana_momentum` (the existing momentum engine) is unchanged; C2 (set it
+  to PAPER or OFF) is the operator's decision.
 
 - Merge times are not deploy times. Windows in the report are approximate
   until the deploy times are known.
@@ -170,8 +276,16 @@ PENDING (no claim).
 cd /opt/yonixalpha && docker compose --env-file .env -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.prod.yml exec -T api python -m yonixalpha_core.tools.regression_report --days 21
 ```
 
-Rollback of this phase: nothing to roll back. The tool is read-only, and
-the global mode can be switched back by the operator.
+Rollback:
+
+- C3: Risk settings > `max_fixed_cost_pct` up to 0.10 (the ceiling), or
+  revert the commit. It only refuses LIVE trades.
+- C4: Paper > execution > switch "Paper buys ... land after the measured
+  LIVE delay" off; paper fills are then immediate again.
+- C5: every new strategy is SHADOW by default; to stop recording one, set it
+  to PAUSED on the Entry Intelligence page. Reverting the commit removes the
+  strategies; their recorded signals stay in `entry_signals`.
+- Nothing deletes data. The global mode stays as the operator set it.
 
 ## 10. Recommendation on LIVE auto-entry
 
@@ -179,8 +293,10 @@ the global mode can be switched back by the operator.
 profitable in any of the 21 days measured (R1). It may be reconsidered only
 after:
 
-- C3 is in place;
+- C3 is in place (done); note that with the measured fixed costs of about
+  0.00022 SOL per round trip, a LIVE trade needs about 0.011 SOL or more to
+  pass the 2% rule;
 - a strategy shows a positive net expectancy after realistic costs on an
   out-of-sample period, with at least 30 trades;
-- paper / LIVE parity (C4) is understood;
+- paper / LIVE parity (C4) is measured on the new paper fills;
 - the operator approves explicitly.

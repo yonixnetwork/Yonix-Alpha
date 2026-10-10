@@ -228,6 +228,7 @@ def plan_trade(
     targets: TargetContext | None = None,
     fixed_cost_quote: Decimal | None = None,
     fixed_cost_detail: dict | None = None,
+    refuse_uneconomic: bool = False,
 ) -> TradePlan:
     """Builds the full risk plan or explains exactly why it can't. Every
     missing input that the plan depends on is a NO_TRADE finding: per the
@@ -454,6 +455,17 @@ def plan_trade(
             break
         final_size = allowed
         method += "; reduced so loss at stop (after costs" + (" and fixed costs" if fixed else "") + ") stays within max_loss"
+
+    # LIVE only (refuse_uneconomic): a PAPER trade charged the LIVE fixed costs already pays them in
+    # its result, and refusing it would only remove evidence.
+    if refuse_uneconomic and fixed and final_size > 0 and fixed / final_size > settings.max_fixed_cost_pct:
+        plan.caps = dict(caps)
+        f.append(_block(
+            "FIXED_COSTS_TOO_HIGH",
+            f"fixed costs {fixed:.6f} are {fixed / final_size:.1%} of the safe size {final_size:.6f} "
+            f"(max {settings.max_fixed_cost_pct:.1%}): the trade is too small to pay its own network fees "
+            f"(bound by {plan.binding_cap}); it is refused, never enlarged", RiskCategory.EXECUTION))
+        return plan
 
     if final_size <= 0 or final_size < settings.min_position_size_quote or final_costs is None:
         f.append(

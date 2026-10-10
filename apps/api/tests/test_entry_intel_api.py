@@ -15,6 +15,7 @@ pytestmark = pytest.mark.asyncio
 MINT = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
 ENDPOINTS = ["/api/entry-intel/overview", "/api/entry-intel/signals", "/api/entry-intel/evaluation",
              "/api/entry-intel/latency", "/api/entry-intel/late-entries", "/api/entry-intel/parity",
+             "/api/entry-intel/strategies",
              f"/api/entry-intel/tokens/{MINT}"]
 
 
@@ -63,3 +64,28 @@ async def test_signals_and_token_detail_show_a_recorded_signal(client, auth_head
     tok = (await client.get(f"/api/entry-intel/tokens/{MINT}", headers=auth_headers)).json()
     assert len(tok["signals"]) == 1 and tok["state"] is None
     assert (await client.get("/api/entry-intel/tokens/short", headers=auth_headers)).status_code == 422
+
+
+async def test_strategy_registry_view_lists_every_strategy_with_its_measured_performance(client, auth_headers, app):
+    from yonixalpha_core import strategy_registry as reg
+
+    now = datetime.now(timezone.utc)
+    async with app.state.db_session_factory() as s:
+        for i, ret in enumerate((-4.0, 6.0, -2.0)):
+            s.add(EntrySignal(mint=f"{MINT[:-3]}{i:03d}", strategy=ei.BREAKOUT_RETEST, lifecycle="FRESH", decision=ei.CANDIDATE,
+                              decided_at=now - timedelta(minutes=10 - i), outcome={"executable_return_pct": ret},
+                              outcome_at=now))
+        await s.commit()
+    redis = app.state.redis
+    await redis.hincrby(f"{reg.WHY_KEY}{ei.BREAKOUT_RETEST}:{now.strftime('%Y%m%d')}", "Ns old: no retest yet", 7)
+    body = (await client.get("/api/entry-intel/strategies", headers=auth_headers)).json()
+    rows = {r["recorded_as"]: r for r in body["strategies"]}
+    assert {r["code"] for r in body["strategies"]} >= {"F1", "F2", "F3", "M1", "M2", "M3", "P1", "P2", "P3", "SW"}
+    rt = rows[ei.BREAKOUT_RETEST]
+    assert rt["mode"] == "SHADOW" and rt["signals"] == 3 and rt["with_return"] == 3
+    assert rt["win_rate"] == round(1 / 3, 4) and rt["expectancy_pct"] == 0.0
+    assert rt["readiness"]["state"] == "INSUFFICIENT_DATA" and rt["deterioration"]["deteriorated"] is False
+    assert rt["top_reasons"] == [["Ns old: no retest yet", 7]]
+    assert rows[ei.SMART_WALLET_CONFIRMATION]["trades_alone"] is False
+    assert "never routed again" in body["rules"]["routing"] and "manual" in body["rules"]["promotion"]
+    assert ei.CURRENT_GATE_ENTRY in body["baselines"]

@@ -44,13 +44,25 @@ from typing import Any
 from yonixalpha_core.solana.flow import Trade, synchronized_buy_cluster
 from yonixalpha_core.solana.launch_features import INITIAL_REAL_TOKENS, REAL_TOKEN_OFFSET, STANDARD_VSOL0
 
-FEATURE_VERSION = "early-2026.10.1"
+FEATURE_VERSION = "early-2026.10.2"  # .2: price-structure features (prior high, low since peak)
 LAMPORTS = 1_000_000_000
 
 EARLY_ACCELERATION = "EARLY_ACCELERATION"
 SMART_WALLET_CONFIRMATION = "SMART_WALLET_CONFIRMATION"
 MOMENTUM_CONTINUATION = "MOMENTUM_CONTINUATION"
-STRATEGIES = (EARLY_ACCELERATION, SMART_WALLET_CONFIRMATION, MOMENTUM_CONTINUATION)
+# Strategy portfolio (regression recovery 2026-10-10; strategy_registry holds
+# the identity, version and thesis of each). Each uses a different signal:
+EARLY_DEMAND_CONFIRMATION = "EARLY_DEMAND_CONFIRMATION"  # F2: buyer breadth broadening, price-free
+SELECTIVE_EARLY_BREAKOUT = "SELECTIVE_EARLY_BREAKOUT"  # F3: new high out of a range, fresh buying
+BREAKOUT_RETEST = "BREAKOUT_RETEST"  # P2: older token, pullback to support holding, buyers return
+MOMENTUM_RECOVERY = "MOMENTUM_RECOVERY"  # P3: after a real drop, selling fades and demand returns
+STRATEGIES = (EARLY_ACCELERATION, SMART_WALLET_CONFIRMATION, MOMENTUM_CONTINUATION, EARLY_DEMAND_CONFIRMATION,
+              SELECTIVE_EARLY_BREAKOUT, BREAKOUT_RETEST, MOMENTUM_RECOVERY)
+FRESH, MOMENTUM, MIGRATION = "FRESH", "MOMENTUM", "MIGRATION"
+CATEGORY_STRATEGIES = {
+    FRESH: (EARLY_ACCELERATION, EARLY_DEMAND_CONFIRMATION, SELECTIVE_EARLY_BREAKOUT),
+    MOMENTUM: (MOMENTUM_CONTINUATION, BREAKOUT_RETEST, MOMENTUM_RECOVERY),
+}
 
 # Baselines recorded through the same labeller, so every strategy is compared
 # with the existing pipeline on identical terms (same stream, same costs).
@@ -113,6 +125,31 @@ class EntryConfig:
     # SMART_WALLET_CONFIRMATION
     sw_min_proven_wallets: int = 1
     sw_entry_within_seconds: int = 90
+    # Token category: FRESH up to this age, MOMENTUM after (migrated tokens: MIGRATION)
+    fresh_max_age_seconds: int = 600
+    # EARLY_DEMAND_CONFIRMATION (F2)
+    dc_min_age_seconds: int = 20
+    dc_max_age_seconds: int = 300
+    dc_min_unique_buyers: int = 12
+    dc_min_meaningful_buyers: int = 5
+    dc_min_net_buy_pressure: float = 0.2  # (buy - sell) / (buy + sell) SOL over 30 s
+    dc_max_top_buyer_share: float = 0.4  # largest single buyer's share of 30 s buy volume
+    # SELECTIVE_EARLY_BREAKOUT (F3)
+    bo_min_age_seconds: int = 30
+    bo_min_prior_pullback_pct: float = 5.0  # a range must exist before a breakout
+    bo_min_break_pct: float = 1.0  # above the high of the trades before the last 10 s
+    bo_min_w10_net_sol: float = 0.3
+    bo_max_displacement_pct: float = 200.0
+    # BREAKOUT_RETEST (P2)
+    rt_min_pullback_pct: float = 5.0
+    rt_max_pullback_pct: float = 20.0
+    rt_min_seconds_since_peak: int = 30
+    rt_min_bounce_pct: float = 3.0
+    # MOMENTUM_RECOVERY (P3)
+    rc_min_drawdown_pct: float = 25.0
+    rc_max_drawdown_pct: float = 70.0
+    rc_min_bounce_pct: float = 5.0
+    rc_min_new_buyers_10s: int = 3
     # Shared
     max_round_trip_cost_pct: float = 8.0  # fees + impact + fixed costs at the reference size
     reference_size_sol: float = 0.05
@@ -171,6 +208,16 @@ def validate_config(raw: dict) -> list[str]:
         errors.append("naive_sample_every must be 2-10000")
     if not 3 <= cfg.event_min_interval_seconds <= 300:
         errors.append("event_min_interval_seconds must be 3-300")
+    if not 60 <= cfg.fresh_max_age_seconds <= 3600:
+        errors.append("fresh_max_age_seconds must be 60-3600")
+    if not 0 <= cfg.dc_min_age_seconds < cfg.dc_max_age_seconds <= 3600:
+        errors.append("dc_min_age_seconds must be below dc_max_age_seconds (<= 3600)")
+    if not 0 < cfg.rt_min_pullback_pct < cfg.rt_max_pullback_pct <= 90:
+        errors.append("rt_min_pullback_pct must be above 0 and below rt_max_pullback_pct (<= 90)")
+    if not 0 < cfg.rc_min_drawdown_pct < cfg.rc_max_drawdown_pct <= 95:
+        errors.append("rc_min_drawdown_pct must be above 0 and below rc_max_drawdown_pct (<= 95)")
+    if not 0 < cfg.dc_max_top_buyer_share <= 1 or not -1 <= cfg.dc_min_net_buy_pressure <= 1:
+        errors.append("dc_max_top_buyer_share must be 0-1 and dc_min_net_buy_pressure -1 to 1")
     return errors
 
 
@@ -352,6 +399,14 @@ def early_features(trades: list[Trade], t: datetime, *, created_ts: int | None, 
         run_high = max(run_high, p)
         worst = max(worst, 1 - p / run_high)
     f["max_pullback_so_far_pct"] = round(worst * 100, 3)
+    # Price structure (breakout / retest / recovery strategies).
+    before = [p for p in (_p(x) for x in held if x.at <= t - timedelta(seconds=SHORT_WINDOW)) if p]
+    f["high_before_10s_raw"] = max(before) if before else None
+    f["price_vs_prior_high_pct"] = round((last_p / max(before) - 1) * 100, 3) if before else None
+    since_peak = prices[peak_i:]
+    low = min(since_peak)
+    f["low_since_peak_raw"] = low
+    f["bounce_from_low_pct"] = round((last_p / low - 1) * 100, 3) if low else None
 
     # Curve progress and its rate (standard pump.fun curve).
     last = held[-1]
@@ -581,7 +636,7 @@ def smart_wallet_confirmation(f: dict[str, Any], others: list[StrategyDecision],
     s = StrategyDecision(SMART_WALLET_CONFIRMATION, WAIT, None, None, None)
     base = [o for o in others if o.decision == CANDIDATE]
     if not base:
-        s.reasons.append("no EARLY_ACCELERATION or MOMENTUM_CONTINUATION candidate to confirm (never a trigger alone)")
+        s.reasons.append("no routed strategy candidate to confirm (never a trigger alone)")
         return s
     if not wallets or wallets.get("status") != "MEASURED":
         s.reasons.append("wallet history insufficient: " + ((wallets or {}).get("reason") or "not evaluated"))
@@ -610,14 +665,211 @@ def smart_wallet_confirmation(f: dict[str, Any], others: list[StrategyDecision],
     return s
 
 
+def _decide(s: StrategyDecision, no: list[str], wait: list[str], f: dict[str, Any]) -> StrategyDecision:
+    level, factor = _evidence(f)
+    s.evidence_level, s.size_factor = level, factor
+    if no:
+        s.decision, s.reasons = NO_TRADE, no + wait
+    elif wait:
+        s.decision, s.reasons = WAIT, wait
+    else:
+        s.decision, s.reasons = CANDIDATE, [f"evidence {level}: planned size x{factor}"]
+    return s
+
+
+def early_demand_confirmation(f: dict[str, Any], phase: str, cfg: EntryConfig) -> StrategyDecision:
+    """F2: is the first demand BROADENING (more independent buyers, less
+    concentration, buyers outweighing sellers) or fading? Deliberately does
+    not look at the price or at inflow acceleration (F1's signal)."""
+    s = StrategyDecision(EARLY_DEMAND_CONFIRMATION, WAIT, None, None, None)
+    if "w10" not in f:
+        s.reasons.append("no trades yet")
+        return s
+    no, wait = _quality_blocks(f, cfg)
+    age, cur, prev, w30 = f.get("age_seconds"), f["w10"], f["w10_prev"], f["w30"]
+    if age is None:
+        wait.append("token age unknown")
+    elif age < cfg.dc_min_age_seconds:
+        wait.append(f"{age:.0f}s old: too early to tell broadening from a first burst (min {cfg.dc_min_age_seconds}s)")
+    elif age > cfg.dc_max_age_seconds:
+        no.append(f"{age:.0f}s old: past the confirmation window ({cfg.dc_max_age_seconds}s)")
+    if phase in (DISTRIBUTION, EXHAUSTED):
+        no.append(f"phase {phase}")
+    if w30["net_sol"] < 0:
+        no.append(f"demand fading: net flow 30 s {w30['net_sol']:+.3f} SOL")
+    if f.get("unique_buyers", 0) < cfg.dc_min_unique_buyers:
+        wait.append(f"{f.get('unique_buyers', 0)} unique buyers (need {cfg.dc_min_unique_buyers})")
+    if f.get("meaningful_independent_buyers", 0) < cfg.dc_min_meaningful_buyers:
+        wait.append(f"{f.get('meaningful_independent_buyers', 0)} meaningful independent buyers (need {cfg.dc_min_meaningful_buyers})")
+    if cur["new_buyers"] < 2 or cur["new_buyers"] + prev["new_buyers"] < 4:
+        wait.append(f"buyer base not broadening: {prev['new_buyers']} then {cur['new_buyers']} new buyers per 10 s")
+    else:
+        s.positives.append(f"{prev['new_buyers']} then {cur['new_buyers']} new buyers per 10 s")
+    if w30["new_sellers"] > w30["new_buyers"]:
+        wait.append(f"seller growth {w30['new_sellers']} > buyer growth {w30['new_buyers']} in 30 s")
+    pressure = f.get("net_buy_pressure_30s")
+    if pressure is None or pressure < cfg.dc_min_net_buy_pressure:
+        wait.append(f"net buy pressure 30 s {pressure if pressure is not None else '-'} (need {cfg.dc_min_net_buy_pressure})")
+    top = w30.get("top_buyer_share")
+    if top is not None and top > cfg.dc_max_top_buyer_share:
+        wait.append(f"one wallet is {top:.0%} of 30 s buy volume (max {cfg.dc_max_top_buyer_share:.0%}): concentrated")
+    s.score = _score([(f.get("unique_buyers", 0) / max(cfg.dc_min_unique_buyers * 2, 1), 2),
+                      ((pressure or 0) / max(cfg.dc_min_net_buy_pressure * 3, 1e-9), 2),
+                      (1 - (top or 1), 1), (cur["new_buyers"] / 6, 1)])
+    return _decide(s, no, wait, f)
+
+
+def selective_early_breakout(f: dict[str, Any], phase: str, cfg: EntryConfig) -> StrategyDecision:
+    """F3: price leaves a range it has already tested (a pullback happened),
+    with fresh buying in the breakout window and room left after costs."""
+    s = StrategyDecision(SELECTIVE_EARLY_BREAKOUT, WAIT, None, None, None)
+    if "w10" not in f:
+        s.reasons.append("no trades yet")
+        return s
+    no, wait = _quality_blocks(f, cfg)
+    age, cur = f.get("age_seconds"), f["w10"]
+    if age is None or age < cfg.bo_min_age_seconds:
+        wait.append(f"younger than {cfg.bo_min_age_seconds}s: no range yet")
+    elif age > cfg.fresh_max_age_seconds:
+        no.append(f"{age:.0f}s old: not a fresh token")
+    if phase in (DISTRIBUTION, EXHAUSTED):
+        no.append(f"phase {phase}")
+    if (f.get("displacement_pct") or 0) > cfg.bo_max_displacement_pct:
+        no.append(f"{f['displacement_pct']:.0f}% above the first price: too little left (limit {cfg.bo_max_displacement_pct:.0f}%)")
+    if (f.get("max_pullback_so_far_pct") or 0) < cfg.bo_min_prior_pullback_pct:
+        wait.append(f"no range yet: largest pullback {f.get('max_pullback_so_far_pct') or 0:.1f}% "
+                    f"(need {cfg.bo_min_prior_pullback_pct}%)")
+    brk = f.get("price_vs_prior_high_pct")
+    if brk is None:
+        wait.append("no price history before the last 10 s")
+    elif brk < cfg.bo_min_break_pct:
+        wait.append(f"price {brk:+.1f}% vs the prior high: no breakout (need +{cfg.bo_min_break_pct}%)")
+    else:
+        s.positives.append(f"{brk:+.1f}% above the prior high")
+    if (f.get("drawdown_from_peak_pct") or 0) > 3:
+        wait.append(f"{f['drawdown_from_peak_pct']:.1f}% below the high just made: the breakout is reversing")
+    if cur["net_sol"] < cfg.bo_min_w10_net_sol or cur["buys"] < 3 or cur["new_buyers"] < 2:
+        wait.append(f"breakout not backed by fresh buying: {cur['net_sol']:+.3f} SOL, {cur['buys']} buys, "
+                    f"{cur['new_buyers']} new buyers in 10 s")
+    else:
+        s.positives.append(f"{cur['net_sol']:+.3f} SOL net and {cur['new_buyers']} new buyers in the breakout")
+    s.score = _score([((brk or 0) / 10, 1), (cur["net_sol"] / max(cfg.bo_min_w10_net_sol * 3, 1e-9), 2),
+                      (cur["new_buyers"] / 5, 1),
+                      (1 - (f.get("displacement_pct") or 0) / max(cfg.bo_max_displacement_pct, 1), 1)])
+    return _decide(s, no, wait, f)
+
+
+def breakout_retest(f: dict[str, Any], phase: str, cfg: EntryConfig) -> StrategyDecision:
+    """P2: an older token pulled back from its high into a shallow retest,
+    the retest holds (a bounce off the low) and buyers come back. Not a
+    chase: entries far above the retest are refused."""
+    s = StrategyDecision(BREAKOUT_RETEST, WAIT, None, None, None)
+    if "w10" not in f:
+        s.reasons.append("no trades yet")
+        return s
+    no, wait = _quality_blocks(f, cfg)
+    cur, prev, w30 = f["w10"], f["w10_prev"], f["w30"]
+    dd = f.get("drawdown_from_peak_pct") or 0.0
+    if phase == DISTRIBUTION:
+        no.append("phase DISTRIBUTION")
+    if dd < cfg.rt_min_pullback_pct:
+        wait.append(f"{dd:.1f}% below the high: no retest yet (need {cfg.rt_min_pullback_pct}%)")
+    elif dd > cfg.rt_max_pullback_pct:
+        no.append(f"{dd:.0f}% below the high: support lost, not a retest (max {cfg.rt_max_pullback_pct}%)")
+    if (f.get("seconds_since_peak") or 0) < cfg.rt_min_seconds_since_peak:
+        wait.append(f"high made {f.get('seconds_since_peak') or 0:.0f}s ago: retest not formed yet")
+    bounce = f.get("bounce_from_low_pct") or 0.0
+    if bounce < cfg.rt_min_bounce_pct:
+        wait.append(f"{bounce:.1f}% off the retest low: not holding yet (need {cfg.rt_min_bounce_pct}%)")
+    elif bounce > dd + cfg.rt_min_bounce_pct:
+        wait.append("already back above the high: a chase, not a retest")
+    if w30["net_sol"] < 0 and cur["new_sellers"] > cur["new_buyers"]:
+        no.append(f"sellers in control: net 30 s {w30['net_sol']:+.3f} SOL, sellers outgrowing buyers")
+    if cur["new_buyers"] < 2 or cur["net_sol"] <= 0 or cur["net_sol"] < prev["net_sol"]:
+        wait.append(f"buyers not returning: {cur['new_buyers']} new, {prev['net_sol']:+.3f} -> {cur['net_sol']:+.3f} SOL per 10 s")
+    else:
+        s.positives.append(f"{cur['new_buyers']} new buyers, inflow {prev['net_sol']:+.3f} -> {cur['net_sol']:+.3f} SOL")
+    s.score = _score([(bounce / 10, 1), (cur["net_sol"] / 1.0, 2), (cur["new_buyers"] / 5, 1),
+                      (1 - dd / max(cfg.rt_max_pullback_pct, 1), 1)])
+    return _decide(s, no, wait, f)
+
+
+def momentum_recovery(f: dict[str, Any], phase: str, cfg: EntryConfig) -> StrategyDecision:
+    """P3: after a real drop, selling is objectively declining and demand
+    returns. Never a dip buy: a falling price with sellers in control is
+    NO_TRADE."""
+    s = StrategyDecision(MOMENTUM_RECOVERY, WAIT, None, None, None)
+    if "w10" not in f:
+        s.reasons.append("no trades yet")
+        return s
+    no, wait = _quality_blocks(f, cfg)
+    cur, prev = f["w10"], f["w10_prev"]
+    dd = f.get("drawdown_from_peak_pct") or 0.0
+    if dd < cfg.rc_min_drawdown_pct:
+        wait.append(f"{dd:.0f}% below the high: no drop to recover from (need {cfg.rc_min_drawdown_pct}%)")
+    elif dd > cfg.rc_max_drawdown_pct:
+        no.append(f"{dd:.0f}% below the high: collapsed, not a recovery (max {cfg.rc_max_drawdown_pct}%)")
+    if (cur.get("price_ret_pct") or 0) < 0 and cur["sell_sol"] > cur["buy_sol"]:
+        no.append("still falling with sellers in control: not catching a falling token")
+    if not (cur["sell_sol"] < prev["sell_sol"] and cur["sell_sol"] < cur["buy_sol"]):
+        wait.append(f"selling not declining: {prev['sell_sol']:.3f} -> {cur['sell_sol']:.3f} SOL sold per 10 s "
+                    f"(bought {cur['buy_sol']:.3f})")
+    else:
+        s.positives.append(f"selling down {prev['sell_sol']:.3f} -> {cur['sell_sol']:.3f} SOL per 10 s")
+    if cur["new_buyers"] < cfg.rc_min_new_buyers_10s or cur["net_sol"] <= 0:
+        wait.append(f"demand not back: {cur['new_buyers']} new buyers, net {cur['net_sol']:+.3f} SOL in 10 s")
+    bounce = f.get("bounce_from_low_pct") or 0.0
+    if bounce < cfg.rc_min_bounce_pct:
+        wait.append(f"{bounce:.1f}% off the low: no confirmed turn (need {cfg.rc_min_bounce_pct}%)")
+    s.score = _score([(bounce / 20, 1), (cur["new_buyers"] / 6, 2), (cur["net_sol"] / 1.0, 1),
+                      (1 - dd / max(cfg.rc_max_drawdown_pct, 1), 1)])
+    return _decide(s, no, wait, f)
+
+
+def category(f: dict[str, Any], cfg: EntryConfig, migrated: bool = False) -> str | None:
+    """FRESH / MOMENTUM / MIGRATION for routing; None while the age is unknown."""
+    if migrated:
+        return MIGRATION
+    age = f.get("age_seconds")
+    if age is None:
+        return None
+    return FRESH if age <= cfg.fresh_max_age_seconds else MOMENTUM
+
+
+def route(decisions: dict[str, StrategyDecision], cat: str | None) -> dict[str, Any]:
+    """One decision per token: among the strategies of its category, the
+    CANDIDATE with the highest score, with every alternative's reason.
+    Nothing in the category qualifies: NO_TRADE. Smart-wallet evidence can
+    only confirm, never select."""
+    eligible = CATEGORY_STRATEGIES.get(cat or "", ())
+    cands = sorted((decisions[n] for n in eligible if n in decisions and decisions[n].decision == CANDIDATE),
+                   key=lambda d: (d.score or 0), reverse=True)
+    rejected = {n: (decisions[n].decision, (decisions[n].reasons or ["-"])[0]) for n in eligible
+                if n in decisions and (not cands or n != cands[0].strategy)}
+    if not cands:
+        return {"category": cat, "decision": NO_TRADE if cat else WAIT, "selected": None,
+                "reason": "no strategy of this category qualifies" if cat else "token age unknown: category undetermined",
+                "rejected": rejected}
+    best = cands[0]
+    return {"category": cat, "decision": CANDIDATE, "selected": best.strategy, "score": best.score,
+            "reason": f"highest-scoring qualifying {cat} strategy", "rejected": rejected}
+
+
 def evaluate(f: dict[str, Any], cfg: EntryConfig, wallets: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Phase and the three strategy decisions at one moment."""
+    """Phase, every strategy's decision at one moment, the token's category
+    and the routed decision (one per token)."""
     phase, phase_ev = momentum_phase(f)
-    ea = early_acceleration(f, phase, cfg)
-    mc = momentum_continuation(f, phase, cfg)
-    sw = smart_wallet_confirmation(f, [ea, mc], wallets, cfg)
-    return {"phase": phase, "phase_evidence": phase_ev,
-            "strategies": {d.strategy: d.to_dict() for d in (ea, sw, mc)}}
+    ds = [early_acceleration(f, phase, cfg), momentum_continuation(f, phase, cfg),
+          early_demand_confirmation(f, phase, cfg), selective_early_breakout(f, phase, cfg),
+          breakout_retest(f, phase, cfg), momentum_recovery(f, phase, cfg)]
+    by = {d.strategy: d for d in ds}
+    cat = category(f, cfg)
+    routed = route(by, cat)
+    base = [by[routed["selected"]]] if routed["selected"] else []
+    sw = smart_wallet_confirmation(f, base, wallets, cfg)
+    by[sw.strategy] = sw
+    return {"phase": phase, "phase_evidence": phase_ev, "category": cat, "route": routed,
+            "strategies": {n: d.to_dict() for n, d in by.items()}}
 
 
 def naive_sampled(mint: str, every: int) -> bool:
@@ -635,6 +887,7 @@ def compact_features(f: dict[str, Any]) -> dict[str, Any]:
             "meaningful_buyers", "meaningful_independent_buyers", "tiny_trade_share", "creator_bought", "creator_sold",
             "large_buy_then_dump", "price_raw", "first_price_raw", "first_price_is_launch", "displacement_pct",
             "peak_price_raw", "drawdown_from_peak_pct", "seconds_since_peak", "max_pullback_so_far_pct", "curve_progress", "sol_accumulated",
+            "high_before_10s_raw", "price_vs_prior_high_pct", "low_since_peak_raw", "bounce_from_low_pct",
             "curve_progress_per_min", "fee_bps", "fee_assumed", "round_trip_cost_pct", "last_trade_age_seconds",
             "stream_age_seconds", "unknown")
     out = {k: f.get(k) for k in keep if k in f}

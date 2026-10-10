@@ -154,3 +154,28 @@ async def test_copy_partial_sell_waits_while_the_position_is_paused(session_fact
         p = await s.get(PaperPosition, pid)
     assert (p.remaining_quantity if p.remaining_quantity is not None else p.quantity) == start
     assert ct.pending_partial_exit(p.plan) == Decimal("0.5")
+
+
+async def test_paper_buy_is_held_until_it_lands_then_filled_at_the_landing_price(session_factory, redis_client):
+    """Regression audit 2026-10-10: a pump-curve paper buy lands like a LIVE
+    one. Before the measured latency has passed it is not managed; then it
+    is re-filled at the stream price at landing (here higher: fewer tokens)."""
+    from yonixalpha_core import paper_execution
+
+    curve, pid, _ = await open_gate_position(session_factory, redis_client)
+    async with session_factory() as s:
+        p = await s.get(PaperPosition, pid)
+        p.plan = paper_execution.schedule_entry_delay(p.plan, NOW.timestamp(), 3.0, "test")
+        qty, cost = p.quantity, p.entry_cost_quote
+        await s.commit()
+    buys = [curve.trade(wallet(80 + i), NOW + timedelta(seconds=2), 1_000_000_000, True) for i in range(3)]
+    await pump_stream.ingest_logs(redis_client, logs_of(*buys), "sig-pump", NOW + timedelta(seconds=2))
+    held = await manage_gate_positions(session_factory, redis_client, None, NOW + timedelta(seconds=1))
+    assert held.get("entry_pending") == 1 and held["managed"] == 0
+    done = await manage_gate_positions(session_factory, redis_client, None, NOW + timedelta(seconds=5))
+    assert done.get("entry_settled") == 1
+    async with session_factory() as s:
+        p = await s.get(PaperPosition, pid)
+    d = p.plan["entry_delay"]
+    assert d["settled"] and d["measured"] and Decimal(d["factor"]) > 1
+    assert p.quantity < qty and p.entry_cost_quote == cost  # same SOL, fewer tokens

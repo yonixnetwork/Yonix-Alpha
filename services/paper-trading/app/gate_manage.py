@@ -279,6 +279,15 @@ async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterC
                         and await redis.exists(f"yx:pm:unpriced:{pid}")):
                     counts["skipped_not_due"] = counts.get("skipped_not_due", 0) + 1
                     continue
+                if p.execution_mode != "LIVE":
+                    # A paper buy that has not "landed" yet (paper_execution entry delay) is not managed;
+                    # once due it is filled at the stream price at landing, then managed as usual.
+                    if paper_execution.entry_delay_pending(p, now):
+                        counts["entry_pending"] = counts.get("entry_pending", 0) + 1
+                        continue
+                    if await paper_execution.settle_entry_delay(session, redis, p, now) is not None:
+                        await session.commit()
+                        counts["entry_settled"] = counts.get("entry_settled", 0) + 1
                 ctx: dict = {}
                 price, model, exit_cost, source = await price_position(redis, jupiter, p, now, venues, rpc, ctx)
                 if price is None:

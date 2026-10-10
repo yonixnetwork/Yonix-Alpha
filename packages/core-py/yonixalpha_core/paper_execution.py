@@ -30,6 +30,7 @@ result and tests are exact.
 
 import hashlib
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
@@ -60,18 +61,23 @@ class PaperExecutionSettings:
     charge_live_fixed_costs: bool = True
     # The price LIVE loses between decision and landing (module docstring).
     charge_measured_live_drift: bool = True
+    # Pump-curve paper buys fill at the stream price measured LIVE latency
+    # after the decision (schedule_entry_delay / settle_entry_delay).
+    simulate_entry_delay: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {"entry_failure_pct": str(self.entry_failure_pct), "exit_failure_pct": str(self.exit_failure_pct),
                 "use_measured_live_rates": self.use_measured_live_rates,
                 "charge_live_fixed_costs": self.charge_live_fixed_costs,
-                "charge_measured_live_drift": self.charge_measured_live_drift}
+                "charge_measured_live_drift": self.charge_measured_live_drift,
+                "simulate_entry_delay": self.simulate_entry_delay}
 
 
 def parse_settings(data: dict[str, Any]) -> tuple[PaperExecutionSettings, list[str]]:
     s, errors = PaperExecutionSettings(), []
     for key, value in (data or {}).items():
-        if key in ("use_measured_live_rates", "charge_live_fixed_costs", "charge_measured_live_drift"):
+        if key in ("use_measured_live_rates", "charge_live_fixed_costs", "charge_measured_live_drift",
+                   "simulate_entry_delay"):
             if isinstance(value, bool):
                 setattr(s, key, value)
             else:
@@ -221,3 +227,74 @@ def draw(key: str) -> Decimal:
 
 def simulated_failure(key: str, pct: Decimal) -> bool:
     return pct > 0 and draw(key) * 100 < pct
+
+
+# --- entry delay (regression audit 2026-10-10) ------------------------------------------
+
+ENTRY_DELAY_KEY = "entry_delay"
+
+
+def schedule_entry_delay(plan: dict | None, decision_ts: float, latency_s: float, source: str) -> dict:
+    """The plan of a paper buy that lands like a LIVE one: filled at the
+    stream price `latency_s` after the decision, not at the decision price.
+    Until then the position is not managed (a buy that has not landed
+    cannot be sold)."""
+    return {**(plan or {}), ENTRY_DELAY_KEY: {"decision_ts": round(decision_ts, 3), "latency_s": round(latency_s, 3),
+                                              "due_ts": round(decision_ts + latency_s, 3), "source": source,
+                                              "settled": False}}
+
+
+def entry_delay_pending(position, now: datetime) -> bool:
+    d = (position.plan or {}).get(ENTRY_DELAY_KEY) or {}
+    return bool(d) and not d.get("settled") and now.timestamp() < float(d["due_ts"])
+
+
+def _stream_price_at(trades: list, ts: float) -> tuple[Decimal | None, float | None]:
+    """Curve price (virtual SOL / virtual tokens, raw units) after the last
+    trade at or before `ts` (on-chain seconds), and that trade's time."""
+    last = None
+    for t in trades:
+        if t.at.timestamp() <= ts and t.virtual_token and (last is None or t.at >= last.at):
+            last = t
+    if last is None:
+        return None, None
+    return Decimal(last.virtual_sol) / Decimal(last.virtual_token), last.at.timestamp()
+
+
+async def settle_entry_delay(session: AsyncSession, redis, position, now: datetime) -> dict | None:
+    """Once the delay has passed, re-fill the paper buy at the stream price
+    at decision + latency: the same SOL buys `1 / factor` as many tokens,
+    factor = price at landing / price at the decision. Moves both ways (a
+    falling price fills cheaper, as it would LIVE). Without stream trades
+    at both times the decision fill is kept and marked unmeasured, never
+    estimated. Returns what was done, or None when nothing was due."""
+    from yonixalpha_core.safety.store import add_timeline_event
+    from yonixalpha_core.solana import pump_stream
+
+    d = dict((position.plan or {}).get(ENTRY_DELAY_KEY) or {})
+    if not d or d.get("settled") or now.timestamp() < float(d["due_ts"]):
+        return None
+    trades = await pump_stream.load_trades(redis, position.asset_id) if redis is not None and position.asset_id else []
+    p0, t0 = _stream_price_at(trades, float(d["decision_ts"]))
+    p1, t1 = _stream_price_at(trades, float(d["due_ts"]))
+    out: dict[str, Any] = {"latency_s": d["latency_s"], "latency_source": d.get("source")}
+    if p0 and p1:
+        factor = p1 / p0
+        out.update(factor=str(factor.quantize(Decimal("0.000001"))), measured=True,
+                   price_change_pct=str(((factor - 1) * 100).quantize(Decimal("0.0001"))))
+        for attr in ("quantity", "initial_quantity", "remaining_quantity"):
+            v = getattr(position, attr)
+            if v is not None:
+                setattr(position, attr, v / factor)
+        for attr in ("entry_price", "highest_price", "lowest_price", "last_price"):
+            v = getattr(position, attr)
+            if v is not None:
+                setattr(position, attr, v * factor)
+    else:
+        out.update(factor="1", measured=False,
+                   reason="no stream trade at the decision or at landing: decision fill kept (unmeasured)")
+    d.update(settled=True, settled_at=now.isoformat(), **{k: v for k, v in out.items() if k not in ("latency_s",)})
+    position.plan = {**(position.plan or {}), ENTRY_DELAY_KEY: d}
+    await add_timeline_event(session, "paper_entry_delay_fill", now, out, candidate_id=position.candidate_id,
+                             assessment_id=position.assessment_id, position_id=position.id)
+    return out

@@ -110,6 +110,48 @@ function SettingsEditor({ ov, onSaved }: { ov: J; onSaved: () => void }) {
   );
 }
 
+function Strategies({ st }: { st: J }) {
+  const rows: J[] = st.strategies ?? [];
+  const routes: Record<string, number> = st.routes ?? {};
+  return (
+    <div>
+      <p className="muted small">
+        One strategy per token, chosen among the strategies of its category (FRESH, MOMENTUM, MIGRATION). {st.rules?.routing}.
+        Promotion: {st.rules?.promotion}. Automatic demotion: {st.rules?.demotion}. Units: {st.rules?.units}.
+        Last evaluation: {st.last_evaluation_at ?? "—"}.
+      </p>
+      <div className="table-scroll">
+        <table className="data-table">
+          <thead><tr><th>Strategy</th><th>Category</th><th>Version</th><th>Mode</th><th>Readiness</th><th>Signals</th>
+            <th>Labelled</th><th>Win rate</th><th>Expectancy %</th><th>Profit factor</th><th>Bad entries</th>
+            <th>Demotion check</th><th>Top blocking reasons (2 days)</th></tr></thead>
+          <tbody>{rows.map((r) => (
+            <tr key={r.recorded_as}>
+              <td><strong>{r.code}</strong> {r.title}<div className="muted small">{r.signal}{r.trades_alone ? "" : " (never trades alone)"}</div></td>
+              <td>{r.category}</td><td className="small">{r.version_full}</td><td>{r.mode}</td>
+              <td><span className={READY_CLASS[r.readiness?.state] ?? "pill pill-off"} title={r.readiness?.reason}>{r.readiness?.state ?? "—"}</span></td>
+              <td>{v(r.signals)}</td><td>{v(r.with_return)}</td><td>{rate(r.win_rate)}</td><td>{v(r.expectancy_pct)}</td>
+              <td>{v(r.profit_factor)}</td><td>{rate(r.bad_entry_rate)}</td>
+              <td className={r.deterioration?.deteriorated ? "neg" : ""}>{r.deterioration?.reason}</td>
+              <td className="small">{(r.top_reasons ?? []).length === 0 ? "—" : (r.top_reasons as [string, number][]).map(([k, n]) => (
+                <div key={k}>{n} x {k}</div>))}</td>
+            </tr>))}</tbody>
+        </table>
+      </div>
+      <div className="table-scroll">
+        <table className="data-table">
+          <thead><tr><th>Baseline</th><th>Signals</th><th>With return</th><th>Win rate</th><th>Expectancy %</th><th>Profit factor</th></tr></thead>
+          <tbody>{Object.entries(st.baselines ?? {}).map(([k, b]: [string, any]) => (
+            <tr key={k}><td>{k}</td><td>{v(b.signals)}</td><td>{v(b.with_executable_return)}</td><td>{rate(b.win_rate)}</td>
+              <td>{v(b.mean_return_pct)}</td><td>{v(b.profit_factor)}</td></tr>))}</tbody>
+        </table>
+      </div>
+      <p className="muted small">Routing, last 2 days: {Object.keys(routes).length === 0 ? "nothing routed yet" :
+        Object.entries(routes).map(([k, n]) => `${k} ${n}`).join(", ")}</p>
+    </div>
+  );
+}
+
 function Evaluation({ ev }: { ev: J }) {
   const names = Object.keys(ev.strategies ?? {});
   return (
@@ -242,6 +284,7 @@ function Parity({ par }: { par: J }) {
 export default function EntryIntelPage() {
   const ov = useApi<J>("/api/entry-intel/overview", undefined, { refreshMs: 10000 });
   const ev = useApi<J>("/api/entry-intel/evaluation", { days: 30 }, { refreshMs: 120000 });
+  const st = useApi<J>("/api/entry-intel/strategies", { days: 14 }, { refreshMs: 120000 });
   const lat = useApi<J>("/api/entry-intel/latency", { hours: 6 }, { refreshMs: 60000 });
   const late = useApi<J>("/api/entry-intel/late-entries", { days: 2 }, { refreshMs: 120000 });
   const par = useApi<J>("/api/entry-intel/parity", { days: 7 }, { refreshMs: 120000 });
@@ -249,7 +292,7 @@ export default function EntryIntelPage() {
   return (
     <div>
       <PageHeader title="Entry Intelligence" icon={<Timer size={20} aria-hidden />}
-        subtitle="Early-acceleration, smart-wallet confirmation and momentum-continuation strategies measured in SHADOW against the existing pipeline: when tokens are seen, when a signal appears, when we enter and what that timing costs. No result here is a promise of future profit." />
+        subtitle="Fresh, momentum and migrated entry strategies measured in SHADOW against the existing pipeline: when tokens are seen, when a signal appears, when we enter and what that timing costs. No result here is a promise of future profit." />
       <ErrorNotice error={ov.error} />
       {ov.loading && !o && <Loading />}
       {o && (
@@ -274,6 +317,9 @@ export default function EntryIntelPage() {
           <Section title="Strategy modes and event re-evaluation"><SettingsEditor ov={o} onSaved={ov.reload} /></Section>
         </>
       )}
+      <Section title="Strategy portfolio and performance, last 14 days">
+        <ErrorNotice error={st.error} />{st.data ? <Strategies st={st.data} /> : st.loading && <Loading />}
+      </Section>
       <Section title="Strategy comparison and readiness (chronological, frozen test period)">
         <ErrorNotice error={ev.error} />{ev.data ? <Evaluation ev={ev.data} /> : ev.loading && <Loading />}
       </Section>

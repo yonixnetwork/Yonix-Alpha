@@ -1013,6 +1013,7 @@ def assess(inp: AssessmentInput, settings: SafetySettings, versions: dict[str, A
         targets=inp.targets,
         fixed_cost_quote=inp.fixed_cost_quote if (_live_target(inp) or inp.paper_fixed_costs) else None,
         fixed_cost_detail=inp.fixed_cost_detail,
+        refuse_uneconomic=_live_target(inp),
     )
     findings.extend(plan.findings)
     _check_execution(inp, settings, plan, findings)

@@ -550,6 +550,33 @@ def test_fixed_costs_above_the_risk_budget_refuse_the_live_trade():
     assert not a.executable and "FIXED_COSTS_EXCEED_RISK" in codes(a)
 
 
+def test_a_trade_too_small_to_pay_its_fixed_costs_is_refused_never_enlarged():
+    """Regression audit 2026-10-10: LIVE trades of 0.001-0.01 SOL paid 5-11%
+    of their size in fixed fees and lost in every size band. A trade whose
+    fixed costs exceed max_fixed_cost_pct of the safe size is refused."""
+    base = decide(_live()).plan
+    fixed = base.position_size.value * Decimal("0.03")  # 3% of the size, under the risk budget
+    assert fixed < base.max_loss.value
+    a = decide(_live(fixed_cost_quote=fixed))
+    assert not a.executable and "FIXED_COSTS_TOO_HIGH" in codes(a)
+    f = next(x for x in a.findings if x.code == "FIXED_COSTS_TOO_HIGH")
+    assert f.action == FinalDecision.NO_TRADE and "never enlarged" in f.message
+    looser = decide(_live(fixed_cost_quote=fixed), replace(SafetySettings(), max_fixed_cost_pct=Decimal("0.10")))
+    assert looser.executable, looser.reasons
+    assert looser.plan.position_size.value <= base.position_size.value  # nothing was made bigger
+    # PAPER charged the LIVE fixed costs pays them in its result and is not refused (LIVE-only rule)
+    paper = decide(healthy(fixed_cost_quote=fixed, paper_fixed_costs=True))
+    assert "FIXED_COSTS_TOO_HIGH" not in codes(paper)
+
+
+def test_max_fixed_cost_pct_is_bounded():
+    from yonixalpha_core.safety.settings import clamp, validate
+
+    clamped, notes = clamp(replace(SafetySettings(), max_fixed_cost_pct=Decimal("0.5")))
+    assert clamped.max_fixed_cost_pct == Decimal("0.10") and notes
+    assert "max_fixed_cost_pct must be positive" in validate(replace(SafetySettings(), max_fixed_cost_pct=Decimal(0)))
+
+
 def test_fixed_live_costs_do_not_change_paper_sizing():
     paper = healthy(fixed_cost_quote=Decimal("100"))  # global mode PAPER: the wallet is not used
     a = decide(paper)
@@ -575,7 +602,9 @@ def test_fixed_costs_too_large_for_the_stop_are_stop_inside_costs():
 
 def test_fixed_costs_shrink_a_risk_bound_live_size_on_a_small_wallet():
     small = AccountState(Decimal("0.08"), Decimal("0.03"), 0, Decimal("0"), Decimal("0"), None, Decimal("0"), False)
-    tiny = SafetySettings(min_position_size_quote=Decimal("0.001"))
+    # The sizing math below with the fixed-cost share allowed up to its 10% ceiling (by default such a
+    # trade is refused as FIXED_COSTS_TOO_HIGH, asserted at the end).
+    tiny = SafetySettings(min_position_size_quote=Decimal("0.001"), max_fixed_cost_pct=Decimal("0.10"))
     fixed = Decimal("0.000225")  # measured live round trip with the token account closed after the exit
     # A 10% stop: proportional costs 5.5% plus fixed 5.8% at this size leave no room before the stop.
     tight = decide(_live(account=small, fixed_cost_quote=fixed), tiny)
@@ -588,6 +617,10 @@ def test_fixed_costs_shrink_a_risk_bound_live_size_on_a_small_wallet():
     assert p.position_size.value < base.position_size.value
     loss = p.position_size.value * _loss_fraction(p.stop_distance_pct, p.entry_cost_bps, p.exit_cost_bps) + fixed
     assert loss <= p.max_loss.value * Decimal("1.000001")
+    # Default policy (regression audit 2026-10-10): fixed fees above 2% of this small size refuse the trade.
+    default = decide(_live(account=small, market=wide, fixed_cost_quote=fixed),
+                     SafetySettings(min_position_size_quote=Decimal("0.001")))
+    assert not default.executable and "FIXED_COSTS_TOO_HIGH" in codes(default)
 
 
 # --- intelligence regime and manipulation (solana.intel) ------------------------------
