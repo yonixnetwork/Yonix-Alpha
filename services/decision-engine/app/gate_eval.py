@@ -293,7 +293,12 @@ async def evaluate_with_gate(
             await session.commit()
             return a
         try:
-            drift = await paper_execution.measured_live_drift(session)
+            pe = await paper_execution.load_settings(session)
+            # A pump-curve paper buy lands like a LIVE one: filled at the stream price measured LIVE
+            # latency after the decision (settled by the paper-trading service), instead of being
+            # charged the median LIVE drift (one or the other, never both).
+            delayed = pe.simulate_entry_delay and engine in CURVE_ENGINES and lifecycle != "MIGRATED"
+            drift = {"buy_pct": None} if delayed else await paper_execution.measured_live_drift(session)
             position = await paper_engine.open_position(
                 session, account, a, row.id, candidate, inp.liquidity_model, inp.quote,
                 inp.token.transfer_fee_bps if inp.token else None, now,
@@ -303,6 +308,9 @@ async def evaluate_with_gate(
                 entry_drift_pct=drift["buy_pct"],  # what a LIVE buy loses before it lands (measured)
             )
             position.execution_mode, position.source, position.lifecycle = "PAPER", "PUMPFUN", lifecycle
+            if delayed:
+                lat, lat_src = await entry_store.measured_latency(session, redis)
+                position.plan = paper_execution.schedule_entry_delay(position.plan, now.timestamp(), lat, lat_src)
             position.execution_provider = live_trading.PAPER_PROVIDER
             position.execution_route = "pump-amm" if lifecycle == "MIGRATED" else "pump"
             position.pool, position.strategy = pool, a.strategy

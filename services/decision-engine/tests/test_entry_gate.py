@@ -101,3 +101,29 @@ async def test_wake_list_returns_pushed_candidates_in_order(redis_client):
     started = datetime.now(timezone.utc)
     assert await gate_events.wait_for_wake(redis_client, stop, 1) == []
     assert (datetime.now(timezone.utc) - started).total_seconds() < 3
+
+
+async def test_curve_paper_buy_is_scheduled_to_land_after_the_measured_latency(db_session, redis_client):
+    """Regression audit 2026-10-10: a pump-curve paper buy is filled at the
+    stream price measured LIVE latency after the decision (settled by the
+    paper-trading service), and the median LIVE drift is not charged on top."""
+    curve = await seed_healthy_launch(redis_client, NOW)
+    cand = await make_candidate(db_session)
+    a = await evaluate_with_gate(db_session, redis_client, ENV, Sources(redis_client, FakeRpc(curve)), cand, NOW)
+    assert a.decision.value == "EXECUTE", a.reasons
+    pos = (await db_session.execute(select(PaperPosition))).scalar_one()
+    d = pos.plan["entry_delay"]
+    assert d["settled"] is False and d["latency_s"] == 3.0 and d["due_ts"] == round(NOW.timestamp() + 3.0, 3)
+    assert "live_drift_pct" not in pos.plan["venue"]
+
+
+async def test_switching_entry_delay_off_keeps_the_immediate_fill(db_session, redis_client):
+    from yonixalpha_core.db.models import PlatformSetting
+
+    db_session.add(PlatformSetting(key="paper_execution", value={"simulate_entry_delay": False}))
+    await db_session.commit()
+    curve = await seed_healthy_launch(redis_client, NOW)
+    cand = await make_candidate(db_session)
+    await evaluate_with_gate(db_session, redis_client, ENV, Sources(redis_client, FakeRpc(curve)), cand, NOW)
+    pos = (await db_session.execute(select(PaperPosition))).scalar_one()
+    assert "entry_delay" not in (pos.plan or {})

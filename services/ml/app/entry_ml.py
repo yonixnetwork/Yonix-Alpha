@@ -42,6 +42,7 @@ log = get_logger("ml.entry")
 
 MODEL_NAME = "entry_timing"
 MIN_TRAIN = 200
+MAX_TRAINING_ROWS = 50_000  # newest labelled signals only: bounded on a 2 GB host
 MIN_TEST = 30
 MIN_POSITIVES = 10
 C_GRID = (0.1, 1.0)
@@ -84,9 +85,10 @@ async def run_entry_cycle(session: AsyncSession) -> dict[str, Any]:
                                                          "signals are labelled"}
     rows_db = (await session.execute(select(EntrySignal.decided_at, EntrySignal.features, EntrySignal.score,
                                             EntrySignal.outcome).where(
-        EntrySignal.strategy.in_(ei.STRATEGIES), EntrySignal.outcome_at.is_not(None)).order_by(EntrySignal.decided_at))).all()
+        EntrySignal.strategy.in_(ei.STRATEGIES), EntrySignal.outcome_at.is_not(None))
+        .order_by(EntrySignal.decided_at.desc()).limit(MAX_TRAINING_ROWS))).all()
     rows = []
-    for at, feats, score, outcome in rows_db:
+    for at, feats, score, outcome in reversed(rows_db):  # newest MAX_TRAINING_ROWS, oldest first
         ex = (outcome or {}).get("executable_return_pct")
         if ex is None or not feats:
             continue

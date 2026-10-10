@@ -158,8 +158,9 @@ async def list_orders(strategy: str | None = None, limit: int = Query(100, ge=1,
 @router.get("/execution-settings")
 async def get_execution_settings(db: AsyncSession = Depends(get_db), _: str = Depends(get_current_username)) -> dict:
     """Simulated entry/exit failure rates for paper trades: the operator's
-    setting, the rate measured from live orders, and which one applies."""
-    return jsonable(await paper_execution.effective_rates(db))
+    setting, the rate measured from live orders, and which one applies;
+    plus the measured LIVE price drift (what paper is charged, or why not)."""
+    return jsonable({**await paper_execution.effective_rates(db), "drift": await paper_execution.measured_live_drift(db)})
 
 
 @router.put("/execution-settings")
@@ -176,7 +177,7 @@ async def put_execution_settings(body: dict, request: Request, db: AsyncSession 
         row.value = s.to_dict()
     await audit(db, username, request, "paper_execution.updated", {"before": current, "after": s.to_dict()})
     await db.commit()
-    return jsonable(await paper_execution.effective_rates(db))
+    return jsonable({**await paper_execution.effective_rates(db), "drift": await paper_execution.measured_live_drift(db)})
 
 
 @router.get("/exit-protection")

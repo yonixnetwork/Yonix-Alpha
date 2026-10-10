@@ -35,6 +35,13 @@ class SafetySettings:
     max_exit_impact_bps: Decimal = Decimal("500")
     max_round_trip_loss_bps: Decimal = Decimal("1000")
     max_slippage_bps: Decimal = Decimal("300")
+    # Fixed per-trade costs (network + priority fees of the buy and the sell,
+    # rent reclaim) as a share of the position. Above it a LIVE trade is
+    # refused (PAPER pays them in its result and is not refused):
+    # 21 days of LIVE trades at 0.001-0.01 SOL paid 5-11% of size in fixed
+    # fees and every size band lost (TRADING_REGRESSION_AND_STRATEGY_RECOVERY.md).
+    # Refusing never enlarges a trade.
+    max_fixed_cost_pct: Decimal = Decimal("0.02")
     wait_for_liquidity_max_age_seconds: int = 1800
 
     # Data freshness
@@ -256,6 +263,7 @@ HARD_LIMITS: dict[str, tuple[str, Any]] = {
     "max_exit_impact_bps": ("max", Decimal("1500")),
     "max_round_trip_loss_bps": ("max", Decimal("2500")),
     "max_slippage_bps": ("max", Decimal("1000")),
+    "max_fixed_cost_pct": ("max", Decimal("0.10")),
     "max_data_age_seconds": ("max", 300),
     "max_buy_tax_pct": ("max", Decimal("25")),
     "funding_check_wallets": ("max", 12),
@@ -397,6 +405,8 @@ def validate(settings: SafetySettings) -> list[str]:
         errors.append("max_leverage must be at least 1")
     if settings.risk_per_trade_pct <= 0:
         errors.append("risk_per_trade_pct must be positive")
+    if settings.max_fixed_cost_pct <= 0:
+        errors.append("max_fixed_cost_pct must be positive")
     if settings.min_position_size_quote > settings.max_position_size_quote:
         errors.append("min_position_size_quote must not exceed max_position_size_quote")
     if settings.max_risk_level_for_auto not in ("LOW", "MODERATE", "HIGH"):

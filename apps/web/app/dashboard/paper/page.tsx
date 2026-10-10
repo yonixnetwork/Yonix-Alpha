@@ -74,7 +74,9 @@ function AccountCard({ a, onReset }: { a: PaperAccountOut; onReset: () => void }
 }
 
 interface PaperExecution {
-  settings: { entry_failure_pct: string; exit_failure_pct: string; use_measured_live_rates: boolean; charge_live_fixed_costs: boolean };
+  settings: { entry_failure_pct: string; exit_failure_pct: string; use_measured_live_rates: boolean; charge_live_fixed_costs: boolean;
+    simulate_entry_delay?: boolean };
+  drift?: { buy_pct: string | null; sell_pct: string | null; buy_n: number; sell_n: number; source: string | null };
   measured: Record<string, { orders: number; failed: number; failure_pct: string | null; usable: boolean }>;
   entry_pct: string;
   exit_pct: string;
@@ -84,12 +86,12 @@ interface PaperExecution {
 
 function ExecutionFailures() {
   const { data, error, setData } = useApi<PaperExecution>("/api/paper/execution-settings");
-  const [draft, setDraft] = useState<{ entry: string; exit: string; measured: boolean; fixed: boolean } | null>(null);
+  const [draft, setDraft] = useState<{ entry: string; exit: string; measured: boolean; fixed: boolean; delay: boolean } | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   useEffect(() => {
     if (data) setDraft({ entry: data.settings.entry_failure_pct, exit: data.settings.exit_failure_pct, measured: data.settings.use_measured_live_rates,
-      fixed: data.settings.charge_live_fixed_costs });
+      fixed: data.settings.charge_live_fixed_costs, delay: data.settings.simulate_entry_delay !== false });
   }, [data]);
   if (error) return <ErrorNotice error={error} />;
   if (!data || !draft) return null;
@@ -103,6 +105,7 @@ function ExecutionFailures() {
           exit_failure_pct: draft!.exit,
           use_measured_live_rates: draft!.measured,
           charge_live_fixed_costs: draft!.fixed,
+          simulate_entry_delay: draft!.delay,
         }),
       );
       setSaved(true);
@@ -125,6 +128,12 @@ function ExecutionFailures() {
         <Stat label="Exit failure rate in use">
           {data.exit_pct}% <span className="muted">({data.exit_source})</span>
         </Stat>
+        {data.drift && (
+          <Stat label="Measured LIVE price drift charged to paper (buy / sell)">
+            {data.drift.buy_pct ?? "none"}% / {data.drift.sell_pct ?? "none"}%{" "}
+            <span className="muted">({data.drift.source ?? "-"})</span>
+          </Stat>
+        )}
         {Object.entries(data.measured).map(([side, m]) => (
           <Stat key={side} label={`Live ${side} orders measured`}>
             {m.orders} {m.failure_pct !== null ? <span className="muted">· {m.failure_pct}% failed</span> : null}
@@ -155,6 +164,15 @@ function ExecutionFailures() {
           </select>
           <div className="form-hint">The buy and sell network + priority fees and the rent reclaim fee, from the Live settings. Counted in the
             risk plan (smaller size, FIXED_COSTS_EXCEED_RISK) and charged to the paper book.</div>
+        </div>
+        <div className="form-row">
+          <label htmlFor="pe-delay">Paper buys on the pump curve land after the measured LIVE delay</label>
+          <select id="pe-delay" value={String(draft.delay)} onChange={(e) => setDraft({ ...draft, delay: e.target.value === "true" })}>
+            <option value="true">yes (recommended: filled at the stream price when a LIVE buy would land)</option>
+            <option value="false">no (filled at the decision price, plus the median LIVE drift when measured)</option>
+          </select>
+          <div className="form-hint">The delay is the median decision-to-confirmation time of the last confirmed LIVE buys (3 s until 5 exist).
+            Until then the position is not managed; the fill moves with the market both ways.</div>
         </div>
       </div>
       <ErrorNotice error={saveError} />

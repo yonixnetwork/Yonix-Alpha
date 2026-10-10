@@ -3,16 +3,19 @@
 Every PASS_INTERVAL_SECONDS, for tokens being observed and tokens with
 recent trades: recompute the early-momentum features ONLY when the token
 had new trades (or REFRESH_SECONDS passed), classify the momentum phase,
-run the three entry strategies, write the per-mint state the dashboard and
-the gate's event trigger read, and record the first CANDIDATE of each
-strategy (entry_signals). A strategy in PAPER mode also creates a gate
-candidate whose entry can only be a PAPER trade; the safety gate decides as
-for any other candidate. Nothing here places an order.
+run every entry strategy (strategy_registry lists them), route the token
+by category, write the per-mint state the dashboard and the gate's event
+trigger read, and record the first CANDIDATE of each strategy
+(entry_signals). Only the routed strategy may create a gate candidate, only
+when it is in PAPER mode, and at most once per token (strategy_registry.
+claim_route); that entry can only be a PAPER trade and the safety gate
+decides as for any other candidate. Nothing here places an order.
 
 Background parts, slower: label signals whose horizon passed (60 s), sample
 recently migrated PumpSwap pools and record the migrated entry variants
-(30 s). All of it pauses at CRITICAL resource pressure and never blocks the
-funnel or the stream.
+(30 s), demote reliably losing PAPER strategies to SHADOW (10 min). All of
+it pauses at CRITICAL resource pressure and never blocks the funnel or the
+stream.
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ from sqlalchemy import func, select
 
 from yonixalpha_core import entry_intel as ei
 from yonixalpha_core import entry_store, entry_timing, gate_events, resources
+from yonixalpha_core import strategy_registry as reg
 from yonixalpha_core.db.models import ModelVersion
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.solana import pump_stream
@@ -35,12 +39,14 @@ log = get_logger("engine-solana-discovery.entry_shadow")
 PASS_INTERVAL_SECONDS = 3.0
 LABEL_INTERVAL_SECONDS = 60.0
 MIG_INTERVAL_SECONDS = 30.0
+DEMOTE_INTERVAL_SECONDS = 600.0
 SETTINGS_REFRESH_SECONDS = 30.0
 REFRESH_SECONDS = 30.0
 ACTIVE_WITHIN_SECONDS = 120
 MAX_MINTS_PER_PASS = 150
 SUPPLY_RAW = 10 ** 15
 PASS_STATS = "yx:ee:pass"
+WHY_KEY, ROUTE_STATS, STATS_TTL = reg.WHY_KEY, reg.ROUTE_STATS, reg.STATS_TTL
 
 
 class Shadow:
@@ -51,6 +57,7 @@ class Shadow:
         self.model: dict | None = None
         self.last_label = 0.0
         self.last_mig = 0.0
+        self.last_demote = 0.0
 
     def prune(self, keep: set[str]) -> None:
         if len(self.fp) > 5000:
@@ -80,7 +87,8 @@ def _state(mint: str, meta: dict, f: dict, res: dict, wallets: dict | None, now:
         "displacement_pct": f.get("displacement_pct"), "drawdown_from_peak_pct": f.get("drawdown_from_peak_pct"),
         "round_trip_cost_pct": f.get("round_trip_cost_pct"), "last_trade_age_seconds": f.get("last_trade_age_seconds"),
         "stream_age_seconds": f.get("stream_age_seconds"), "complete_history": f.get("complete_history"),
-        "strategies": res["strategies"], "ml_probability": ml,
+        "strategies": res["strategies"], "category": res.get("category"), "route": res.get("route"),
+        "paper_route": res.get("paper_route"), "ml_probability": ml,
         "smart_wallets": {k: wallets.get(k) for k in ("status", "reason", "proven_wallets", "evaluated_wallets")} if wallets else None,
         "features": ei.compact_features(f),
     }
@@ -101,6 +109,8 @@ async def shadow_pass(redis, session_factory, shadow: Shadow, now: datetime, fun
     started_raw = await redis.get(pump_stream.STREAM_STARTED)
     started_ts = int(started_raw) if started_raw else None
     counts = {"considered": len(mints), "evaluated": 0, "recorded": 0, "paper_candidates": 0}
+    why: dict[str, dict[str, int]] = {}
+    routes: dict[str, int] = {}
     evaluated = 0
     async with session_factory() as session:
         for mint in mints:
@@ -125,7 +135,7 @@ async def shadow_pass(redis, session_factory, shadow: Shadow, now: datetime, fun
                                   stream_heartbeat=hb)
             res = ei.evaluate(f, cfg)
             wallets = None
-            if any(res["strategies"][k]["decision"] == ei.CANDIDATE for k in (ei.EARLY_ACCELERATION, ei.MOMENTUM_CONTINUATION)):
+            if res["route"]["selected"]:
                 try:
                     async with session.begin_nested():
                         wallets = await entry_store.wallet_evidence(session, redis, trades, now,
@@ -133,6 +143,12 @@ async def shadow_pass(redis, session_factory, shadow: Shadow, now: datetime, fun
                 except Exception as exc:  # noqa: BLE001 - evidence only
                     wallets = {"status": "UNKNOWN", "reason": f"wallet evidence failed: {type(exc).__name__}"}
                 res = ei.evaluate(f, cfg, wallets)
+            # The paper route: the same router over the strategies in PAPER mode only (a SHADOW or
+            # PAUSED strategy never trades), so one token gets one paper decision.
+            paper_route = ei.route({n: ei.StrategyDecision(**d) for n, d in res["strategies"].items()
+                                    if modes.get(n) == "PAPER"}, res["category"])
+            res["paper_route"] = paper_route
+            _count(why, routes, res)
             ml = None
             evaluated += 1
             shadow.fp[mint] = (len(trades), last_ts, time.monotonic())
@@ -152,7 +168,9 @@ async def shadow_pass(redis, session_factory, shadow: Shadow, now: datetime, fun
                     continue
                 await entry_timing.mark(redis, mint, f"first_candidate_at:{name}", now.timestamp())
                 cand_id = None
-                if modes.get(name) == "PAPER" and name != ei.SMART_WALLET_CONFIRMATION and funnel_create is not None:
+                routed = paper_route["selected"] == name
+                if (routed and modes.get(name) == "PAPER" and name != ei.SMART_WALLET_CONFIRMATION
+                        and funnel_create is not None and await reg.claim_route(redis, mint, name)):
                     try:
                         cand = await funnel_create(session, mint, meta, now, name)
                         if cand is not None:
@@ -161,12 +179,16 @@ async def shadow_pass(redis, session_factory, shadow: Shadow, now: datetime, fun
                             await gate_events.wake(redis, cand.id)
                     except Exception as exc:  # noqa: BLE001
                         log.warning("entry_shadow.paper_candidate_failed", mint=mint, error=f"{type(exc).__name__}: {exc}")
+                    # The claim is kept even when no candidate was created (budget full, or the
+                    # token already has an open candidate whose trade may lose): never a second try.
                 ok = await entry_store.record_signal(
                     session, mint=mint, strategy=name, lifecycle="FRESH", decision=ei.CANDIDATE, decided_at=now,
                     phase=res["phase"], score=d.get("score"), evidence_level=d.get("evidence_level"),
                     size_factor=d.get("size_factor"), launch_at=launch_at, price_raw=f.get("price_raw"),
                     features=ei.compact_features(f), reasons=d.get("reasons", []) + d.get("positives", []),
-                    evidence={"smart_wallets": wallets, "mode": modes.get(name), "phase_evidence": res["phase_evidence"]},
+                    evidence={"smart_wallets": wallets, "mode": modes.get(name), "phase_evidence": res["phase_evidence"],
+                              "strategy_version": reg.version_of(name), "category": res["category"],
+                              "route": res["route"], "paper_route": paper_route},
                     candidate_id=cand_id, ml_probability=ml)
                 counts["recorded"] += int(ok)
             if (ei.naive_sampled(mint, cfg.naive_sample_every) and f.get("trades_total", 0) >= 10
@@ -177,9 +199,39 @@ async def shadow_pass(redis, session_factory, shadow: Shadow, now: datetime, fun
             await entry_store.write_state(redis, mint, now, _state(mint, meta, f, res, wallets, now, ml))
         await session.commit()
     counts["evaluated"] = evaluated
+    await _flush_counters(redis, now, why, routes)
     shadow.prune(set(mints))
     await redis.hset(PASS_STATS, mapping={"last_pass_at": now.isoformat(), **{k: v for k, v in counts.items()}})
     return counts
+
+
+def _count(why: dict[str, dict[str, int]], routes: dict[str, int], res: dict) -> None:
+    for name, d in res["strategies"].items():
+        if d["decision"] != ei.CANDIDATE and d.get("reasons"):
+            k = reg.reason_key(d["reasons"][0])
+            why.setdefault(name, {})[k] = why.get(name, {}).get(k, 0) + 1
+    r = res["route"]
+    k = f"selected:{r['selected']}" if r["selected"] else f"no_trade:{r['category'] or 'UNKNOWN'}"
+    routes[k] = routes.get(k, 0) + 1
+
+
+async def _flush_counters(redis, now: datetime, why: dict[str, dict[str, int]], routes: dict[str, int]) -> None:
+    if not why and not routes:
+        return
+    day = now.strftime("%Y%m%d")
+    pipe = redis.pipeline(transaction=False)
+    for name, reasons in why.items():
+        key = f"{WHY_KEY}{name}:{day}"
+        for k, v in reasons.items():
+            pipe.hincrby(key, k, v)
+        pipe.expire(key, STATS_TTL)
+    for k, v in routes.items():
+        pipe.hincrby(f"{ROUTE_STATS}{day}", k, v)
+    pipe.expire(f"{ROUTE_STATS}{day}", STATS_TTL)
+    await pipe.execute()
+
+
+top_reasons = reg.top_reasons
 
 
 async def background(redis, session_factory, rpc, shadow: Shadow, now: datetime) -> dict:
@@ -194,6 +246,13 @@ async def background(redis, session_factory, rpc, shadow: Shadow, now: datetime)
         out["migrated"] = await entry_store.sample_migrated(redis, rpc, now)
         async with session_factory() as session:
             out["migrated_recorded"] = await entry_store.record_migrated_variants(session, redis, now, s["modes"])
+    if time.monotonic() - shadow.last_demote >= DEMOTE_INTERVAL_SECONDS:
+        shadow.last_demote = time.monotonic()
+        async with session_factory() as session:
+            dem = await reg.apply_demotions(session, now)
+        if dem.get("demoted"):
+            out["demoted"] = dem
+            shadow.settings = None  # reload the modes now
     return out
 
 

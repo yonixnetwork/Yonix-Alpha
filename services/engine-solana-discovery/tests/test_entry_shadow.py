@@ -136,3 +136,106 @@ async def test_fast_pass_promotes_right_after_the_window_and_records_the_baselin
     assert base.mint == MINT and base.price_raw is not None
     assert await redis.lrange(gate_events.GATE_WAKE, 0, -1) == [str(cand.id)]
     assert int(await redis.hget(FUNNEL, "fast_pass_runs")) == 1
+
+
+# --- routing, reason counters and demotion (regression recovery, 2026-10-10) ------------------------
+
+def broad(created: datetime) -> Curve:
+    """Both EARLY_ACCELERATION and EARLY_DEMAND_CONFIRMATION qualify."""
+    c = Curve(created)
+    for i in range(8):
+        c.buy(1 + i * 2, f"a{i}", 0.12)
+    for i in range(12):
+        c.buy(18 + i * 0.6, f"b{i}", 0.2 + 0.02 * i)
+    return c
+
+
+async def test_two_paper_strategies_on_one_token_open_one_candidate_and_never_re_enter(redis, session_factory):
+    from yonixalpha_core import strategy_registry as reg
+
+    now = datetime.now(timezone.utc)
+    created = now - timedelta(seconds=26)
+    c = broad(created)
+    await put(redis, MINT, c, created)
+    async with session_factory() as s:
+        s.add(PlatformSetting(key=entry_store.SETTINGS_KEY, value={"modes": {ei.EARLY_ACCELERATION: "PAPER",
+                                                                             ei.EARLY_DEMAND_CONFIRMATION: "PAPER"}}))
+        await s.commit()
+    res = await entry_shadow.shadow_pass(redis, session_factory, entry_shadow.Shadow(), now, create_strategy_candidate)
+    assert res["paper_candidates"] == 1
+    state = await entry_store.read_state(redis, MINT)
+    assert state["category"] == ei.FRESH and state["paper_route"]["selected"] in (ei.EARLY_ACCELERATION,
+                                                                                  ei.EARLY_DEMAND_CONFIRMATION)
+    routed = state["paper_route"]["selected"]
+    assert await redis.get(reg.ROUTE_CLAIM + MINT) == routed
+    async with session_factory() as s:
+        sigs = (await s.execute(select(EntrySignal).where(EntrySignal.mint == MINT))).scalars().all()
+        cands = (await s.execute(select(TradingCandidate))).scalars().all()
+    assert len(cands) == 1 and cands[0].detail["entry_strategy"] == routed
+    by = {x.strategy: x for x in sigs}
+    assert by[routed].candidate_id == cands[0].id and by[routed].evidence["strategy_version"].startswith("F")
+    other = ({ei.EARLY_ACCELERATION, ei.EARLY_DEMAND_CONFIRMATION} - {routed}).pop()
+    assert by[other].candidate_id is None  # recorded for measurement, never a second trade on the token
+    # more trades later (or a loss on the first trade): the token is never routed again
+    for i in range(6):
+        c.buy(27 + i, f"z{i}", 0.4)
+    await redis.delete(pump_stream.trades_key(MINT))
+    await put(redis, MINT, c, created)
+    async with session_factory() as s:  # the first paper trade closed (a loss, say): its candidate is CLOSED
+        cand = (await s.execute(select(TradingCandidate))).scalar_one()
+        cand.state = "closed"
+        await s.commit()
+    for k in await redis.keys(entry_store.RECORDED_KEY + "*"):  # so only the route claim can stop a second entry
+        await redis.delete(k)
+    again = await entry_shadow.shadow_pass(redis, session_factory, entry_shadow.Shadow(), now + timedelta(seconds=8),
+                                           create_strategy_candidate)
+    assert again["evaluated"] == 1 and (await entry_store.read_state(redis, MINT))["paper_route"]["selected"]
+    assert again["paper_candidates"] == 0
+    async with session_factory() as s:
+        assert len((await s.execute(select(TradingCandidate))).scalars().all()) == 1
+
+
+async def test_shadow_strategies_never_trade_and_blocking_reasons_are_counted(redis, session_factory):
+    now = datetime.now(timezone.utc)
+    created = now - timedelta(seconds=26)
+    await put(redis, MINT, broad(created), created)
+    res = await entry_shadow.shadow_pass(redis, session_factory, entry_shadow.Shadow(), now, create_strategy_candidate)
+    assert res["paper_candidates"] == 0  # all strategies in SHADOW (default)
+    state = await entry_store.read_state(redis, MINT)
+    assert state["route"]["selected"] is not None and state["paper_route"]["decision"] == ei.NO_TRADE
+    top = await entry_shadow.top_reasons(redis, ei.MOMENTUM_CONTINUATION, now)
+    assert top and top[0][0] == "younger than Ns: continuation needs a history" and top[0][1] == 1
+    day = now.strftime("%Y%m%d")
+    assert int(await redis.hget(entry_shadow.ROUTE_STATS + day, f"selected:{state['route']['selected']}")) == 1
+    assert 0 < await redis.ttl(entry_shadow.ROUTE_STATS + day) <= entry_shadow.STATS_TTL
+
+
+async def test_reliably_losing_paper_strategy_is_demoted_to_shadow_and_audited(redis, session_factory):
+    from yonixalpha_core import strategy_registry as reg
+    from yonixalpha_core.db.models import AuditLog
+
+    now = datetime.now(timezone.utc)
+    async with session_factory() as s:
+        s.add(PlatformSetting(key=entry_store.SETTINGS_KEY, value={"modes": {ei.EARLY_ACCELERATION: "PAPER",
+                                                                             ei.BREAKOUT_RETEST: "PAPER"}}))
+        for i in range(40):
+            for name, ret in ((ei.EARLY_ACCELERATION, -5.0 + (i % 3)), (ei.BREAKOUT_RETEST, 2.0 - (i % 2) * 3)):
+                await entry_store.record_signal(s, mint=f"m{i:03d}", strategy=name, lifecycle="FRESH", decision=ei.CANDIDATE,
+                                                decided_at=now - timedelta(minutes=60 - i))
+        await s.commit()
+        for row in (await s.execute(select(EntrySignal))).scalars().all():
+            i = int(row.mint[1:])
+            row.outcome = {"executable_return_pct": -5.0 + (i % 3) if row.strategy == ei.EARLY_ACCELERATION
+                           else 2.0 - (i % 2) * 3}
+            row.outcome_at = now
+        await s.commit()
+    async with session_factory() as s:
+        out = await reg.apply_demotions(s, now)
+    assert out == {"checked": 2, "demoted": [ei.EARLY_ACCELERATION]}
+    async with session_factory() as s:
+        st = await entry_store.load_settings(s)
+        audit = (await s.execute(select(AuditLog).where(AuditLog.event_type == "entry_intel.strategy_demoted"))).scalars().all()
+    assert st["modes"][ei.EARLY_ACCELERATION] == "SHADOW" and st["modes"][ei.BREAKOUT_RETEST] == "PAPER"
+    assert len(audit) == 1 and audit[0].detail["evidence"]["upper_95_pct"] < 0
+    async with session_factory() as s:  # run again: nothing left to demote, nothing promoted
+        assert (await reg.apply_demotions(s, now))["demoted"] == []

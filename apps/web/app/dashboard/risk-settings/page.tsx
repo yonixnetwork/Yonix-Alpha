@@ -51,6 +51,7 @@ const HELP: Record<string, string> = {
   risk_per_trade_pct: "Loss at the stop, after all costs, as a fraction of equity (0.01 = 1%).",
   max_pool_fraction: "Largest position as a fraction of pool liquidity.",
   max_round_trip_loss_bps: "Refuse if buying and immediately selling would lose more than this.",
+  max_fixed_cost_pct: "Refuse a LIVE trade whose fixed network fees (buy + sell + rent reclaim) exceed this share of its size (0.02 = 2%). Too-small trades are refused, never enlarged. PAPER trades pay these fees in their result and are not refused.",
   min_stop_pct: "Floor on the automatic stop distance. Must exceed round-trip costs.",
   trailing_activation_r: "When the trailing stop starts. 0 = at TP1 (default); 1.5 = once price is 1.5× the stop distance above entry.",
   trailing_max_giveback_pct: "Most of the move from the peak the trailing stop gives back. 0 = no cap beyond the stop distance (default); 0.15 = 15%.",
