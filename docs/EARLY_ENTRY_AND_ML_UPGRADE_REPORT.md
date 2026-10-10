@@ -240,7 +240,28 @@ Full-suite result: see section 10a (filled in from the run log).
 
 ### 10a. Full run
 
-RESULTS_PLACEHOLDER
+Run in the build container on 2026-10-10 (Postgres 16 and Redis 7 local),
+all suites, nothing skipped or disabled:
+
+| Suite | Result |
+|---|---|
+| ruff | all checks passed |
+| core-py | 983 passed, 0 failed |
+| api | 186 passed, 0 failed |
+| data-solana | 10 passed |
+| data-evm | 14 passed |
+| copy-engine | 18 passed |
+| engine-solana-discovery | 24 passed |
+| engine-solana-migration | 11 passed |
+| engine-solana-momentum | 11 passed |
+| decision-engine | 64 passed |
+| ml | 50 passed |
+| paper-trading | 85 passed |
+| web | `tsc --noEmit` clean, `next lint` clean, `next build` succeeded (`/dashboard/entry-intel` built) |
+| alembic | upgrade to 0047, `alembic check` (no drift), downgrade to 0046 and upgrade again: all succeeded |
+
+One defect was found by the new tests and fixed before commit: the ML
+metrics held numpy values that could not be stored as JSON.
 
 ## 11. Live behaviours not verified
 
