@@ -74,6 +74,21 @@ async def test_repeated_429_backs_off_longer_and_a_success_resets_it():
     assert await rpc.call("getSlot") == 1 and rpc.endpoints[0].rate_limit_streak == 0
 
 
+async def test_a_long_429_streak_still_cools_down_instead_of_overflowing():
+    """Server 2026-10-10: after ~1000 consecutive 429s, 2 ** streak overflowed
+    float ("int too large to convert to float"), the provider got no
+    cooldown and was hit again on every call."""
+    def handler(request):
+        return httpx.Response(429, json={"jsonrpc": "2.0", "id": 1, "error": {"code": 429}})
+
+    rpc = RpcManager.create(client=httpx.AsyncClient(transport=httpx.MockTransport(handler)), primary_url=PRIMARY)
+    rpc.endpoints[0].rate_limit_streak = 5000
+    with pytest.raises(rpc_mod.RpcAllEndpointsFailedError) as e:
+        await rpc.call("getAccountInfo")
+    assert "HTTP 429" in str(e.value) and "too large" not in str(e.value)
+    assert round(rpc.cooling_down()) == rpc_mod.MAX_RATE_LIMIT_BACKOFF
+
+
 async def test_403_for_a_method_skips_that_provider_for_that_method_only():
     sent = []
 

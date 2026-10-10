@@ -368,7 +368,10 @@ class RpcManager:
                     # A provider still limiting after its cooldown gets a longer
                     # rest instead of being hit again every 30 s; its own
                     # Retry-After wins when it sends one.
-                    backoff = min(self.cooldown_seconds * 2 ** (endpoint.rate_limit_streak - 1), MAX_RATE_LIMIT_BACKOFF)
+                    # The exponent is capped: after ~1000 consecutive 429s an
+                    # uncapped 2 ** streak no longer converts to float
+                    # (OverflowError), which skipped the cooldown entirely.
+                    backoff = min(self.cooldown_seconds * 2 ** min(endpoint.rate_limit_streak - 1, 16), MAX_RATE_LIMIT_BACKOFF)
                     retry_after = _retry_after(response)
                     if retry_after is not None:
                         backoff = max(retry_after, 1.0)
