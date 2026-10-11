@@ -30,6 +30,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from yonixalpha_core import deployer_intel, entry_intel, entry_store, entry_timing, events, gate_events, opportunities, wallet_intel
 from yonixalpha_core.db.models import Token, TokenEvent, TokenObservation, TradingCandidate
 from yonixalpha_core.logging import get_logger
+from yonixalpha_core.safety import store
+from yonixalpha_core.safety.models import StrategyMode
 from yonixalpha_core.safety.settings import SafetySettings
 from yonixalpha_core.solana import intel, launch_features, observation, pump_stream
 from yonixalpha_core.solana.codec import db_safe
@@ -44,6 +46,18 @@ MAX_CANDIDATE_AGE_SECONDS = 30 * 60
 MIN_AGE_SECONDS = 60
 PREFILTER_WINDOW_SECONDS = 300
 MAX_ACTIVE_CANDIDATES = 25  # default of SafetySettings.max_active_candidates
+# Slots of max_active_candidates that only migrated tokens may use: fresh and
+# momentum promotions stop at budget - reserve, so a busy launch hour can
+# never take every slot from the migration engine (2026-10-11: migrated
+# tokens got no slot for two days).
+MIGRATION_RESERVE_FRACTION = 0.2
+
+
+def non_migration_budget(budget: int) -> int:
+    """Slots fresh / momentum / entry-strategy candidates may fill."""
+    return max(1, budget - int(budget * MIGRATION_RESERVE_FRACTION))  # 25 -> 20 (5 reserved)
+
+
 OBSERVATION_RETENTION_DAYS = 3
 OBS_REPORT_TTL = 6 * 3600
 OUTCOME_COUNTER = {observation.REJECT: "rejected", observation.NO_TRADE: "expired",
@@ -87,10 +101,9 @@ async def create_strategy_candidate(session: AsyncSession, mint: str, meta: dict
     """An entry strategy in PAPER mode: a gate candidate whose entry can
     only be a PAPER trade (detail.paper_only). The safety gate runs every
     check as for any other candidate. Respects the gate budget."""
-    from yonixalpha_core.safety import store
 
     settings, _ = await store.load_settings(session, "solana_fresh")
-    if await active_candidate_count(session) >= settings.max_active_candidates:
+    if await active_candidate_count(session) >= non_migration_budget(settings.max_active_candidates):
         return None
     return await create_candidate(session, "discovery", mint, meta, now, f"entry strategy {strategy} (PAPER mode)",
                                   {"entry_strategy": strategy, "paper_only": True})
@@ -305,7 +318,7 @@ async def observe_fresh(redis: Redis, session_factory, settings: SafetySettings,
             mint, await pump_stream.load_trades(redis, mint), created_ts, now, settings, creator=meta.get("creator") or None,
             curve=await pump_stream.load_curve(redis, mint),
             initial_real_token_reserves=int(meta.get("initial_real_token_reserves") or 0) or None, monitoring_since=since)
-        if report.outcome == observation.PROMOTE and active >= settings.max_active_candidates:
+        if report.outcome == observation.PROMOTE and active >= non_migration_budget(settings.max_active_candidates):
             counts["budget_full"] += 1
             if (report.age_seconds or 0) >= settings.fresh_max_monitoring_seconds:
                 report.outcome = observation.NO_TRADE
@@ -379,6 +392,7 @@ async def run_funnel(redis: Redis, session_factory, settings: SafetySettings, no
               "rejected": 0, "expired": 0, "migration_detected": 0}
     async with session_factory() as session:
         active = await active_candidate_count(session)
+        momentum_off = await store.load_strategy_mode(session, "solana_momentum") == StrategyMode.OFF
 
     active = await observe_fresh(redis, session_factory, settings, now, counts, active)
     budget = settings.max_active_candidates
@@ -403,7 +417,8 @@ async def run_funnel(redis: Redis, session_factory, settings: SafetySettings, no
                                                                "candidate_id": str(cand.id)}, "funnel")
 
     # Momentum: established tokens (not launches) trading faster right now.
-    for mint in await pump_stream.active_mints(redis, now, MOMENTUM_ACTIVE_WITHIN_SECONDS):
+    # Strategy OFF: no candidate is created (the gate would only reject it).
+    for mint in ([] if momentum_off else await pump_stream.active_mints(redis, now, MOMENTUM_ACTIVE_WITHIN_SECONDS)):
         meta = await pump_stream.load_meta(redis, mint)
         if not meta or not meta.get("bonding_curve"):
             continue  # launched before this stream started: curve address unknown
@@ -424,7 +439,7 @@ async def run_funnel(redis: Redis, session_factory, settings: SafetySettings, no
         ok, stats = momentum_prefilter(await pump_stream.load_trades(redis, mint), now, created_ts, mom, near)
         if not ok:
             continue
-        if active >= budget:
+        if active >= non_migration_budget(budget):
             counts["budget_full"] += 1
             continue
         if not await redis.set(f"{pump_stream.PREFIX}:mom_seen:{mint}", "1", nx=True, ex=MOMENTUM_REPROMOTE_SECONDS):

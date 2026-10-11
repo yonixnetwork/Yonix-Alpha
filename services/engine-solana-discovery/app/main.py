@@ -120,6 +120,27 @@ async def _funnel_loop(redis, session_factory, stop_event: asyncio.Event) -> Non
             pass
 
 
+RETENTION_INTERVAL_SECONDS = 3600
+
+
+async def _retention_loop(session_factory, stop_event: asyncio.Event) -> None:
+    """Hourly data retention (yonixalpha_core.retention); a no-op while the
+    operator has not enabled it."""
+    from yonixalpha_core import retention
+
+    while not stop_event.is_set():
+        try:
+            out = await retention.run(session_factory, datetime.now(timezone.utc))
+            if out.get("deleted"):
+                log.info("retention.run", **{k: v for k, v in out["deleted"].items()})
+        except Exception as exc:  # noqa: BLE001 - cleanup never stops the service
+            log.warning("retention.failed", error=f"{type(exc).__name__}: {exc}"[:300])
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=RETENTION_INTERVAL_SECONDS)
+        except asyncio.TimeoutError:
+            pass
+
+
 async def run() -> None:
     settings = get_settings()
     configure_logging(settings.LOG_LEVEL)
@@ -208,6 +229,7 @@ async def run() -> None:
                 _stream_guard_loop(redis, rpc, ws_client, session_factory, stop_event),
                 _health_check_loop(rpc, session_factory, stop_event),
                 _funnel_loop(redis, session_factory, stop_event),
+                _retention_loop(session_factory, stop_event),
                 entry_shadow.run(redis, session_factory, rpc, settings, stop_event, create_strategy_candidate),
                 run_watcher("engine-solana-discovery", settings, session_factory, stop_event, rpc=rpc, ws_urls=next_ws_url,
                             redis=redis),

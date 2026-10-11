@@ -13,9 +13,10 @@ decides as for any other candidate. Nothing here places an order.
 
 Background parts, slower: label signals whose horizon passed (60 s), sample
 recently migrated PumpSwap pools and record the migrated entry variants
-(30 s), demote reliably losing PAPER strategies to SHADOW (10 min). All of
-it pauses at CRITICAL resource pressure and never blocks the funnel or the
-stream.
+(30 s; migrations are also found by checking whether the pool of a
+nearly complete curve exists, migration_watch), demote reliably losing
+PAPER strategies to SHADOW (10 min). All of it pauses at CRITICAL resource
+pressure and never blocks the funnel or the stream.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ from yonixalpha_core import entry_store, entry_timing, gate_events, resources
 from yonixalpha_core import strategy_registry as reg
 from yonixalpha_core.db.models import ModelVersion
 from yonixalpha_core.logging import get_logger
-from yonixalpha_core.solana import pump_stream
+from yonixalpha_core.solana import migration_watch, pump_stream
 
 log = get_logger("engine-solana-discovery.entry_shadow")
 
@@ -243,6 +244,10 @@ async def background(redis, session_factory, rpc, shadow: Shadow, now: datetime)
             out["labels"] = await entry_store.label_due(session, redis, now)
     if rpc is not None and time.monotonic() - shadow.last_mig >= MIG_INTERVAL_SECONDS:
         shadow.last_mig = time.monotonic()
+        try:
+            out["migration_watch"] = await migration_watch.detect(redis, rpc, now)
+        except Exception as exc:  # noqa: BLE001 - RPC shed or unavailable: next pass
+            out["migration_watch"] = {"error": type(exc).__name__}
         out["migrated"] = await entry_store.sample_migrated(redis, rpc, now)
         async with session_factory() as session:
             out["migrated_recorded"] = await entry_store.record_migrated_variants(session, redis, now, s["modes"])
