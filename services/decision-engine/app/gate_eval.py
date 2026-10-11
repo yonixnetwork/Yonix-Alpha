@@ -47,6 +47,12 @@ log = get_logger("decision-engine.gate")
 
 ENGINE_OF = {"discovery": "solana_fresh", "migration": "solana_migration", "momentum": "solana_momentum"}
 MAX_OBSERVATION_SECONDS = {"solana_fresh": 30 * 60, "solana_migration": 60 * 60, "solana_momentum": 20 * 60}
+# A candidate whose evaluations never complete (an error on every pass)
+# never reaches the time limit check after the gate. This grace past the
+# limit ends it anyway, so it cannot hold one of the max_active_candidates
+# slots forever (2026-10-11: 25 discovery candidates stuck since 2026-09-27
+# filled the whole budget and no migrated token got a slot).
+STALE_GRACE_SECONDS = 10 * 60
 REEVALUATE_EVERY_SECONDS = 30
 GATE_STATES = [
     CandidateState.DISCOVERED.value, CandidateState.OBSERVING.value, CandidateState.ANALYZING.value,
@@ -92,6 +98,27 @@ def _analysis_started(candidate: TradingCandidate) -> datetime | None:
     return None
 
 
+async def expire_stale(session: AsyncSession, candidate: TradingCandidate, engine: str, now: datetime) -> bool:
+    """Ends a candidate older than its engine's time limit plus
+    STALE_GRACE_SECONDS, before any data is assembled (the step that fails
+    for such candidates). A candidate waiting for the operator's approval is
+    ended the same way: an approval of a stale analysis is not one."""
+    started = _analysis_started(candidate) or candidate.created_at
+    if started is None:
+        return False
+    limit = MAX_OBSERVATION_SECONDS[engine] + STALE_GRACE_SECONDS
+    age = (now - started).total_seconds()
+    if age < limit:
+        return False
+    apply_transition(candidate, CandidateState.REJECTED,
+                     reason=f"not executable within {MAX_OBSERVATION_SECONDS[engine]}s; last: EXPIRED_STALE "
+                            f"(no completed evaluation for {age / 3600:.1f} h)")
+    await store.add_timeline_event(session, "candidate_expired_stale", now, {"engine": engine, "age_seconds": round(age)},
+                                   candidate_id=candidate.id)
+    await session.commit()
+    return True
+
+
 def _move(candidate: TradingCandidate, target: CandidateState, reason: str) -> None:
     if candidate.state != target.value:
         apply_transition(candidate, target, reason=reason)
@@ -105,6 +132,8 @@ async def evaluate_with_gate(
     same evaluation runs with the operator's decision in place of the
     strategy signal; the outcome is written to operator["result"]."""
     engine = ENGINE_OF[candidate.engine]
+    if operator is None and await expire_stale(session, candidate, engine, now):
+        return None
     mint = candidate.detail["mint"]
     eval_started = time.time()
 

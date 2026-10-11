@@ -87,6 +87,29 @@ marks with the LIVE cost basis, which includes fees and new-account rent
 (30-110% of a tiny buy), so LIVE MFE / MAE looked negative. The tool now
 compares marks with the market price of the fill (`plan.fill.market_price`).
 
+**R4. The paper winner (migration) stopped receiving tokens. Confidence:
+high (server data 2026-10-11).**
+
+- Migration candidates per day: about 415-426 (Oct 4-6), 303-313
+  (Oct 7-8), 131 (Oct 9), 4 (Oct 10), 0 (Oct 11).
+- The pump stream saw 1 migration event in 24 h (Redis `yx:pump:migrated`).
+  Pump.fun's docs repository changed on 2026-10-08: `migrate_v2`, v3 buys
+  with a "synthetic migration", new events. The stream reads only the event
+  data written to transaction logs (`logsSubscribe`), and the migration
+  event is no longer reaching it there. The event layout itself is
+  unchanged in the official IDL (same discriminator and fields).
+- Second cause, same effect: the 25-slot candidate budget was full of 25
+  `discovery` candidates stuck in ANALYZING since 2026-09-27 (manual BUY
+  candidates are skipped by the automatic loop, so nothing ever ended
+  them). Every migration hit `budget_full` (870 191 times in the counters).
+- Fixes (MF1): migrations are also detected by checking, every 30 s,
+  whether the canonical PumpSwap pool of a curve seen close to completion
+  exists (`solana/migration_watch.py`, one getMultipleAccounts per 100
+  curves); a candidate past its engine's time limit plus 10 minutes is
+  ended (`gate_eval.expire_stale`, also for manual-only candidates); 20% of
+  the budget (5 of 25) is reserved for migrated tokens; with the momentum
+  strategy OFF the funnel creates no momentum candidates.
+
 ## 2. Before / after performance
 
 | Group | Trades | Win rate | Net SOL | Profit factor |
@@ -286,6 +309,24 @@ Rollback:
   to PAUSED on the Entry Intelligence page. Reverting the commit removes the
   strategies; their recorded signals stay in `entry_signals`.
 - Nothing deletes data. The global mode stays as the operator set it.
+
+## 9b. Data retention (operator request, 2026-10-11)
+
+`yonixalpha_core/retention.py`, hourly in engine-solana-discovery, OFF until
+the operator enables it. Older than 3 days it removes: notifications; info /
+warning system events; decisions that did not trade and that no position,
+order or ML row points to; finished candidates with no position, ML row or
+entry signal; timeline events not tied to a position; token events (except
+migration events, kept 8 days for the launchpad 7-day health rule); tokens
+nothing refers to. It never touches positions, orders, ML feature rows, ML
+labels (opportunity outcomes), entry signals, model versions, validation
+sets, wallet / creator history, EVM tables or audit logs. Every run is
+audited (`retention.run`).
+
+```
+cd /opt/yonixalpha && docker compose --env-file .env -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.prod.yml exec -T api python -m yonixalpha_core.tools.retention
+cd /opt/yonixalpha && docker compose --env-file .env -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.prod.yml exec -T api python -m yonixalpha_core.tools.retention --enable
+```
 
 ## 10. Recommendation on LIVE auto-entry
 

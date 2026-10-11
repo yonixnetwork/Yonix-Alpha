@@ -29,6 +29,14 @@ RECENT = f"{PREFIX}:recent"  # zset mint -> create timestamp
 PROMOTED = f"{PREFIX}:promoted"  # zset mint -> promotion timestamp
 MIGRATED = f"{PREFIX}:migrated"  # zset mint -> migration timestamp
 ACTIVE = f"{PREFIX}:active"  # zset mint -> last trade timestamp (momentum scan)
+# Curves close to completion (or completed) and not yet seen migrating:
+# migration_watch checks whether their PumpSwap pool exists, so a migration
+# is found even when its event is not in the transaction logs (pump.fun's
+# migrate_v2 / v3 buys, 2026-10-08).
+NEAR_COMPLETE = f"{PREFIX}:near_complete"  # zset mint -> last seen near completion
+NEAR_COMPLETE_REMAINING = 0.10  # real tokens left on the curve, share of the standard 793.1M
+STANDARD_REAL_TOKENS = 793_100_000_000_000
+NEAR_COMPLETE_RETENTION = 6 * 3600
 STREAM_STARTED = f"{PREFIX}:stream_started"  # first ingest: start of the creator-launch coverage
 NAMES = f"{PREFIX}:name"  # + ":" + normalized name -> first mint that used it
 NAME_TTL = 24 * 3600
@@ -146,6 +154,8 @@ async def ingest_logs(redis: Redis, logs: list[str], signature: str | None, rece
             if "real_sol_reserves" in f:
                 curve["rsol"] = f["real_sol_reserves"]
                 curve["rtok"] = f["real_token_reserves"]
+                if int(f["real_token_reserves"]) <= NEAR_COMPLETE_REMAINING * STANDARD_REAL_TOKENS:
+                    pipe.zadd(NEAR_COMPLETE, {mint: ts})
             # A reported total of 0 is treated as unknown, never as free: no
             # SOL curve fee tier charges nothing, and a 0 would drop the fee
             # from every cost estimate. The last real rate is kept; with none,
@@ -159,10 +169,12 @@ async def ingest_logs(redis: Redis, logs: list[str], signature: str | None, rece
         elif kind == "complete":
             pipe.hset(curve_key(mint), mapping={"complete": 1, "completed_at": ts or int(received_at.timestamp())})
             pipe.expire(curve_key(mint), CURVE_TTL)
+            pipe.zadd(NEAR_COMPLETE, {mint: ts or int(received_at.timestamp())})
         elif kind == "migration":
             pipe.hset(curve_key(mint), mapping={"complete": 1, "pool": f.get("pool", ""), "migrated_at": ts or 0})
             pipe.expire(curve_key(mint), CURVE_TTL)
             pipe.zadd(MIGRATED, {mint: ts or int(received_at.timestamp())})
+            pipe.zrem(NEAR_COMPLETE, mint)
     for kind, n in counts.items():
         pipe.hincrby(STATS, kind if from_stream else f"{kind}_gap_filled", n)
     await pipe.execute()
@@ -309,6 +321,7 @@ async def prune(redis: Redis, now: datetime) -> None:
     pipe.zremrangebyscore(RECENT, "-inf", t - RECENT_RETENTION)
     pipe.zremrangebyscore(PROMOTED, "-inf", t - PROMOTED_RETENTION)
     pipe.zremrangebyscore(MIGRATED, "-inf", t - PROMOTED_RETENTION)
+    pipe.zremrangebyscore(NEAR_COMPLETE, "-inf", t - NEAR_COMPLETE_RETENTION)
     pipe.zremrangebyscore(OBS_FINAL, "-inf", t - PROMOTED_RETENTION)
     pipe.zremrangebyscore(OBS_LIVE, "-inf", t - RECENT_RETENTION)
     await pipe.execute()

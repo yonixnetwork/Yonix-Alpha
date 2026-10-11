@@ -263,3 +263,35 @@ async def test_wallet_intel_failure_keeps_the_launch_features(redis, session_fac
     await trade(redis, "WFAIL", created + 1, "a", True, 0.2, 31)
     rec = await funnel._ledger_intel(redis, "WFAIL", NOW, SETTINGS)
     assert rec["stage"] == "FRESH" and "manipulation" in rec and rec["wallets"]["error"] == "KeyError: 'wins'"
+
+
+# --- migration slots and momentum OFF (2026-10-11) ---------------------------------------------------
+
+async def test_migrated_tokens_keep_reserved_slots_when_launches_fill_the_rest(redis, session_factory):
+    from app.funnel import non_migration_budget
+
+    assert non_migration_budget(25) == 20 and non_migration_budget(2) == 2 and non_migration_budget(1) == 1
+    for i in range(6):
+        await growing_launch(redis, f"L{i}")
+    await redis.hset(pump_stream.meta_key("MIG"), mapping={"symbol": "MIG", "created_at": 1})
+    await redis.hset(pump_stream.curve_key("MIG"), mapping={"vsol": 1, "vtok": 1, "updated_at": 1, "complete": 1, "pool": "POOL"})
+    await redis.zadd(pump_stream.MIGRATED, {"MIG": int(NOW.timestamp()) - 60})
+    counts = await run_funnel(redis, session_factory, replace(SETTINGS, max_active_candidates=5), NOW)
+    assert counts["promoted"] == 4 and counts["budget_full"] == 2  # 1 of 5 slots kept for migrated tokens
+    assert counts["migrations"] == 1
+    assert sorted(c.engine for c in await candidates(session_factory)) == ["discovery"] * 4 + ["migration"]
+
+
+async def test_momentum_set_off_creates_no_momentum_candidates(redis, session_factory):
+    from yonixalpha_core.db.models import StrategyConfig
+
+    async with session_factory() as s:
+        s.add(StrategyConfig(strategy="solana_momentum", mode="OFF"))
+        await s.commit()
+    created = await launch(redis, "OLD", 3 * 3600)
+    for i in range(30):
+        await trade(redis, "OLD", int(NOW.timestamp()) - 60 + i * 2, f"o{i}", True, 0.3, 40 + i)
+    await redis.zadd(pump_stream.ACTIVE, {"OLD": int(NOW.timestamp())})
+    counts = await run_funnel(redis, session_factory, SETTINGS, NOW)
+    assert counts["momentum_considered"] == 0 and counts["momentum_promoted"] == 0
+    assert created and await candidates(session_factory) == []

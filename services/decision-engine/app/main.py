@@ -23,7 +23,7 @@ from yonixalpha_core.state_machine import CandidateState
 
 from app import diagnostics
 from app.evaluate import evaluate_candidate
-from app.gate_eval import evaluate_with_gate, is_gate_candidate
+from app.gate_eval import ENGINE_OF, evaluate_with_gate, expire_stale, is_gate_candidate
 
 log = get_logger("decision-engine.main")
 
@@ -121,7 +121,12 @@ async def _evaluation_loop(session_factory, redis, settings, stop_event: asyncio
                         if candidate is None or candidate.state not in EVALUABLE_STATES:
                             continue  # state changed since the query above
                         if (candidate.detail or {}).get("manual_only"):
-                            continue  # evaluated only by its manual BUY request (_manual_loop)
+                            # Evaluated only by its manual BUY request (_manual_loop); once stale it is
+                            # ended here, so it never holds a gate slot forever.
+                            if is_gate_candidate(candidate):
+                                await expire_stale(session, candidate, ENGINE_OF[candidate.engine],
+                                                   datetime.now(timezone.utc))
+                            continue
                         if is_gate_candidate(candidate):
                             if sources is None:
                                 continue
