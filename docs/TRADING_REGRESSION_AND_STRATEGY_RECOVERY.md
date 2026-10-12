@@ -109,6 +109,17 @@ high (server data 2026-10-11).**
   ended (`gate_eval.expire_stale`, also for manual-only candidates); 20% of
   the budget (5 of 25) is reserved for migrated tokens; with the momentum
   strategy OFF the funnel creates no momentum candidates.
+- Follow-up (2026-10-12): the reserve was one-sided. About 25 migrations an
+  hour, each analysed up to 60 minutes, then held every slot and no fresh
+  launch was promoted for 8 hours. Each side now keeps 5 of the 25 slots:
+  migrated tokens may hold at most 20, fresh / momentum at most 20.
+- Also found 2026-10-12: the solana_migration daily loss limit is 0.02 SOL
+  (an operator setting sized for the LIVE wallet), while paper positions
+  are sized from the paper book (about 9.6 SOL, 1% risk, 0.47 SOL per
+  trade). One paper stop-loss (-0.097 SOL) blocks paper entries for the
+  rest of the UTC day. Not changed in code: the operator either sizes the
+  paper book like the LIVE wallet (Paper page, reset when flat) or changes
+  the limit; the limit is never raised automatically.
 
 ## 2. Before / after performance
 
