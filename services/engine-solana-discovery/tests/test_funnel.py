@@ -295,3 +295,27 @@ async def test_momentum_set_off_creates_no_momentum_candidates(redis, session_fa
     counts = await run_funnel(redis, session_factory, SETTINGS, NOW)
     assert counts["momentum_considered"] == 0 and counts["momentum_promoted"] == 0
     assert created and await candidates(session_factory) == []
+
+
+async def test_migrations_cannot_take_the_slots_kept_for_fresh_launches(redis, session_factory):
+    """2026-10-12: about 25 migrations an hour, each analysed up to 60 min,
+    held every slot and no fresh launch was promoted for 8 hours."""
+    from yonixalpha_core.db.models import Token
+
+    async with session_factory() as s:
+        for i in range(20):
+            tok = Token(mint_address=f"MIGTOKEN{i:02d}", first_seen_source="pump_stream")
+            s.add(tok)
+            await s.flush()
+            s.add(TradingCandidate(token_id=tok.id, engine="migration", state="analyzing", state_history=[],
+                                   detail={"source": "pump_stream", "mint": tok.mint_address}))
+        await s.commit()
+    for i in range(3):
+        await growing_launch(redis, f"F{i}")
+    await redis.hset(pump_stream.meta_key("MIGNEW"), mapping={"symbol": "MIGNEW", "created_at": 1})
+    await redis.hset(pump_stream.curve_key("MIGNEW"), mapping={"vsol": 1, "vtok": 1, "updated_at": 1, "complete": 1,
+                                                               "pool": "POOL"})
+    await redis.zadd(pump_stream.MIGRATED, {"MIGNEW": int(NOW.timestamp()) - 60})
+    counts = await run_funnel(redis, session_factory, SETTINGS, NOW)  # max_active_candidates 25
+    assert counts["promoted"] == 3  # fresh launches still get their 5 kept slots
+    assert counts["migrations"] == 0 and counts["budget_full"] >= 1  # migrations stop at 20 of 25

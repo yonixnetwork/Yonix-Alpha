@@ -46,16 +46,22 @@ MAX_CANDIDATE_AGE_SECONDS = 30 * 60
 MIN_AGE_SECONDS = 60
 PREFILTER_WINDOW_SECONDS = 300
 MAX_ACTIVE_CANDIDATES = 25  # default of SafetySettings.max_active_candidates
-# Slots of max_active_candidates that only migrated tokens may use: fresh and
-# momentum promotions stop at budget - reserve, so a busy launch hour can
-# never take every slot from the migration engine (2026-10-11: migrated
-# tokens got no slot for two days).
+# Each side of the budget keeps a reserve the other cannot take: fresh /
+# momentum candidates may hold at most budget - reserve slots, and so may
+# migrated tokens (2026-10-11: launches took every slot from migrations;
+# 2026-10-12: about 25 migrations an hour, each analysed up to 60 min, took
+# every slot from fresh launches).
 MIGRATION_RESERVE_FRACTION = 0.2
 
 
 def non_migration_budget(budget: int) -> int:
-    """Slots fresh / momentum / entry-strategy candidates may fill."""
-    return max(1, budget - int(budget * MIGRATION_RESERVE_FRACTION))  # 25 -> 20 (5 reserved)
+    """Most slots one side (fresh + momentum, or migrated) may hold."""
+    return max(1, budget - int(budget * MIGRATION_RESERVE_FRACTION))  # 25 -> 20 (5 kept for the other side)
+
+
+def fresh_limit(budget: int, migration_active: int) -> int:
+    """Slots fresh / momentum / entry-strategy candidates may fill now."""
+    return min(non_migration_budget(budget), budget - migration_active)
 
 
 OBSERVATION_RETENTION_DAYS = 3
@@ -85,8 +91,9 @@ async def fast_pass(redis: Redis, session_factory, settings: SafetySettings, now
     if not only:
         return counts
     async with session_factory() as session:
-        active = await active_candidate_count(session)
-    await observe_fresh(redis, session_factory, settings, now, counts, active, only=only)
+        total, mig = await active_counts(session)
+    await observe_fresh(redis, session_factory, settings, now, counts, total - mig, only=only,
+                        limit=fresh_limit(settings.max_active_candidates, mig))
     pipe = redis.pipeline(transaction=False)
     for k, v in counts.items():
         if v:
@@ -103,7 +110,8 @@ async def create_strategy_candidate(session: AsyncSession, mint: str, meta: dict
     check as for any other candidate. Respects the gate budget."""
 
     settings, _ = await store.load_settings(session, "solana_fresh")
-    if await active_candidate_count(session) >= non_migration_budget(settings.max_active_candidates):
+    total, mig = await active_counts(session)
+    if total - mig >= fresh_limit(settings.max_active_candidates, mig):
         return None
     return await create_candidate(session, "discovery", mint, meta, now, f"entry strategy {strategy} (PAPER mode)",
                                   {"entry_strategy": strategy, "paper_only": True})
@@ -125,6 +133,16 @@ async def active_candidate_count(session: AsyncSession) -> int:
         )
     )
     return result.scalar_one()
+
+
+async def active_counts(session: AsyncSession) -> tuple[int, int]:
+    """(all active gate candidates, of which migrated-token candidates)."""
+    rows = (await session.execute(
+        select(TradingCandidate.engine, func.count()).where(
+            TradingCandidate.state.in_(ACTIVE_STATES), TradingCandidate.detail["source"].astext == SOURCE
+        ).group_by(TradingCandidate.engine))).all()
+    by = dict(rows)
+    return sum(by.values()), by.get("migration", 0)
 
 
 async def _upsert_token(session: AsyncSession, mint: str, meta: dict[str, str], now: datetime) -> Token:
@@ -299,10 +317,14 @@ async def _promoted_side_effects(redis: Redis, session, mint: str, cand, now: da
 
 
 async def observe_fresh(redis: Redis, session_factory, settings: SafetySettings, now: datetime, counts: dict[str, int],
-                        active: int, only: set[str] | None = None) -> int:
-    """FRESH_OBSERVING for every new launch: see solana.observation. Returns
-    the updated number of active gate candidates. `only`: the fast pass
-    (just-matured mints); capacity trimming is left to the full pass."""
+                        active: int, only: set[str] | None = None, limit: int | None = None) -> int:
+    """FRESH_OBSERVING for every new launch: see solana.observation. `active`:
+    active fresh / momentum gate candidates; `limit`: how many of them the
+    budget allows now (fresh_limit). Returns the updated `active`. `only`:
+    the fast pass (just-matured mints); capacity trimming is left to the
+    full pass."""
+    if limit is None:
+        limit = non_migration_budget(settings.max_active_candidates)
     rows: list[dict] = []
     live: list[tuple[int, str, dict, observation.ObservationReport]] = []
     open_mints = await pump_stream.open_for_observation(redis, now, max(settings.fresh_max_monitoring_seconds,
@@ -318,7 +340,7 @@ async def observe_fresh(redis: Redis, session_factory, settings: SafetySettings,
             mint, await pump_stream.load_trades(redis, mint), created_ts, now, settings, creator=meta.get("creator") or None,
             curve=await pump_stream.load_curve(redis, mint),
             initial_real_token_reserves=int(meta.get("initial_real_token_reserves") or 0) or None, monitoring_since=since)
-        if report.outcome == observation.PROMOTE and active >= non_migration_budget(settings.max_active_candidates):
+        if report.outcome == observation.PROMOTE and active >= limit:
             counts["budget_full"] += 1
             if (report.age_seconds or 0) >= settings.fresh_max_monitoring_seconds:
                 report.outcome = observation.NO_TRADE
@@ -390,16 +412,17 @@ async def run_funnel(redis: Redis, session_factory, settings: SafetySettings, no
     counts = {"considered": 0, "prefilter_failed": 0, "promoted": 0, "budget_full": 0, "migrations": 0,
               "momentum_considered": 0, "momentum_promoted": 0, "observing": 0, "continue_monitoring": 0,
               "rejected": 0, "expired": 0, "migration_detected": 0}
+    budget = settings.max_active_candidates
     async with session_factory() as session:
-        active = await active_candidate_count(session)
+        total, mig = await active_counts(session)
         momentum_off = await store.load_strategy_mode(session, "solana_momentum") == StrategyMode.OFF
 
-    active = await observe_fresh(redis, session_factory, settings, now, counts, active)
-    budget = settings.max_active_candidates
+    active = await observe_fresh(redis, session_factory, settings, now, counts, total - mig,
+                                 limit=fresh_limit(budget, mig))
 
     since = int((now - timedelta(seconds=MAX_CANDIDATE_AGE_SECONDS)).timestamp())
     for mint, migrated_ts in await pump_stream.migrated_since(redis, since):
-        if active >= budget:
+        if mig >= non_migration_budget(budget) or active + mig >= budget:
             counts["budget_full"] += 1
             continue  # not marked seen: retried next run while still recent
         if not await redis.set(f"{pump_stream.PREFIX}:mig_seen:{mint}", "1", nx=True, ex=86400):
@@ -410,7 +433,7 @@ async def run_funnel(redis: Redis, session_factory, settings: SafetySettings, no
             cand = await create_candidate(session, "migration", mint, meta, now, "pump.fun migration event",
                                           {"pool": curve.pool if curve else None, "migrated_ts": migrated_ts})
         if cand is not None:
-            active += 1
+            mig += 1
             counts["migrations"] += 1
             await events.publish(redis, "migration.detected", {"mint": mint, "symbol": meta.get("symbol"),
                                                                "pool": curve.pool if curve else None,
@@ -439,7 +462,7 @@ async def run_funnel(redis: Redis, session_factory, settings: SafetySettings, no
         ok, stats = momentum_prefilter(await pump_stream.load_trades(redis, mint), now, created_ts, mom, near)
         if not ok:
             continue
-        if active >= non_migration_budget(budget):
+        if active >= fresh_limit(budget, mig):
             counts["budget_full"] += 1
             continue
         if not await redis.set(f"{pump_stream.PREFIX}:mom_seen:{mint}", "1", nx=True, ex=MOMENTUM_REPROMOTE_SECONDS):
