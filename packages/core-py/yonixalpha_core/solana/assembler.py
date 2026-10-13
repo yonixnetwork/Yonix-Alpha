@@ -105,6 +105,85 @@ def entry_exit_check(trades, now: datetime, creator: str | None, liquidity: Deci
             "metrics": {k: (v if isinstance(v, (bool, int, list)) or v is None else str(v)) for k, v in d.metrics.items()}}
 
 
+# Short-lived reuse of token reads between evaluations of the same token
+# (every 30 s, events down to 10 s; fresh and momentum both read the same
+# mint). A cached value keeps its ORIGINAL observation time, so the gate's
+# freshness rule (max_data_age_seconds) judges it exactly as before; the
+# lifetime is always below that limit. Failures are never cached.
+READ_CACHE_MAX = 4000
+MINT_CACHE_SECONDS = 45
+HOLDERS_CACHE_SECONDS = 15
+
+
+def _cache_of(rpc) -> dict:
+    """The cache lives on the RPC client it was read through (one per process
+    in the services; separate per test client)."""
+    c = getattr(rpc, "_read_cache", None)
+    if c is None:
+        c = {}
+        try:
+            setattr(rpc, "_read_cache", c)
+        except (AttributeError, TypeError):
+            pass
+    return c
+
+
+def _cache_ttl(wanted: float, max_data_age_seconds: int | None) -> float:
+    if max_data_age_seconds is None:
+        return wanted
+    return max(0.0, min(wanted, max_data_age_seconds - 10))
+
+
+def _cache_get(key: tuple, rpc) -> Any:
+    cache = _cache_of(rpc)
+    hit = cache.get(key)
+    counter = getattr(rpc, "_count", None)
+    if hit is not None and hit[0] > time.monotonic():
+        if callable(counter):
+            counter(f"*|{key[0]}|cache|hit")
+        return hit[1]
+    if hit is not None:
+        cache.pop(key, None)
+    if callable(counter):
+        counter(f"*|{key[0]}|cache|miss")
+    return None
+
+
+def _cache_put(rpc, key: tuple, ttl: float, value: Any) -> None:
+    if ttl <= 0:
+        return
+    cache = _cache_of(rpc)
+    if len(cache) >= READ_CACHE_MAX:
+        now = time.monotonic()
+        for k in [k for k, (exp, _) in cache.items() if exp <= now] or list(cache)[: READ_CACHE_MAX // 4]:
+            cache.pop(k, None)
+    cache[key] = (time.monotonic() + ttl, value)
+
+
+async def cached_mint(rpc, mint: str, now: datetime, max_data_age_seconds: int | None = None
+                      ) -> tuple[TokenProgramInfo | None, str | None]:
+    key = ("getAccountInfo:mint", mint)
+    hit = _cache_get(key, rpc)
+    if hit is not None:
+        return hit, None
+    token, err = await fetch_mint(rpc, mint, now)
+    if token is not None:
+        _cache_put(rpc, key, _cache_ttl(MINT_CACHE_SECONDS, max_data_age_seconds), token)
+    return token, err
+
+
+async def cached_holders(rpc, mint: str, supply_raw: int, excluded_owners: set[str], creator: str | None, now: datetime,
+                         max_data_age_seconds: int | None = None) -> tuple[HolderInfo | None, str | None]:
+    key = ("getTokenLargestAccounts:holders", mint, supply_raw, tuple(sorted(excluded_owners)), creator)
+    hit = _cache_get(key, rpc)
+    if hit is not None:
+        return hit, None
+    holders, err = await fetch_holders(rpc, mint, supply_raw, excluded_owners, creator, now)
+    if holders is not None:
+        _cache_put(rpc, key, _cache_ttl(HOLDERS_CACHE_SECONDS, max_data_age_seconds), holders)
+    return holders, err
+
+
 async def fetch_mint(rpc, mint: str, now: datetime) -> tuple[TokenProgramInfo | None, str | None]:
     try:
         res = await rpc.call("getAccountInfo", [mint, {"encoding": "jsonParsed", "commitment": "confirmed"}])
@@ -302,7 +381,7 @@ async def assemble_fresh(src: Sources, mint: str, now: datetime, c: Controls,
     strategy = "fresh_launch_flow" if engine == "solana_fresh" else "solana_momentum"
     inp = _base_input(engine, strategy, mint, symbol, now, c)
 
-    token, err = await _timed(ev, "mint_rpc", fetch_mint(src.rpc, mint, now))
+    token, err = await _timed(ev, "mint_rpc", cached_mint(src.rpc, mint, now, c.settings.max_data_age_seconds))
     if err:
         ev["errors"].append(err)
     inp.token = token
@@ -409,7 +488,7 @@ async def assemble_fresh(src: Sources, mint: str, now: datetime, c: Controls,
     ev["intel"] = inp.intel
 
     if token is not None and curve_addr:
-        inp.holders, err = await _timed(ev, "holders_rpc", fetch_holders(src.rpc, mint, token.supply_raw, {curve_addr}, creator, now))
+        inp.holders, err = await _timed(ev, "holders_rpc", cached_holders(src.rpc, mint, token.supply_raw, {curve_addr}, creator, now, c.settings.max_data_age_seconds))
         if err:
             ev["errors"].append(err)
 
@@ -448,7 +527,7 @@ async def assemble_migrated(src: Sources, mint: str, now: datetime, c: Controls)
     ev: dict[str, Any] = {"errors": [], "source": "PUMPFUN", "lifecycle": "MIGRATED", "creator": creator}
     inp = _base_input("solana_migration", "post_migration_flow", mint, symbol, now, c)
 
-    token, err = await _timed(ev, "mint_rpc", fetch_mint(src.rpc, mint, now))
+    token, err = await _timed(ev, "mint_rpc", cached_mint(src.rpc, mint, now, c.settings.max_data_age_seconds))
     if err:
         ev["errors"].append(err)
     inp.token = token
@@ -548,7 +627,7 @@ async def assemble_migrated(src: Sources, mint: str, now: datetime, c: Controls)
             inp.quote = quote
 
     if token is not None and pool_state is not None:
-        inp.holders, err = await _timed(ev, "holders_rpc", fetch_holders(src.rpc, mint, token.supply_raw, {pool_addr}, creator, now))
+        inp.holders, err = await _timed(ev, "holders_rpc", cached_holders(src.rpc, mint, token.supply_raw, {pool_addr}, creator, now, c.settings.max_data_age_seconds))
         if err:
             ev["errors"].append(err)
 

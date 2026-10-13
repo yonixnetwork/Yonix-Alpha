@@ -1,4 +1,7 @@
+import asyncio
+import copy
 import hashlib
+import json
 import re
 import time
 from dataclasses import dataclass, field
@@ -33,6 +36,10 @@ MAX_RATE_LIMIT_BACKOFF = 300.0
 # A 401/403 on one of these (or on several methods) means the key/URL itself
 # is refused: the endpoint is AUTHENTICATION_FAILED and skipped for every
 # method until FORBIDDEN_METHOD_SECONDS pass or a request succeeds.
+FLUSH_EVERY_SECONDS = 60.0
+# Requests with effects (or that must reach the network exactly once) are
+# never coalesced with an identical in-flight request.
+NO_COALESCE = frozenset({"sendTransaction", "simulateTransaction", "requestAirdrop"})
 CORE_METHODS = {"getSlot", "getBalance", "getAccountInfo", "getMultipleAccounts", "getLatestBlockhash",
                 "sendTransaction", "simulateTransaction", "getSignatureStatuses"}
 AUTH_FAILED_AFTER_METHODS = 3
@@ -224,6 +231,14 @@ class RpcManager:
     # provider, since the provider's limit is per key, not per process.
     shared: Any = field(default=None, init=False)
     role_fallbacks: dict = field(default_factory=dict, init=False)  # role -> requests no role holder could take
+    # Aggregated usage (rpc_usage): "<endpoint>|<method>|<priority>|<outcome>" -> calls,
+    # "<endpoint>|<method>|latency_ms" -> summed ms. Flushed to Redis at most once a minute.
+    usage: dict = field(default_factory=dict, init=False)
+    service_name: str = field(default="unknown", init=False)
+    _flushed: dict = field(default_factory=dict, init=False)
+    _last_flush: float = field(default=0.0, init=False)
+    _flushing: bool = field(default=False, init=False)
+    _inflight_calls: dict = field(default_factory=dict, init=False)
 
     @classmethod
     def create(
@@ -333,6 +348,49 @@ class RpcManager:
         self.endpoints = new
 
     async def call(self, method: str, params: list | None = None, priority: str = "normal") -> dict:
+        """Identical read requests in flight at the same moment (same method,
+        params and priority) share one network request; each caller gets its
+        own copy of the result. Then see _call."""
+        if method in NO_COALESCE:
+            return await self._call(method, params, priority)
+        try:
+            key = (method, priority, json.dumps(params or [], sort_keys=True, default=str))
+        except (TypeError, ValueError):
+            return await self._call(method, params, priority)
+        task = self._inflight_calls.get(key)
+        if task is not None:
+            self._count(f"*|{method}|{priority}|coalesced")
+            return copy.deepcopy(await asyncio.shield(task))
+        task = asyncio.ensure_future(self._call(method, params, priority))
+        self._inflight_calls[key] = task
+        task.add_done_callback(lambda t, k=key: self._inflight_calls.pop(k, None) if self._inflight_calls.get(k) is t else None)
+        return await asyncio.shield(task)
+
+    def _count(self, field_: str, n: float = 1) -> None:
+        self.usage[field_] = self.usage.get(field_, 0) + n
+
+    def _maybe_flush(self) -> None:
+        now = time.monotonic()
+        if self.shared is None or self._flushing or now - self._last_flush < FLUSH_EVERY_SECONDS:
+            return
+        self._last_flush, self._flushing = now, True
+
+        async def go() -> None:
+            from yonixalpha_core import rpc_usage
+
+            try:
+                await rpc_usage.flush(self.shared, self.service_name, dict(self.usage), self._flushed)
+            except Exception as exc:  # noqa: BLE001 - metrics are advisory
+                log.debug("rpc.usage_flush_failed", error=type(exc).__name__)
+            finally:
+                self._flushing = False
+
+        try:
+            asyncio.get_running_loop().create_task(go())
+        except RuntimeError:
+            self._flushing = False
+
+    async def _call(self, method: str, params: list | None = None, priority: str = "normal") -> dict:
         """`priority`: "critical" (trade execution: tried on every usable
         endpoint, never shed), "normal" (decisions), "background" (history,
         analytics, follow-ups: shed with RpcRateLimitedError instead of
@@ -348,20 +406,27 @@ class RpcManager:
         if priority == "background":
             candidates = await self._background_candidates(method)
             if not candidates:
+                self._count(f"*|{method}|background|shed")
                 raise RpcRateLimitedError(f"background {method} shed: every endpoint is limited, cooling down or busy")
         else:
             candidates = self._candidates(method)
             if not candidates:
                 raise RpcMethodUnsupportedError(f"no configured RPC endpoint offers {method}")
-        for endpoint in candidates:
+        self._maybe_flush()
+        for attempt, endpoint in enumerate(candidates):
             started = time.monotonic()
             endpoint._sent.append(started)
+            who = endpoint.name or endpoint.label
+            if attempt:
+                self._count(f"{who}|{method}|{priority}|failover_retry")
             endpoint.inflight += 1
             if priority == "background":
                 endpoint.inflight_background += 1
             try:
                 response = await self.client.post(endpoint.url, json=payload, timeout=endpoint.timeout or self.timeout_seconds)
+                self._count(f"{who}|{method}|latency_ms", round((time.monotonic() - started) * 1000, 1))
                 if response.status_code == 429:
+                    self._count(f"{who}|{method}|{priority}|http_429")
                     endpoint.rate_limited_count += 1
                     endpoint.rate_limit_streak += 1
                     endpoint.rate_limited_by_method[method] = endpoint.rate_limited_by_method.get(method, 0) + 1
@@ -415,6 +480,7 @@ class RpcManager:
                     v = str(result.get("version", "legacy"))
                     endpoint.tx_versions[v] = endpoint.tx_versions.get(v, 0) + 1
                 endpoint.successes += 1
+                self._count(f"{who}|{method}|{priority}|ok")
                 self._note(method, endpoint.label, ok=True)
                 endpoint.last_success_at = _now_iso()
                 ms = (time.monotonic() - started) * 1000
@@ -435,6 +501,7 @@ class RpcManager:
             except RpcRequestError as exc:
                 # The endpoint is healthy; another endpoint may still support the request.
                 last_error = exc
+                self._count(f"{who}|{method}|{priority}|rejected")
                 reasons.append(f"{endpoint.label}: {_reason(exc, urls)}")
                 if endpoint.unsupported.get(method, 0) <= time.monotonic():
                     unsupported_only = False
@@ -444,6 +511,7 @@ class RpcManager:
             except Exception as exc:  # noqa: BLE001 - any transport/parse/RPC failure triggers failover
                 unsupported_only = False
                 last_error = exc
+                self._count(f"{who}|{method}|{priority}|failed")
                 reasons.append(f"{endpoint.label}: {_reason(exc, urls)}")
                 endpoint.failures += 1
                 endpoint.last_failure_at = _now_iso()

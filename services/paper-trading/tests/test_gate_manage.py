@@ -179,3 +179,32 @@ async def test_paper_buy_is_held_until_it_lands_then_filled_at_the_landing_price
     d = p.plan["entry_delay"]
     assert d["settled"] and d["measured"] and Decimal(d["factor"]) > 1
     assert p.quantity < qty and p.entry_cost_quote == cost  # same SOL, fewer tokens
+
+
+async def test_open_positions_keep_their_stops_after_the_daily_limit_blocks_new_entries(session_factory, redis_client):
+    """Reaching MAX_DAILY_LOSS_SOL blocks new entries only: an open position is
+    still managed and its stop still closes it."""
+    from yonixalpha_core.safety.gate import account_blockers
+    from yonixalpha_core.safety.pipeline import account_daily_loss_limit
+
+    curve, pid, a = await open_gate_position(session_factory, redis_client)
+    async with session_factory() as s:
+        await store.save_settings(s, "GLOBAL", {"min_stop_pct": "0.10", "max_daily_loss_quote": "0.01"}, None)
+        acct = await store.get_paper_account(s, "solana")
+        s.add(PaperPosition(symbol="L", provider="paper", side="LONG", entry_price=Decimal("1"), quantity=Decimal("1"),
+                            take_profit=[], status="closed", realized_pnl=Decimal("-0.02"), exit_reason="stop_loss",
+                            entry_at=NOW - timedelta(minutes=2), exit_at=NOW - timedelta(minutes=1), account_id=acct.id,
+                            engine="solana_migration", asset_id="OTHER", entry_cost_quote=Decimal("1"),
+                            proceeds_quote=Decimal("0.98")))
+        await s.commit()
+        state = await store.account_state(s, acct, MINT, NOW, False, engine="solana_fresh")
+        from dataclasses import replace
+        state = replace(state, account_daily_loss_limit=await account_daily_loss_limit(s), token_exposure=Decimal(0))
+        assert "DAILY_LOSS_LIMIT" in {b.code for b in account_blockers(state, FRESH, NOW)}  # entries blocked
+    later = NOW + timedelta(seconds=30)
+    await push_trades(redis_client, curve, sells=12, at=later)
+    counts = await manage_gate_positions(session_factory, redis_client, None, later)
+    assert counts["closed"] == 1  # the stop still fired
+    async with session_factory() as s:
+        p = await s.get(PaperPosition, pid)
+    assert p.status == "closed" and p.exit_reason == "stop_loss"

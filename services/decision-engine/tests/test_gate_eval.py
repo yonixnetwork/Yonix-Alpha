@@ -282,9 +282,13 @@ async def test_invalid_saved_risk_settings_block_the_entry(db_session, redis_cli
     await db_session.commit()
     curve = await seed_healthy_launch(redis_client, NOW)
     cand = await make_candidate(db_session)
-    a = await evaluate_with_gate(db_session, redis_client, ENV, Sources(redis_client, FakeRpc(curve)), cand, NOW)
-    assert a.decision.value == "NO_TRADE"
-    assert any(f.code == "TRADING_CONTROL_OFF" and "failed validation" in f.message for f in a.findings), a.reasons
+    rpc = FakeRpc(curve)
+    a = await evaluate_with_gate(db_session, redis_client, ENV, Sources(redis_client, rpc), cand, NOW)
+    # Refused before any token data is fetched (account-level blocker), reason on the candidate.
+    assert a is None and rpc.calls == []
+    blocked = cand.detail["entry_blocked"]
+    assert blocked["codes"] == ["TRADING_CONTROL_OFF"] and "failed validation" in blocked["reason"]
+    assert blocked["token_data_fetched"] is False
     assert (await db_session.execute(select(PaperPosition))).first() is None
 
 

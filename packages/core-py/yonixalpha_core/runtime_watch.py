@@ -18,6 +18,8 @@ async def run_watcher(service: str, settings, session_factory, stop_event: async
             # 429 cooldowns and the background budget are per provider key,
             # so every service shares them through Redis.
             rpc.shared = redis
+        if hasattr(rpc, "service_name"):
+            rpc.service_name = service  # labels its usage counters (rpc_usage)
         reloaders = rpc_registry.make_reloaders(service, rpc, settings, session_factory, redis, ws_urls)
         status = {"rpc": lambda: rpc_registry.rpc_status(rpc)}
     if evm_rpcs:  # BSC / Robinhood endpoints added or changed in the dashboard (chains/evm/rpc_registry)
