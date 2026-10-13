@@ -485,8 +485,13 @@ def test_live_target_only_with_every_permission():
     not_ready = decide(healthy(global_mode=GlobalMode.LIVE, strategy_mode=StrategyMode.AUTO, live_trading_permitted=True,
                                live_ready=False, live_not_ready_reason="wallet not configured"))
     assert not_ready.decision == FinalDecision.NO_TRADE and "LIVE_NOT_READY" in codes(not_ready)
-    a = decide(healthy(global_mode=GlobalMode.LIVE, strategy_mode=StrategyMode.AUTO, live_trading_permitted=True, live_ready=True))
-    assert a.execution_target == ExecutionTarget.LIVE
+    a = decide(healthy(engine="solana_fresh", global_mode=GlobalMode.LIVE, strategy_mode=StrategyMode.AUTO,
+                       live_trading_permitted=True, live_ready=True))
+    assert a.execution_target == ExecutionTarget.LIVE, a.reasons
+    # Momentum is suspended from LIVE entries whatever the modes (PAPER unaffected).
+    m = decide(healthy(global_mode=GlobalMode.LIVE, strategy_mode=StrategyMode.AUTO, live_trading_permitted=True, live_ready=True))
+    assert m.decision == FinalDecision.NO_TRADE and "STRATEGY_NOT_LIVE_ELIGIBLE" in codes(m)
+    assert decide().decision == FinalDecision.EXECUTE  # the same momentum input in PAPER
     b = decide(healthy(global_mode=GlobalMode.PAPER, strategy_mode=StrategyMode.AUTO, live_trading_permitted=True))
     assert b.execution_target == ExecutionTarget.PAPER
 
@@ -525,7 +530,9 @@ def test_own_entry_counts_in_a_young_curves_real_reserve():
 # --- fixed per-trade costs (live network/priority fees, unreclaimed rent) ----
 
 def _live(**kw):
-    return healthy(global_mode=GlobalMode.LIVE, strategy_mode=StrategyMode.AUTO, live_trading_permitted=True, live_ready=True, **kw)
+    # solana_fresh: the momentum engine is suspended from LIVE entries (gate.LIVE_SUSPENDED_ENGINES).
+    return healthy(engine="solana_fresh", global_mode=GlobalMode.LIVE, strategy_mode=StrategyMode.AUTO,
+                   live_trading_permitted=True, live_ready=True, **kw)
 
 
 def test_fixed_costs_are_counted_in_the_loss_at_the_stop_for_live_trades():

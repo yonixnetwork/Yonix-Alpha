@@ -116,9 +116,19 @@ async def test_save_for_all_engines_from_the_dashboard(app, client, auth_headers
     row = next(o for o in g["scope_links"]["overridden_by"] if o["scope"] == "solana_momentum")
     assert row["values"] == {"skip_duplicate_names": True, "min_name_length": 6}
 
+    # Default: GLOBAL changes, the engine keeps its own value and is named in the response.
     r = await client.post("/api/control/settings-all", json={"changes": {"skip_duplicate_names": False}}, headers=auth_headers)
     assert r.status_code == 200, r.text
-    assert r.json()["engines_updated"] == ["solana_momentum"] and "x-config-revision" in r.headers
+    assert r.json()["engines_updated"] == ["solana_momentum"] and r.json()["engine_values_removed"] is False
+    assert r.json()["effective"]["skip_duplicate_names"] is False
+    async with app.state.db_session_factory() as s:
+        assert (await store.load_settings(s, "solana_momentum"))[0].skip_duplicate_names is True
+    # Explicit request: the engine's own value for that key is removed.
+    r = await client.post("/api/control/settings-all", json={"changes": {"skip_duplicate_names": False},
+                                                             "remove_engine_values": True}, headers=auth_headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["engines_updated"] == ["solana_momentum"] and r.json()["engine_values_removed"] is True
+    assert "x-config-revision" in r.headers
     async with app.state.db_session_factory() as s:
         for engine in ("solana_fresh", "solana_migration", "solana_momentum"):
             assert (await store.load_settings(s, engine))[0].skip_duplicate_names is False, engine
@@ -294,3 +304,35 @@ async def test_provider_roles_and_plan_health(app, client, auth_headers):
     assert "10 blocks" in span["observed"] and span["current_plan"] == "not stated" and "Alchemy" in span["recommendation"]
     assert ph["upgrade_required"] >= 3 and ph["role_coverage"]["robinhood"]["DISCOVERY"] == ["public #1"]
     assert ph["role_fallbacks"]["bsc"] == {"WALLET_DATA": 3}
+
+
+async def test_sol_sizing_saved_from_the_dashboard_is_returned_and_used_by_the_risk_summary(app, client, auth_headers):
+    """Save -> the response carries the authoritative effective values -> a
+    reload shows the same -> the risk summary (computed by the engine's own
+    functions) reports them; a conflicting value is refused and nothing changes."""
+    r = await client.put("/api/control/settings/GLOBAL", json={"settings": {
+        "trade_size_mode": "FIXED_SOL", "fixed_trade_size_sol": "0.05", "max_loss_per_trade_sol": "0.002",
+        "max_daily_loss_quote": "0.03"}}, headers=auth_headers)
+    assert r.status_code == 200, r.text
+    eff = r.json()["effective"]
+    assert (eff["trade_size_mode"], eff["fixed_trade_size_sol"], eff["max_loss_per_trade_sol"], eff["max_daily_loss_quote"]) == \
+        ("FIXED_SOL", "0.05", "0.002", "0.03")
+    reloaded = (await client.get("/api/control/settings/GLOBAL", headers=auth_headers)).json()["effective"]
+    assert {k: reloaded[k] for k in eff} == eff  # what the page shows after a reload is what was saved
+    m = (await client.get("/api/control/settings/solana_migration", headers=auth_headers)).json()["effective"]
+    assert m["fixed_trade_size_sol"] == "0.05"  # every strategy follows GLOBAL unless it has its own value
+
+    bad = await client.put("/api/control/settings/GLOBAL", json={"settings": {"fixed_trade_size_sol": "5"}}, headers=auth_headers)
+    assert bad.status_code == 422 and "max_position_size_quote" in bad.text
+    assert (await client.get("/api/control/settings/GLOBAL", headers=auth_headers)).json()["effective"]["fixed_trade_size_sol"] == "0.05"
+
+    s = (await client.get("/api/control/risk-summary", headers=auth_headers)).json()
+    assert s["global"]["trade_size_mode"] == "FIXED_SOL" and s["global"]["fixed_trade_size_sol"] == "0.05"
+    acct = s["accounts"][0]
+    assert acct["mode"] == "PAPER" and acct["status"] == "WITHIN DAILY LIMIT"
+    assert acct["max_daily_loss_sol"] == "0.03" and acct["remaining_daily_loss_budget_sol"] == "0.03"
+    assert acct["realized_pnl_today_sol"] == "0" and acct["open_positions_pnl_sol"] == "0"
+    eng = {e["engine"]: e for e in s["strategies"]}
+    assert eng["solana_migration"]["trade_size"].startswith("0.05 SOL fixed")
+    assert eng["solana_momentum"]["live_eligible"] is False and eng["solana_fresh"]["live_eligible"] is True
+    assert s["entries_blocked_today"]["total"] == 0

@@ -276,6 +276,14 @@ class AccountState:
     # Master §57: the wallet cannot pay the fees of this trade (and keep its
     # fee reserve). NO_TRADE, shown as INSUFFICIENT GAS. None = enough.
     insufficient_gas: str | None = None
+    # Daily limits (realized PnL of positions closed since 00:00 UTC).
+    # daily_realized_pnl is the whole account's (every strategy on it);
+    # strategy_daily_realized_pnl this strategy's own share. The account
+    # limit is the GLOBAL max_daily_loss_quote; None = only the strategy's
+    # own setting applies to the whole account (callers that predate the split).
+    strategy_daily_realized_pnl: Decimal | None = None
+    account_daily_loss_limit: Decimal | None = None
+    account_name: str | None = None
 
 
 @dataclass

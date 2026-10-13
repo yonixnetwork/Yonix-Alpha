@@ -60,6 +60,11 @@ async def rules_version(session: AsyncSession) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()[:12]
 
 
+async def account_daily_loss_limit(session: AsyncSession) -> Decimal:
+    glob, _ = await store.load_settings(session, store.GLOBAL_SCOPE)
+    return glob.max_daily_loss_quote
+
+
 async def load_controls(session: AsyncSession, redis: Redis, app_settings: Any, engine: str, strategy_mode: StrategyMode,
                         asset_id: str, now: datetime, approval: bool, live: bool = False,
                         live_venue: str | None = None, source: str = "sniper") -> tuple[Controls, Any, dict]:
@@ -77,7 +82,11 @@ async def load_controls(session: AsyncSession, redis: Redis, app_settings: Any, 
         account = await get_live_account(session)
     else:
         account = await store.get_paper_account(session, store.ENGINE_ACCOUNT[engine])
-    state = await store.account_state(session, account, asset_id, now, await kill_switch.is_engaged(redis))
+    state = await store.account_state(session, account, asset_id, now, await kill_switch.is_engaged(redis), engine=engine)
+    # The account-wide daily limit is GLOBAL's (MAX_DAILY_LOSS_SOL): every
+    # strategy trading this account counts toward it; the engine's own value
+    # limits only that engine's own losses (gate._check_account_state).
+    state = replace(state, account_daily_loss_limit=await account_daily_loss_limit(session))
     # Operator switches (chain / sniper / copy / new entries); `source` is
     # sniper for autonomous entries, manual for operator requests.
     from yonixalpha_core.chains import controls as trading_controls

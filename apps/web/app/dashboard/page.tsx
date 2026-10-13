@@ -4,6 +4,7 @@ import Link from "next/link";
 import { LayoutDashboard } from "lucide-react";
 import { SellButton } from "@/components/ManualTrade";
 import { PnlOutcome, type PnlView } from "@/components/Pnl";
+import RiskSummary from "@/components/RiskSummary";
 import { ErrorNotice, Loading, PageHeader, Section, StatePill, fmtDuration, modeClass } from "@/components/ui";
 import { formatDecimal } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
@@ -64,6 +65,7 @@ export default function DashboardPage() {
     <div>
       <PageHeader title="Dashboard" icon={<LayoutDashboard size={20} aria-hidden />}
         subtitle={<><span className={modeClass(data.global_mode)}>{data.global_mode}</span>{data.kill_switch && <span className="pill pill-danger"> KILL SWITCH ON</span>}</>} />
+      <RiskSummary compact />
       <div className="dash-grid">
         <div className="term-card">
           <div className="term-card-title">Live wallet</div>

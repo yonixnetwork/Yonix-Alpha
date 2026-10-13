@@ -36,7 +36,8 @@ from yonixalpha_core.db.models import TradingCandidate
 from yonixalpha_core.logging import get_logger
 from yonixalpha_core.notify import alert_error
 from yonixalpha_core.safety import pipeline, store
-from yonixalpha_core.safety.gate import CURVE_ENGINES, Assessment, assess
+from yonixalpha_core import rpc_usage
+from yonixalpha_core.safety.gate import CURVE_ENGINES, Assessment, account_blockers, assess
 from yonixalpha_core.safety.models import FinalDecision, GlobalMode, StrategyMode
 from yonixalpha_core.solana import pump_stream, pumpswap
 from yonixalpha_core.solana.codec import db_safe
@@ -54,6 +55,10 @@ MAX_OBSERVATION_SECONDS = {"solana_fresh": 30 * 60, "solana_migration": 60 * 60,
 # filled the whole budget and no migrated token got a slot).
 STALE_GRACE_SECONDS = 10 * 60
 REEVALUATE_EVERY_SECONDS = 30
+# A candidate whose ACCOUNT blocks every new entry (daily loss limit, kill
+# switch, max open positions, cooldown, ...) is re-checked this often instead
+# of every 30 s; the check costs one DB read, no RPC.
+ACCOUNT_BLOCKED_RECHECK_SECONDS = 60
 GATE_STATES = [
     CandidateState.DISCOVERED.value, CandidateState.OBSERVING.value, CandidateState.ANALYZING.value,
     CandidateState.WAITING_FOR_LIQUIDITY.value, CandidateState.WAITING_FOR_APPROVAL.value,
@@ -117,6 +122,29 @@ async def expire_stale(session: AsyncSession, candidate: TradingCandidate, engin
                                    candidate_id=candidate.id)
     await session.commit()
     return True
+
+
+async def _account_blocked(session: AsyncSession, redis: Redis, candidate: TradingCandidate, engine: str, blocked: list,
+                           now: datetime, operator: dict | None) -> None:
+    """New entries are impossible on this account right now: no token data is
+    fetched, the candidate keeps its state (it expires on its normal time
+    limit), the reason is shown on the candidate and counted, and the next
+    check is ACCOUNT_BLOCKED_RECHECK_SECONDS away. Open positions are managed
+    by paper-trading / the live worker and are not affected."""
+    first = blocked[0]
+    codes = sorted({b.code for b in blocked})
+    reason = "; ".join(f"{b.code}: {b.message}" for b in blocked)[:500]
+    await rpc_usage.count_entry_blocked(redis, engine, codes, now)
+    if operator is None:
+        await redis.set(f"yx:gate:pace:{candidate.id}", "1", ex=ACCOUNT_BLOCKED_RECHECK_SECONDS)
+    prior = (candidate.detail or {}).get("entry_blocked") or {}
+    if prior.get("codes") != codes:
+        candidate.detail = {**(candidate.detail or {}), "entry_blocked": {"codes": codes, "reason": reason, "at": now.isoformat(),
+                                                                          "token_data_fetched": False}}
+        await session.commit()
+    if operator is not None:
+        operator["result"] = {"status": "BLOCKED", "reason": f"{first.code}: {first.message}"}
+    log.info("gate.account_blocked", engine=engine, mint=(candidate.detail or {}).get("mint"), codes=codes)
 
 
 def _move(candidate: TradingCandidate, target: CandidateState, reason: str) -> None:
@@ -195,6 +223,17 @@ async def evaluate_with_gate(
     controls, account, settings_meta = await pipeline.load_controls(session, redis, settings, engine, strategy_mode, mint, now,
                                                                     approval, live=live_intent,
                                                                     source="manual" if operator is not None else "sniper")
+    # Order of operations (cheapest first): stale expiry -> pacing -> migration
+    # hand-off -> strategy OFF -> account state (DB) -> ACCOUNT BLOCKERS ->
+    # token data (RPC) -> full assessment. Account blockers need no token data,
+    # so a blocked account no longer fetches token data only to be refused for
+    # the same reason (on 2026-10-12, 12,550 of 12,782 migration evaluations
+    # were DAILY_LOSS_LIMIT refusals that each fetched the full token state).
+    blocked = [b for b in account_blockers(controls.account, controls.settings, now)
+               if b.hard_block or b.decision == FinalDecision.WAIT]
+    if blocked:
+        await _account_blocked(session, redis, candidate, engine, blocked, now, operator)
+        return None
     live_ready, live_reason = await live_trading.live_readiness(redis, settings, now) if live_intent else (None, None)
     if engine == "solana_migration":
         inp, evidence = await assemble_migrated(sources, mint, now, controls)

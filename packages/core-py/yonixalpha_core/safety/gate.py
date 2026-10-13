@@ -8,6 +8,7 @@ from yonixalpha_core.safety.models import (
     DECISION_PRECEDENCE,
     RISK_ENGINE_VERSION,
     RISK_LEVEL_ORDER,
+    AccountState,
     AssessmentInput,
     DataStatus,
     ExecutionTarget,
@@ -793,8 +794,23 @@ def _check_migrated_liquidity(r: dict[str, Any], s: SafetySettings, out: list[Fi
                                 f"{limit / 100:.2f}% · Decision: NO_TRADE", FinalDecision.NO_TRADE, True))
 
 
+def account_blockers(a: AccountState, s: SafetySettings, now: datetime) -> list[Finding]:
+    """Everything that prohibits a new entry and needs no token data: the
+    kill switch, operator controls, fees, open-position count, daily loss
+    limits, the loss cooldown and (FIXED_SOL, policy REJECT) a balance below
+    the fixed size. The gate runs it on every assessment, and the decision
+    engine runs it BEFORE fetching any token data, so a blocked account no
+    longer pays RPC calls for an answer it already knows."""
+    out: list[Finding] = []
+    _check_account_state(a, s, now, out)
+    return out
+
+
 def _check_account(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) -> None:
-    a = inp.account
+    _check_account_state(inp.account, s, inp.now, out)
+
+
+def _check_account_state(a: AccountState, s: SafetySettings, now: datetime, out: list[Finding]) -> None:
     if a.kill_switch_engaged:
         out.append(_finding(RiskCategory.ACCOUNT, "KILL_SWITCH", RiskLevel.CRITICAL, "kill switch engaged", FinalDecision.NO_TRADE, True))
     if a.trading_blocked_by:
@@ -810,12 +826,36 @@ def _check_account(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) 
     if a.daily_realized_pnl is None:
         out.append(_finding(RiskCategory.ACCOUNT, "DAILY_PNL_UNAVAILABLE", RiskLevel.CRITICAL,
                             "today's realized PnL unavailable — daily loss limit can't be enforced", FinalDecision.NO_TRADE, True))
-    elif a.daily_realized_pnl <= -s.max_daily_loss_quote:
-        out.append(_finding(RiskCategory.ACCOUNT, "DAILY_LOSS_LIMIT", RiskLevel.CRITICAL,
-                            f"daily realized PnL {a.daily_realized_pnl} hit max_daily_loss {s.max_daily_loss_quote}",
-                            FinalDecision.NO_TRADE, True))
+    elif a.account_daily_loss_limit is None:
+        if a.daily_realized_pnl <= -s.max_daily_loss_quote:
+            out.append(_finding(RiskCategory.ACCOUNT, "DAILY_LOSS_LIMIT", RiskLevel.CRITICAL,
+                                f"daily realized PnL {a.daily_realized_pnl} hit max_daily_loss {s.max_daily_loss_quote}",
+                                FinalDecision.NO_TRADE, True))
+    else:
+        acct = a.account_name or "this account"
+        if a.daily_realized_pnl <= -a.account_daily_loss_limit:
+            out.append(_finding(RiskCategory.ACCOUNT, "DAILY_LOSS_LIMIT", RiskLevel.CRITICAL,
+                                f"DAILY LIMIT REACHED: realized PnL today (since 00:00 UTC) on {acct} {a.daily_realized_pnl:.9f} SOL, "
+                                f"every strategy on it counted, hit the account limit MAX_DAILY_LOSS_SOL "
+                                f"{a.account_daily_loss_limit} SOL — new entries blocked until 00:00 UTC; open positions keep "
+                                "their stops and exits", FinalDecision.NO_TRADE, True))
+        own = a.strategy_daily_realized_pnl
+        if own is not None and own <= -s.max_daily_loss_quote:
+            out.append(_finding(RiskCategory.ACCOUNT, "STRATEGY_DAILY_LOSS_LIMIT", RiskLevel.CRITICAL,
+                                f"this strategy's own realized PnL today {own:.9f} SOL hit its daily loss limit "
+                                f"{s.max_daily_loss_quote} SOL — its new entries are blocked until 00:00 UTC",
+                                FinalDecision.NO_TRADE, True))
+    if a.token_exposure is not None and a.token_exposure > 0:
+        out.append(_finding(RiskCategory.ACCOUNT, "TOKEN_ALREADY_HELD", RiskLevel.CRITICAL,
+                            f"this account already holds an open position in this token ({a.token_exposure:.9f} SOL), "
+                            "from this or another strategy: one position per token", FinalDecision.NO_TRADE, True))
+    if (s.trade_size_mode == "FIXED_SOL" and s.fixed_size_policy == "REJECT" and a.available_balance is not None
+            and s.fixed_trade_size_sol > 0 and a.available_balance < s.fixed_trade_size_sol):
+        out.append(_finding(RiskCategory.ACCOUNT, "INSUFFICIENT_BALANCE", RiskLevel.CRITICAL,
+                            f"INSUFFICIENT BALANCE: available {a.available_balance:.9f} SOL is below the fixed trade size "
+                            f"{s.fixed_trade_size_sol} SOL (policy REJECT)", FinalDecision.NO_TRADE, True))
     if a.last_loss_at is not None and s.cooldown_after_loss_seconds > 0:
-        elapsed = (inp.now - a.last_loss_at).total_seconds()
+        elapsed = (now - a.last_loss_at).total_seconds()
         if elapsed < s.cooldown_after_loss_seconds:
             out.append(_finding(RiskCategory.ACCOUNT, "LOSS_COOLDOWN", RiskLevel.MODERATE,
                                 f"cooldown after loss: {s.cooldown_after_loss_seconds - elapsed:.0f}s remaining", FinalDecision.WAIT))
@@ -966,6 +1006,41 @@ def _liquidity(inp: AssessmentInput, plan: TradePlan) -> dict[str, Any]:
     return out
 
 
+# Strategies excluded from LIVE entries regardless of mode, until their
+# regression is investigated and validated (2026-10-13: momentum lost in LIVE
+# throughout, PF 0.05 over 33 trades, and PF 0.29 over 38 PAPER trades after
+# 2026-10-10). PAPER and SHADOW are unaffected; exits are never affected.
+# Lifting it is a reviewed code change, not a dashboard switch.
+LIVE_SUSPENDED_ENGINES = frozenset({"solana_momentum"})
+
+TOKEN_CATEGORIES = ("FRESH", "NEAR_MIGRATION", "MIGRATED", "MOMENTUM")
+
+
+def token_category(inp: AssessmentInput, settings: SafetySettings) -> str | None:
+    """The token's actual state at the decision, independent of which
+    strategy evaluated it: MOMENTUM (momentum engine), MIGRATED (a pool exists
+    or the token is evaluated as migrated), NEAR_MIGRATION (curve at or above
+    momentum_near_migration_progress) or FRESH (on the bonding curve). The
+    same rule as solana_performance's stage, so reports and trades agree."""
+    if not inp.engine.startswith("solana_"):
+        return None
+    if inp.engine == "solana_momentum":
+        return "MOMENTUM"
+    m = inp.market
+    if inp.engine == "solana_migration" or (m is not None and (m.migrated or m.curve_complete)):
+        return "MIGRATED"
+    if m is not None and m.curve_progress is not None and m.curve_progress >= settings.momentum_near_migration_progress:
+        return "NEAR_MIGRATION"
+    return "FRESH"
+
+
+def _check_live_eligibility(inp: AssessmentInput, out: list[Finding]) -> None:
+    if _live_target(inp) and inp.engine in LIVE_SUSPENDED_ENGINES:
+        out.append(_finding(RiskCategory.STRATEGY, "STRATEGY_NOT_LIVE_ELIGIBLE", RiskLevel.CRITICAL,
+                            f"{inp.engine} is suspended from LIVE entries until its regression is validated "
+                            "(PAPER evaluation continues)", FinalDecision.NO_TRADE, True))
+
+
 def _live_target(inp: AssessmentInput) -> bool:
     """Whether an executable decision for `inp` goes to the live wallet."""
     return inp.global_mode == GlobalMode.LIVE and inp.strategy_mode != StrategyMode.PAPER and inp.live_trading_permitted
@@ -993,6 +1068,7 @@ def assess(inp: AssessmentInput, settings: SafetySettings, versions: dict[str, A
     _check_entry_quality(inp, findings)
     _check_market(inp, findings)
     _check_account(inp, settings, findings)
+    _check_live_eligibility(inp, findings)
 
     soft_reduce = any(f.action == FinalDecision.REDUCE_SIZE for f in findings)
     m = inp.market
@@ -1015,6 +1091,7 @@ def assess(inp: AssessmentInput, settings: SafetySettings, versions: dict[str, A
         fixed_cost_detail=inp.fixed_cost_detail,
         refuse_uneconomic=_live_target(inp),
     )
+    plan.token_category = token_category(inp, settings)
     findings.extend(plan.findings)
     _check_execution(inp, settings, plan, findings)
     migrated_liq = migrated_liquidity_report(inp, settings, plan) if _migrated_applies(inp) or inp.engine in CURVE_ENGINES else None
