@@ -15,11 +15,36 @@ class SafetySettings:
     been run on this data yet.
     """
 
+    # Trade sizing (SOL for the Solana engines; the quote currency elsewhere).
+    # RISK_PCT: size = (equity x risk_per_trade_pct - fixed costs) / loss at
+    #   the stop, bounded by the caps below (the original behaviour).
+    # FIXED_SOL: every entry uses exactly fixed_trade_size_sol. Its planned
+    #   loss at the stop (costs included) must stay within
+    #   max_loss_per_trade_sol; what happens when it doesn't is
+    #   fixed_size_policy: REJECT (default: the trade is refused with the exact
+    #   reason) or REDUCE (the size is lowered to the largest that satisfies
+    #   every cap and the loss limit, and each reduction is reported).
+    #   Account equity never changes the size in this mode.
+    trade_size_mode: str = "RISK_PCT"
+    fixed_trade_size_sol: Decimal = Decimal("0")
+    # Absolute maximum planned loss per trade (at the stop, costs included).
+    # Required in FIXED_SOL; in RISK_PCT it also caps equity x risk_per_trade_pct.
+    # 0 = not set. A stop is not a guaranteed maximum: gaps, liquidity loss
+    # and failed transactions can lose more.
+    max_loss_per_trade_sol: Decimal = Decimal("0")
+    fixed_size_policy: str = "REJECT"
+
     # Account risk
     risk_per_trade_pct: Decimal = Decimal("0.01")
     max_position_size_quote: Decimal = Decimal("1")
     min_position_size_quote: Decimal = Decimal("0.01")
     max_open_positions: int = 3
+    # Daily realized-loss limit in SOL, from 00:00 UTC. The GLOBAL value is the
+    # ACCOUNT limit: every strategy trading that account (all Solana engines
+    # share one paper book, and LIVE shares the wallet) counts toward it. A
+    # strategy's own value (an engine override) additionally limits that
+    # strategy's own realized loss. Reaching either blocks new entries only;
+    # open positions keep their stops and exits.
     max_daily_loss_quote: Decimal = Decimal("0.5")
     max_total_exposure_quote: Decimal = Decimal("3")
     max_token_exposure_quote: Decimal = Decimal("1")
@@ -300,6 +325,9 @@ HARD_LIMITS: dict[str, tuple[str, Any]] = {
     "dump_cluster_min_shared": ("min", 2),
 }
 
+TRADE_SIZE_MODES = ("RISK_PCT", "FIXED_SOL")
+FIXED_SIZE_POLICIES = ("REJECT", "REDUCE")
+LAMPORT_DECIMALS = 9  # SOL amounts finer than one lamport cannot be executed
 CREATOR_ACTIONS = ("WARN", "REDUCE_SIZE", "REQUIRE_MANUAL_APPROVAL", "REJECT")
 INTEL_ACTIONS = ("WARN", "REQUIRE_MANUAL_APPROVAL", "WAIT", "NO_TRADE")
 # Fields with a fixed set of values (the dashboard renders a select).
@@ -307,6 +335,8 @@ ENUM_FIELDS: dict[str, tuple[str, ...]] = {
     "creator_below_threshold_action": CREATOR_ACTIONS,
     "creator_history_unknown_action": CREATOR_ACTIONS,
     "max_risk_level_for_auto": ("LOW", "MODERATE", "HIGH"),
+    "trade_size_mode": TRADE_SIZE_MODES,
+    "fixed_size_policy": FIXED_SIZE_POLICIES,
     "mayhem_action": INTEL_ACTIONS,
     "manipulation_high_action": INTEL_ACTIONS,
     "manipulation_medium_action": INTEL_ACTIONS,
@@ -409,6 +439,7 @@ def validate(settings: SafetySettings) -> list[str]:
         errors.append("max_fixed_cost_pct must be positive")
     if settings.min_position_size_quote > settings.max_position_size_quote:
         errors.append("min_position_size_quote must not exceed max_position_size_quote")
+    errors.extend(sizing_errors(settings))
     if settings.max_risk_level_for_auto not in ("LOW", "MODERATE", "HIGH"):
         errors.append("max_risk_level_for_auto must be LOW, MODERATE or HIGH")
     if settings.fresh_max_monitoring_seconds < settings.fresh_observation_seconds:
@@ -469,6 +500,37 @@ def validate(settings: SafetySettings) -> list[str]:
         errors.append("wallet_win_peak_pct must be positive and wallet_loss_drawdown_pct in (0, 100]")
     if not (2 <= settings.dump_cluster_medium_wallets <= settings.dump_cluster_high_wallets):
         errors.append("dump_cluster_medium_wallets must be at least 2 and not above dump_cluster_high_wallets")
+    return errors
+
+
+def _finer_than_lamport(v: Decimal) -> bool:
+    return v != v.quantize(Decimal(1).scaleb(-LAMPORT_DECIMALS))
+
+
+def sizing_errors(settings: SafetySettings) -> list[str]:
+    """Conflicting or unexecutable sizing values are refused at save time,
+    never resolved silently at trade time."""
+    errors: list[str] = []
+    if settings.trade_size_mode not in TRADE_SIZE_MODES:
+        errors.append(f"trade_size_mode must be one of {', '.join(TRADE_SIZE_MODES)}")
+    if settings.fixed_size_policy not in FIXED_SIZE_POLICIES:
+        errors.append(f"fixed_size_policy must be one of {', '.join(FIXED_SIZE_POLICIES)}")
+    if settings.fixed_trade_size_sol < 0 or settings.max_loss_per_trade_sol < 0 or settings.max_daily_loss_quote < 0:
+        errors.append("fixed_trade_size_sol, max_loss_per_trade_sol and max_daily_loss_quote must not be negative")
+    for name in ("fixed_trade_size_sol", "max_loss_per_trade_sol"):
+        if _finer_than_lamport(getattr(settings, name)):
+            errors.append(f"{name} has more than {LAMPORT_DECIMALS} decimals (finer than one lamport)")
+    if settings.trade_size_mode == "FIXED_SOL":
+        if settings.fixed_trade_size_sol <= 0:
+            errors.append("FIXED_SOL mode needs fixed_trade_size_sol above 0")
+        if settings.max_loss_per_trade_sol <= 0:
+            errors.append("FIXED_SOL mode needs max_loss_per_trade_sol above 0 (the planned loss limit per trade)")
+        if settings.fixed_trade_size_sol > settings.max_position_size_quote:
+            errors.append(f"fixed_trade_size_sol {settings.fixed_trade_size_sol} exceeds max_position_size_quote "
+                          f"{settings.max_position_size_quote}: raise the cap or lower the trade size")
+        if 0 < settings.fixed_trade_size_sol < settings.min_position_size_quote:
+            errors.append(f"fixed_trade_size_sol {settings.fixed_trade_size_sol} is below min_position_size_quote "
+                          f"{settings.min_position_size_quote}")
     return errors
 
 

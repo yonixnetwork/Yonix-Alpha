@@ -195,9 +195,10 @@ async def test_legacy_full_copy_still_replaces_global(db):
     assert (await store.engine_overrides(db, "solana_fresh"))["mode"] == "legacy_full_copy"
 
 
-async def test_save_for_all_engines_reaches_an_engine_that_had_its_own_value(db):
-    """The reported case: duplicates allowed from the dashboard, yet momentum
-    still rejected them because it kept its own stored value."""
+async def test_save_for_all_engines_removes_engine_values_only_when_asked_explicitly(db):
+    """Duplicates allowed from the dashboard, momentum still rejecting them
+    because it kept its own value: removing that value is an explicit
+    operator request (remove_engine_values), never a side effect."""
     g = settings_to_dict(settings_from_dict({}))
     await store.save_settings(db, "GLOBAL", g, None)
     await store.save_settings(db, "solana_momentum", {**g, "skip_duplicate_names": True, "min_name_length": 5}, None)
@@ -207,7 +208,8 @@ async def test_save_for_all_engines_reaches_an_engine_that_had_its_own_value(db)
     assert (await store.engine_overrides(db, "solana_momentum"))["values"] == {"min_name_length": 5}  # equal to GLOBAL now
 
     row, _, touched = await store.save_for_all_engines(db, {"skip_duplicate_names": False}, None,
-                                                       ["solana_fresh", "solana_migration", "solana_momentum"], "allow duplicates")
+                                                       ["solana_fresh", "solana_migration", "solana_momentum"], "allow duplicates",
+                                                       remove_engine_values=True)
     await db.commit()
     for engine in ("solana_fresh", "solana_migration", "solana_momentum", "binance_futures"):
         s, _ = await store.load_settings(db, engine)
@@ -220,12 +222,62 @@ async def test_save_for_all_engines_reaches_an_engine_that_had_its_own_value(db)
     await store.save_settings(db, "solana_fresh", {**settings_to_dict((await store.load_settings(db, "solana_fresh"))[0]),
                                                    "skip_duplicate_names": True}, None)
     await db.commit()
-    _, _, touched = await store.save_for_all_engines(db, {"skip_duplicate_names": False}, None, ["solana_fresh"])
+    _, _, touched = await store.save_for_all_engines(db, {"skip_duplicate_names": False}, None, ["solana_fresh"],
+                                                     remove_engine_values=True)
     await db.commit()
     assert touched == ["solana_fresh"] and (await store.load_settings(db, "solana_fresh"))[0].skip_duplicate_names is False
 
     with pytest.raises(store.SettingsError):
         await store.save_for_all_engines(db, {"no_such_setting": 1}, None, ["solana_fresh"])
+
+
+async def test_global_save_cannot_remove_the_migration_fixed_sol_size_cap(db):
+    """Regression for the 2026-10-09 23:29 save: a GLOBAL change of the sizing
+    keys removed the migration engine's own 0.01 SOL cap, while its 0.02 SOL
+    daily limit stayed. Engine values now survive any GLOBAL save."""
+    await store.save_settings(db, "GLOBAL", {}, None)
+    await store.save_settings(db, "solana_migration", {"max_position_size_quote": "0.01", "risk_per_trade_pct": "0.02",
+                                                       "max_daily_loss_quote": "0.02", "trade_size_mode": "FIXED_SOL",
+                                                       "fixed_trade_size_sol": "0.01", "max_loss_per_trade_sol": "0.002"}, None)
+    await db.commit()
+    for changes in ({"max_position_size_quote": "2", "risk_per_trade_pct": "0.02"}, {"max_position_size_quote": "1"},
+                    {"trade_size_mode": "RISK_PCT", "fixed_trade_size_sol": "0", "max_daily_loss_quote": "0.5"}):
+        _, _, kept = await store.save_for_all_engines(db, changes, None, ["solana_fresh", "solana_migration", "solana_momentum"])
+        await db.commit()
+        assert kept == ["solana_migration"]
+        m, _ = await store.load_settings(db, "solana_migration")
+        assert (m.max_position_size_quote, m.trade_size_mode, m.fixed_trade_size_sol) == (Decimal("0.01"), "FIXED_SOL", Decimal("0.01"))
+        assert (m.max_daily_loss_quote, m.max_loss_per_trade_sol) == (Decimal("0.02"), Decimal("0.002"))
+    # The GLOBAL save (plain PUT) keeps them too.
+    await store.save_settings(db, "GLOBAL", {"max_position_size_quote": "3"}, None)
+    await db.commit()
+    assert (await store.load_settings(db, "solana_migration"))[0].fixed_trade_size_sol == Decimal("0.01")
+
+
+async def test_saving_one_field_keeps_every_other_field(db):
+    await store.save_settings(db, "GLOBAL", {"min_liquidity_quote": "100", "max_open_positions": 2}, None)
+    await store.save_settings(db, "solana_migration", {"max_daily_loss_quote": "0.02", "min_stop_pct": "0.12"}, None)
+    await db.commit()
+    await store.save_settings(db, "GLOBAL", {"max_open_positions": 4}, None)  # one key only
+    await store.save_settings(db, "solana_migration", {"min_stop_pct": "0.15"}, None)
+    await db.commit()
+    g, _ = await store.load_settings(db, "GLOBAL")
+    assert (g.min_liquidity_quote, g.max_open_positions) == (Decimal("100"), 4)
+    m, _ = await store.load_settings(db, "solana_migration")
+    assert (m.max_daily_loss_quote, m.min_stop_pct, m.max_open_positions) == (Decimal("0.02"), Decimal("0.15"), 4)
+
+
+async def test_conflicting_fixed_sol_settings_are_refused_and_nothing_is_written(db):
+    before = await store.engine_overrides(db, "solana_migration")
+    for bad in ({"trade_size_mode": "FIXED_SOL", "fixed_trade_size_sol": "0.05"},  # no loss limit
+                {"trade_size_mode": "FIXED_SOL", "max_loss_per_trade_sol": "0.002"},  # no size
+                {"trade_size_mode": "FIXED_SOL", "fixed_trade_size_sol": "5", "max_loss_per_trade_sol": "0.1"},  # > max_position_size 1
+                {"fixed_trade_size_sol": "-0.1"}, {"max_daily_loss_quote": "-1"},
+                {"fixed_trade_size_sol": "0.0000000001"},  # finer than a lamport
+                {"trade_size_mode": "PERCENT"}):
+        with pytest.raises(store.SettingsError):
+            await store.save_settings(db, "solana_migration", bad, None)
+    assert await store.engine_overrides(db, "solana_migration") == before
 
 
 async def test_follow_global_for_one_key_keeps_the_others(db):
@@ -296,11 +348,14 @@ async def test_every_risk_setting_saved_on_the_dashboard_reaches_every_solana_en
 
     base = SafetySettings()
     untestable = []
+    # Values a setting is only valid together with (FIXED_SOL needs a size and a loss limit).
+    companions = {"trade_size_mode": {"fixed_trade_size_sol": Decimal("0.05"), "max_loss_per_trade_sol": Decimal("0.002")}}
     for f in fields(SafetySettings):
         current = getattr(base, f.name)
         chosen = None
+        extra = companions.get(f.name, {})
         for alt in _alternatives(f.name, current):
-            candidate = replace(base, **{f.name: alt})
+            candidate = replace(base, **{f.name: alt}, **extra)
             clamped, _ = clamp(candidate)
             if not validate(candidate) and getattr(clamped, f.name) == alt:
                 chosen = alt
@@ -308,7 +363,7 @@ async def test_every_risk_setting_saved_on_the_dashboard_reaches_every_solana_en
         if chosen is None:
             untestable.append(f.name)
             continue
-        await store.save_settings(db, "GLOBAL", settings_to_dict(replace(base, **{f.name: chosen})), None)
+        await store.save_settings(db, "GLOBAL", settings_to_dict(replace(base, **{f.name: chosen}, **extra)), None)
         await db.commit()
         for engine in ("solana_fresh", "solana_migration", "solana_momentum"):
             s, meta = await store.load_settings(db, engine)

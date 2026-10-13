@@ -37,15 +37,24 @@ class SettingsVersionOut(BaseModel):
 class SettingsSaved(BaseModel):
     version: SettingsVersionOut
     clamp_notes: list[str]
+    # The authoritative effective settings of the saved scope, read back from
+    # the database after the commit (what every engine now uses).
+    effective: dict[str, Any] | None = None
 
 
 class SettingsSavedAll(SettingsSaved):
+    # remove_engine_values: engines whose own value was removed; otherwise the
+    # engines that keep their own value for a changed key (nothing removed).
     engines_updated: list[str]
+    engine_values_removed: bool = False
 
 
 class SettingsChanges(BaseModel):
     changes: dict[str, Any]
     note: str | None = Field(None, max_length=256)
+    # Explicit operator request only: also remove the engines' own values for
+    # the changed keys. Default: engine values are kept.
+    remove_engine_values: bool = False
 
 
 class FollowGlobal(BaseModel):

@@ -85,6 +85,11 @@ class TradePlan:
     fixed_cost_quote: Decimal | None = None  # per-trade fixed costs counted in the loss at the stop
     fixed_cost_detail: dict | None = None
     leverage: Decimal = Decimal(1)
+    # Modelled loss if the stop fills (size x loss fraction + fixed costs).
+    # An estimate, not a guarantee: gaps and failed sells can lose more.
+    planned_loss_at_stop: Decimal | None = None
+    # FRESH / NEAR_MIGRATION / MIGRATED / MOMENTUM at the decision (gate.token_category)
+    token_category: str | None = None
     findings: list[Finding] = field(default_factory=list)
 
     @property
@@ -117,6 +122,8 @@ class TradePlan:
             "fixed_cost_quote": str(self.fixed_cost_quote) if self.fixed_cost_quote is not None else None,
             "fixed_cost_detail": self.fixed_cost_detail,
             "leverage": str(self.leverage),
+            "planned_loss_at_stop": str(self.planned_loss_at_stop) if self.planned_loss_at_stop is not None else None,
+            "token_category": self.token_category,
         }
 
 
@@ -210,6 +217,125 @@ def _adjust_targets(tps: list, entry_price: Decimal, t: TargetContext) -> list:
     return out
 
 
+_CAP_LABELS = {
+    "max_position_size": "max_position_size_quote",
+    "available_balance": "the available balance",
+    "total_exposure": "the remaining total exposure (max_total_exposure_quote minus open positions)",
+    "token_exposure": "the remaining exposure allowed for this token",
+    "pool_fraction": "max_pool_fraction of the pool's liquidity",
+    "impact_limit": "the largest size within the entry/exit price-impact limits",
+}
+
+
+def _cap_code(name: str) -> str:
+    return "INSUFFICIENT_BALANCE" if name == "available_balance" else f"FIXED_SIZE_ABOVE_{name.upper()}"
+
+
+def _fixed_size(plan: "TradePlan", settings: SafetySettings, caps: dict[str, Decimal], max_loss: Decimal, budget: Decimal,
+                fixed: Decimal, stop_pct: Decimal, model, quote, slip: Decimal, tfee: Decimal, side: str,
+                overrides: ManualOverrides, size_multiplier: Decimal,
+                refuse_uneconomic: bool) -> tuple[Decimal, tuple[Decimal, Decimal], Provenance, str] | None:
+    """FIXED_SOL sizing: the size is fixed_trade_size_sol. Every cap, the
+    planned loss at the stop and the soft-warning reduction are checked
+    against it; under policy REJECT any of them refuses the trade with the
+    exact reason, under REDUCE the size is lowered and every reduction is
+    reported. The size is never raised. Returns None when blocked (findings
+    appended)."""
+    f = plan.findings
+    requested = settings.fixed_trade_size_sol
+    reduce = settings.fixed_size_policy == "REDUCE"
+    policy = f"policy {settings.fixed_size_policy}"
+    plan.caps = dict(caps)
+    if requested <= 0:
+        f.append(_block("RISK_CALCULATION_UNAVAILABLE", "FIXED_SOL sizing needs fixed_trade_size_sol above 0 — not set"))
+        return None
+    if overrides.position_size_quote is not None and overrides.position_size_quote != requested:
+        f.append(_block(
+            "SIZE_SETTINGS_CONFLICT",
+            f"the strategy's manual position size ({overrides.position_size_quote} SOL, strategy settings / BUY_AMOUNT_SOL) "
+            f"differs from fixed_trade_size_sol {requested} SOL: clear one of them or make them equal — the trade is "
+            "refused rather than picking one silently"))
+        return None
+    size, notes = requested, []
+    plan.binding_cap = "fixed_trade_size"
+    for name, cap in sorted(caps.items(), key=lambda kv: kv[1]):
+        if size <= cap:
+            continue
+        if not reduce:
+            plan.binding_cap = name
+            f.append(_block(_cap_code(name), f"fixed trade size {requested} SOL exceeds {_CAP_LABELS.get(name, name)} "
+                                             f"({max(cap, Decimal(0)):.9f} SOL); {policy}: refused, never reduced silently"))
+            return None
+        size, plan.binding_cap = cap, name
+        notes.append(f"reduced to {_CAP_LABELS.get(name, name)} {max(cap, Decimal(0)):.9f}")
+    if size <= 0:
+        f.append(_block(_cap_code(plan.binding_cap), f"no size fits {_CAP_LABELS.get(plan.binding_cap, plan.binding_cap)}"))
+        return None
+
+    def costs_or_block(at: Decimal):
+        c = _costs_at(at, model, quote, slip, tfee, side)
+        if c is None:
+            f.append(_block("COSTS_UNDEFINED", f"execution costs at {at:.9f} SOL can't be estimated (no liquidity model and no "
+                                               "quote for this size)", RiskCategory.EXECUTION))
+        return c
+
+    costs = costs_or_block(size)
+    if costs is None:
+        return None
+    fixed_bps = fixed / size * BPS if fixed else Decimal(0)
+    if costs[0] + costs[1] + fixed_bps >= stop_pct * BPS:
+        plan.entry_cost_bps, plan.exit_cost_bps = costs
+        f.append(_block("STOP_INSIDE_COSTS",
+                        f"round-trip costs {(costs[0] + costs[1] + fixed_bps) / 100:.2f}% at {size:.9f} SOL meet or exceed the "
+                        f"stop distance {stop_pct:.2%} — the trade can't be profitable before the stop", RiskCategory.EXECUTION))
+        return None
+    loss = size * _loss_fraction(stop_pct, costs[0], costs[1], side) + fixed
+    if loss > max_loss:
+        if not reduce:
+            f.append(_block("TRADE_SIZE_EXCEEDS_RISK",
+                            f"planned loss at the stop {loss:.9f} SOL (size {size:.9f} SOL, stop {stop_pct:.2%}, costs "
+                            f"{(costs[0] + costs[1]) / 100:.2f}%" + (f", fixed costs {fixed:.9f} SOL" if fixed else "")
+                            + f") exceeds max_loss_per_trade_sol {max_loss} SOL; {policy}: refused"))
+            return None
+        for _ in range(SIZE_ITERATIONS * 2):
+            allowed = budget / _loss_fraction(stop_pct, costs[0], costs[1], side)
+            if size <= allowed:
+                break
+            size = allowed
+            costs = costs_or_block(size)
+            if costs is None:
+                return None
+        plan.binding_cap = "risk"
+        notes.append(f"reduced to {size:.9f} so the planned loss at the stop stays within {max_loss} SOL")
+    if size_multiplier < 1:
+        if not reduce:
+            f.append(_block("FIXED_SIZE_REDUCTION_REQUIRED",
+                            f"soft risk warnings require a size x{size_multiplier} below the fixed {requested} SOL; {policy}: "
+                            "refused (choose policy REDUCE to trade the smaller size)"))
+            return None
+        size = size * size_multiplier
+        notes.append(f"x{size_multiplier} for soft risk warnings")
+        costs = costs_or_block(size)
+        if costs is None:
+            return None
+    if refuse_uneconomic and fixed and fixed / size > settings.max_fixed_cost_pct:
+        f.append(_block("FIXED_COSTS_TOO_HIGH",
+                        f"fixed costs {fixed:.6f} are {fixed / size:.1%} of {size:.9f} SOL (max {settings.max_fixed_cost_pct:.1%}): "
+                        "the trade is too small to pay its own network fees; it is refused, never enlarged", RiskCategory.EXECUTION))
+        return None
+    if size < settings.min_position_size_quote:
+        f.append(_block("SIZE_BELOW_MINIMUM", f"size {size:.9f} SOL after {'; '.join(notes) or 'checks'} is below "
+                                              f"min_position_size {settings.min_position_size_quote}"))
+        return None
+    size = size.quantize(Decimal(1).scaleb(-9), rounding="ROUND_DOWN")  # whole lamports
+    if notes:
+        f.append(Finding(RiskCategory.ACCOUNT, "FIXED_SIZE_REDUCED", RiskLevel.MODERATE,
+                         f"fixed trade size {requested} SOL -> {size} SOL ({policy}): " + "; ".join(notes),
+                         FinalDecision.REDUCE_SIZE))
+    method = f"FIXED_SOL: fixed_trade_size_sol {requested}" + (f"; {'; '.join(notes)}" if notes else "")
+    return size, costs, Provenance.MANUAL, method
+
+
 def plan_trade(
     *,
     entry_price: Decimal | None,
@@ -300,10 +426,28 @@ def plan_trade(
     plan.stop_distance_pct = stop_pct
 
     # --- Maximum loss ------------------------------------------------------
-    if account.equity is None or account.equity <= 0:
-        f.append(_block("EQUITY_UNAVAILABLE", "account equity unavailable — maximum loss cannot be calculated"))
-        return plan
-    configured_max_loss = account.equity * settings.risk_per_trade_pct
+    # FIXED_SOL: the operator's absolute SOL limit; equity plays no part.
+    # RISK_PCT: equity x risk_per_trade_pct, capped by max_loss_per_trade_sol when set.
+    fixed_mode = settings.trade_size_mode == "FIXED_SOL"
+    abs_cap = settings.max_loss_per_trade_sol if settings.max_loss_per_trade_sol > 0 else None
+    if fixed_mode:
+        if abs_cap is None:
+            f.append(_block("RISK_CALCULATION_UNAVAILABLE",
+                            "FIXED_SOL sizing needs max_loss_per_trade_sol (the planned loss limit per trade) — not set"))
+            return plan
+        configured_max_loss = abs_cap
+        base_method, base_inputs = "max_loss_per_trade_sol (FIXED_SOL mode)", {"max_loss_per_trade_sol": abs_cap}
+    else:
+        if account.equity is None or account.equity <= 0:
+            f.append(_block("EQUITY_UNAVAILABLE", "account equity unavailable — maximum loss cannot be calculated"))
+            return plan
+        configured_max_loss = account.equity * settings.risk_per_trade_pct
+        base_method = "equity * risk_per_trade_pct"
+        base_inputs = {"equity": account.equity, "risk_per_trade_pct": settings.risk_per_trade_pct}
+        if abs_cap is not None and abs_cap < configured_max_loss:
+            configured_max_loss = abs_cap
+            base_method = "max_loss_per_trade_sol (below equity * risk_per_trade_pct)"
+            base_inputs = {**base_inputs, "max_loss_per_trade_sol": abs_cap}
     if overrides.max_risk_quote is not None:
         if overrides.max_risk_quote <= 0:
             f.append(_block("MANUAL_MAX_RISK_INVALID", "manual maximum risk must be positive"))
@@ -314,20 +458,16 @@ def plan_trade(
                     RiskCategory.ACCOUNT,
                     "MANUAL_MAX_RISK_REDUCED",
                     RiskLevel.MODERATE,
-                    f"manual maximum risk {overrides.max_risk_quote} exceeds risk_per_trade limit {configured_max_loss:.6f}; reduced",
+                    f"manual maximum risk {overrides.max_risk_quote} exceeds the per-trade loss limit {configured_max_loss:.6f}; reduced",
                     FinalDecision.REDUCE_SIZE,
                 )
             )
-            plan.max_loss = PlannedValue(configured_max_loss, Provenance.AUTO, "equity * risk_per_trade_pct (manual value exceeded it)")
+            plan.max_loss = PlannedValue(configured_max_loss, Provenance.AUTO, f"{base_method} (manual value exceeded it)")
         else:
             plan.max_loss = PlannedValue(overrides.max_risk_quote, Provenance.MANUAL, "operator-specified, validated")
     else:
-        plan.max_loss = PlannedValue(
-            configured_max_loss,
-            Provenance.AUTO,
-            "equity * risk_per_trade_pct",
-            {"equity": account.equity, "risk_per_trade_pct": settings.risk_per_trade_pct},
-        )
+        plan.max_loss = PlannedValue(configured_max_loss, Provenance.MANUAL if fixed_mode else Provenance.AUTO,
+                                     base_method, base_inputs)
     max_loss = plan.max_loss.value
     # Fixed per-trade costs (live network/priority fees, unreclaimed rent)
     # come out of the same budget: size * loss_fraction + fixed <= max_loss.
@@ -367,116 +507,125 @@ def plan_trade(
                 model, settings.max_entry_impact_bps, settings.max_exit_impact_bps, upper, side
             )
 
-    # --- Size: risk-based, iterated so costs are evaluated at the size used --
-    size = min(caps.values())
-    risk_size: Decimal | None = None
-    costs: tuple[Decimal, Decimal] | None = None
-    for _ in range(SIZE_ITERATIONS):
-        if size <= 0:
-            break
-        costs = _costs_at(size, model, quote, slip, tfee, side)
-        if costs is None:
+    if fixed_mode:
+        fixed_result = _fixed_size(plan, settings, caps, max_loss, budget, fixed, stop_pct, model, quote, slip, tfee,
+                                   side, overrides, size_multiplier, refuse_uneconomic)
+        if fixed_result is None:
+            return plan
+        final_size, final_costs, prov, method = fixed_result
+        risk_size = None
+    else:
+        # --- Size: risk-based, iterated so costs are evaluated at the size used --
+        size = min(caps.values())
+        risk_size: Decimal | None = None
+        costs: tuple[Decimal, Decimal] | None = None
+        for _ in range(SIZE_ITERATIONS):
+            if size <= 0:
+                break
+            costs = _costs_at(size, model, quote, slip, tfee, side)
+            if costs is None:
+                f.append(
+                    _block(
+                        "COSTS_UNDEFINED",
+                        "execution costs at the planned size can't be estimated (no liquidity model and no quote for this size)",
+                        RiskCategory.EXECUTION,
+                    )
+                )
+                return plan
+            loss_frac = _loss_fraction(stop_pct, costs[0], costs[1], side)
+            if loss_frac <= 0:
+                f.append(_block("LOSS_UNDEFINED", "loss fraction non-positive — invalid cost/stop inputs"))
+                return plan
+            risk_size = budget / loss_frac
+            new_size = min([risk_size, *caps.values()])
+            if new_size == size:
+                break
+            size = new_size
+
+        fixed_bps = (fixed / size * BPS) if fixed and size > 0 else Decimal(0)
+        if costs is not None and costs[0] + costs[1] + fixed_bps >= stop_pct * BPS:
+            # Recorded so the decision can be audited: at which size, how the
+            # cost splits, and which caps bounded the size.
+            plan.caps, plan.entry_cost_bps, plan.exit_cost_bps = dict(caps), costs[0], costs[1]
             f.append(
                 _block(
-                    "COSTS_UNDEFINED",
-                    "execution costs at the planned size can't be estimated (no liquidity model and no quote for this size)",
+                    "STOP_INSIDE_COSTS",
+                    f"round-trip costs {(costs[0] + costs[1]) / 100:.2f}% meet or exceed the stop distance {stop_pct:.2%} — the trade can't be profitable before the stop "
+                    f"(at size {size:.6g}: entry {costs[0] / 100:.2f}%, exit {costs[1] / 100:.2f}% incl. {slip / 100:.2f}% slippage allowance"
+                    + (f" and {tfee / 100:.2f}% transfer fee" if tfee else "")
+                    + (f", plus fixed costs {fixed:.6f} = {fixed_bps / 100:.2f}%" if fixed else "") + ")",
                     RiskCategory.EXECUTION,
                 )
             )
             return plan
-        loss_frac = _loss_fraction(stop_pct, costs[0], costs[1], side)
-        if loss_frac <= 0:
-            f.append(_block("LOSS_UNDEFINED", "loss fraction non-positive — invalid cost/stop inputs"))
+
+        binding = min(caps, key=lambda k: caps[k])
+        plan.caps = dict(caps)
+        plan.binding_cap = "risk" if risk_size is not None and risk_size <= caps[binding] else binding
+
+        if overrides.position_size_quote is not None:
+            requested = overrides.position_size_quote
+            if requested <= 0:
+                f.append(_block("MANUAL_SIZE_INVALID", "manual position size must be positive"))
+                return plan
+            if requested > size:
+                f.append(
+                    Finding(
+                        RiskCategory.ACCOUNT,
+                        "MANUAL_SIZE_REDUCED",
+                        RiskLevel.MODERATE,
+                        f"manual size {requested} exceeds safe size {size:.6f} (bound by {plan.binding_cap}); reduced",
+                        FinalDecision.REDUCE_SIZE,
+                    )
+                )
+                final_size, prov, method = size, Provenance.AUTO, f"manual size reduced to {plan.binding_cap} bound"
+            else:
+                final_size, prov, method = requested, Provenance.MANUAL, "operator-specified, validated against every cap"
+        else:
+            final_size, prov, method = size, Provenance.AUTO, f"min(max_loss / loss_fraction, caps) — bound by {plan.binding_cap}"
+
+        if size_multiplier < 1:
+            final_size = final_size * size_multiplier
+            method += f"; x{size_multiplier} for soft risk warnings"
+
+        # Enforce the invariant directly rather than trusting the iteration
+        # above to have converged: size * loss_fraction(costs at that size) must
+        # not exceed max_loss. Costs only fall as size falls, so this terminates.
+        final_costs = costs
+        for _ in range(SIZE_ITERATIONS * 2):
+            if final_size <= 0:
+                break
+            final_costs = _costs_at(final_size, model, quote, slip, tfee, side) or final_costs
+            if final_costs is None:
+                break
+            allowed = budget / _loss_fraction(stop_pct, final_costs[0], final_costs[1], side)
+            if final_size <= allowed:
+                break
+            final_size = allowed
+            method += "; reduced so loss at stop (after costs" + (" and fixed costs" if fixed else "") + ") stays within max_loss"
+
+        # LIVE only (refuse_uneconomic): a PAPER trade charged the LIVE fixed costs already pays them in
+        # its result, and refusing it would only remove evidence.
+        if refuse_uneconomic and fixed and final_size > 0 and fixed / final_size > settings.max_fixed_cost_pct:
+            plan.caps = dict(caps)
+            f.append(_block(
+                "FIXED_COSTS_TOO_HIGH",
+                f"fixed costs {fixed:.6f} are {fixed / final_size:.1%} of the safe size {final_size:.6f} "
+                f"(max {settings.max_fixed_cost_pct:.1%}): the trade is too small to pay its own network fees "
+                f"(bound by {plan.binding_cap}); it is refused, never enlarged", RiskCategory.EXECUTION))
             return plan
-        risk_size = budget / loss_frac
-        new_size = min([risk_size, *caps.values()])
-        if new_size == size:
-            break
-        size = new_size
 
-    fixed_bps = (fixed / size * BPS) if fixed and size > 0 else Decimal(0)
-    if costs is not None and costs[0] + costs[1] + fixed_bps >= stop_pct * BPS:
-        # Recorded so the decision can be audited: at which size, how the
-        # cost splits, and which caps bounded the size.
-        plan.caps, plan.entry_cost_bps, plan.exit_cost_bps = dict(caps), costs[0], costs[1]
-        f.append(
-            _block(
-                "STOP_INSIDE_COSTS",
-                f"round-trip costs {(costs[0] + costs[1]) / 100:.2f}% meet or exceed the stop distance {stop_pct:.2%} — the trade can't be profitable before the stop "
-                f"(at size {size:.6g}: entry {costs[0] / 100:.2f}%, exit {costs[1] / 100:.2f}% incl. {slip / 100:.2f}% slippage allowance"
-                + (f" and {tfee / 100:.2f}% transfer fee" if tfee else "")
-                + (f", plus fixed costs {fixed:.6f} = {fixed_bps / 100:.2f}%" if fixed else "") + ")",
-                RiskCategory.EXECUTION,
-            )
-        )
-        return plan
-
-    binding = min(caps, key=lambda k: caps[k])
-    plan.caps = dict(caps)
-    plan.binding_cap = "risk" if risk_size is not None and risk_size <= caps[binding] else binding
-
-    if overrides.position_size_quote is not None:
-        requested = overrides.position_size_quote
-        if requested <= 0:
-            f.append(_block("MANUAL_SIZE_INVALID", "manual position size must be positive"))
-            return plan
-        if requested > size:
+        if final_size <= 0 or final_size < settings.min_position_size_quote or final_costs is None:
             f.append(
-                Finding(
-                    RiskCategory.ACCOUNT,
-                    "MANUAL_SIZE_REDUCED",
-                    RiskLevel.MODERATE,
-                    f"manual size {requested} exceeds safe size {size:.6f} (bound by {plan.binding_cap}); reduced",
-                    FinalDecision.REDUCE_SIZE,
+                _block(
+                    "SIZE_BELOW_MINIMUM",
+                    f"safe size {max(final_size, Decimal(0)):.6f} is below min_position_size {settings.min_position_size_quote} (bound by {plan.binding_cap})",
                 )
             )
-            final_size, prov, method = size, Provenance.AUTO, f"manual size reduced to {plan.binding_cap} bound"
-        else:
-            final_size, prov, method = requested, Provenance.MANUAL, "operator-specified, validated against every cap"
-    else:
-        final_size, prov, method = size, Provenance.AUTO, f"min(max_loss / loss_fraction, caps) — bound by {plan.binding_cap}"
-
-    if size_multiplier < 1:
-        final_size = final_size * size_multiplier
-        method += f"; x{size_multiplier} for soft risk warnings"
-
-    # Enforce the invariant directly rather than trusting the iteration
-    # above to have converged: size * loss_fraction(costs at that size) must
-    # not exceed max_loss. Costs only fall as size falls, so this terminates.
-    final_costs = costs
-    for _ in range(SIZE_ITERATIONS * 2):
-        if final_size <= 0:
-            break
-        final_costs = _costs_at(final_size, model, quote, slip, tfee, side) or final_costs
-        if final_costs is None:
-            break
-        allowed = budget / _loss_fraction(stop_pct, final_costs[0], final_costs[1], side)
-        if final_size <= allowed:
-            break
-        final_size = allowed
-        method += "; reduced so loss at stop (after costs" + (" and fixed costs" if fixed else "") + ") stays within max_loss"
-
-    # LIVE only (refuse_uneconomic): a PAPER trade charged the LIVE fixed costs already pays them in
-    # its result, and refusing it would only remove evidence.
-    if refuse_uneconomic and fixed and final_size > 0 and fixed / final_size > settings.max_fixed_cost_pct:
-        plan.caps = dict(caps)
-        f.append(_block(
-            "FIXED_COSTS_TOO_HIGH",
-            f"fixed costs {fixed:.6f} are {fixed / final_size:.1%} of the safe size {final_size:.6f} "
-            f"(max {settings.max_fixed_cost_pct:.1%}): the trade is too small to pay its own network fees "
-            f"(bound by {plan.binding_cap}); it is refused, never enlarged", RiskCategory.EXECUTION))
-        return plan
-
-    if final_size <= 0 or final_size < settings.min_position_size_quote or final_costs is None:
-        f.append(
-            _block(
-                "SIZE_BELOW_MINIMUM",
-                f"safe size {max(final_size, Decimal(0)):.6f} is below min_position_size {settings.min_position_size_quote} (bound by {plan.binding_cap})",
-            )
-        )
-        return plan
+            return plan
 
     plan.entry_cost_bps, plan.exit_cost_bps = final_costs
+    plan.planned_loss_at_stop = final_size * _loss_fraction(stop_pct, final_costs[0], final_costs[1], side) + fixed
     plan.position_size = PlannedValue(
         final_size, prov, method, {k: v for k, v in caps.items()} | {"risk_size": risk_size, "max_loss": max_loss}
         | ({"fixed_costs": fixed, "risk_budget_after_fixed_costs": budget} if fixed else {})

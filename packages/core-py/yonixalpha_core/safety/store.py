@@ -179,6 +179,11 @@ async def save_settings(
     overrides), so later GLOBAL changes keep reaching it. Returns the row
     and the clamp notes. Raises SettingsError when the settings are
     inconsistent — nothing is written then."""
+    # A partial save changes only the keys it sends: every other key keeps
+    # this scope's current effective value instead of falling back to a code
+    # default (a dashboard sending one field must not reset the rest).
+    current, _meta = await load_settings(session, scope)
+    data = {**settings_to_dict(current), **{k: v for k, v in (data or {}).items()}}
     try:
         parsed = settings_from_dict(data)
     except (ValueError, TypeError, ArithmeticError) as exc:
@@ -252,12 +257,21 @@ async def follow_global(session: AsyncSession, engine: str, user_id: uuid.UUID |
 
 
 async def save_for_all_engines(session: AsyncSession, changes: dict[str, Any], user_id: uuid.UUID | None,
-                               engines: list[str], note: str | None = None) -> tuple[RiskSettingsVersion, list[str], list[str]]:
-    """One change for every engine: `changes` are written into GLOBAL, and
-    every engine that overrides one of those keys drops that override, so
-    the new value is what every engine uses. Other engine-specific values
-    stay. Returns (GLOBAL row, clamp notes, engines whose override was removed).
-    Raises SettingsError (nothing written) when the result is invalid."""
+                               engines: list[str], note: str | None = None,
+                               remove_engine_values: bool = False) -> tuple[RiskSettingsVersion, list[str], list[str]]:
+    """`changes` are written into GLOBAL in one transaction.
+
+    Engine-specific values are KEPT unless the operator explicitly asks for
+    them to be removed (`remove_engine_values`): on 2026-10-09 a GLOBAL save
+    of max_position_size_quote / risk_per_trade_pct silently dropped the
+    migration engine's own 0.01 SOL size cap while its 0.02 SOL daily limit
+    stayed, so one ordinary stop (0.0968 SOL) used up the day's limit.
+
+    Returns (GLOBAL row, clamp notes, engines): with remove_engine_values the
+    engines whose override of a changed key was removed, otherwise the
+    engines that still use their own value for a changed key (reported to the
+    operator, never changed). Raises SettingsError (nothing written) when the
+    result is invalid."""
     glob = await _latest_settings_row(session, GLOBAL_SCOPE)
     current = _base_dict(glob, GLOBAL_SCOPE) if glob else settings_to_dict(default_settings_for(GLOBAL_SCOPE))
     unknown = sorted(set(changes) - set(current))
@@ -271,10 +285,18 @@ async def save_for_all_engines(session: AsyncSession, changes: dict[str, Any], u
         own, overrides = await _engine_own(session, engine)
         if own is None:
             continue
-        if set(overrides) & set(changes) or not is_override_row(own):
-            await follow_global(session, engine, user_id, keys=list(changes))
-            if set(overrides) & set(changes):
+        if not is_override_row(own):
+            # A legacy full copy ignores GLOBAL entirely: convert it to overrides
+            # (its own values, measured against the new GLOBAL, are all kept).
+            await follow_global(session, engine, user_id, keys=list(changes) if remove_engine_values else [])
+            if remove_engine_values and set(overrides) & set(changes):
                 touched.append(engine)
+            continue
+        if not set(overrides) & set(changes):
+            continue
+        if remove_engine_values:
+            await follow_global(session, engine, user_id, keys=list(changes))
+        touched.append(engine)
     return row, notes, touched
 
 
@@ -393,7 +415,8 @@ def notional_value(p: PaperPosition) -> Decimal:
 
 
 async def account_state(
-    session: AsyncSession, account: PaperAccount, asset_id: str | None, now: datetime, kill_switch_engaged: bool
+    session: AsyncSession, account: PaperAccount, asset_id: str | None, now: datetime, kill_switch_engaged: bool,
+    engine: str | None = None,
 ) -> AccountState:
     """Equity is cash plus open positions marked at their last observed
     price (entry price until the first mark; futures: margin + unrealized
@@ -420,6 +443,15 @@ async def account_state(
             )
         )
     ).scalar_one()
+    strategy_daily = None
+    if engine is not None:
+        strategy_daily = Decimal((
+            await session.execute(
+                select(func.coalesce(func.sum(PaperPosition.realized_pnl), 0)).where(
+                    PaperPosition.account_id == account.id, PaperPosition.status == "closed",
+                    PaperPosition.exit_at >= day_start, PaperPosition.engine == engine)
+            )
+        ).scalar_one())
     last_loss = (
         await session.execute(
             select(func.max(PaperPosition.exit_at)).where(
@@ -436,6 +468,8 @@ async def account_state(
         last_loss_at=last_loss,
         token_exposure=token_exposure,
         kill_switch_engaged=kill_switch_engaged,
+        strategy_daily_realized_pnl=strategy_daily,
+        account_name=account.name,
     )
 
 
