@@ -87,6 +87,22 @@ def _check_scope(scope: str) -> None:
 
 # --- settings -----------------------------------------------------------------
 
+@router.get("/risk-summary")
+async def risk_summary(db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
+                       _: str = Depends(get_current_username)) -> dict:
+    """Sizing mode, SOL limits, realized loss today, remaining daily budget,
+    open-position PnL / planned risk (apart from realized), entries refused by
+    risk controls, and each strategy's effective configuration and status,
+    all computed by the risk engine's own functions. Read-only."""
+    from yonixalpha_core import risk_summary as rs
+    from yonixalpha_core.live_trading import LIVE_ACCOUNT
+
+    live = (await db.execute(select(func.count()).select_from(PaperAccount).where(PaperAccount.name == LIVE_ACCOUNT))).scalar_one()
+    out = await rs.build(db, redis, live_configured=bool(live))
+    await db.commit()  # only ever creates the default paper book on first use, like /summary
+    return out
+
+
 @router.get("/settings/{scope}", response_model=SettingsOut)
 async def get_risk_settings(scope: str, db: AsyncSession = Depends(get_db), _: str = Depends(get_current_username)) -> SettingsOut:
     _check_scope(scope)
@@ -129,7 +145,13 @@ async def put_risk_settings(
     except store.SettingsError as exc:
         raise HTTPException(422, {"errors": exc.errors}) from exc
     await db.commit()
-    return SettingsSaved(version=SettingsVersionOut.model_validate(row), clamp_notes=notes)
+    return SettingsSaved(version=SettingsVersionOut.model_validate(row), clamp_notes=notes,
+                         effective=await _effective(db, scope))
+
+
+async def _effective(db: AsyncSession, scope: str) -> dict:
+    settings, _ = await store.load_settings(db, scope)
+    return settings_to_dict(settings)
 
 
 @router.post("/settings/{scope}/follow-global", response_model=SettingsSaved)
@@ -141,23 +163,27 @@ async def follow_global(scope: str, request: Request, body: FollowGlobal | None 
         raise HTTPException(422, "GLOBAL cannot follow itself")
     row = await store.follow_global(db, scope, await _user_id(db, username), keys=body.keys if body else None)
     await db.commit()
-    return SettingsSaved(version=SettingsVersionOut.model_validate(row), clamp_notes=[])
+    return SettingsSaved(version=SettingsVersionOut.model_validate(row), clamp_notes=[], effective=await _effective(db, scope))
 
 
 @router.post("/settings-all", response_model=SettingsSavedAll)
 async def save_for_all_engines(body: SettingsChanges, request: Request, db: AsyncSession = Depends(get_db),
                                username: str = Depends(get_current_username)) -> SettingsSavedAll:
-    """Saves the changed keys once for every engine: written into GLOBAL, and
-    removed from every engine that overrode them. One transaction."""
+    """Saves the changed keys into GLOBAL (one transaction). Engines that use
+    their own value for a changed key keep it unless remove_engine_values is
+    set explicitly; the response names them either way."""
     if not body.changes:
         raise HTTPException(422, "no changes")
     try:
         row, notes, touched = await store.save_for_all_engines(db, body.changes, await _user_id(db, username),
-                                                               [s for s in SCOPES if s != store.GLOBAL_SCOPE], body.note)
+                                                               [s for s in SCOPES if s != store.GLOBAL_SCOPE], body.note,
+                                                               remove_engine_values=body.remove_engine_values)
     except store.SettingsError as exc:
         raise HTTPException(422, {"errors": exc.errors}) from exc
     await db.commit()
-    return SettingsSavedAll(version=SettingsVersionOut.model_validate(row), clamp_notes=notes, engines_updated=touched)
+    return SettingsSavedAll(version=SettingsVersionOut.model_validate(row), clamp_notes=notes, engines_updated=touched,
+                            engine_values_removed=body.remove_engine_values,
+                            effective=await _effective(db, store.GLOBAL_SCOPE))
 
 
 @router.get("/settings/{scope}/history", response_model=list[SettingsVersionOut])

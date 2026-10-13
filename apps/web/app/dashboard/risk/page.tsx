@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import Pagination from "@/components/Pagination";
+import RiskSummary from "@/components/RiskSummary";
 import { usePagedList } from "@/lib/usePagedList";
 import { boolPillClass, formatDate } from "@/lib/format";
 import type { RiskEventOut } from "@/lib/types";
@@ -15,6 +16,8 @@ export default function RiskEventsPage() {
       <div className="page-header">
         <div className="page-title">Risk Events</div>
       </div>
+
+      <RiskSummary />
 
       <div className="filters">
         <select value={approved} onChange={(e) => setApproved(e.target.value)}>

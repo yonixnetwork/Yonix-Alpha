@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { apiGet, apiPost, apiPut, ApiError } from "@/lib/api";
 import { formatDate } from "@/lib/format";
 import type { SettingsOut, SettingsVersionOut } from "@/lib/types";
+import RiskSummary from "@/components/RiskSummary";
 import RuntimeApply from "@/components/RuntimeApply";
 
 const SCOPES = ["GLOBAL", "solana_fresh", "solana_migration", "solana_momentum"];
@@ -14,6 +15,11 @@ type Value = string | number | boolean | string[] | null;
 // First match wins; `also` shows a key that belongs to another section here
 // too (same value, edited in either place).
 const SECTIONS: { title: string; match: (k: string) => boolean; also?: string[]; note?: string }[] = [
+  {
+    title: "Trade size & loss limits (SOL)",
+    match: (k) => /^trade_size_mode$|^fixed_trade_size_sol$|^fixed_size_policy$|^max_loss_per_trade_sol$|^max_daily_loss_quote$/.test(k),
+    note: "Three independent values. FIXED_TRADE_SIZE_SOL (fixed_trade_size_sol, with trade_size_mode FIXED_SOL) is the SOL each entry uses — account equity never changes it. MAX_LOSS_PER_TRADE_SOL (max_loss_per_trade_sol) is the most a trade may lose at its stop including fees, as modelled; a stop is not a guaranteed maximum (gaps, liquidity loss and failed sells can lose more). MAX_DAILY_LOSS_SOL (max_daily_loss_quote, on GLOBAL) is the realized loss since 00:00 UTC, every Solana strategy together, that stops new entries; a strategy's own value limits only that strategy's losses. Open positions keep their stops and exits when a limit is reached.",
+  },
   { title: "Account & sizing", match: (k) => /risk_per_trade|position_size|open_positions|daily_loss|exposure|cooldown/.test(k) },
   {
     title: "Creator risk",
@@ -48,6 +54,11 @@ const SECTIONS: { title: string; match: (k: string) => boolean; also?: string[];
 ];
 
 const HELP: Record<string, string> = {
+  trade_size_mode: "FIXED_SOL: every entry uses fixed_trade_size_sol. RISK_PCT: size from equity x risk_per_trade_pct and the stop distance (the original behaviour).",
+  fixed_trade_size_sol: "SOL per entry in FIXED_SOL mode (up to 9 decimals = 1 lamport). Must be within min/max_position_size_quote.",
+  fixed_size_policy: "When the fixed size breaks a cap, the per-trade loss limit or needs a soft-warning reduction: REJECT refuses the trade with the reason (default); REDUCE trades the largest size that fits and reports each reduction. Never enlarged.",
+  max_loss_per_trade_sol: "Most a trade may lose at its stop, fees included, in SOL. Required in FIXED_SOL; in RISK_PCT it also caps equity x risk_per_trade_pct. 0 = not set.",
+  max_daily_loss_quote: "MAX_DAILY_LOSS_SOL. On GLOBAL: the account's realized-loss limit since 00:00 UTC, all Solana strategies together. On a strategy: that strategy's own losses only.",
   risk_per_trade_pct: "Loss at the stop, after all costs, as a fraction of equity (0.01 = 1%).",
   max_pool_fraction: "Largest position as a fraction of pool liquidity.",
   max_round_trip_loss_bps: "Refuse if buying and immediately selling would lose more than this.",
@@ -183,11 +194,15 @@ export default function RiskSettingsPage() {
     }
   }
 
+  const [removeEngineValues, setRemoveEngineValues] = useState(false);
+
   const valueOf = (k: string) => fromInput(data!.effective[k], draft[k] ?? toInput(data!.effective[k]));
 
-  /** `all`: one change for every engine — written into GLOBAL and removed
-   * from every engine that had its own value for it (one server transaction).
-   * Otherwise only this scope is saved. */
+  /** `all`: the change is written into GLOBAL (one server transaction).
+   * Engines with their own value for a changed key KEEP it unless the
+   * operator ticks "also remove their own values" — a GLOBAL save never
+   * deletes a strategy's limits as a side effect. Otherwise only this scope
+   * is saved. Either way the page shows what the server stored. */
   async function save(all: boolean) {
     if (!data) return;
     setBusy(true);
@@ -196,21 +211,25 @@ export default function RiskSettingsPage() {
     try {
       if (all) {
         const changes = Object.fromEntries([...changed].map((k) => [k, valueOf(k)]));
-        const res = await apiPost<{ version: SettingsVersionOut; clamp_notes: string[]; engines_updated: string[] }>(
-          "/api/control/settings-all", { changes, note: note || null });
-        setSaved(`Saved for ALL engines (GLOBAL version ${res.version.version}).` +
-          (res.engines_updated.length ? ` Removed the engine-only value in ${res.engines_updated.join(", ")}.` : "") +
+        const res = await apiPost<{ version: SettingsVersionOut; clamp_notes: string[]; engines_updated: string[];
+          engine_values_removed: boolean; effective: Record<string, Value> }>(
+          "/api/control/settings-all", { changes, note: note || null, remove_engine_values: removeEngineValues });
+        const stored = Object.keys(changes).map((k) => `${k} = ${show(res.effective?.[k])}`).join(", ");
+        setSaved(`SAVED to GLOBAL version ${res.version.version}: ${stored}.` +
+          (res.engines_updated.length ? (res.engine_values_removed
+            ? ` Removed the engine-only value in ${res.engines_updated.join(", ")}.`
+            : ` Kept the engine-only value in ${res.engines_updated.join(", ")} (they still use their own).`) : "") +
           (res.clamp_notes.length ? ` Bounded by hard limits: ${res.clamp_notes.join("; ")}` : ""));
+        setRemoveEngineValues(false);
       } else {
         // Always the complete set: a key left out would fall back to the code
         // default on the server rather than keep its current value.
         const payload = Object.fromEntries(Object.keys(data.effective).map((k) => [k, valueOf(k)]));
-        const res = await apiPut<{ version: SettingsVersionOut; clamp_notes: string[] }>(`/api/control/settings/${scope}`, {
-          settings: payload,
-          note: note || null,
-        });
-        setSaved(`Saved for ${scope === "GLOBAL" ? "GLOBAL (engines with their own value for a key keep it)" : `${scope} ONLY`} ` +
-          `as version ${res.version.version}.` + (res.clamp_notes.length ? ` Bounded by hard limits: ${res.clamp_notes.join("; ")}` : ""));
+        const res = await apiPut<{ version: SettingsVersionOut; clamp_notes: string[]; effective: Record<string, Value> }>(
+          `/api/control/settings/${scope}`, { settings: payload, note: note || null });
+        const stored = [...changed].map((k) => `${k} = ${show(res.effective?.[k])}`).join(", ");
+        setSaved(`SAVED for ${scope === "GLOBAL" ? "GLOBAL (engines with their own value for a key keep it)" : `${scope} ONLY`} ` +
+          `as version ${res.version.version}: ${stored}.` + (res.clamp_notes.length ? ` Bounded by hard limits: ${res.clamp_notes.join("; ")}` : ""));
       }
       setNote("");
       await load();
@@ -228,6 +247,7 @@ export default function RiskSettingsPage() {
       <div className="page-header">
         <div className="page-title">Risk Settings</div>
       </div>
+      <RiskSummary />
       <p className="muted">
         Runtime thresholds used by the safety gate, stored in the database and versioned. Hard limits cannot be
         exceeded from here. Secrets and API keys are never stored here; they stay in the server&apos;s .env.
@@ -345,8 +365,12 @@ export default function RiskSettingsPage() {
         <div className="inline-form" style={{ marginTop: 20 }}>
           <input placeholder="Change note (optional)" value={note} onChange={(e) => setNote(e.target.value)} maxLength={256} />
           <button className="btn" disabled={busy || changed.size === 0} onClick={() => save(true)}>
-            {busy ? "Saving…" : `Save ${changed.size} change${changed.size === 1 ? "" : "s"} for ALL engines`}
+            {busy ? "Saving…" : `Save ${changed.size} change${changed.size === 1 ? "" : "s"} to GLOBAL (all engines)`}
           </button>
+          <label className="small" title="Explicit request: engines that use their own value for a changed key are switched back to GLOBAL for that key.">
+            <input type="checkbox" checked={removeEngineValues} onChange={(e) => setRemoveEngineValues(e.target.checked)} />
+            {" "}also remove the engines&apos; own values for these keys
+          </label>
           <button className="btn btn-ghost" disabled={busy || changed.size === 0} onClick={() => save(false)}>
             {scope === "GLOBAL" ? "Save GLOBAL only (keep engine values)" : `Save for ${scope} only`}
           </button>
