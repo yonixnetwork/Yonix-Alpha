@@ -172,3 +172,12 @@ def test_token_category_is_the_tokens_state_not_the_strategys_name():
     assert token_category(healthy(engine="solana_migration"), s) == "MIGRATED"
     assert token_category(healthy(engine="solana_momentum"), s) == "MOMENTUM"
     assert assess(healthy(), s).plan.to_dict()["token_category"] == "FRESH"
+
+
+def test_a_reduced_fixed_size_is_re_checked_against_the_stop_with_its_fixed_fees():
+    # fixed fees of 0.004 SOL: 4% of 0.1 SOL is fine, but on the size reduced to the
+    # 0.003 SOL loss limit they exceed the stop distance -> refused, never traded at a loss
+    inp = healthy(fixed_cost_quote=Decimal("0.004"), paper_fixed_costs=True)
+    r = assess(inp, fixed(size="0.1", max_loss="0.0045", policy="REDUCE"))
+    msg = next(f.message for f in r.findings if f.code == "STOP_INSIDE_COSTS")
+    assert not r.executable and msg.startswith("after reduced to"), r.reasons

@@ -318,6 +318,12 @@ def _fixed_size(plan: "TradePlan", settings: SafetySettings, caps: dict[str, Dec
         costs = costs_or_block(size)
         if costs is None:
             return None
+    if notes and costs[0] + costs[1] + (fixed / size * BPS if fixed else Decimal(0)) >= stop_pct * BPS:
+        # A reduced size pays the same fixed fees on less SOL: re-checked at the size actually traded.
+        f.append(_block("STOP_INSIDE_COSTS",
+                        f"after {'; '.join(notes)}: round-trip costs at {size:.9f} SOL meet or exceed the stop distance "
+                        f"{stop_pct:.2%} — the trade can't be profitable before the stop", RiskCategory.EXECUTION))
+        return None
     if refuse_uneconomic and fixed and fixed / size > settings.max_fixed_cost_pct:
         f.append(_block("FIXED_COSTS_TOO_HIGH",
                         f"fixed costs {fixed:.6f} are {fixed / size:.1%} of {size:.9f} SOL (max {settings.max_fixed_cost_pct:.1%}): "
