@@ -230,7 +230,7 @@ async def evaluate_with_gate(
     # the same reason (on 2026-10-12, 12,550 of 12,782 migration evaluations
     # were DAILY_LOSS_LIMIT refusals that each fetched the full token state).
     blocked = [b for b in account_blockers(controls.account, controls.settings, now)
-               if b.hard_block or b.decision == FinalDecision.WAIT]
+               if b.hard_block or b.action == FinalDecision.WAIT]
     if blocked:
         await _account_blocked(session, redis, candidate, engine, blocked, now, operator)
         return None

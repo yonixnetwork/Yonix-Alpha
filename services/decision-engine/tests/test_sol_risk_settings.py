@@ -141,3 +141,16 @@ async def test_manual_buy_cannot_bypass_the_daily_limit(db_session, redis_client
     assert await evaluate_with_gate(db_session, redis_client, ENV, Sources(redis_client, rpc), cand, NOW, operator=operator) is None
     assert operator["result"]["status"] == "BLOCKED" and operator["result"]["reason"].startswith("DAILY_LOSS_LIMIT")
     assert rpc.calls == []
+
+
+async def test_loss_cooldown_waits_before_any_token_data_without_crashing(db_session, redis_client):
+    # LOSS_COOLDOWN is a WAIT, not a hard block: the pre-check read the wrong
+    # attribute (Finding.decision) and crashed every evaluation during a cooldown.
+    await store.save_settings(db_session, "GLOBAL", {**SOL, "cooldown_after_loss_seconds": 600}, None)
+    await db_session.commit()
+    await closed_loss(db_session, "solana_fresh", "-0.001")
+    curve = await seed_healthy_launch(redis_client, NOW)
+    cand = await make_candidate(db_session)
+    rpc = FakeRpc(curve)
+    assert await evaluate_with_gate(db_session, redis_client, ENV, Sources(redis_client, rpc), cand, NOW) is None
+    assert cand.detail["entry_blocked"]["codes"] == ["LOSS_COOLDOWN"] and rpc.calls == []
