@@ -27,6 +27,8 @@ jobs:
           - services/decision-engine
           - services/ml
           - services/paper-trading
+          - packages/crypto-py
+          - services/crypto-trading
     steps:
       - uses: actions/checkout@v4
 
@@ -49,6 +51,8 @@ jobs:
         run: |
           if [ "${{ matrix.project }}" = "packages/core-py" ]; then
             ruff check yonixalpha_core tests
+          elif [ "${{ matrix.project }}" = "packages/crypto-py" ]; then
+            ruff check yonixalpha_crypto tests
           else
             ruff check app tests
           fi

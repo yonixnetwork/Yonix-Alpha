@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { ArrowRightLeft, BarChart3, Bell, Boxes, Copy, Fingerprint, FlaskRound, Layers, Link2, Brain, ClipboardCheck, Eye, FlaskConical, Filter, Gauge, LayoutDashboard, ListChecks, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Radio, Rocket, Search, Send, Server, Settings, ShieldAlert, SlidersHorizontal, Network, Sparkles, Timer, Wallet, WalletCards, Workflow, type LucideIcon } from "lucide-react";
+import { ArrowRightLeft, BarChart3, Bell, Boxes, CandlestickChart, Copy, Fingerprint, FlaskRound, Layers, Link2, Brain, ClipboardCheck, Eye, FlaskConical, Filter, Gauge, LayoutDashboard, ListChecks, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Radio, Rocket, Search, Send, Server, Settings, ShieldAlert, SlidersHorizontal, Network, Sparkles, Timer, Wallet, WalletCards, Workflow, type LucideIcon } from "lucide-react";
 import NotificationsBell from "@/components/NotificationsBell";
 import RuntimeApply from "@/components/RuntimeApply";
 import { modeClass, stateClass } from "@/components/ui";
@@ -61,6 +61,12 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
       { href: "/dashboard/live", label: "Live Execution", icon: Send },
       { href: "/dashboard/wallets", label: "Wallets", icon: WalletCards },
     ],
+  },
+  {
+    // Regular crypto (Bybit / Binance spot, DEMO only): a separate engine
+    // from the Memecoin "Trading" group above (yonixalpha_crypto).
+    title: "Crypto Trading",
+    items: [{ href: "/dashboard/crypto", label: "Strategy Lab", icon: CandlestickChart }],
   },
   {
     title: "Machine learning",

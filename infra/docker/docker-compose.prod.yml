@@ -61,6 +61,11 @@ services:
   paper-trading:
     restart: unless-stopped
 
+  # Restarted only after a crash: a clean exit (engine off, nothing open)
+  # leaves it stopped, using no memory.
+  crypto-trading:
+    restart: on-failure
+
   reverse-proxy:
     build:
       context: ../nginx

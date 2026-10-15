@@ -1,4 +1,6 @@
 -e ../../packages/core-py
+# Crypto Trading engine (separate package; the Memecoin services never install it).
+-e ../../packages/crypto-py
 
 # fastapi pinned >=0.135 (rather than the 0.115.x this project started on)
 # specifically so starlette resolves unbounded and can go past 0.42 — every

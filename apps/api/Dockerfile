@@ -14,8 +14,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY packages/core-py /packages/core-py
+COPY packages/crypto-py /packages/crypto-py
 COPY apps/api/requirements.txt .
-RUN sed -i 's#../../packages/core-py#/packages/core-py#' requirements.txt \
+RUN sed -i -e 's#../../packages/core-py#/packages/core-py#' -e 's#../../packages/crypto-py#/packages/crypto-py#' requirements.txt \
     && pip install -r requirements.txt
 
 COPY apps/api .
@@ -31,4 +32,7 @@ EXPOSE 8000
 HEALTHCHECK --interval=15s --timeout=5s --start-period=120s --retries=3 \
     CMD curl -f http://localhost:8000/api/health || exit 1
 
-CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host ${APP_HOST:-0.0.0.0} --port ${APP_PORT:-8000}"]
+# The crypto schema (Crypto Trading engine) has its own migration history in
+# its own schema. A failure there never stops the API: the Crypto Trading
+# page then reports "schema not installed" and everything else runs as before.
+CMD ["sh", "-c", "alembic upgrade head && { python -m yonixalpha_crypto.migrate upgrade || echo 'crypto schema migration failed; the Crypto Trading engine stays unavailable'; } && uvicorn app.main:app --host ${APP_HOST:-0.0.0.0} --port ${APP_PORT:-8000}"]
