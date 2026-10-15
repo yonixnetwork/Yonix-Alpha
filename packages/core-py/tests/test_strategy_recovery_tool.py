@@ -131,6 +131,24 @@ async def test_report_reconstructs_the_winner_and_splits_migration_by_day(sf):
     assert "Nothing was written." in out
 
 
+async def test_curve_entries_keep_their_category_and_urls_are_hidden(sf):
+    async with sf() as s:
+        await seed(s)
+        p = (await s.execute(select(PaperPosition).where(PaperPosition.engine == "solana_fresh"))).scalar_one()
+        p.plan = {**p.plan, "venue": {"decimals": 6, "type": "pump_curve"}}
+        p.lifecycle = "MIGRATED"  # the token migrated while the position was held
+        ra = (await s.execute(select(RiskAssessment))).scalar_one()
+        ra.assessment = {**ra.assessment, "reasons": ["RPC error from https://rpc.example/abcdef0123456789 (403)"]}
+        await s.commit()
+    async with sf() as s:
+        await s.execute(text("SET TRANSACTION READ ONLY"))
+        lines = await sr.build(s, ["trades", "deep"], 10, 12, [(datetime.fromisoformat(a), n) for a, n in sr.DEPLOYS], NOW)
+        await s.rollback()
+    out = "\n".join(lines)
+    assert "FRESH -> migrated while held" in out
+    assert "abcdef0123456789" not in out and "<url>" in out
+
+
 async def test_pick_and_established_migrated_tokens(sf):
     async with sf() as s:
         winner = await seed(s)

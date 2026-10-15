@@ -26,7 +26,9 @@ Sections (default: all)
               paper entry-delay measurement per engine
 
 Token category at entry: plan.token_category when recorded (since PR #76); before
-that MOMENTUM = momentum engine, MIGRATED = migrated at the decision / entered as
+that MOMENTUM = momentum engine; a position bought on the bonding curve keeps its
+curve category (FRESH / NEAR_MIGRATION, "-> migrated while held" when the token
+migrated during the hold); MIGRATED = migrated at the decision / entered as
 MIGRATED / migration engine, NEAR_MIGRATION = curve progress >= 0.70 at the
 decision, FRESH otherwise (the same rule as regression_report). Migrated tokens are
 split by pool age at the decision (snapshot age_seconds); one whose market cap at the
@@ -39,6 +41,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import statistics
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -108,8 +111,12 @@ def _t(v: datetime | None) -> str:
     return "-" if v is None else v.astimezone(timezone.utc).strftime("%m-%d %H:%M:%S")
 
 
+URL_RE = re.compile(r"(?:https?|wss?)://[^\s\"'\\]+")
+
+
 def _j(v: Any, limit: int = 400) -> str:
-    s = json.dumps(v, default=str, separators=(",", ":"))
+    # Stored reasons can carry provider URLs (some embed an API key): never print them.
+    s = URL_RE.sub("<url>", json.dumps(v, default=str, separators=(",", ":")))
     return s if len(s) <= limit else s[: limit - 3] + "..."
 
 
@@ -130,6 +137,7 @@ SELECT pp.id, coalesce(pp.execution_mode, 'PAPER') AS mode, coalesce(pp.engine, 
        pp.entry_price, pp.exit_price, pp.highest_price, pp.lowest_price, pp.quantity, pp.initial_quantity,
        pp.tp_hits, pp.max_loss_quote, pp.model_version, pp.feature_version, pp.account_id,
        pp.plan->>'token_category' AS plan_category, pp.plan->>'lifecycle' AS plan_lifecycle,
+       pp.plan->'venue'->>'type' AS venue_type,
        pp.plan->>'fixed_cost_quote' AS fixed_cost, pp.plan->'venue'->>'live_drift_pct' AS live_drift,
        pp.plan->'entry_delay'->>'measured' AS delay_measured, pp.plan->'entry_delay'->>'price_change_pct' AS delay_move,
        pp.plan->'entry_delay'->>'latency_s' AS delay_s,
@@ -151,6 +159,12 @@ def category(r: Any) -> str:
         base = r.plan_category
     elif r.engine == "solana_momentum":
         base = "MOMENTUM"
+    elif r.venue_type == "pump_curve" and r.engine != "solana_migration" and snap.get("migrated") is not True:
+        # bought on the bonding curve; position.lifecycle turns MIGRATED if the
+        # token migrates while held, which is not its state at entry
+        cp = _d(snap.get("curve_progress"))
+        base = "NEAR_MIGRATION" if cp is not None and cp >= Decimal("0.70") else "FRESH"
+        return base + (" -> migrated while held" if r.lifecycle == "MIGRATED" else "")
     elif snap.get("migrated") is True or r.plan_lifecycle == "MIGRATED" or r.lifecycle == "MIGRATED" \
             or r.engine == "solana_migration":
         base = "MIGRATED"
@@ -441,7 +455,7 @@ def section_compare(rows: list[Any]) -> list[str]:
         if not r.snap:
             continue
         cls = "BIG WIN >=50%" if (r.pnl_pct or 0) >= Decimal("0.5") else "WIN" if (r.pnl or 0) > 0 else "LOSS"
-        groups[f"{r.mode} {category(r).split(' pool')[0]} | {cls}"].append(r)
+        groups[f"{r.mode} {category(r).split(' pool')[0].split(' (')[0]} | {cls}"].append(r)
         groups[f"{r.mode} {r.engine} | {cls}"].append(r)
     hdr = "  " + f"{'group':44s} {'n':>4} " + " ".join(f"{f[:11]:>11}" for f in SNAP_FIELDS)
     out.append(hdr)
@@ -660,6 +674,12 @@ async def section_activity(s, now: datetime) -> list[str]:
         out.append(f"  {h:%m-%d %H}h  candidates " + (", ".join(f"{k} {v}" for k, v in sorted(c.items())) or "NONE")
                    + ("  | " + "; ".join(sorted(errs[h])[:6]) if errs.get(h) else ""))
     out.append(f"  hours with no candidate at all: {empty} of {len(hours)}")
+    kinds = (await s.execute(text(
+        "SELECT service, event_type, count(*) n, min(created_at) a, max(created_at) b, (array_agg(detail ORDER BY created_at DESC))[1] d "
+        "FROM system_events WHERE created_at >= :since AND severity IN ('error', 'critical') GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 12"),
+        {"since": since})).all()
+    out.append("  error kinds (count, first..last, latest detail; URLs hidden):")
+    out += [f"    {r.service:24s} {r.event_type:34s} x{r.n:<6} {_t(r.a)}..{_t(r.b)} {_j(r.d, 260)}" for r in kinds] or ["    none"]
     first = (await s.execute(text("SELECT created_at, service, event_type, severity FROM system_events WHERE created_at >= :since "
                                   "AND (event_type ILIKE '%start%' OR event_type ILIKE '%stop%' OR event_type ILIKE '%crash%' "
                                   "OR event_type ILIKE '%down%') ORDER BY created_at LIMIT 60"), {"since": since})).all()
