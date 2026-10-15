@@ -24,7 +24,7 @@ through the existing dataset → training → validation → challenger → shad
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -35,7 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from yonixalpha_core import opportunity_analysis as oa
 from yonixalpha_core.db.models import ExecutionOrder, OpportunityOutcome, TokenObservation
 from yonixalpha_core.solana import launch_features as lf
-from yonixalpha_core.solana import pump_stream
+from yonixalpha_core.solana import pump_stream, pumpswap
 
 HORIZONS: tuple[tuple[str, int], ...] = (("T+5s", 5), ("T+10s", 10), ("T+20s", 20), ("T+30s", 30), ("T+60s", 60),
                                          ("T+5m", 300), ("T+15m", 900), ("T+30m", 1800), ("T+60m", 3600))
@@ -156,6 +156,37 @@ def _price_raw(t) -> Decimal | None:
     return Decimal(t.virtual_sol) / Decimal(t.virtual_token) if t.virtual_token else None
 
 
+def pool_price_at(series: list, at: datetime, migrated_at: datetime, seen: list[tuple[float, float]]):
+    """(price_raw, trade time, None) after a migration, from recorded
+    PumpSwap trades, or (None, None, why). A price is used only when one read
+    of the pool covered the whole span from that trade to `at` (no trade can
+    be missing in between); otherwise it is UNAVAILABLE, never the frozen
+    bonding-curve price."""
+    price, last_at, why = pumpswap.covered_price_at([t for t in series if t.at >= migrated_at], at, seen)
+    if price is None and why.startswith("no PumpSwap trade"):
+        why = "no PumpSwap trade recorded between the migration and this time"
+    return price, last_at, why
+
+
+async def pool_history(redis, mint: str) -> tuple[datetime | None, list, list[tuple[float, float]]]:
+    """(migration time, recorded pool trades, pool read coverage); (None, [], [])
+    for a token that has not migrated."""
+    ts = await redis.zscore(pump_stream.MIGRATED, mint)
+    if ts is None:
+        return None, [], []
+    trades, seen = await pumpswap.recorded_pool_history(redis, pumpswap.canonical_pool(mint))
+    return datetime.fromtimestamp(float(ts), tz=timezone.utc), trades, seen
+
+
+def merged_series(curve: list, migrated_at: datetime | None, pool: list) -> list:
+    """Curve trades until the migration, PumpSwap trades from then on (R6).
+    Curve trades stamped after the migration cannot be real prices of the
+    token and are dropped."""
+    if migrated_at is None:
+        return curve
+    return sorted([t for t in curve if t.at < migrated_at] + [t for t in pool if t.at >= migrated_at], key=lambda t: t.at)
+
+
 def price_at(trades: list, at: datetime):
     """(price_raw, trade time) of the last trade at or before `at`."""
     best = None
@@ -195,7 +226,9 @@ async def track(session: AsyncSession, redis, now: datetime, limit: int = 300) -
     for row in rows:
         start = row.decided_at
         end = start + timedelta(seconds=TRACK_SECONDS)
-        trades = sorted(await pump_stream.load_trades(redis, row.mint), key=lambda t: t.at)
+        curve_trades = sorted(await pump_stream.load_trades(redis, row.mint), key=lambda t: t.at)
+        mig_at, pool_trades, seen = await pool_history(redis, row.mint)
+        trades = merged_series(curve_trades, mig_at, pool_trades)
         # Token metadata is only needed until the regime and early buyers are recorded.
         meta = (await pump_stream.load_meta(redis, row.mint) or {}) if row.regime is None or row.mint not in recorded else {}
         base = Decimal(row.snapshot["price_raw"]) if (row.snapshot or {}).get("price_raw") else price_at(trades, start)[0]
@@ -209,15 +242,21 @@ async def track(session: AsyncSession, redis, now: datetime, limit: int = 300) -
             if name in hz or now < t:
                 prev_at = t
                 continue
-            price, at = price_at(trades, t)
-            if price is None:
+            after_migration = mig_at is not None and t >= mig_at
+            if after_migration:
+                price, at, reason = pool_price_at(trades, t, mig_at, seen)
+            else:
+                price, at = price_at(trades, t)
                 reason = ("no stream trades for this token (PumpSwap tokens and expired history are not in the stream)"
                           if not trades else "stream history no longer reaches this time")
+            if price is None:
                 hz[name] = {"unavailable": reason}
             else:
-                hz[name] = {"price_raw": str(price), "change_pct": _s(_pct(price, base)),
-                            "price_at": at.isoformat(), "source": "pump_stream trades"}
-            if trades:
+                hz[name] = {"price_raw": str(price), "change_pct": _s(_pct(price, base)), "price_at": at.isoformat(),
+                            "source": "pumpswap pool trades (recorded)" if after_migration else "pump_stream trades"}
+            if after_migration and price is None:
+                path[name] = {"at": t.isoformat(), "unknown": reason}
+            elif trades:
                 path[name] = oa.path_point(trades, start, float(base) if base is not None else None, prev_at, t, supply)
             prev_at = t
         if base is not None:
@@ -248,7 +287,7 @@ async def track(session: AsyncSession, redis, now: datetime, limit: int = 300) -
             changed += 1
         changed += await _wallets(session, redis, row, trades, meta, started_ts, recorded, now, wcfg)
         if now >= end + timedelta(seconds=60) and all(n in hz for n, _ in HORIZONS) \
-                and _finalize(row, trades, await _fee_bps(redis, row.mint), now):
+                and _finalize(row, trades, await _fee_bps(redis, row.mint), now, mig_at):
             row.status, row.completed_at = "COMPLETE", now
             changed += 1
             await _deployer(session, redis, row, meta, trades, now, wcfg, resolve=True)
@@ -415,7 +454,8 @@ async def _wallets(session: AsyncSession, redis, row: OpportunityOutcome, trades
     return changed
 
 
-def _finalize(row: OpportunityOutcome, trades: list, curve_fee_bps: int | None, now: datetime) -> bool:
+def _finalize(row: OpportunityOutcome, trades: list, curve_fee_bps: int | None, now: datetime,
+              migrated_at: datetime | None = None) -> bool:
     """Writes returns, recovery, labels and the counterfactual (untraded) or
     exit analysis (traded). False while a traded row still waits for its
     exit + 60 min."""
@@ -432,11 +472,14 @@ def _finalize(row: OpportunityOutcome, trades: list, curve_fee_bps: int | None, 
     fee = (row.regime or {}).get("fee_bps") or curve_fee_bps
     mayhem = (row.regime or {}).get("mayhem")
     latency = timedelta(seconds=oa.REFERENCE_LATENCY_SECONDS)
+    # Curve simulations stop at the migration, also when it happened before
+    # the decision (migration-engine rows): a pool is not a bonding curve.
+    sim_migrated_at = migrated_at or row.migrated_at
     path = {k: dict(v) for k, v in (row.path or {}).items()}  # new objects, so the JSONB change is detected
     for name, sec in HORIZONS:
         if name in path:
             path[name]["executable"] = oa.round_trip(trades, start + latency, start + timedelta(seconds=sec), fee_bps=fee,
-                                                     mayhem=mayhem, migrated_at=row.migrated_at)
+                                                     mayhem=mayhem, migrated_at=sim_migrated_at)
     row.path = path
     primary = (path.get(oa.PRIMARY_HORIZON) or {}).get("executable") or {}
     if "executable_return_pct" in primary:
@@ -454,7 +497,7 @@ def _finalize(row: OpportunityOutcome, trades: list, curve_fee_bps: int | None, 
                                          mfe_pct=_f(result.get("mfe_pct")), exit_reason=result.get("exit_reason"))
     else:
         analysis["counterfactual"] = oa.counterfactual(trades, start, base, end, fee_bps=fee, mayhem=mayhem,
-                                                       migrated_at=row.migrated_at, reasons=row.reasons)
+                                                       migrated_at=sim_migrated_at, reasons=row.reasons)
     row.analysis = analysis
     row.labels = oa.labels(trades, start, base, end, migrated_at=row.migrated_at,
                            executable_primary=primary.get("executable_return_pct"), rec=rec)

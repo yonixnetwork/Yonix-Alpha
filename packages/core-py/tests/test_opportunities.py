@@ -60,7 +60,8 @@ async def test_rejected_token_horizons_peak_drawdown_and_migration(db, redis):
     base = 30 * 10**9
     await put_trades(redis, mint, [(-5, base), (3, base), (8, int(base * 1.1)), (25, int(base * 1.5)), (50, int(base * 0.9)),
                                    (200, int(base * 2)), (800, int(base * 1.2)), (1700, int(base * 0.8))])
-    await redis.zadd(pump_stream.MIGRATED, {mint: (T0 + timedelta(seconds=1000)).timestamp()})
+    # Migrates after its last curve trade (curve trades cannot follow a migration; R6 prices after it from the pool).
+    await redis.zadd(pump_stream.MIGRATED, {mint: (T0 + timedelta(seconds=3500)).timestamp()})
     await redis.hset(pump_stream.curve_key(mint), mapping={"vsol": base, "vtok": VT, "updated_at": int(T0.timestamp()), "fee_bps": 125})
     await redis.hset(pump_stream.meta_key(mint), mapping={"creator": "Dev1", "created_at": int((T0 - timedelta(seconds=10)).timestamp())})
     snap = {"price_raw": str(Decimal(base) / Decimal(VT)), "market_cap_sol": "30"}
@@ -81,16 +82,18 @@ async def test_rejected_token_horizons_peak_drawdown_and_migration(db, redis):
     assert row.horizons["T+5m"]["change_pct"] == "100.00" and row.horizons["T+30m"]["change_pct"] == "-20.00"
     assert row.peak_pct == Decimal("100.00") and row.drawdown_pct == Decimal("-20.00")
     # Tracking runs to T+60m now; peak / drawdown keep their 30-minute meaning.
-    assert row.migrated_at == T0 + timedelta(seconds=1000) and row.status == "TRACKING" and "T+60m" not in row.horizons
+    assert row.migrated_at == T0 + timedelta(seconds=3500) and row.status == "TRACKING" and "T+60m" not in row.horizons
     await opp.track(db, redis, T0 + timedelta(seconds=3700))
     await db.refresh(row)
-    assert row.status == "COMPLETE" and row.peak_pct == Decimal("100.00") and row.horizons["T+60m"]["change_pct"] == "-20.00"
+    assert row.status == "COMPLETE" and row.peak_pct == Decimal("100.00")
+    # T+60m is after the migration and the pool was never read: unavailable, not the last curve price
+    assert "PumpSwap" in row.horizons["T+60m"]["unavailable"]
     assert row.path["T+30s"]["buys"] == 1 and row.path["T+5m"]["peak_so_far_pct"] == 100.0
     assert row.regime["data_regime"] == "post_boost" and row.regime["strategy"] == "solana_fresh"
     # The launch reached the deployer history: noted when first tracked, resolved when the row completed.
     dl = await db.get(models.DeployerLaunch, mint)
     assert dl.creator == "Dev1" and dl.resolved_at == T0 + timedelta(seconds=3700) and dl.outcome == "WIN"
-    assert dl.migrated is True and dl.time_to_migration_seconds == 1010 and dl.peak_mc_sol == Decimal("60.0000")
+    assert dl.migrated is True and dl.time_to_migration_seconds == 3510 and dl.peak_mc_sol == Decimal("60.0000")
     fu = row.analysis["relationship_followup"]  # what the demand structure did after the decision (review only)
     assert fu["new_buyers_after_decision"] == 7 and fu["independent_buyers_arrived"] is True
     assert fu["creator_sold_after_decision"] is False and fu["cluster_exit_share"] is None and "never a decision-time" in fu["note"]

@@ -14,6 +14,7 @@ usage dashboard rather than multiplying by an assumed price.
                                 field "<service>|<endpoint>|<method>|latency_ms"          -> summed ms
                                 field "<service>|*|<method>|<priority>|coalesced"         -> duplicates served
     yx:gate:entry_blocked:<YYYYMMDD>  field "<engine>|<code>" -> evaluations refused before any token data was fetched
+    yx:gate:token_backoff:<YYYYMMDD>  field "<engine>|<code>" -> re-checks pushed to 60 s after a token-level block
 
 Read with: python -m yonixalpha_core.tools.rpc_usage [--hours 24]
 """
@@ -25,6 +26,7 @@ from typing import Any
 
 USAGE_KEY = "yx:rpc:usage:"
 BLOCKED_KEY = "yx:gate:entry_blocked:"
+BACKOFF_KEY = "yx:gate:token_backoff:"
 TTL_SECONDS = 8 * 86400
 FLUSH_EVERY_SECONDS = 60.0
 
@@ -74,6 +76,29 @@ async def count_entry_blocked(redis: Any, engine: str, codes: list[str], now: da
         await pipe.execute()
     except Exception:  # noqa: BLE001 - counting must never block a decision
         pass
+
+
+async def count_token_backoff(redis: Any, engine: str, codes: list[str], now: datetime | None = None) -> None:
+    """One evaluation blocked only by token data that needs new trades
+    (no volatility yet, too little liquidity, no flow): its next timed
+    re-check was pushed back (R9). Counted once per code."""
+    if redis is None:
+        return
+    key = BACKOFF_KEY + (now or datetime.now(timezone.utc)).strftime("%Y%m%d")
+    try:
+        pipe = redis.pipeline(transaction=False)
+        for code in codes:
+            pipe.hincrby(key, f"{engine}|{code}", 1)
+        pipe.hincrby(key, f"{engine}|*", 1)
+        pipe.expire(key, TTL_SECONDS)
+        await pipe.execute()
+    except Exception:  # noqa: BLE001 - counting must never block a decision
+        pass
+
+
+async def token_backoff_today(redis: Any, now: datetime | None = None) -> dict[str, int]:
+    raw = await redis.hgetall(BACKOFF_KEY + (now or datetime.now(timezone.utc)).strftime("%Y%m%d"))
+    return {_s(k): int(v) for k, v in raw.items()}
 
 
 def _s(x) -> str:

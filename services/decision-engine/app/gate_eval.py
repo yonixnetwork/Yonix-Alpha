@@ -59,6 +59,15 @@ REEVALUATE_EVERY_SECONDS = 30
 # switch, max open positions, cooldown, ...) is re-checked this often instead
 # of every 30 s; the check costs one DB read, no RPC.
 ACCOUNT_BLOCKED_RECHECK_SECONDS = 60
+# R9 (2026-10-15): a decision blocked ONLY by token data that needs new trades
+# to change (no measurable volatility yet, too little liquidity, no flow
+# data) is re-checked after this long instead of REEVALUATE_EVERY_SECONDS;
+# a meaningful market event (gate_events) still brings it forward. Up to 333
+# such migration evaluations an hour each paid a full token read.
+TOKEN_BLOCKED_RECHECK_SECONDS = 60
+TOKEN_DATA_BACKOFF_CODES = frozenset({
+    "AUTO_SL_NO_VOLATILITY", "INSUFFICIENT_LIQUIDITY", "INSUFFICIENT_MIGRATED_LIQUIDITY", "FLOW_UNAVAILABLE",
+})
 GATE_STATES = [
     CandidateState.DISCOVERED.value, CandidateState.OBSERVING.value, CandidateState.ANALYZING.value,
     CandidateState.WAITING_FOR_LIQUIDITY.value, CandidateState.WAITING_FOR_APPROVAL.value,
@@ -145,6 +154,15 @@ async def _account_blocked(session: AsyncSession, redis: Redis, candidate: Tradi
     if operator is not None:
         operator["result"] = {"status": "BLOCKED", "reason": f"{first.code}: {first.message}"}
     log.info("gate.account_blocked", engine=engine, mint=(candidate.detail or {}).get("mint"), codes=codes)
+
+
+def token_backoff_codes(a: Assessment) -> list[str]:
+    """The blocking codes when the decision is blocked only by token data
+    that needs new trades (R9); [] when anything else blocks or it executes."""
+    if a.executable:
+        return []
+    blocking = {f.code for f in a.findings if f.hard_block or f.action == a.decision}
+    return sorted(blocking) if blocking and blocking <= TOKEN_DATA_BACKOFF_CODES else []
 
 
 def _move(candidate: TradingCandidate, target: CandidateState, reason: str) -> None:
@@ -271,6 +289,10 @@ async def evaluate_with_gate(
                                else f"e{int(now.timestamp())}" if trigger.startswith("event")
                                else str(int(now.timestamp()) // REEVALUATE_EVERY_SECONDS))
     row, created = await store.persist_assessment(session, a, candidate.id, key)
+    backoff = token_backoff_codes(a) if operator is None else []
+    if backoff:
+        await redis.set(f"yx:gate:pace:{candidate.id}", "1", ex=TOKEN_BLOCKED_RECHECK_SECONDS)
+        await rpc_usage.count_token_backoff(redis, engine, backoff, now)
     if not created:
         await session.commit()
         return a
@@ -362,23 +384,28 @@ async def evaluate_with_gate(
             return a
         try:
             pe = await paper_execution.load_settings(session)
-            # A pump-curve paper buy lands like a LIVE one: filled at the stream price measured LIVE
-            # latency after the decision (settled by the paper-trading service), instead of being
-            # charged the median LIVE drift (one or the other, never both).
-            delayed = pe.simulate_entry_delay and engine in CURVE_ENGINES and lifecycle != "MIGRATED"
-            drift = {"buy_pct": None} if delayed else await paper_execution.measured_live_drift(session)
+            # A paper buy lands like a LIVE one: filled at the price measured LIVE latency after the
+            # decision (settled by the paper-trading service), instead of being charged the median
+            # LIVE drift (one or the other, never both). Curve tokens use the pump.fun stream;
+            # PumpSwap entries (R5) recorded pool trades, with the drift as the fallback when the
+            # pool record cannot prove the price at landing.
+            pool_entry = lifecycle == "MIGRATED"
+            delayed = pe.simulate_entry_delay and (pool_entry or engine in CURVE_ENGINES)
+            drift = await paper_execution.measured_live_drift(session) if (pool_entry or not delayed) else {"buy_pct": None}
             position = await paper_engine.open_position(
                 session, account, a, row.id, candidate, inp.liquidity_model, inp.quote,
                 inp.token.transfer_fee_bps if inp.token else None, now,
                 venue={"type": adapter, "kind": "spot", "decimals": inp.token.decimals if inp.token else None,
                        **provenance["venue"]},
                 max_slippage_bps=controls.settings.max_slippage_bps,
-                entry_drift_pct=drift["buy_pct"],  # what a LIVE buy loses before it lands (measured)
+                entry_drift_pct=None if delayed else drift["buy_pct"],  # what a LIVE buy loses before it lands (measured)
             )
             position.execution_mode, position.source, position.lifecycle = "PAPER", "PUMPFUN", lifecycle
             if delayed:
                 lat, lat_src = await entry_store.measured_latency(session, redis)
-                position.plan = paper_execution.schedule_entry_delay(position.plan, now.timestamp(), lat, lat_src)
+                position.plan = paper_execution.schedule_entry_delay(
+                    position.plan, now.timestamp(), lat, lat_src, venue="pool" if pool_entry else "curve",
+                    fallback_drift_pct=drift["buy_pct"] if pool_entry else None)
             position.execution_provider = live_trading.PAPER_PROVIDER
             position.execution_route = "pump-amm" if lifecycle == "MIGRATED" else "pump"
             position.pool, position.strategy = pool, a.strategy

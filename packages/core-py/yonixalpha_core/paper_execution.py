@@ -30,7 +30,7 @@ result and tests are exact.
 
 import hashlib
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -229,19 +229,70 @@ def simulated_failure(key: str, pct: Decimal) -> bool:
     return pct > 0 and draw(key) * 100 < pct
 
 
+# --- migration crossing (R4, 2026-10-15) ------------------------------------------------
+
+CROSSING_KEY = "migration_crossing"
+SELL_LATENCY_CACHE = "yx:paper:sell_latency"
+DEFAULT_SELL_LATENCY_SECONDS = 3.0  # until 5 LIVE sells are measured (stated with the value)
+
+
+async def measured_sell_latency(session: AsyncSession, redis) -> tuple[float, str]:
+    """Median submission -> confirmation of confirmed LIVE sells (newest 200),
+    cached 10 minutes; the stated default while fewer than 5 are measured."""
+    import statistics
+
+    if redis is not None:
+        cached = await redis.get(SELL_LATENCY_CACHE)
+        if cached:
+            v, src = cached.split("|", 1)
+            return float(v), src
+    o = ExecutionOrder
+    rows = (await session.execute(select(o.created_at, o.confirmed_at).where(
+        o.mode == "LIVE", o.side == "SELL", o.status == "CONFIRMED", o.confirmed_at.is_not(None))
+        .order_by(o.created_at.desc()).limit(200))).all()
+    vals = [(c - s).total_seconds() for s, c in rows if c >= s]
+    if len(vals) >= 5:
+        out = (round(statistics.median(vals), 2), f"MEASURED: median of {len(vals)} confirmed LIVE sells")
+    else:
+        out = (DEFAULT_SELL_LATENCY_SECONDS, f"DEFAULT: {len(vals)} measured LIVE sells (need 5)")
+    if redis is not None:
+        await redis.set(SELL_LATENCY_CACHE, f"{out[0]}|{out[1]}", ex=600)
+    return out
+
+
+def schedule_crossing(plan: dict | None, now: datetime, latency_s: float, source: str) -> dict:
+    """A paper position whose token just migrated. A LIVE seller first has to
+    notice the migration and route the sell to the pool: for latency_s the
+    paper position is not managed, then it is managed at the pool price of
+    that later tick, selling at most one take-profit level per tick."""
+    return {**(plan or {}), CROSSING_KEY: {"migrated_at": now.isoformat(), "latency_s": round(latency_s, 3),
+                                           "due_ts": round(now.timestamp() + latency_s, 3), "source": source}}
+
+
+def crossing_pending(position, now: datetime) -> bool:
+    d = (position.plan or {}).get(CROSSING_KEY) or {}
+    return bool(d) and now.timestamp() < float(d["due_ts"])
+
+
 # --- entry delay (regression audit 2026-10-10) ------------------------------------------
 
 ENTRY_DELAY_KEY = "entry_delay"
 
 
-def schedule_entry_delay(plan: dict | None, decision_ts: float, latency_s: float, source: str) -> dict:
+def schedule_entry_delay(plan: dict | None, decision_ts: float, latency_s: float, source: str, venue: str = "curve",
+                         fallback_drift_pct: Decimal | None = None) -> dict:
     """The plan of a paper buy that lands like a LIVE one: filled at the
-    stream price `latency_s` after the decision, not at the decision price.
-    Until then the position is not managed (a buy that has not landed
-    cannot be sold)."""
-    return {**(plan or {}), ENTRY_DELAY_KEY: {"decision_ts": round(decision_ts, 3), "latency_s": round(latency_s, 3),
-                                              "due_ts": round(decision_ts + latency_s, 3), "source": source,
-                                              "settled": False}}
+    price `latency_s` after the decision, not at the decision price. Until
+    then the position is not managed (a buy that has not landed cannot be
+    sold). venue "curve": the pump.fun stream price; "pool" (R5,
+    2026-10-15): recorded PumpSwap trades, and when they cannot prove the
+    price at landing, `fallback_drift_pct` (the measured LIVE buy drift)
+    is charged instead, so a pool entry is never more optimistic than before."""
+    d = {"decision_ts": round(decision_ts, 3), "latency_s": round(latency_s, 3),
+         "due_ts": round(decision_ts + latency_s, 3), "source": source, "settled": False, "venue": venue}
+    if fallback_drift_pct is not None:
+        d["fallback_drift_pct"] = str(fallback_drift_pct)
+    return {**(plan or {}), ENTRY_DELAY_KEY: d}
 
 
 def entry_delay_pending(position, now: datetime) -> bool:
@@ -261,7 +312,25 @@ def _stream_price_at(trades: list, ts: float) -> tuple[Decimal | None, float | N
     return Decimal(last.virtual_sol) / Decimal(last.virtual_token), last.at.timestamp()
 
 
-async def settle_entry_delay(session: AsyncSession, redis, position, now: datetime) -> dict | None:
+async def _pool_prices(redis, rpc, mint: str, decision_ts: float, due_ts: float):
+    """((p0, t0), (p1, t1), why) from recorded PumpSwap trades. One fresh
+    read of the pool (the read position management makes anyway) proves
+    the span up to landing."""
+    from yonixalpha_core.solana import pumpswap
+
+    pool = pumpswap.canonical_pool(mint)
+    if rpc is not None:
+        try:
+            await pumpswap.recent_pool_trades(rpc, redis, pool)
+        except Exception:  # noqa: BLE001 - unmeasured then; the fallback applies
+            pass
+    trades, seen = await pumpswap.recorded_pool_history(redis, pool)
+    p0, t0, why0 = pumpswap.covered_price_at(trades, datetime.fromtimestamp(decision_ts, timezone.utc), seen)
+    p1, t1, why1 = pumpswap.covered_price_at(trades, datetime.fromtimestamp(due_ts, timezone.utc), seen)
+    return (p0, t0), (p1, t1), why0 or why1
+
+
+async def settle_entry_delay(session: AsyncSession, redis, position, now: datetime, rpc=None) -> dict | None:
     """Once the delay has passed, re-fill the paper buy at the stream price
     at decision + latency: the same SOL buys `1 / factor` as many tokens,
     factor = price at landing / price at the decision. Moves both ways (a
@@ -274,14 +343,30 @@ async def settle_entry_delay(session: AsyncSession, redis, position, now: dateti
     d = dict((position.plan or {}).get(ENTRY_DELAY_KEY) or {})
     if not d or d.get("settled") or now.timestamp() < float(d["due_ts"]):
         return None
-    trades = await pump_stream.load_trades(redis, position.asset_id) if redis is not None and position.asset_id else []
-    p0, t0 = _stream_price_at(trades, float(d["decision_ts"]))
-    p1, t1 = _stream_price_at(trades, float(d["due_ts"]))
-    out: dict[str, Any] = {"latency_s": d["latency_s"], "latency_source": d.get("source")}
+    pool = d.get("venue") == "pool"
+    why = None
+    if pool and redis is not None and position.asset_id:
+        (p0, _), (p1, _), why = await _pool_prices(redis, rpc, position.asset_id, float(d["decision_ts"]),
+                                                   float(d["due_ts"]))
+    else:
+        trades = await pump_stream.load_trades(redis, position.asset_id) if redis is not None and position.asset_id else []
+        p0, _ = _stream_price_at(trades, float(d["decision_ts"]))
+        p1, _ = _stream_price_at(trades, float(d["due_ts"]))
+    out: dict[str, Any] = {"latency_s": d["latency_s"], "latency_source": d.get("source"),
+                           "price_source": "pumpswap pool trades" if pool else "pump_stream trades"}
+    factor = None
     if p0 and p1:
         factor = p1 / p0
         out.update(factor=str(factor.quantize(Decimal("0.000001"))), measured=True,
                    price_change_pct=str(((factor - 1) * 100).quantize(Decimal("0.0001"))))
+    elif d.get("fallback_drift_pct") is not None:
+        # The price at landing is not proven: charge the measured LIVE buy drift
+        # instead (what pool entries were charged before R5), never nothing.
+        pct = Decimal(d["fallback_drift_pct"])
+        factor = 1 + pct / 100
+        out.update(factor=str(factor.quantize(Decimal("0.000001"))), measured=False, charged_live_drift_pct=str(pct),
+                   reason=f"{why or 'no price at landing'}: measured LIVE buy drift {pct}% charged instead")
+    if factor is not None:
         for attr in ("quantity", "initial_quantity", "remaining_quantity"):
             v = getattr(position, attr)
             if v is not None:
@@ -292,7 +377,8 @@ async def settle_entry_delay(session: AsyncSession, redis, position, now: dateti
                 setattr(position, attr, v * factor)
     else:
         out.update(factor="1", measured=False,
-                   reason="no stream trade at the decision or at landing: decision fill kept (unmeasured)")
+                   reason=(why if pool and why else "no stream trade at the decision or at landing")
+                   + ": decision fill kept (unmeasured)")
     d.update(settled=True, settled_at=now.isoformat(), **{k: v for k, v in out.items() if k not in ("latency_s",)})
     position.plan = {**(position.plan or {}), ENTRY_DELAY_KEY: d}
     await add_timeline_event(session, "paper_entry_delay_fill", now, out, candidate_id=position.candidate_id,

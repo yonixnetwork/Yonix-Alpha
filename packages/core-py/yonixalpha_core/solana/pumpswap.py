@@ -45,6 +45,17 @@ SELL_EVENT_DISC = bytes([62, 47, 55, 10, 165, 3, 220, 42])
 LAMPORTS = Decimal(1_000_000_000)
 TRADE_CACHE_TTL = 3600
 POOL_FEE_KEY = "yx:pumpswap:fee:"  # latest fee (bps) a pool charged, from its own trade events
+# Pool trades seen by any reader (R6, 2026-10-15): the outcomes ledger prices
+# migrated tokens from these instead of the frozen bonding-curve stream. Only
+# trades already fetched for decisions or open positions are recorded (no
+# extra RPC). SEEN holds when the pool was read, so a price is used only
+# where the record is known to be complete.
+POOL_TRADES_KEY = "yx:pumpswap:trades:"  # zset trade row (json) -> trade timestamp
+POOL_SEEN_KEY = "yx:pumpswap:seen:"  # zset read timestamp -> read timestamp
+POOL_HISTORY_SECONDS = 3 * 3600
+# A read a moment before the time asked about still counts: the gate reads
+# the pool while it evaluates, a fraction of a second before its decision.
+COVERAGE_GRACE_SECONDS = 2.0
 
 
 class PoolUnavailable(Exception):
@@ -260,4 +271,70 @@ async def recent_pool_trades(rpc, redis, pool: str, limit: int = 25) -> list[Poo
                     await redis.set(POOL_FEE_KEY + pool, int(rows[-1][7]), ex=6 * 3600)
         for r in rows:
             out.append(PoolTrade(datetime.fromisoformat(r[0]), r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8]))
-    return sorted(out, key=lambda t: t.at)
+    out.sort(key=lambda t: t.at)
+    if redis is not None:
+        await record_pool_trades(redis, pool, out, complete=len(sigs) < limit)
+    return out
+
+
+def _row(t: PoolTrade) -> str:
+    return json.dumps([t.at.isoformat(), t.user, t.is_buy, t.base_raw, t.quote_lamports, t.pool_base, t.pool_quote,
+                       t.fee_bps, t.pool])
+
+
+async def record_pool_trades(redis, pool: str, trades: list[PoolTrade], now: float | None = None,
+                             complete: bool = False) -> None:
+    """Keeps what a read of `pool` returned for the outcomes ledger. The read
+    time is recorded as coverage: the newest `limit` signatures were read,
+    so every trade between the oldest returned one and now is known.
+    `complete`: fewer signatures than the limit came back (the whole
+    history). Never raises."""
+    import time
+
+    now = time.time() if now is None else now
+    # The span this read proves complete: everything for a complete history,
+    # from the oldest returned trade otherwise (nothing before it is known).
+    oldest = 0.0 if complete else trades[0].at.timestamp() if trades else now
+    try:
+        pipe = redis.pipeline(transaction=False)
+        if trades:
+            pipe.zadd(POOL_TRADES_KEY + pool, {_row(t): t.at.timestamp() for t in trades})
+        pipe.zadd(POOL_SEEN_KEY + pool, {json.dumps([now, oldest]): now})
+        for key in (POOL_TRADES_KEY + pool, POOL_SEEN_KEY + pool):
+            pipe.zremrangebyscore(key, 0, now - POOL_HISTORY_SECONDS)
+            pipe.expire(key, POOL_HISTORY_SECONDS)
+        await pipe.execute()
+    except Exception:  # noqa: BLE001 - recording is for review; it never affects a decision
+        pass
+
+
+def covered_price_at(trades: list[Trade], at: datetime,
+                     seen: list[tuple[float, float]]) -> tuple[Decimal | None, datetime | None, str | None]:
+    """(price_raw, trade time, None): the pool price after the last recorded
+    trade at or before `at`, when one read of the pool covered the span from
+    that trade to `at` (so no trade in between can be missing); else
+    (None, None, why). price_raw = quote lamports / base raw units."""
+    last = None
+    for t in trades:
+        if t.at <= at:
+            last = t
+        else:
+            break
+    if last is None or not last.virtual_token:
+        return None, None, "no PumpSwap trade recorded at or before this time"
+    lo, hi = last.at.timestamp(), at.timestamp()
+    if not any(oldest <= lo and hi - COVERAGE_GRACE_SECONDS <= read for read, oldest in seen):
+        return None, None, ("PumpSwap pool not read around this time (pool trades are recorded only while the token "
+                            "is evaluated or held)")
+    return Decimal(last.virtual_sol) / Decimal(last.virtual_token), last.at, None
+
+
+async def recorded_pool_history(redis, pool: str) -> tuple[list[Trade], list[tuple[float, float]]]:
+    """(trades as flow Trades, oldest first; [(read_ts, oldest_trade_ts_covered)])."""
+    rows = await redis.zrange(POOL_TRADES_KEY + pool, 0, -1)
+    trades = []
+    for raw in rows:
+        r = json.loads(raw)
+        trades.append(as_flow_trade(PoolTrade(datetime.fromisoformat(r[0]), r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8])))
+    seen = [tuple(json.loads(raw)) for raw in await redis.zrange(POOL_SEEN_KEY + pool, 0, -1)]
+    return sorted(trades, key=lambda t: t.at), [(float(a), float(b)) for a, b in seen]

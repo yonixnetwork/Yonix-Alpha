@@ -284,6 +284,10 @@ class AccountState:
     strategy_daily_realized_pnl: Decimal | None = None
     account_daily_loss_limit: Decimal | None = None
     account_name: str | None = None
+    # This strategy's own most recent losing exit (cooldown_scope STRATEGY).
+    # strategy_loss_known says whether the caller computed it at all.
+    strategy_last_loss_at: datetime | None = None
+    strategy_loss_known: bool = False
 
 
 @dataclass
