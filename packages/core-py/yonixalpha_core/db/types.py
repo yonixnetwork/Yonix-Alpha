@@ -21,6 +21,11 @@ class ScrubbedJSONB(TypeDecorator):
     impl = JSONB
     cache_ok = True
 
+    def coerce_compared_value(self, op, value):
+        # Comparisons keep JSONB's own typing: the key in `col ? 'key'`
+        # (has_key) is TEXT, not this type, so the SQL stays `jsonb ? text`.
+        return self.impl.coerce_compared_value(op, value)
+
     def process_bind_param(self, value, dialect):
         return scrub_credentials(value) if value is not None else value
 

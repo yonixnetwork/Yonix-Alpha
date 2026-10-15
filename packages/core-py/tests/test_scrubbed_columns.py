@@ -97,3 +97,13 @@ async def test_orm_and_core_writes_are_scrubbed(sf):
     assert ev.detail["meta"] == KEPT[0]
     assert reason == "quote failed: https://solana-mainnet.core.chainstack.com/…"
     assert ev.detail["error"] == "all endpoints failed: https://mainnet.helius-rpc.com/…"
+
+
+async def test_jsonb_key_and_containment_queries_still_work(sf):
+    async with sf() as s:
+        s.add(SystemEvent(service="x", event_type="e", severity="info", detail={"final": 1, "tags": ["a"]}))
+        await s.commit()
+    async with sf() as s:
+        assert (await s.execute(select(SystemEvent).where(SystemEvent.detail.has_key("final")))).scalar_one()
+        assert (await s.execute(select(SystemEvent).where(SystemEvent.detail.contains({"tags": ["a"]})))).scalar_one()
+        assert (await s.execute(select(SystemEvent).where(~SystemEvent.detail.has_key("missing")))).scalar_one()
