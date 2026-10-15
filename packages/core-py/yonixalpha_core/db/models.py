@@ -23,6 +23,7 @@ from sqlalchemy.dialects.postgresql import INET, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from yonixalpha_core.db.base import Base
+from yonixalpha_core.db.types import ScrubbedJSONB, ScrubbedString
 
 
 def _uuid_pk() -> Mapped[uuid.UUID]:
@@ -81,7 +82,7 @@ class AuditLog(Base):
     id: Mapped[uuid.UUID] = _uuid_pk()
     user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     event_type: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
-    detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    detail: Mapped[dict | None] = mapped_column(ScrubbedJSONB, nullable=True)
     ip_address: Mapped[str | None] = mapped_column(INET, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
@@ -100,7 +101,7 @@ class SystemEvent(Base):
     service: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     event_type: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     severity: Mapped[str] = mapped_column(String(16), nullable=False, default="info")
-    detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    detail: Mapped[dict | None] = mapped_column(ScrubbedJSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
@@ -228,9 +229,9 @@ class TradingCandidate(Base):
     token_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tokens.id", ondelete="CASCADE"), nullable=False, index=True)
     engine: Mapped[str] = mapped_column(String(32), nullable=False, index=True)  # discovery|migration|momentum
     state: Mapped[str] = mapped_column(String(32), nullable=False, index=True, default="discovered")
-    state_history: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    state_history: Mapped[list] = mapped_column(ScrubbedJSONB, nullable=False, default=list)
     state_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    detail: Mapped[dict | None] = mapped_column(ScrubbedJSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     token: Mapped["Token"] = relationship()
@@ -628,17 +629,17 @@ class ExecutionOrder(Base):
     amount_kind: Mapped[str] = mapped_column(String(8), nullable=False)  # sol | tokens
     slippage_pct: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False)
     priority_fee_sol: Mapped[Decimal] = mapped_column(Numeric(20, 9), nullable=False)
-    limits: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # guard bounds used
+    limits: Mapped[dict | None] = mapped_column(ScrubbedJSONB, nullable=True)  # guard bounds used
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING", index=True)
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
     signature: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    error: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    guard: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    error: Mapped[str | None] = mapped_column(ScrubbedString(500), nullable=True)
+    guard: Mapped[dict | None] = mapped_column(ScrubbedJSONB, nullable=True)
+    result: Mapped[dict | None] = mapped_column(ScrubbedJSONB, nullable=True)
     # Decision context at the BUY/SELL decision, stage timings and the
     # price-execution analysis (yonixalpha_core.execution_analysis).
-    diagnostics: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    diagnostics: Mapped[dict | None] = mapped_column(ScrubbedJSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -778,13 +779,13 @@ class RiskAssessment(Base):
     execution_target: Mapped[str] = mapped_column(String(8), nullable=False)
     overall_risk: Mapped[str] = mapped_column(String(16), nullable=False)
     risk_engine_version: Mapped[str] = mapped_column(String(16), nullable=False)
-    assessment: Mapped[dict] = mapped_column(JSONB, nullable=False)  # Assessment.to_dict()
+    assessment: Mapped[dict] = mapped_column(ScrubbedJSONB, nullable=False)  # Assessment.to_dict()
     approval_state: Mapped[str] = mapped_column(String(16), nullable=False, default="NONE", index=True)
     approved_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Filled later for REJECT/NO_TRADE/WAIT rows: what the price did after
     # the decision (see safety follow-up job), never at decision time.
-    outcome: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    outcome: Mapped[dict | None] = mapped_column(ScrubbedJSONB, nullable=True)
     evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
@@ -824,7 +825,7 @@ class TradeTimelineEvent(Base):
         ForeignKey("paper_positions.id", ondelete="CASCADE"), nullable=True, index=True
     )
     event_type: Mapped[str] = mapped_column(String(48), nullable=False)
-    detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    detail: Mapped[dict | None] = mapped_column(ScrubbedJSONB, nullable=True)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
 
 
@@ -974,26 +975,26 @@ class OpportunityOutcome(Base):
     candidate_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
     assessment_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     position_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
-    reasons: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    reasons: Mapped[list] = mapped_column(ScrubbedJSONB, nullable=False, default=list)
     decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
-    snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
-    horizons: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    snapshot: Mapped[dict] = mapped_column(ScrubbedJSONB, nullable=False, default=dict)
+    horizons: Mapped[dict] = mapped_column(ScrubbedJSONB, nullable=False, default=dict)
     peak_pct: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
     drawdown_pct: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
     migrated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    trade_result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    loss_analysis: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    trade_result: Mapped[dict | None] = mapped_column(ScrubbedJSONB, nullable=True)
+    loss_analysis: Mapped[dict | None] = mapped_column(ScrubbedJSONB, nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="TRACKING", index=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Ledger v2 (0019): the path to T+60m, theoretical vs executable return,
     # counterfactual / exit analysis, multi-target labels, regime tags and
     # shadow model scores (never read by the gate).
-    path: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    analysis: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    labels: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    regime: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    post_exit: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    ml_shadow: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    path: Mapped[dict | None] = mapped_column(ScrubbedJSONB, nullable=True)
+    analysis: Mapped[dict | None] = mapped_column(ScrubbedJSONB, nullable=True)
+    labels: Mapped[dict | None] = mapped_column(ScrubbedJSONB, nullable=True)
+    regime: Mapped[dict | None] = mapped_column(ScrubbedJSONB, nullable=True)
+    post_exit: Mapped[dict | None] = mapped_column(ScrubbedJSONB, nullable=True)
+    ml_shadow: Mapped[dict | None] = mapped_column(ScrubbedJSONB, nullable=True)
     theoretical_return_pct: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
     executable_return_pct: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
     feature_version: Mapped[str | None] = mapped_column(String(32), nullable=True)

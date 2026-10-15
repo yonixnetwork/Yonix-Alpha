@@ -328,12 +328,12 @@ This is an availability defect: a long-running service must recover its provider
 | Oct 14 11:44:34 | last failed health check: endpoint list = **[SOLANA_RPC_URL only]** | the new "helius" row was **not in the services' list**: disabled or not yet usable |
 | Oct 14 11:44:53 / 11:44:57 | "helius" **updated**, then tested CONNECTED | the operator enabled or fixed it; the services reloaded it and the errors stopped |
 
-**Corrected conclusion (INFERRED from timestamps; provider edits are not audited):**
+**Corrected conclusion (INFERRED from timestamps; the audit log can confirm who changed what, see below):**
 - The restart at 11:40 did **not** end the outage; errors continued for 4 more minutes.
 - The provider edit at 11:44:53 ended it. The hot reload works.
 - Cause: the only dashboard provider was rate-limited, its replacement was not enabled for about 19 hours, and the env backup was the only endpoint left, answering 429.
 - The software defects are visibility, not reloading:
-  1. provider add, edit and delete are not in the audit log;
+  1. (correction, Oct 15) provider add, edit and delete **are** in the audit log (`rpc.provider_added`, `rpc.provider_updated`, `rpc.provider_deleted`, `rpc.env_endpoint_updated`), but an edit recorded only the names of the changed fields, not whether "enabled" went from off to on; the evidence tool now lists these entries (`AUDIT_PATTERNS` includes `rpc.%`);
   2. no single clear alert says "no healthy Solana RPC, discovery is not running" (the repeated health-check alerts are throttled);
   3. the dashboard lets the last Helius provider be replaced by a disabled one without a warning.
 - **R7 is revised accordingly.**
@@ -471,8 +471,8 @@ Still UNKNOWN:
 | R4 | Paper migration crossing: after `position_migrated`, keep the position unmanaged for the measured LIVE sell latency, then fill each take-profit at the pool price at that time, one sale per tick | code (paper only) | removes an optimism | replay STONKS/TAPE timelines; a test with a price that collapses within 2 s |
 | R5 | Paper entry latency for PumpSwap entries: re-price with pool trade events, which are already fetched for flow | code (paper only) | realism | test with two pool trades around the latency |
 | R6 | Outcome horizons for migrated tokens: use pool trade prices, not the curve stream | code (review data) | data quality | test: a migrated token no longer gets the 0.00041088 price |
-| R7 | (revised after V5) Audit every RPC provider add / edit / enable / delete; one CRITICAL alert, not throttled away, when a service has had no healthy Solana endpoint for 5 minutes ("discovery is not running"), repeated hourly while it lasts; a dashboard warning when the change would leave only the env backup or a disabled provider | code | availability | tests: audit row per change; alert fires once at 5 min and again hourly; warning on the last-provider case |
-| R8 | Redact URLs in stored reasons (`redact.redact_text` where RPC errors become reasons); rotate the exposed provider key | code plus operator | security | test: no URL survives into `risk_assessments.assessment` |
+| R7 | (revised after V5; IMPLEMENTED Oct 15, `yonixalpha_core/rpc_outage.py`, `routes/rpc.py`) Add the values before and after (enabled, priority, ...) to the existing provider audit entries; one CRITICAL alert, not throttled away, when a service has had no healthy Solana endpoint for 5 minutes ("discovery is not running"), repeated hourly while it lasts; a dashboard warning when the change would leave only the env backup or a disabled provider | code | availability | tests: audit row per change; alert fires once at 5 min and again hourly; warning on the last-provider case |
+| R8 | (IMPLEMENTED Oct 15, `yonixalpha_core/db/types.py`: every write to the decision, event, audit, candidate, order and outcome records cuts key-bearing URLs to scheme://host/…; older rows unchanged) Redact URLs in stored reasons; rotate the exposed provider key (operator) | code plus operator | security | test: no URL survives into `risk_assessments.assessment` |
 | R9 | Helius: back off re-evaluation of a candidate whose last decision was a token-level hard block that needs new trades (AUTO_SL_NO_VOLATILITY, INSUFFICIENT_LIQUIDITY, FLOW_UNAVAILABLE) from 10-30 s to 60 s, still woken by a new trade event; holder cache up to `max_data_age_seconds - 10` | code | none to safety (freshness unchanged) | counters before and after; the decision path still sees data within max age |
 | R10 | Make the cooldown per strategy (with the account-wide limit unchanged) | code, default = current behaviour | neutral | test: a fresh loss does not pause migration when enabled |
 

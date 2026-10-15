@@ -221,6 +221,44 @@ async def _enabled_count(db: AsyncSession, settings: Settings) -> int:
     return len(await rpc_registry.effective_rpc(db, settings))
 
 
+async def _solana_warnings(db: AsyncSession, redis: Redis, settings: Settings) -> list[str]:
+    """After a change that disables or removes a Solana endpoint (called
+    before commit): would the bot be left without an endpoint known to work?
+    "Works" is what services saw on real requests in the last 5 minutes, or
+    a CONNECTED test in that time (the same as CONNECTED on this page). The
+    change is still saved; the dashboard asks before sending it and shows
+    these after. On Oct 13-14 a disabled provider plus a rate-limited one
+    left the bot without a working RPC for about 22 hours."""
+    now = datetime.now(timezone.utc)
+    acks = await runtime_config.read_acks(redis)
+    overrides = await rpc_registry.env_overrides(db)
+    rows = {str(p.id): p for p in (await db.execute(select(RpcProvider).where(RpcProvider.chain == "solana"))).scalars()}
+    left = []
+    for r in await rpc_registry.effective_rpc(db, settings):
+        p = rows.get(r.get("id", ""))
+        last_test = p.last_test if p else (overrides.get(r["label"]) or {}).get("last_test")
+        h = _health(r["label"], acks, last_test, now)
+        left.append((r["name"], h["connected"] and h["healthy"] != "NO"))
+    out = []
+    if left and not any(ok for _, ok in left):
+        out.append(f"None of the Solana RPC endpoints left enabled ({', '.join(n for n, _ in left)}) has worked in the "
+                   "last 5 minutes (no successful request and no CONNECTED test). If they keep failing, the bot has no "
+                   "working RPC: no new tokens are found and open positions may not be priced or exited on time. "
+                   "Test them now, or enable another provider.")
+    if len(left) == 1:
+        out.append(f"Only one Solana RPC endpoint is left enabled ({left[0][0]}): if it fails there is nothing to fail over to.")
+    return out
+
+
+AUDITED_FIELDS = ("name", "provider_type", "enabled", "priority", "timeout_seconds", "rate_limit_rps", "roles", "plan")
+
+
+def _audit_values(p: RpcProvider) -> dict:
+    """Non-secret fields of a provider for the audit log (the URL only as
+    its host, as shown on the page)."""
+    return {**{f: getattr(p, f) for f in AUDITED_FIELDS}, "host": p.rpc_display}
+
+
 @router.post("/providers")
 async def add_provider(body: ProviderIn, request: Request, db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
                        settings: Settings = Depends(get_settings), username: str = Depends(get_current_username)) -> dict:
@@ -263,6 +301,7 @@ async def edit_provider(provider_id: UUID, body: ProviderPatch, request: Request
         if not body.password:
             raise HTTPException(422, "changing a URL needs your password")
         await require_password(db, redis, username, body.password, request, "rpc", {"action": "edit_url", "name": p.name})
+    before = _audit_values(p)
     changed = []
     if body.name is not None and body.name != p.name:
         if (await db.execute(select(RpcProvider).where(RpcProvider.name == body.name))).scalar_one_or_none():
@@ -296,36 +335,47 @@ async def edit_provider(provider_id: UUID, body: ProviderPatch, request: Request
     if p.chain == "solana" and await _enabled_count(db, settings) == 0:
         await db.rollback()
         raise HTTPException(409, "this would leave no enabled RPC endpoint; enable another one first")
-    await audit(db, username, request, "rpc.provider_updated", {"name": p.name, "changed": changed})
+    warnings = (await _solana_warnings(db, redis, settings)
+                if p.chain == "solana" and before["enabled"] and not p.enabled else [])
+    after = _audit_values(p)
+    diff = {k: {"before": before[k], "after": after[k]} for k in before if before[k] != after[k]}
+    await audit(db, username, request, "rpc.provider_updated",
+                {"name": p.name, "changed": changed, "values": diff, **({"warnings": warnings} if warnings else {})})
     await db.commit()
-    return {"id": str(p.id), "changed": changed, "test": p.last_test if "rpc_url" in changed else None}
+    return {"id": str(p.id), "changed": changed, "test": p.last_test if "rpc_url" in changed else None, "warnings": warnings}
 
 
 @router.delete("/providers/{provider_id}")
 async def delete_provider(provider_id: UUID, request: Request, db: AsyncSession = Depends(get_db),
-                          settings: Settings = Depends(get_settings), username: str = Depends(get_current_username)) -> dict:
+                          redis: Redis = Depends(get_redis), settings: Settings = Depends(get_settings),
+                          username: str = Depends(get_current_username)) -> dict:
     p = await db.get(RpcProvider, provider_id)
     if p is None:
         raise HTTPException(404, "provider not found")
-    name, chain = p.name, p.chain
+    name, chain, was = p.name, p.chain, _audit_values(p)
     await db.delete(p)
     await db.flush()
     if chain == "solana" and await _enabled_count(db, settings) == 0:
         await db.rollback()
         raise HTTPException(409, "this would leave no enabled RPC endpoint; add or enable another one first")
-    await audit(db, username, request, "rpc.provider_deleted", {"name": name})
+    warnings = await _solana_warnings(db, redis, settings) if chain == "solana" and was["enabled"] else []
+    await audit(db, username, request, "rpc.provider_deleted",
+                {"name": name, "chain": chain, "was": was, **({"warnings": warnings} if warnings else {})})
     await db.commit()
-    return {"deleted": name}
+    return {"deleted": name, "warnings": warnings}
 
 
 @router.put("/providers/env/{label}")
 async def edit_env_endpoint(label: str, body: EnvPatch, request: Request, db: AsyncSession = Depends(get_db),
-                            settings: Settings = Depends(get_settings), username: str = Depends(get_current_username)) -> dict:
+                            redis: Redis = Depends(get_redis), settings: Settings = Depends(get_settings),
+                            username: str = Depends(get_current_username)) -> dict:
     """Enable/disable or reorder a .env endpoint (its URL stays in .env)."""
     if label not in {slot[0] for slot in rpc_registry.ENV_RPC}:
         raise HTTPException(404, f"unknown .env endpoint; one of {[s[0] for s in rpc_registry.ENV_RPC]}")
     overrides = await rpc_registry.env_overrides(db)
     entry = dict(overrides.get(label) or {})
+    was = next((r for r in await rpc_registry.providers(db, settings) if r["label"] == label), None)
+    was_enabled = bool(was and was["enabled"])
     if body.enabled is not None:
         entry["enabled"] = body.enabled
     if body.priority is not None:
@@ -341,9 +391,13 @@ async def edit_env_endpoint(label: str, body: EnvPatch, request: Request, db: As
     if await _enabled_count(db, settings) == 0:
         await db.rollback()
         raise HTTPException(409, "this would leave no enabled RPC endpoint; enable another one first")
-    await audit(db, username, request, "rpc.env_endpoint_updated", {"label": label, **body.model_dump(exclude_none=True)})
+    warnings = await _solana_warnings(db, redis, settings) if was_enabled and body.enabled is False else []
+    await audit(db, username, request, "rpc.env_endpoint_updated",
+                {"label": label, **body.model_dump(exclude_none=True),
+                 "before": {k: (was or {}).get(k) for k in ("enabled", "priority", "roles", "plan")},
+                 **({"warnings": warnings} if warnings else {})})
     await db.commit()
-    return {"label": label, **entry}
+    return {"label": label, **entry, "warnings": warnings}
 
 
 @router.post("/providers/{provider_id}/test")
