@@ -281,3 +281,12 @@ These answer the open questions before any strategy code depends on them:
 - Binance USDⓈ-M reachable from the server, and XAUUSDT, BTCUSDT and ETHUSDT listed and trading.
 - Hyperliquid public info API reachable.
 - Current memory and CPU of each container.
+
+## 10. Operator decisions (2026-10-15)
+
+| Question | Decision |
+|---|---|
+| GitHub | No new forks. The yonixnetwork private copies are the record; rules are re-implemented with attribution (repo + commit), no files copied. |
+| Confluence proximity rule | The public original's rule is the default; your corrected rule is a labelled option. |
+| Forex | Confluence runs in demo on Binance XAUUSDT, labelled as an adapted instrument, if the server check passes; EURUSD / GBPUSD stay BLOCKED. |
+| Gold vs BTC EMA history | 31 candles (as the original); 150 available as a setting. |
