@@ -31,7 +31,7 @@ All realized PnL is net of every fee the simulator or the chain charged. `realiz
    - It is position `915561d1`: migration engine, token "D O T F" (`3oa5Gy38...Pump`), entered 2026-10-06 03:13:53 UTC.
    - Realized **+0.13899 SOL on 0.0100 SOL**, which is **+1389.9%**. TP2 and TP3 filled at **24.1x** the entry price.
    - The price was flat for 96 minutes, then rose 23x in under three minutes on a pool showing 1,282 SOL of liquidity.
-   - Whether that move was real and executable is **not verified** (section 3.1, check V1).
+   - Public market data (GeckoTerminal) confirms the move was real and the paper sells were executable (section 3.1, V1).
 2. **Without that one trade the "profitable period" was a losing period** (S1, VERIFIED arithmetic):
    - The whole of Oct 6 was +0.1243 SOL. Without the trade it is **-0.0147** over 23 trades.
    - Migration before #53 was +0.1054 over 78 trades. Without it, **-0.0336**.
@@ -125,7 +125,16 @@ Possible explanations:
 - a direct SOL transfer into the quote vault (it changes the price without a swap);
 - a reserve read that is wrong for this pool's layout.
 
-Status: **UNVERIFIED.** Check V1 (GeckoTerminal OHLCV of pool `HHWweFKz...`, run on the server) shows whether trades printed at ~2.2e-3.
+Status after check V1 (GeckoTerminal 5-minute candles of pool `HHWweFKz...`, run on the server 2026-10-15): **VERIFIED as a real market move.**
+
+| Candle (UTC) | Open | High | Close | Volume |
+|---|---|---|---|---|
+| Oct 6 04:50-04:55 | 9.825e-5 | 2.265e-3 | 2.265e-3 | (cut off) |
+| 04:55-05:00 | 2.265e-3 | 2.284e-3 | 2.284e-3 | 30.7 SOL |
+| 05:00-05:05 | 2.284e-3 | 2.291e-3 | 2.291e-3 | 11.3 SOL |
+
+- The paper sells (04:52:44 at 2.261e-3, 0.145 SOL in total) were inside a range that kept trading with real volume, so they were executable.
+- This was one rare event on an instant-bond token, not something the strategy can repeat.
 
 **Was it repeatable?**
 - The other "established" migrated trades (market cap > 3,000 SOL at entry): 17 paper trades, net +0.0033. Without 915561d1, that is **-0.1357**.
@@ -461,7 +470,7 @@ R1 was approved by the operator on 2026-10-15 and is applied from the Risk Setti
 - No migration is destructive and no history is deleted.
 
 ## Final answer
-- **The ~1000% trade:** real in the paper records (+1389.9%, +0.139 SOL on 0.01 SOL), but it is one trade on an "established" instant-bond token. The market move behind it is not verified (V1).
+- **The ~1000% trade:** real in the paper records (+1389.9%, +0.139 SOL on 0.01 SOL), but it is one trade on an "established" instant-bond token. Public market data confirms the move was real (V1).
 - **Without that trade,** no strategy was ever net profitable. The system did not lose a working strategy; the strategy code never changed.
 - **What changed:**
   - position sizes (Oct 9 23:29 and Oct 10 08:25);
