@@ -298,7 +298,10 @@ These answer the open questions before any strategy code depends on them:
   - The ticker for XAUUSDT, BTCUSDT and ETHUSDT returns "Service unavailable from a restricted location according to 'b. Eligibility'".
   - The server (DigitalOcean nyc3) is in a location Binance restricts. YonixAlpha will not route around this (no proxies or VPNs), because that would break Binance's terms.
   - So every Binance-based design (Meta Muse on BTCUSDT/ETHUSDT, Gold vs BTC on XAUUSDT/BTCUSDT, Confluence on XAUUSDT) is BLOCKED as planned. It needs another data venue (operator decision) or stays blocked.
-- **Hyperliquid:** not run yet (check 3).
+- **Hyperliquid: REACHABLE from the server.**
+  - The main perp list (`meta`) includes BTC, ETH and PAXG.
+  - `perpDexs` lists a builder-deployed dex `xyz` (HIP-3) with commodity and stock perps (BRENTOIL, CL, COPPER, CORN, ...). Whether `xyz:GOLD` exists is NOT VERIFIED yet (the output was cut at 800 characters).
+  - Hyperliquid's terms also restrict some locations for *trading*. Demo mode uses only public market data and sends nothing.
 - **Memory: tight.**
   - 1967 MB total, 388 MB available, and 1001 MB of swap already in use.
   - The largest users are postgres (273 MB) and redis (268 MB).
