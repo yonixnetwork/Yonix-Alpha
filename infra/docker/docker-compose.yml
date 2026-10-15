@@ -224,6 +224,30 @@ services:
         condition: service_healthy
     networks: [yonixalpha]
 
+  # Crypto Trading engine (Bybit / Binance spot, DEMO only), separate from
+  # the Memecoin services: its own image (packages/crypto-py only, no
+  # packages/core-py), its own schema `crypto`. It runs only while its engine
+  # is switched ON in the dashboard (or a demo position is open) and exits
+  # otherwise; the switch is in the crypto schema, not in .env.
+  # Hard limits so it can never take memory or CPU from the other services.
+  crypto-trading:
+    build:
+      context: ../..
+      dockerfile: services/crypto-trading/Dockerfile
+    env_file:
+      - ../../.env
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpus: 0.25
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    networks: [yonixalpha]
+
 networks:
   yonixalpha:
     driver: bridge

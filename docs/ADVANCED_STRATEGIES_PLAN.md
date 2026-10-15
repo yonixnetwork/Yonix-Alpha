@@ -380,7 +380,53 @@ These answer the open questions before any strategy code depends on them:
   - keeps separate demo accounts per exchange.
 - **Worker:** `services/crypto-trading`.
   - Memory limit 128 MB and CPU 0.25 in compose.
-  - Idle while the engine is off (the default). It checks its config every 30 s and runs a public exchange health check every 10 min.
+  - Runs only while the engine is ON or a demo position is open; otherwise it exits to free memory. While running it checks its config every 30 s and runs a public exchange health check every 10 min.
   - It honours its own emergency stop and the global kill switch.
 - **API:** `/api/crypto/*` (authenticated), in a new route file plus one router line. Config saves are versioned per strategy and audited in `crypto.config_audit`.
 - **UI:** a new nav group "Crypto Trading", separate from the Memecoin "Trading" group.
+
+## 14. Implemented in this branch (2026-10-15): Crypto Trading foundation + Meta Muse
+
+What exists in code, with the evidence for each item:
+
+| Item | Status | Evidence |
+|---|---|---|
+| Package `packages/crypto-py` (`yonixalpha_crypto`), no import of `yonixalpha_core` | COMPLETED | `tests/test_demo_guard.py::test_the_package_has_no_credentials_signing_or_memecoin_imports` |
+| Own schema `crypto` + own Alembic history (`crypto.alembic_version`) | COMPLETED | `tests/test_migrations.py`: upgrade, `alembic check`, downgrade to base, and a probe table in `public` survives |
+| Bybit V5 spot adapter (instruments, kline, tickers, time) | COMPLETED (MockTransport) | `tests/test_exchanges.py`; live reachability from the server NOT VERIFIED (run `check_exchanges`) |
+| Binance spot adapter, used separately for `binance` and `binance_us` | COMPLETED (MockTransport) | 451 handling and NOTIONAL / MIN_NOTIONAL filters tested; binance.com is BLOCKED from the server (HTTP 451) |
+| Candle hygiene (duplicates, order, forming candle, gaps, stale) | COMPLETED | `test_candle_hygiene_*` |
+| Public-only HTTP client; order paths, signed params and key headers refused before sending | COMPLETED | `test_anything_but_public_market_data_is_refused`, `test_a_blocked_request_never_reaches_the_network` |
+| Modes DISABLED / DEMO only; executor calls `require_demo` before any fill | COMPLETED | `test_only_demo_executes`, `test_the_executor_refuses_a_non_demo_mode_before_writing_anything` |
+| Isolated USDT risk (risk per trade, position, exposure, cash, daily loss, open positions, spread, price age, minimum size, precision) | COMPLETED | `tests/test_risk_demo.py` |
+| Demo fill model (ask / bid + slippage, tick rounding against the order, taker fee, top-of-book size limit, idempotent client id) | COMPLETED | `test_fill_model_*`, `test_one_demo_entry_per_closed_candle_and_restart_is_safe` |
+| Per-strategy config (versioned, validated, audited, off by default, never re-enabled by a restart) | COMPLETED | `tests/test_config_store.py`, `apps/api/tests/test_crypto_api.py` |
+| Engine switch + own emergency stop + platform kill switch (read only) | COMPLETED | `test_kill_switch_and_emergency_stop_block_new_entries`; the kill-switch key matches `yonixalpha_core` (API test) |
+| Protection of open demo positions while the strategy or engine is off | COMPLETED | `test_protection_keeps_working_when_the_strategy_and_engine_are_off` |
+| Worker `services/crypto-trading` (runs only while the engine is ON or a demo position is open, exits otherwise; 128 MB / 0.25 CPU hard limits; restart on failure only) | COMPLETED | `services/crypto-trading/tests` (exits by itself when idle); compose renders `mem_limit 134217728`, `cpus 0.25`, `restart on-failure`; idle RSS measured at 62 MB |
+| API `/api/crypto/*` (login required) | COMPLETED | `test_crypto_api.py` (401 without login, 503 before the schema exists, per-strategy saves, Memecoin settings untouched) |
+| UI: nav group "Crypto Trading" > Strategy Lab | COMPLETED (typecheck + lint) | browser check pending in this round |
+| Meta Muse module (v1) | COMPLETED, DEMO, spot LONG only | `tests/test_meta_muse.py` (EMA = pandas adjust=False, divergence rules, exits, closed candles, defaults = original), plus an end-to-end engine test |
+| Read-only exchange check tool | COMPLETED | `python -m yonixalpha_crypto.tools.check_exchanges` |
+| Backtests / performance evidence | NOT IMPLEMENTED | no strategy has demo or backtest results yet; the metrics show "unavailable" below 20 closed trades |
+| Gold vs BTC, Hyperliquid grid, Confluence | BLOCKED / NOT IMPLEMENTED | as listed in the registry with reasons |
+
+**Meta Muse on spot: a real limitation, not hidden.**
+- The original trades USD-M futures both ways. On spot only the LONG half can be simulated; SHORT signals are stored with the reason and not filled.
+- A faithful version needs perpetual market data plus a demo short and funding model, for example Bybit linear USDT perpetuals. That is a later increment and must first be checked for reachability from the server.
+
+**Memecoin protection check:** `git diff origin/main --stat` shows no change under any of these paths:
+- `packages/core-py`
+- `services/{data-solana, data-evm, copy-engine, engine-solana-*, decision-engine, ml, paper-trading}`
+- `scripts`
+- `apps/api/migrations`
+- `apps/web/lib`
+- existing API route files
+
+The only shared files touched are additive: `apps/api/app/api/router.py` (+2 lines), `apps/api/Dockerfile`, `apps/api/requirements.txt`, `apps/web/app/dashboard/layout.tsx` (one nav group), compose (one new service), CI (two matrix rows) and `.env.example`.
+
+**Deployment effect (for review):**
+- The API and web images change. Nothing in this change alters the Memecoin worker images: `packages/core-py` and their service folders are byte-for-byte unchanged. They can still be rebuilt and recreated for an existing reason, when `deploy.sh` prunes build cache older than 48 h, which happens with or without this change. To avoid even that, deploy only the changed services with the targeted command in the deployment notes.
+- The new `crypto-trading` container starts and exits within seconds while the engine is OFF (the default).
+- The on/off switch is a row in `crypto.engine_state`, not a line in `.env`. Every Memecoin service loads the whole `.env`, so editing it would change their configuration and make compose recreate them; the database switch avoids that.
+- The API creates the `crypto` schema at start. If that fails, the API still starts.
