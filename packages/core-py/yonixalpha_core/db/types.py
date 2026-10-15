@@ -20,6 +20,10 @@ from yonixalpha_core.redact import scrub_credentials
 class ScrubbedJSONB(TypeDecorator):
     impl = JSONB
     cache_ok = True
+    # As JSONB: an attribute never set is SQL NULL, an explicit None is JSON
+    # null. Without this a row created without the field got JSON null, and
+    # `col IS NULL` queries ("not scored yet") stopped finding it.
+    should_evaluate_none = True
 
     def coerce_compared_value(self, op, value):
         # Comparisons keep JSONB's own typing: the key in `col ? 'key'`

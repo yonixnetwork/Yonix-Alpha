@@ -107,3 +107,14 @@ async def test_jsonb_key_and_containment_queries_still_work(sf):
         assert (await s.execute(select(SystemEvent).where(SystemEvent.detail.has_key("final")))).scalar_one()
         assert (await s.execute(select(SystemEvent).where(SystemEvent.detail.contains({"tags": ["a"]})))).scalar_one()
         assert (await s.execute(select(SystemEvent).where(~SystemEvent.detail.has_key("missing")))).scalar_one()
+
+
+async def test_null_handling_is_the_same_as_plain_jsonb(sf):
+    # never set -> SQL NULL (found by IS NULL, e.g. "not scored yet"); explicit None -> JSON null, as JSONB does
+    async with sf() as s:
+        s.add(SystemEvent(service="x", event_type="unset", severity="info"))
+        s.add(SystemEvent(service="x", event_type="none", severity="info", detail=None))
+        await s.commit()
+    async with sf() as s:
+        found = (await s.execute(select(SystemEvent.event_type).where(SystemEvent.detail.is_(None)))).scalars().all()
+    assert found == ["unset"]
