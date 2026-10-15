@@ -145,7 +145,13 @@ Status: **UNVERIFIED.** Check V1 (GeckoTerminal OHLCV of pool `HHWweFKz...`, run
 - Paper: about 8 such trades, about +0.054 (6 + 2 rows in S1: +0.0414 and +0.0122; STONKS and TAPE are verified individually).
 - **LIVE: the same pattern occurred 5 times and won 0 times** (LIVE fresh rows "MIGRATED pool <10m" 4 trades -0.0021, "30m-24h" 1 trade -0.0001).
 
-INFERRED: paper is selling at a pool price that a LIVE sell, which has to be built, routed to PumpSwap, sent and confirmed, did not get. Check V2 (minute candles around the two migrations) shows how long that price lasted.
+**Update after check V2 (GeckoTerminal 1-minute candles of the STONKS pool, run on the server 2026-10-15):**
+- 13:33 candle: open 6.255e-7, high 6.584e-7, low 5.920e-7, close 6.066e-7, 39.7 SOL traded.
+- The price then rose to 1.10e-6 by 13:39.
+- The paper fills (6.258e-7 to 6.262e-7 at 13:33:29) were **inside the range that actually traded**. Even the minute's low was +63% above the entry, so a sell 2 to 5 s later would also have been well in profit.
+- **D1 is downgraded:** for STONKS the migration-crossing exit was executable, not a simulator artifact.
+- What remains open is why the 5 LIVE trades of the same kind won 0 times. Their sizes (0.003 to 0.01 SOL) made fees 5% to 10% of size, and their sell timing is not recorded per trade.
+- So the realistic part of D1 is only that all three take-profits filled in one tick. In the market the price kept rising, so this cost profit rather than inflating it.
 
 ### 3.3 Momentum winners
 
@@ -270,7 +276,7 @@ Sequence:
 
 **Smallest safe correction (proposed, not applied; needs approval):**
 - Set the per-engine override `solana_migration.max_loss_per_trade_sol` = **0.0067 SOL** (a third of the 0.02 limit). The setting exists since #76, and it lowers risk.
-- With a ~14% stop plus costs, that gives sizes of about 0.03 to 0.045 SOL, with fixed costs (0.000225) near 0.5% to 0.75% of size.
+- With a ~14% stop plus costs, that gives sizes of about 0.035 SOL (up to about 0.08 SOL on a 5% stop), with fixed costs (0.000225) near 0.3% to 0.7% of size.
 - The daily limit is not raised, nothing is reset, and LIVE stays off.
 - The alternative of restoring the exact historical 0.01 cap is faithful to history, but at 0.01 SOL the post-#53 fixed costs are 2.25% of size. That is what throttled approvals on Oct 7 to 9 (STOP_INSIDE_COSTS).
 
@@ -287,9 +293,22 @@ Sequence:
 - **Recovery:** it ended only when `paper-trading`, `data-solana`, `decision-engine`, `engine-solana-discovery` and `ml` were restarted at 11:39 to 11:40 Oct 14 (the #76 deploy). The server has not rebooted since Sep 30.
 - **Possible earlier gap:** Oct 13 04:00 to 10:08 also had migration candidates but no discovery candidates. That ended at the #75 deploy restart (10:09).
 
-HYPOTHESIS: the pump.fun stream or the RPC client gets stuck and does not recover without a restart. This would be the same failure class twice.
+**Update after check V3 (error kinds, run 2026-10-15 04:40 UTC):**
 
-Check V3 (the activity section now lists error kinds with URLs hidden) gives the error type.
+| Service | Event | Count | First .. last | Latest detail |
+|---|---|---|---|---|
+| data-solana | `rpc_health_check_failed` | 2,597 | Oct 13 05:33 .. Oct 14 11:44 | "All RPC endpoints failed for method=getHealth (env:primary: HTTP 429)"; the endpoint list starts with `SOLANA_RPC_URL` (env), `disabled: true` |
+| engine-solana-discovery | `rpc_health_check_failed` | 2,594 | Oct 13 04:42 .. Oct 14 11:44 | same |
+| engine-solana-discovery | `pump_stream_unhealthy` | 131 | **Oct 13 14:01 .. Oct 14 11:50** | "the stream delivered 26 of 114 launches PumpPortal announced in the last 10 min (23%)"; action "WebSocket reconnected to the next provider" |
+| decision-engine | `candidate_evaluation_failed` | 427 | Oct 14 12:30 .. 12:53 | the `Finding.decision` bug, fixed by #77 |
+
+VERIFIED: in both services the RPC health check (one `getHealth` every 30 s) failed continuously from the morning of Oct 13. The only endpoint it tried was the env backup, which answered HTTP 429.
+
+From 14:01 the pump.fun WebSocket delivered only about a quarter of new launches. Reconnecting "to the next provider" did not repair it for 21.7 hours, and only the restart at 11:40 Oct 14 did. Discovery then had almost nothing to promote.
+
+HYPOTHESIS, to confirm with check V5: the dashboard-configured Helius endpoints had dropped out of these two services' RPC manager, either disabled or rate-limited without recovery, or not reloaded. That left only the public backup. The restart reloaded them.
+
+This is an availability defect: a long-running service must recover its providers without a restart (Stage B, R7).
 
 ---
 
@@ -379,6 +398,10 @@ cd /opt/yonixalpha && git fetch -q origin claude/yonixalpha-platform-architectur
   curl -s "https://api.geckoterminal.com/api/v2/networks/solana/pools/4LgLqjHDRsVHbEBADe6LssV81PKpbSMqpkSPddU8cPQr/ohlcv/minute?aggregate=1&before_timestamp=1791466800&limit=10&currency=token" | python3 -c "import sys,json,datetime;[print(datetime.datetime.utcfromtimestamp(r[0]),r[1:]) for r in json.load(sys.stdin)['data']['attributes']['ohlcv_list']]"
   ```
 - **V3. Outage error kinds:** `R --section activity`.
+- **V5. Which endpoints the health check saw when the outage began (names only, no URLs):**
+  ```
+  $C exec -T -e PGOPTIONS='-c default_transaction_read_only=on' postgres psql -U yonixalpha -d yonixalpha -P pager=off -c "select created_at, e->>'name' n, e->>'label' l, e->>'source' src, e->>'disabled' dis, e->>'rate_limited' rl, e->>'auth_failed' auth, e->>'consecutive_failures' cf, e->>'successes' ok, e->>'failures' bad, left(regexp_replace(coalesce(e->>'last_error',''),'(https?|wss?)://[^ ]+','<url>','g'),80) err from system_events, jsonb_array_elements(detail->'endpoints') e where service='engine-solana-discovery' and event_type='rpc_health_check_failed' and created_at in ((select min(created_at) from system_events where service='engine-solana-discovery' and event_type='rpc_health_check_failed' and created_at > '2026-10-13 13:55+00'), (select max(created_at) from system_events where service='engine-solana-discovery' and event_type='rpc_health_check_failed')) order by 1, 4"
+  ```
 - **V4. Corrected categories and paper-realism rows:** `R --section trades > /tmp/yx_tr.txt; sed -n 1,40p /tmp/yx_tr.txt; tail -n 15 /tmp/yx_tr.txt`.
 
 Still UNKNOWN:
@@ -404,6 +427,8 @@ Still UNKNOWN:
 - **Global PAPER plus #69 frequency for momentum:** momentum is OFF and is not LIVE-eligible (#76). Keep it OFF until B5.
 
 ## B3. Corrections, smallest first (each one needs approval)
+
+R1 was approved by the operator on 2026-10-15 and is applied from the Risk Settings page (scope `solana_migration`), so the save is recorded under the operator's account.
 
 | # | Change | Kind | Risk effect | Test |
 |---|---|---|---|---|
