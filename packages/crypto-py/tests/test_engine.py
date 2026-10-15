@@ -57,7 +57,7 @@ def market():
 
 
 async def engine(sf, redis, md):
-    return Engine(CryptoSettings(database_url="unused", redis_url="unused"), markets={"bybit": md}, redis=redis,
+    return Engine(CryptoSettings(database_url="unused", redis_url="unused"), markets={md.exchange: md}, redis=redis,
                   session_factory=sf)
 
 
@@ -177,11 +177,12 @@ async def test_no_schema_means_waiting_not_failing(redis):
 async def test_meta_muse_end_to_end_long_eth_with_stop_anchored_on_the_fill(sf, redis):
     from tests.test_meta_muse import series
 
-    md = FakeMarket("bybit")
+    md = FakeMarket("binance_us")  # the default exchange (reachable from the server)
     md.series["BTC/USDT"] = candles(series(60000, -0.002))
     md.series["ETH/USDT"] = candles(series(3000, 0.002))
     last = Decimal(series(3000, 0.002)[-1])
-    md.books["ETH/USDT"] = book(str(last - Decimal("0.05")), str(last + Decimal("0.05")), symbol="ETH/USDT")
+    md.books["ETH/USDT"] = book(str(last - Decimal("0.05")), str(last + Decimal("0.05")), symbol="ETH/USDT",
+                                  exchange="binance_us")
     async with sf() as s:
         await config_store.ensure_defaults(s)
         await s.commit()
@@ -195,7 +196,7 @@ async def test_meta_muse_end_to_end_long_eth_with_stop_anchored_on_the_fill(sf, 
         order = (await s.execute(select(DemoOrder))).scalar_one()
         pos = (await s.execute(select(DemoPosition))).scalar_one()
         sig = (await s.execute(select(Signal))).scalar_one()
-    assert order.symbol == "ETH/USDT" and order.status == "FILLED"
+    assert order.symbol == "ETH/USDT" and order.status == "FILLED" and order.exchange == "binance_us"
     assert pos.stop_price == order.price * Decimal("0.99") and pos.target_price == order.price * Decimal("1.02")
     assert sig.detail["lead"]["direction"] == "down" and sig.detail["traded"]["direction"] == "up"
     # the loss at the stop stays within the 5 USDT default risk budget

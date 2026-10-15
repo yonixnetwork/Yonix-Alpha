@@ -80,7 +80,7 @@ register(StrategySpec(
     status=IMPLEMENTED, status_reason="",
     provenance={"repo": "https://github.com/hoziertom44-arch/Meta_Muse_Crossover_strategy", "commit": "a163ff7",
                 "copy": "yonixnetwork/meta-muse-crossover-strategy@ab3b52d", "licence": "none (rules re-implemented)"},
-    exchanges=SPOT_EXCHANGES, intervals=("5m", "15m", "1h"), default_exchange="bybit",
+    exchanges=SPOT_EXCHANGES, intervals=("5m", "15m", "1h"), default_exchange="binance_us",
     default_symbols=("BTC/USDT", "ETH/USDT"), default_interval="5m", max_symbols=2,
     params={"fast": (9, "int", 2, 100), "slow": (21, "int", 3, 400),
             "trend_threshold": (Decimal("0.0015"), "dec", "0", "0.05"),

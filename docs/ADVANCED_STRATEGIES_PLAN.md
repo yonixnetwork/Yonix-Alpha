@@ -317,9 +317,9 @@ These answer the open questions before any strategy code depends on them:
 | Resource monitoring (host, Postgres, Redis, services) | COMPLETED (Memecoin side) | `yonixalpha_core/resources.py`, `GET /system/resources`; read-only reuse allowed |
 | Global kill switch | COMPLETED | Redis key `yonixalpha:kill_switch:engaged` (`kill_switch.py`); the new engine reads it, never writes it |
 | Crypto Trading engine (regular crypto, separate from Memecoin) | NOT IMPLEMENTED | removed Sep 29 (`7e87552`); archive only |
-| Bybit public market data | NOT IMPLEMENTED | archive `venues/bybit.py` (deleted); server reachability NOT VERIFIED |
+| Bybit public market data | BLOCKED on this server | server: HTTP 403 on `/v5/market/time` (Oct 15); the adapter exists and is tested, but it is not used from this server |
 | Binance (binance.com) public market data | BLOCKED on this server | server: HTTP 451 "restricted location" (Oct 15) |
-| Binance.US public market data (separate exchange, spot only) | NOT VERIFIED | needs a server check; it is a different exchange entity with its own fees and instruments, so it is configured separately and never presented as binance.com |
+| Binance.US public market data (separate exchange, spot only) | VERIFIED reachable | server: HTTP 200 on `/api/v3/ping` (Oct 15); a different exchange entity with its own fees and instruments, configured separately and never presented as binance.com |
 | Exchange abstraction (symbols, precision, minimum sizes) | NOT IMPLEMENTED (current app) | archive `venues/common.py` only had Ticker / Candle types |
 | Crypto demo execution and accounting | NOT IMPLEMENTED | the Memecoin paper engine exists but is protected and SOL-denominated; it is not reused |
 | Crypto strategy registry and per-strategy config | NOT IMPLEMENTED | the Memecoin registry (`strategy_registry.py`) is protected |
@@ -393,8 +393,8 @@ What exists in code, with the evidence for each item:
 |---|---|---|
 | Package `packages/crypto-py` (`yonixalpha_crypto`), no import of `yonixalpha_core` | COMPLETED | `tests/test_demo_guard.py::test_the_package_has_no_credentials_signing_or_memecoin_imports` |
 | Own schema `crypto` + own Alembic history (`crypto.alembic_version`) | COMPLETED | `tests/test_migrations.py`: upgrade, `alembic check`, downgrade to base, and a probe table in `public` survives |
-| Bybit V5 spot adapter (instruments, kline, tickers, time) | COMPLETED (MockTransport) | `tests/test_exchanges.py`; live reachability from the server NOT VERIFIED (run `check_exchanges`) |
-| Binance spot adapter, used separately for `binance` and `binance_us` | COMPLETED (MockTransport) | 451 handling and NOTIONAL / MIN_NOTIONAL filters tested; binance.com is BLOCKED from the server (HTTP 451) |
+| Bybit V5 spot adapter (instruments, kline, tickers, time) | COMPLETED (MockTransport) | `tests/test_exchanges.py`; BLOCKED from the server (HTTP 403, Oct 15), so not the default |
+| Binance spot adapter, used separately for `binance` and `binance_us` | COMPLETED (MockTransport) | 451 handling and NOTIONAL / MIN_NOTIONAL filters tested; binance.com is BLOCKED from the server (HTTP 451); Binance.US answers HTTP 200 and is the default exchange for Meta Muse |
 | Candle hygiene (duplicates, order, forming candle, gaps, stale) | COMPLETED | `test_candle_hygiene_*` |
 | Public-only HTTP client; order paths, signed params and key headers refused before sending | COMPLETED | `test_anything_but_public_market_data_is_refused`, `test_a_blocked_request_never_reaches_the_network` |
 | Modes DISABLED / DEMO only; executor calls `require_demo` before any fill | COMPLETED | `test_only_demo_executes`, `test_the_executor_refuses_a_non_demo_mode_before_writing_anything` |
@@ -405,7 +405,7 @@ What exists in code, with the evidence for each item:
 | Protection of open demo positions while the strategy or engine is off | COMPLETED | `test_protection_keeps_working_when_the_strategy_and_engine_are_off` |
 | Worker `services/crypto-trading` (runs only while the engine is ON or a demo position is open, exits otherwise; 128 MB / 0.25 CPU hard limits; restart on failure only) | COMPLETED | `services/crypto-trading/tests` (exits by itself when idle); compose renders `mem_limit 134217728`, `cpus 0.25`, `restart on-failure`; idle RSS measured at 62 MB |
 | API `/api/crypto/*` (login required) | COMPLETED | `test_crypto_api.py` (401 without login, 503 before the schema exists, per-strategy saves, Memecoin settings untouched) |
-| UI: nav group "Crypto Trading" > Strategy Lab | COMPLETED (typecheck + lint) | browser check pending in this round |
+| UI: nav group "Crypto Trading" > Strategy Lab | COMPLETED | typecheck, lint and a local browser check |
 | Meta Muse module (v1) | COMPLETED, DEMO, spot LONG only | `tests/test_meta_muse.py` (EMA = pandas adjust=False, divergence rules, exits, closed candles, defaults = original), plus an end-to-end engine test |
 | Read-only exchange check tool | COMPLETED | `python -m yonixalpha_crypto.tools.check_exchanges` |
 | Backtests / performance evidence | NOT IMPLEMENTED | no strategy has demo or backtest results yet; the metrics show "unavailable" below 20 closed trades |
@@ -413,7 +413,7 @@ What exists in code, with the evidence for each item:
 
 **Meta Muse on spot: a real limitation, not hidden.**
 - The original trades USD-M futures both ways. On spot only the LONG half can be simulated; SHORT signals are stored with the reason and not filled.
-- A faithful version needs perpetual market data plus a demo short and funding model, for example Bybit linear USDT perpetuals. That is a later increment and must first be checked for reachability from the server.
+- A faithful version needs perpetual market data plus a demo short and funding model, for example Bybit linear USDT perpetuals. Bybit is refused from the server (HTTP 403) and Binance USD-M too (HTTP 451), so this stays a later increment with no reachable source today; Hyperliquid perps are a separate venue and would be a separate, clearly labelled integration.
 
 **Memecoin protection check:** `git diff origin/main --stat` shows no change under any of these paths:
 - `packages/core-py`
@@ -423,7 +423,7 @@ What exists in code, with the evidence for each item:
 - `apps/web/lib`
 - existing API route files
 
-The only shared files touched are additive: `apps/api/app/api/router.py` (+2 lines), `apps/api/Dockerfile`, `apps/api/requirements.txt`, `apps/web/app/dashboard/layout.tsx` (one nav group), compose (one new service), CI (two matrix rows) and `.env.example`.
+The only shared files touched are additive: `apps/api/app/api/router.py` (+2 lines), `apps/api/Dockerfile`, `apps/api/requirements.txt`, `apps/web/app/dashboard/layout.tsx` (one nav group), compose (one new service) and CI (two matrix rows). `.env.example` is not changed.
 
 **Deployment effect (for review):**
 - The API and web images change. Nothing in this change alters the Memecoin worker images: `packages/core-py` and their service folders are byte-for-byte unchanged. They can still be rebuilt and recreated for an existing reason, when `deploy.sh` prunes build cache older than 48 h, which happens with or without this change. To avoid even that, deploy only the changed services with the targeted command in the deployment notes.

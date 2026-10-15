@@ -8,6 +8,7 @@ import pytest
 from yonixalpha_crypto import config_store, registry
 from yonixalpha_crypto.candles import clean
 from yonixalpha_crypto.strategies import implementation
+from yonixalpha_crypto.exchanges.profiles import PROFILES
 from yonixalpha_crypto.strategies.meta_muse import ema, signal, trend
 
 from tests.conftest import NOW, candles
@@ -90,3 +91,9 @@ def test_defaults_are_the_originals_and_validation_holds():
             config_store.validate(spec, base, bad)
     ok = config_store.validate(spec, base, {"enabled": True, "mode": "DEMO", "exchange": "binance_us"})
     assert ok["enabled"] and ok["exchange"] == "binance_us"
+
+
+def test_default_exchange_is_the_one_reachable_from_the_server():
+    # 2026-10-15 server checks: Bybit HTTP 403, binance.com HTTP 451, Binance.US HTTP 200.
+    assert registry.get("meta_muse").default_exchange == "binance_us"
+    assert "403" in PROFILES["bybit"].note and "451" in PROFILES["binance"].note

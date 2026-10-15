@@ -35,7 +35,8 @@ FEE_ASSUMED = "ASSUMED public base tier (not account-verified)"
 PROFILES: dict[str, ExchangeProfile] = {
     "bybit": ExchangeProfile(
         "bybit", "Bybit (spot)", "https://api.bybit.com", "spot", Decimal("10"), Decimal("10"),
-        f"{FEE_ASSUMED}: Bybit help center, non-VIP spot 0.10% / 0.10%"),
+        f"{FEE_ASSUMED}: Bybit help center, non-VIP spot 0.10% / 0.10%",
+        "Bybit refuses some locations (HTTP 403); this server got 403 on 2026-10-15"),
     "binance": ExchangeProfile(
         "binance", "Binance (binance.com spot)", "https://api.binance.com", "spot", Decimal("10"), Decimal("10"),
         f"{FEE_ASSUMED}: Regular tier 0.10% / 0.10% (third-party summaries)",
