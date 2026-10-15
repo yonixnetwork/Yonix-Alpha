@@ -127,3 +127,31 @@ async def test_switching_entry_delay_off_keeps_the_immediate_fill(db_session, re
     await evaluate_with_gate(db_session, redis_client, ENV, Sources(redis_client, FakeRpc(curve)), cand, NOW)
     pos = (await db_session.execute(select(PaperPosition))).scalar_one()
     assert "entry_delay" not in (pos.plan or {})
+
+
+async def test_pumpswap_paper_buy_is_scheduled_with_the_live_drift_as_fallback(db_session, redis_client):
+    """R5 (2026-10-15): a PumpSwap paper buy also lands after the measured
+    latency, priced from recorded pool trades; the measured LIVE drift is
+    kept only as the fallback (not charged at the fill: never both)."""
+    from datetime import timedelta
+
+    from yonixalpha_core.solana import pumpswap
+    from yonixalpha_core.testing.pumpswap import FakePoolRpc, seed_sol_usd, trade_history
+
+    await seed_sol_usd(redis_client, NOW)
+    rpc = FakePoolRpc(MINT, 700_000_000_000_000, 95 * 10**9,
+                      trade_history(pumpswap.canonical_pool(MINT), 25, 0, NOW - timedelta(seconds=500), every=20),
+                      inner=FakeRpc(None))
+    cand = await make_candidate(db_session)
+    cand.engine = "migration"
+    await db_session.commit()
+    a = await evaluate_with_gate(db_session, redis_client, ENV, Sources(redis_client, rpc), cand, NOW)
+    assert a is not None and a.decision.value == "EXECUTE", a.reasons
+    pos = (await db_session.execute(select(PaperPosition))).scalar_one()
+    d = pos.plan["entry_delay"]
+    assert d["venue"] == "pool" and d["settled"] is False and d["latency_s"] == 3.0
+    assert "fallback_drift_pct" not in d  # no LIVE drift measured yet: nothing to fall back to
+    assert "live_drift_pct" not in pos.plan["venue"]
+    # the gate's pool read was recorded for the settlement (no extra RPC)
+    trades, seen = await pumpswap.recorded_pool_history(redis_client, pumpswap.canonical_pool(MINT))
+    assert trades and seen

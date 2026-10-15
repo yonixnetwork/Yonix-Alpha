@@ -53,6 +53,9 @@ POOL_FEE_KEY = "yx:pumpswap:fee:"  # latest fee (bps) a pool charged, from its o
 POOL_TRADES_KEY = "yx:pumpswap:trades:"  # zset trade row (json) -> trade timestamp
 POOL_SEEN_KEY = "yx:pumpswap:seen:"  # zset read timestamp -> read timestamp
 POOL_HISTORY_SECONDS = 3 * 3600
+# A read a moment before the time asked about still counts: the gate reads
+# the pool while it evaluates, a fraction of a second before its decision.
+COVERAGE_GRACE_SECONDS = 2.0
 
 
 class PoolUnavailable(Exception):
@@ -303,6 +306,27 @@ async def record_pool_trades(redis, pool: str, trades: list[PoolTrade], now: flo
         await pipe.execute()
     except Exception:  # noqa: BLE001 - recording is for review; it never affects a decision
         pass
+
+
+def covered_price_at(trades: list[Trade], at: datetime,
+                     seen: list[tuple[float, float]]) -> tuple[Decimal | None, datetime | None, str | None]:
+    """(price_raw, trade time, None): the pool price after the last recorded
+    trade at or before `at`, when one read of the pool covered the span from
+    that trade to `at` (so no trade in between can be missing); else
+    (None, None, why). price_raw = quote lamports / base raw units."""
+    last = None
+    for t in trades:
+        if t.at <= at:
+            last = t
+        else:
+            break
+    if last is None or not last.virtual_token:
+        return None, None, "no PumpSwap trade recorded at or before this time"
+    lo, hi = last.at.timestamp(), at.timestamp()
+    if not any(oldest <= lo and hi - COVERAGE_GRACE_SECONDS <= read for read, oldest in seen):
+        return None, None, ("PumpSwap pool not read around this time (pool trades are recorded only while the token "
+                            "is evaluated or held)")
+    return Decimal(last.virtual_sol) / Decimal(last.virtual_token), last.at, None
 
 
 async def recorded_pool_history(redis, pool: str) -> tuple[list[Trade], list[tuple[float, float]]]:

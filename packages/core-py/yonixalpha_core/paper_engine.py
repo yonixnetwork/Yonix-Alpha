@@ -132,6 +132,10 @@ class PositionState:
     move_stop_to_breakeven_at_tp1: bool = False
     breakeven_price: Decimal | None = None
     management_paused: bool = False
+    # Take-profit sales allowed in one tick (None = every level reached).
+    # A paper position that crossed a migration sells one level per tick, as
+    # a LIVE seller sends one order at a time (R4).
+    max_tp_sales_per_tick: int | None = None
 
 
 @dataclass
@@ -186,9 +190,13 @@ def manage_step(s: PositionState, price: Decimal, exit_now: bool = False) -> Ste
     if s.management_paused:
         return r
 
+    sold = 0
     for i, (tp_price, fraction) in enumerate(s.take_profits):
         if i in s.tp_hits or not _beyond(price, tp_price, side):
             continue
+        if s.max_tp_sales_per_tick is not None and sold >= s.max_tp_sales_per_tick:
+            break  # the next level is sold on a later tick, at that tick's price
+        sold += 1
         qty = min(s.initial_quantity * fraction, s.remaining_quantity)
         s.tp_hits.append(i)
         if qty > 0:
@@ -237,6 +245,7 @@ def state_of(p: PaperPosition) -> PositionState:
         move_stop_to_breakeven_at_tp1=bool(plan.get("move_stop_to_breakeven_at_tp1")),
         breakeven_price=Decimal(plan["breakeven_price"]) if plan.get("breakeven_price") else None,
         management_paused=bool(getattr(p, "management_paused", False)),
+        max_tp_sales_per_tick=1 if plan.get("migration_crossing") else None,
     )
 
 

@@ -45,6 +45,11 @@ const SECTIONS: { title: string; match: (k: string) => boolean; also?: string[];
   { title: "Token name filters", match: (k) => /name_length|duplicate_names|ascii_names/.test(k),
     note: "Word blacklists (substring / exact / regex) are on the Rules page." },
   { title: "Fresh-token observation", match: (k) => /^fresh_|max_active_candidates|^momentum_/.test(k) },
+  {
+    title: "Migration entries",
+    match: (k) => /^migration_/.test(k),
+    note: "The migration engine trades newly migrated pools. A completed pump.fun curve is worth about 410 SOL; a token whose market cap at the decision is far above that is an established token, not a fresh migration (17 such paper trades netted +0.0033 SOL, -0.1357 without one outlier). Those are refused; the token is still followed in the outcomes ledger. 0 turns the rule off.",
+  },
   { title: "Exit intelligence", match: (k) => /^exit_/.test(k) },
   { title: "Liquidity & execution", match: (k) => /liquidity|pool_fraction|impact|round_trip|slippage|data_age/.test(k) },
   { title: "Token & holders", match: (k) => /authority|transfer_fee|top1|top10|holder|tax|agent|program/.test(k) },
@@ -64,6 +69,10 @@ const HELP: Record<string, string> = {
   max_round_trip_loss_bps: "Refuse if buying and immediately selling would lose more than this.",
   max_fixed_cost_pct: "Refuse a LIVE trade whose fixed network fees (buy + sell + rent reclaim) exceed this share of its size (0.02 = 2%). Too-small trades are refused, never enlarged. PAPER trades pay these fees in their result and are not refused.",
   min_stop_pct: "Floor on the automatic stop distance. Must exceed round-trip costs.",
+  low_volatility_stop_threshold: "Solana only. Below this measured volatility (0.01 = 1%) the pool has barely moved and the volatility says nothing about a safe stop. 0 = off.",
+  low_volatility_min_stop_pct: "Solana only. The automatic stop is at least this wide when volatility is below low_volatility_stop_threshold (ZEREBRO: a 5% stop filled at -13%). The size shrinks so the planned loss stays the same. 0 = off.",
+  migration_max_entry_market_cap_sol: "Migration engine only: refuse entries whose market cap at the decision is above this (SOL). 0 = off. An operator's manual BUY is not refused.",
+  cooldown_scope: "Whose loss starts cooldown_after_loss_seconds: ACCOUNT (any losing exit pauses every strategy, the original behaviour) or STRATEGY (only the strategy that lost waits). Daily loss limits are unchanged.",
   trailing_activation_r: "When the trailing stop starts. 0 = at TP1 (default); 1.5 = once price is 1.5× the stop distance above entry.",
   trailing_max_giveback_pct: "Most of the move from the peak the trailing stop gives back. 0 = no cap beyond the stop distance (default); 0.15 = 15%.",
   max_risk_level_for_auto: "Findings above this level need operator approval.",
@@ -180,6 +189,17 @@ export default function RiskSettingsPage() {
 
   async function followGlobal(engine: string = scope, keys?: string[]) {
     if (!data) return;
+    // 2026-10-15: one click here removed solana_migration's own 0.02 daily loss limit
+    // (its effective limit became GLOBAL's 0.5). Say what changes and ask first.
+    const own = engine === data.scope ? data.scope_links?.override_keys ?? []
+      : data.scope_links?.overridden_by?.find((o) => o.scope === engine)?.keys ?? [];
+    const affected = keys ?? own;
+    const valueOn = (k: string) => (engine === data.scope ? show(data.effective[k])
+      : show(data.scope_links?.overridden_by?.find((o) => o.scope === engine)?.values?.[k]));
+    const globalOf = (k: string) => (data.scope === "GLOBAL" ? show(data.effective[k]) : show(data.scope_links?.global_values?.[k]));
+    const lines = affected.map((k) => `- ${k}: ${valueOn(k)} -> ${globalOf(k)} (GLOBAL)`).join("\n");
+    if (!window.confirm(`${engine} will stop using its own value and use GLOBAL instead:\n${lines || "- every value"}\n\n`
+      + "A limit of its own (for example a lower daily loss limit) is removed. Continue?")) return;
     setBusy(true);
     setError(null);
     setSaved(null);

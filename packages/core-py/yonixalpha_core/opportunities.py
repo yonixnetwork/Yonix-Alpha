@@ -162,19 +162,10 @@ def pool_price_at(series: list, at: datetime, migrated_at: datetime, seen: list[
     of the pool covered the whole span from that trade to `at` (no trade can
     be missing in between); otherwise it is UNAVAILABLE, never the frozen
     bonding-curve price."""
-    last = None
-    for t in series:
-        if t.at <= at:
-            last = t
-        else:
-            break
-    if last is None or last.at < migrated_at:
-        return None, None, "no PumpSwap trade recorded between the migration and this time"
-    lo, hi = last.at.timestamp(), at.timestamp()
-    if not any(oldest <= lo and hi <= read for read, oldest in seen):
-        return None, None, ("PumpSwap pool not read around this time (pool trades are recorded only while the token "
-                            "is evaluated or held)")
-    return _price_raw(last), last.at, None
+    price, last_at, why = pumpswap.covered_price_at([t for t in series if t.at >= migrated_at], at, seen)
+    if price is None and why.startswith("no PumpSwap trade"):
+        why = "no PumpSwap trade recorded between the migration and this time"
+    return price, last_at, why
 
 
 async def pool_history(redis, mint: str) -> tuple[datetime | None, list, list[tuple[float, float]]]:

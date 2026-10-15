@@ -209,14 +209,14 @@ async def _manage_live(session, redis: Redis, app_settings, p: PaperPosition, pr
                                                      "exit_requested": out["requested"]}, "live")
 
 
-async def _note_migration(session, p: PaperPosition, source: str, now: datetime) -> None:
+async def _note_migration(session, p: PaperPosition, source: str, now: datetime, redis=None) -> bool:
     """A position bought on the bonding curve whose token has migrated: the
     same position, now in its POST_MIGRATION market state. Its price
     already comes from the PumpSwap pool (price_position); a live sell must
     go there too — a bonding-curve sell of a completed curve cannot fill."""
     venue = (p.plan or {}).get("venue") or {}
     if venue.get("type") != "pump_curve" or source != "rpc:pumpswap_pool" or p.lifecycle == "MIGRATED":
-        return
+        return False
     before = p.execution_route
     p.lifecycle = "MIGRATED"
     p.pool = pumpswap.canonical_pool(p.asset_id)
@@ -228,6 +228,13 @@ async def _note_migration(session, p: PaperPosition, source: str, now: datetime)
                               "price_source": source},
                              candidate_id=p.candidate_id, assessment_id=p.assessment_id, position_id=p.id)
     log.info("gate_manage.position_migrated", position_id=str(p.id), mint=p.asset_id, route=p.execution_route)
+    if p.execution_mode != "LIVE":
+        # R4: a paper sell cannot land on the pool before a LIVE one would.
+        lat, src = await paper_execution.measured_sell_latency(session, redis)
+        p.plan = paper_execution.schedule_crossing(p.plan, now, lat, src)
+        await add_timeline_event(session, "paper_migration_crossing", now, {"unmanaged_seconds": lat, "source": src},
+                                 candidate_id=p.candidate_id, assessment_id=p.assessment_id, position_id=p.id)
+    return True
 
 
 def rpc_priced(p: PaperPosition) -> bool:
@@ -285,9 +292,12 @@ async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterC
                     if paper_execution.entry_delay_pending(p, now):
                         counts["entry_pending"] = counts.get("entry_pending", 0) + 1
                         continue
-                    if await paper_execution.settle_entry_delay(session, redis, p, now) is not None:
+                    if await paper_execution.settle_entry_delay(session, redis, p, now, rpc=rpc) is not None:
                         await session.commit()
                         counts["entry_settled"] = counts.get("entry_settled", 0) + 1
+                    if paper_execution.crossing_pending(p, now):
+                        counts["crossing_pending"] = counts.get("crossing_pending", 0) + 1
+                        continue
                 ctx: dict = {}
                 price, model, exit_cost, source = await price_position(redis, jupiter, p, now, venues, rpc, ctx)
                 if price is None:
@@ -296,7 +306,11 @@ async def manage_gate_positions(session_factory, redis: Redis, jupiter: JupiterC
                     if rpc_min_interval_seconds > 0 and rpc_priced(p):  # a failing pool read is not retried every pass
                         await redis.set(f"yx:pm:unpriced:{pid}", "1", ex=max(1, int(rpc_min_interval_seconds)))
                     continue
-                await _note_migration(session, p, source, now)
+                if await _note_migration(session, p, source, now, redis) and paper_execution.crossing_pending(p, now):
+                    p.last_price, p.last_marked_at = price, now
+                    await session.commit()
+                    counts["crossing_pending"] = counts.get("crossing_pending", 0) + 1
+                    continue
                 extra = None if p.exit_requested or p.management_paused else await _exit_intelligence(
                     redis, p, model, now, session, ctx.get("pool_trades"), rpc, price)
                 if p.execution_mode == "LIVE":  # a paused position still honours its stop (manage_step)
