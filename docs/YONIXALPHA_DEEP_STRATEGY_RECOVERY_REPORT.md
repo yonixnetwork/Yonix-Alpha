@@ -437,7 +437,10 @@ Still UNKNOWN:
 
 ## B3. Corrections, smallest first (each one needs approval)
 
-R1 was approved by the operator on 2026-10-15 and is applied from the Risk Settings page (scope `solana_migration`), so the save is recorded under the operator's account.
+**R1 applied 2026-10-15** (operator approval):
+- At 04:49:19 a Risk Settings action stored `solana_migration` v6 "follow GLOBAL for max_daily_loss_quote" (the "Use GLOBAL" button). That removed migration's own 0.02 limit, so the effective limit became 0.5, and `max_loss_per_trade_sol` stayed 0.
+- This was corrected with `tools.engine_settings` (dry run first, then `--apply`), which wrote **v7**: own values `max_daily_loss_quote 0.02` and `max_loss_per_trade_sol 0.0067`, with an audit entry.
+- Proposed UI follow-up: the "Use GLOBAL" buttons sit next to the save controls and remove a limit without a confirmation. They should ask for one.
 
 | # | Change | Kind | Risk effect | Test |
 |---|---|---|---|---|
