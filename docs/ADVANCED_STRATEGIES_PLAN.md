@@ -290,3 +290,16 @@ These answer the open questions before any strategy code depends on them:
 | Confluence proximity rule | The public original's rule is the default; your corrected rule is a labelled option. |
 | Forex | Confluence runs in demo on Binance XAUUSDT, labelled as an adapted instrument, if the server check passes; EURUSD / GBPUSD stay BLOCKED. |
 | Gold vs BTC EMA history | 31 candles (as the original); 150 available as a setting. |
+
+## 11. Server checks (2026-10-15, run by the operator)
+
+- **Binance USDⓈ-M: BLOCKED from the server.**
+  - `fapi/v1/ping` returns HTTP 451.
+  - The ticker for XAUUSDT, BTCUSDT and ETHUSDT returns "Service unavailable from a restricted location according to 'b. Eligibility'".
+  - The server (DigitalOcean nyc3) is in a location Binance restricts. YonixAlpha will not route around this (no proxies or VPNs), because that would break Binance's terms.
+  - So every Binance-based design (Meta Muse on BTCUSDT/ETHUSDT, Gold vs BTC on XAUUSDT/BTCUSDT, Confluence on XAUUSDT) is BLOCKED as planned. It needs another data venue (operator decision) or stays blocked.
+- **Hyperliquid:** not run yet (check 3).
+- **Memory: tight.**
+  - 1967 MB total, 388 MB available, and 1001 MB of swap already in use.
+  - The largest users are postgres (273 MB) and redis (268 MB).
+  - The new worker must be small and capped (target 128 MB), and it must be possible to leave it stopped.
