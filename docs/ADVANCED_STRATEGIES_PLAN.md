@@ -306,3 +306,81 @@ These answer the open questions before any strategy code depends on them:
   - 1967 MB total, 388 MB available, and 1001 MB of swap already in use.
   - The largest users are postgres (273 MB) and redis (268 MB).
   - The new worker must be small and capped (target 128 MB), and it must be possible to leave it stopped.
+
+## 12. Audit checklist for the Crypto Trading engine (2026-10-15, second directive)
+
+**Repository.** `raymondyonpandadugul-cloud/yonix-alpha` cannot be read from this session: an anonymous clone asks for credentials, so it is private or does not exist. The server's deploy log reads "From github.com:yonixnetwork/Yonix-Alpha", so production deploys this repository, and the work continues here.
+
+| Item | Status | Evidence |
+|---|---|---|
+| Memecoin engine and its controls (system profile, kill switch, per-engine risk) | COMPLETED, PROTECTED | all suites pass at `afd6897`; untouched |
+| Resource monitoring (host, Postgres, Redis, services) | COMPLETED (Memecoin side) | `yonixalpha_core/resources.py`, `GET /system/resources`; read-only reuse allowed |
+| Global kill switch | COMPLETED | Redis key `yonixalpha:kill_switch:engaged` (`kill_switch.py`); the new engine reads it, never writes it |
+| Crypto Trading engine (regular crypto, separate from Memecoin) | NOT IMPLEMENTED | removed Sep 29 (`7e87552`); archive only |
+| Bybit public market data | NOT IMPLEMENTED | archive `venues/bybit.py` (deleted); server reachability NOT VERIFIED |
+| Binance (binance.com) public market data | BLOCKED on this server | server: HTTP 451 "restricted location" (Oct 15) |
+| Binance.US public market data (separate exchange, spot only) | NOT VERIFIED | needs a server check; it is a different exchange entity with its own fees and instruments, so it is configured separately and never presented as binance.com |
+| Exchange abstraction (symbols, precision, minimum sizes) | NOT IMPLEMENTED (current app) | archive `venues/common.py` only had Ticker / Candle types |
+| Crypto demo execution and accounting | NOT IMPLEMENTED | the Memecoin paper engine exists but is protected and SOL-denominated; it is not reused |
+| Crypto strategy registry and per-strategy config | NOT IMPLEMENTED | the Memecoin registry (`strategy_registry.py`) is protected |
+| Meta Muse module | NOT IMPLEMENTED | rules verified (section 5.1) |
+| Gold vs BTC module | BLOCKED | Binance 451; gold source choice pending (PAXG or `xyz:GOLD` on Hyperliquid, check pending) |
+| Hyperliquid grid module | NOT IMPLEMENTED | Hyperliquid public API reachable from the server (Oct 15) |
+| Confluence on forex | BLOCKED | no forex data source; MT5 is Windows-only (`requirements.txt: MetaTrader5`) |
+| Live order paths for new modules | NOT IMPLEMENTED (deliberately) | demo only |
+
+**Candle counts (verified in source, correcting the brief):**
+- **Meta Muse** fetches **150** candles (`config.py: MAX_KLINES = 150`), so its original-compatible default is 150.
+- **Gold vs BTC** fetches **31** (`bot.py: get_candles(symbol, SLOW_MA_PERIOD + 10)`), so its default is 31, with 150 as an option (operator decision, section 10).
+- Both originals read the still-forming candle. The ports use closed candles only (no look-ahead, reproducible).
+
+**Research repositories (licences checked by shallow clone; no code executed):**
+
+| Repository | Commit | Licence | Use |
+|---|---|---|---|
+| freqtrade/freqtrade | b330689 | GPL-3.0 | ideas only; YonixAlpha has no licence file and is public, so GPL code is not copied |
+| freqtrade/freqtrade-strategies | f3340ce | GPL-3.0 | ideas only |
+| EA31337/EA31337-Libre | 146fe75 | GPL-3.0 | ideas only (MQL, MetaTrader) |
+| EA31337/EA31337-strategies | 55fcb1f | GPL-3.0 | ideas only (MQL) |
+| ArturSepp/TrendFollowingSystems | b1d75d9 | GPL-3.0 | ideas only |
+| arwensorcenelli/trend-bot | ab75bb1 | none | research only: 10/50 MA trend with a 3×ATR stop on index futures, next-day execution |
+| grinay/geektrade-strategies | 855641d | MIT | candidate: Pine strategies built for Bybit (ETH Momentum Breakout; its README claims 56% win rate and PF 3.08, NOT VERIFIED, not reused as evidence) |
+| Solana references (6 repos) | see clone log | none | research only; Memecoin is protected |
+
+**Next step (smallest safe unfinished task):** the Crypto Trading engine foundation (section 13), with no strategy trading yet.
+
+## 13. Foundation design (implemented in the next commits)
+
+- **Package:** `packages/crypto-py` (`yonixalpha_crypto`). It does not import `yonixalpha_core` at runtime.
+- **Database:** own Postgres schema `crypto`, with its own Alembic history (`crypto.alembic_version`).
+  - The main Alembic chain, `apps/api/migrations`, and every existing table are untouched.
+  - The main Alembic autogenerate compares only the default schema.
+- **Exchanges:** each is configured separately with its own base URL, fee assumption (labelled "ASSUMED, not account-verified"), symbols and precision rules:
+
+  | Exchange | API |
+  |---|---|
+  | `bybit` | V5 spot |
+  | `binance` | binance.com spot |
+  | `binance_us` | api.binance.us spot |
+
+- **Public-only HTTP client:**
+  - It allows only GET requests to listed public market-data paths.
+  - It refuses order paths, signature parameters and API-key headers before any request is sent.
+  - The package holds no credentials.
+- **Modes:** only `DISABLED` and `DEMO`. Any other mode is rejected by validation and again at the executor.
+- **Risk:** quote-currency (USDT) limits per strategy:
+  - risk per trade, maximum position, maximum open positions;
+  - daily loss, total exposure;
+  - stale-data rejection, minimum order size, precision rounding.
+- **Demo executor:**
+  - fills at the ask (buy) or bid (sell), plus a slippage allowance;
+  - charges taker fees;
+  - rejects orders below the minimum size;
+  - uses an idempotent client id, so a repeated signal cannot double-fill;
+  - keeps separate demo accounts per exchange.
+- **Worker:** `services/crypto-trading`.
+  - Memory limit 128 MB and CPU 0.25 in compose.
+  - Idle while the engine is off (the default). It checks its config every 30 s and runs a public exchange health check every 10 min.
+  - It honours its own emergency stop and the global kill switch.
+- **API:** `/api/crypto/*` (authenticated), in a new route file plus one router line. Config saves are versioned per strategy and audited in `crypto.config_audit`.
+- **UI:** a new nav group "Crypto Trading", separate from the Memecoin "Trading" group.
