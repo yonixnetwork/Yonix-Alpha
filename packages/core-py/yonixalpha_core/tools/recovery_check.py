@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
 
 from yonixalpha_core import rpc_usage
+from yonixalpha_core.opportunities import HORIZONS
 from yonixalpha_core.config import get_settings
 from yonixalpha_core.db.base import make_engine, make_session_factory
 from yonixalpha_core.db.redis import make_redis
@@ -64,13 +65,21 @@ async def build(s, redis, since: datetime, now: datetime) -> list[str]:
         out.append("  none yet (no paper entry or migration crossing)")
 
     out.append("\n== R6: outcome horizons after a migration ==")
+    # A horizon's time is decided_at + its offset; a bonding-curve price at or
+    # after the token's migration is the old frozen-price bug.
+    offsets = ", ".join(f"('{n}', {sec})" for n, sec in HORIZONS)
     r6 = (await s.execute(text(
         "SELECT count(*) FILTER (WHERE h.value->>'source' = 'pumpswap pool trades (recorded)'), "
-        "count(*) FILTER (WHERE h.value->>'unavailable' LIKE '%PumpSwap%'), "
-        "count(*) FILTER (WHERE o.migrated_at IS NOT NULL AND h.value->>'price_raw' LIKE '0.00041088%') "
-        "FROM opportunity_outcomes o, jsonb_each(o.horizons) h WHERE o.decided_at >= :since"), {"since": since})).one()
-    out.append(f"  priced from the pool {r6[0]}, unavailable (pool not read) {r6[1]}")
-    out.append(f"  frozen graduation price on migrated tokens {r6[2]} (the old bug: should stay 0)")
+        "count(*) FILTER (WHERE h.value->>'unavailable' LIKE 'PumpSwap pool not read%' "
+        "OR h.value->>'unavailable' LIKE 'no PumpSwap trade recorded%'), "
+        "count(*) FILTER (WHERE h.value->>'source' = 'pump_stream trades' AND o.migrated_at IS NOT NULL "
+        "AND o.decided_at + make_interval(secs => hs.sec) >= o.migrated_at) "
+        f"FROM opportunity_outcomes o CROSS JOIN LATERAL jsonb_each(o.horizons) h JOIN (VALUES {offsets}) AS hs(name, sec) "
+        "ON hs.name = h.key WHERE o.decided_at >= :since"), {"since": since})).one()
+    out.append(f"  after the migration: priced from the pool {r6[0]}, unavailable (pool not read or no pool trade) {r6[1]}")
+    out.append(f"  curve price used after the migration {r6[2]} (the old bug; rows decided after the deploy: should be 0)")
+    out.append("  (pool trades are recorded only while a migrated token is evaluated or held; rows decided before the"
+               " deploy keep the values they were given)")
 
     out.append("\n== R9: re-checks slowed after a token-level block (today, UTC) ==")
     backoff = await rpc_usage.token_backoff_today(redis, now) if redis is not None else {}

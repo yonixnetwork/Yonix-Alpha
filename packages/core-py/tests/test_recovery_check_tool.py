@@ -75,6 +75,15 @@ async def test_each_change_is_counted_and_nothing_is_written(sf, redis):
                                  decided_at=NOW, migrated_at=NOW, reasons=[], snapshot={},
                                  horizons={"T+5s": {"source": "pumpswap pool trades (recorded)", "price_raw": "0.0005"},
                                            "T+30m": {"unavailable": "PumpSwap pool not read around this time"}}))
+        # decided before the deploy: an old curve price after the migration (counted), a curve price
+        # before it (not counted), and the old no-stream message that also mentions PumpSwap (not counted)
+        s.add(OpportunityOutcome(key="old", mint="O", engine="solana_fresh", stage="GATE", decision="REJECT",
+                                 decided_at=NOW - timedelta(minutes=50), migrated_at=NOW - timedelta(minutes=40),
+                                 reasons=[], snapshot={},
+                                 horizons={"T+30m": {"source": "pump_stream trades", "price_raw": "0.00041088"},
+                                           "T+5m": {"source": "pump_stream trades", "price_raw": "0.0003"},
+                                           "T+15m": {"unavailable": "no stream trades for this token (PumpSwap tokens "
+                                                                    "and expired history are not in the stream)"}}))
         await s.commit()
     await rpc_usage.count_token_backoff(redis, "solana_fresh", ["AUTO_SL_NO_VOLATILITY"], NOW)
 
@@ -82,8 +91,8 @@ async def test_each_change_is_counted_and_nothing_is_written(sf, redis):
     assert "refusals 1 (tokens 1)" in out
     assert "migration crossing (unmanaged for the LIVE sell latency): 1" in out
     assert "entry fill via pumpswap pool trades, measured=true: 1" in out
-    assert "priced from the pool 1, unavailable (pool not read) 1" in out
-    assert "frozen graduation price on migrated tokens 0" in out
+    assert "priced from the pool 1, unavailable (pool not read or no pool trade) 1" in out
+    assert "curve price used after the migration 1 (" in out
     assert "AUTO_SL_NO_VOLATILITY" in out
     async with sf() as s:
         assert await s.scalar(select(func.count()).select_from(RiskAssessment)) == 1
