@@ -163,8 +163,9 @@ export default function RpcPage() {
   async function run(fn: () => Promise<unknown>, ok: string) {
     setBusy(true); setErr(null); setMsg(null); setSaved(false);
     try {
-      await fn();
-      setMsg(ok);
+      const r = await fn();
+      const warnings = (r as { warnings?: string[] } | undefined)?.warnings ?? [];
+      setMsg(warnings.length ? `${ok} WARNING: ${warnings.join(" ")}` : ok);
       setSaved(true);
       await reload();
     } catch (e) {
@@ -210,6 +211,21 @@ export default function RpcPage() {
   if (error) return <ErrorNotice error={error} />;
   if (!data) return <Loading />;
   const active = data.providers.find((p) => p.label === data.active);
+  /** What disabling or deleting `p` would leave: the same check the API
+   * makes (it saves the change and returns these as warnings). "Working" =
+   * CONNECTED on this page and not unhealthy. */
+  const removalWarnings = (p: Provider): string[] => {
+    if (!p.enabled) return [];
+    const left = data.providers.filter((x) => x.enabled && x.configured && x.label !== p.label);
+    if (left.length === 0) return [];  // refused by the API: the last enabled endpoint
+    const out: string[] = [];
+    if (!left.some((x) => x.connected && x.healthy !== "NO")) {
+      out.push(`None of the endpoints left enabled (${left.map((x) => x.name).join(", ")}) has worked in the last 5 minutes. `
+        + "If they keep failing, the bot has no working RPC: no new tokens are found and open positions may not be priced or exited on time.");
+    }
+    if (left.length === 1) out.push(`Only ${left[0].name} would be left enabled: if it fails there is nothing to fail over to.`);
+    return out;
+  };
   return (
     <div>
       <PageHeader title="RPC & Data Providers" icon={<Network size={20} aria-hidden />}
@@ -259,14 +275,21 @@ export default function RpcPage() {
                   </td>
                   <td>
                     <div className="btn-row">
-                      <button className="btn btn-ghost btn-sm" disabled={busy}
-                        onClick={() => patch(p, { enabled: !p.enabled }, `${p.name} ${p.enabled ? "disabled" : "enabled"}.`)}>
-                        {p.enabled ? "Disable" : "Enable"}
-                      </button>
+                      {removalWarnings(p).length > 0 ? (
+                        <ConfirmButton label="Disable" className="btn btn-ghost btn-sm" danger disabled={busy} title={`Disable ${p.name}?`} confirmLabel="Disable anyway"
+                          body={<>{removalWarnings(p).map((w) => <p key={w} className="neg">{w}</p>)}<p>Test the others first, or enable another provider.</p></>}
+                          onConfirm={() => patch(p, { enabled: false }, `${p.name} disabled.`)} />
+                      ) : (
+                        <button className="btn btn-ghost btn-sm" disabled={busy}
+                          onClick={() => patch(p, { enabled: !p.enabled }, `${p.name} ${p.enabled ? "disabled" : "enabled"}.`)}>
+                          {p.enabled ? "Disable" : "Enable"}
+                        </button>
+                      )}
                       {p.source === "dashboard" && (
                         <>
                           <button className="btn btn-ghost btn-sm" onClick={() => setEdit({ id: p.id!, rpc_url: "", ws_url: "", password: "" })}>Change URL</button>
-                          <ConfirmButton label="Delete" danger title={`Delete ${p.name}?`} body="It is removed from every service on the next revision."
+                          <ConfirmButton label="Delete" danger title={`Delete ${p.name}?`}
+                            body={<>{removalWarnings(p).map((w) => <p key={w} className="neg">{w}</p>)}<p>It is removed from every service on the next revision.</p></>}
                             onConfirm={() => run(() => apiDelete(`/api/rpc/providers/${p.id}`), `${p.name} deleted.`)} />
                         </>
                       )}

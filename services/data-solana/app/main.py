@@ -11,6 +11,7 @@ from yonixalpha_core.db.models import SystemEvent
 from yonixalpha_core.db.writers import write_market_snapshot
 from yonixalpha_core.logging import configure_logging, get_logger
 from yonixalpha_core.notify import alert_error
+from yonixalpha_core.rpc_outage import RpcOutageAlarm
 from yonixalpha_core.solana.rpc import RpcManager
 from yonixalpha_core.solana.rpc_registry import WsUrls
 from yonixalpha_core.runtime_watch import run_watcher
@@ -33,11 +34,12 @@ HEALTH_CHECK_INTERVAL_SECONDS = 30
 VENUE_PROBE = os.getenv("SOLANA_VENUE_PROBE", "1") != "0"
 
 
-async def _record_system_event(session_factory, event_type: str, severity: str, detail: dict | None = None) -> None:
+async def _record_system_event(session_factory, event_type: str, severity: str, detail: dict | None = None,
+                               alert: bool = True) -> None:
     async with session_factory() as session:
         session.add(SystemEvent(service="data-solana", event_type=event_type, severity=severity, detail=detail))
         await session.commit()
-    if severity in ("error", "critical"):
+    if alert and severity in ("error", "critical"):
         # Throttled per event (notify.ALERT_THROTTLE_SECONDS) with a count of the
         # suppressed repeats: a 30-second check failing in a loop cannot flood the
         # chat. Every occurrence is still stored as a SystemEvent above.
@@ -49,19 +51,30 @@ async def _health_check_loop(rpc: RpcManager, session_factory, stop_event: async
     so RPC failover state is exercised even during a quiet WS period, and so
     an operator has a System Event trail of RPC health over time.
     """
-    while not stop_event.is_set():
-        try:
-            await rpc.call("getHealth")
-            log.info("rpc.health_check.ok", endpoints=rpc.health_snapshot())
-        except Exception as exc:  # noqa: BLE001
-            log.error("rpc.health_check.failed", error=str(exc), endpoints=rpc.health_snapshot())
-            await _record_system_event(
-                session_factory, "rpc_health_check_failed", "error", {"error": str(exc), "endpoints": rpc.health_snapshot()}
-            )
-        try:
-            await asyncio.wait_for(stop_event.wait(), timeout=HEALTH_CHECK_INTERVAL_SECONDS)
-        except asyncio.TimeoutError:
-            pass
+    # One Telegram alert after 5 minutes with no working RPC (shared with the
+    # other Solana services), hourly reminders and a "working again" message:
+    # see yonixalpha_core.rpc_outage. A single failed check is stored as a
+    # SystemEvent but no longer sent to Telegram on its own.
+    alarm = RpcOutageAlarm("data-solana", session_factory)
+    try:
+        while not stop_event.is_set():
+            try:
+                await rpc.call("getHealth")
+                log.info("rpc.health_check.ok", endpoints=rpc.health_snapshot())
+                await alarm.ok()
+            except Exception as exc:  # noqa: BLE001
+                log.error("rpc.health_check.failed", error=str(exc), endpoints=rpc.health_snapshot())
+                await alarm.failed(str(exc), rpc.health_snapshot())
+                await _record_system_event(
+                    session_factory, "rpc_health_check_failed", "error",
+                    {"error": str(exc), "endpoints": rpc.health_snapshot()}, alert=False,
+                )
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=HEALTH_CHECK_INTERVAL_SECONDS)
+            except asyncio.TimeoutError:
+                pass
+    finally:
+        await alarm.aclose()
 
 
 def _build_subscriptions() -> list[dict]:
