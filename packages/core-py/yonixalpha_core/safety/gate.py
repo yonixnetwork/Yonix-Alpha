@@ -854,11 +854,17 @@ def _check_account_state(a: AccountState, s: SafetySettings, now: datetime, out:
         out.append(_finding(RiskCategory.ACCOUNT, "INSUFFICIENT_BALANCE", RiskLevel.CRITICAL,
                             f"INSUFFICIENT BALANCE: available {a.available_balance:.9f} SOL is below the fixed trade size "
                             f"{s.fixed_trade_size_sol} SOL (policy REJECT)", FinalDecision.NO_TRADE, True))
-    if a.last_loss_at is not None and s.cooldown_after_loss_seconds > 0:
-        elapsed = (now - a.last_loss_at).total_seconds()
+    # cooldown_scope STRATEGY (R10): only this strategy's own last loss counts,
+    # when the caller computed it; otherwise any loss on the account does.
+    per_strategy = s.cooldown_scope == "STRATEGY" and a.strategy_loss_known
+    last_loss = a.strategy_last_loss_at if per_strategy else a.last_loss_at
+    if last_loss is not None and s.cooldown_after_loss_seconds > 0:
+        elapsed = (now - last_loss).total_seconds()
         if elapsed < s.cooldown_after_loss_seconds:
+            whose = "this strategy's last loss" if per_strategy else "a loss on the account"
             out.append(_finding(RiskCategory.ACCOUNT, "LOSS_COOLDOWN", RiskLevel.MODERATE,
-                                f"cooldown after loss: {s.cooldown_after_loss_seconds - elapsed:.0f}s remaining", FinalDecision.WAIT))
+                                f"cooldown after {whose}: {s.cooldown_after_loss_seconds - elapsed:.0f}s remaining",
+                                FinalDecision.WAIT))
 
 
 def _check_market(inp: AssessmentInput, out: list[Finding]) -> None:
@@ -880,6 +886,29 @@ def _check_market(inp: AssessmentInput, out: list[Finding]) -> None:
     elif m.volatility >= Decimal("0.05"):
         out.append(_finding(RiskCategory.MARKET, "ELEVATED_VOLATILITY", RiskLevel.MODERATE,
                             f"window volatility {m.volatility:.1%}", FinalDecision.EXECUTE))
+
+
+def entry_market_cap_sol(inp: AssessmentInput) -> Decimal | None:
+    """Market cap at the decision in SOL: price (SOL per whole token) times
+    the whole-token supply. None when either is unknown."""
+    m, tok = inp.market, inp.token
+    if m is None or m.price is None or tok is None or tok.supply_raw is None or tok.decimals is None:
+        return None
+    return m.price * Decimal(tok.supply_raw) / Decimal(10) ** tok.decimals
+
+
+def _check_established_migration(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) -> None:
+    """R2: the migration engine trades newly migrated pools. A market cap far
+    above a completed curve (~410 SOL) at the decision means an established
+    token. An operator's manual BUY is the operator's choice and not refused."""
+    limit = s.migration_max_entry_market_cap_sol
+    if inp.engine != "solana_migration" or limit <= 0 or inp.operator_request:
+        return
+    mcap = entry_market_cap_sol(inp)
+    if mcap is not None and mcap > limit:
+        out.append(_finding(RiskCategory.STRATEGY, "ESTABLISHED_TOKEN_NOT_MIGRATION", RiskLevel.HIGH,
+                            f"market cap at the decision {mcap:.0f} SOL is above migration_max_entry_market_cap_sol "
+                            f"{limit} SOL: an established token, not a fresh migration", FinalDecision.REJECT, True))
 
 
 def _check_strategy_and_ml(inp: AssessmentInput, s: SafetySettings, out: list[Finding]) -> None:
@@ -1067,6 +1096,7 @@ def assess(inp: AssessmentInput, settings: SafetySettings, versions: dict[str, A
     _check_entry_exit(inp, findings)
     _check_entry_quality(inp, findings)
     _check_market(inp, findings)
+    _check_established_migration(inp, settings, findings)
     _check_account(inp, settings, findings)
     _check_live_eligibility(inp, findings)
 
@@ -1090,6 +1120,7 @@ def assess(inp: AssessmentInput, settings: SafetySettings, versions: dict[str, A
         fixed_cost_quote=inp.fixed_cost_quote if (_live_target(inp) or inp.paper_fixed_costs) else None,
         fixed_cost_detail=inp.fixed_cost_detail,
         refuse_uneconomic=_live_target(inp),
+        low_volatility_floor=settings.low_volatility_min_stop_pct if inp.engine.startswith("solana_") else Decimal(0),
     )
     plan.token_category = token_category(inp, settings)
     findings.extend(plan.findings)

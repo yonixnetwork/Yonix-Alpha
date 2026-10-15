@@ -63,6 +63,7 @@ async def main(argv: list[str] | None = None) -> int:
     try:
         fields = await rpc_usage.read_usage(redis, hours=a.hours, now=now)
         blocked = await rpc_usage.entry_blocked_today(redis, now)
+        backoff = await rpc_usage.token_backoff_today(redis, now)
     finally:
         await redis.aclose()
     rows, cache_rows, totals = summarize(fields)
@@ -83,6 +84,11 @@ async def main(argv: list[str] | None = None) -> int:
     if not blocked:
         print("  none")
     for k, v in sorted(blocked.items(), key=lambda kv: -kv[1]):
+        print(f"  {k:<48} {v}")
+    print("RE-CHECKS SLOWED TO 60 s AFTER A TOKEN-LEVEL BLOCK (today, UTC; a new trade still wakes them)")
+    if not backoff:
+        print("  none")
+    for k, v in sorted(backoff.items(), key=lambda kv: -kv[1]):
         print(f"  {k:<48} {v}")
     print("Nothing was written.")
     return 0

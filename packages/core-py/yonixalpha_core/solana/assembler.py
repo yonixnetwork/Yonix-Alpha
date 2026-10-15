@@ -113,6 +113,10 @@ def entry_exit_check(trades, now: datetime, creator: str | None, liquidity: Deci
 READ_CACHE_MAX = 4000
 MINT_CACHE_SECONDS = 45
 HOLDERS_CACHE_SECONDS = 15
+# Migrated pools (R9, 2026-10-15): holder reads may be reused up to the data
+# age the gate accepts anyway (max_data_age_seconds - 10, see _cache_ttl).
+# Bonding-curve tokens keep 15 s: their holders change within seconds.
+HOLDERS_CACHE_MIGRATED_SECONDS = 50
 
 
 def _cache_of(rpc) -> dict:
@@ -173,14 +177,15 @@ async def cached_mint(rpc, mint: str, now: datetime, max_data_age_seconds: int |
 
 
 async def cached_holders(rpc, mint: str, supply_raw: int, excluded_owners: set[str], creator: str | None, now: datetime,
-                         max_data_age_seconds: int | None = None) -> tuple[HolderInfo | None, str | None]:
+                         max_data_age_seconds: int | None = None,
+                         cache_seconds: float = HOLDERS_CACHE_SECONDS) -> tuple[HolderInfo | None, str | None]:
     key = ("getTokenLargestAccounts:holders", mint, supply_raw, tuple(sorted(excluded_owners)), creator)
     hit = _cache_get(key, rpc)
     if hit is not None:
         return hit, None
     holders, err = await fetch_holders(rpc, mint, supply_raw, excluded_owners, creator, now)
     if holders is not None:
-        _cache_put(rpc, key, _cache_ttl(HOLDERS_CACHE_SECONDS, max_data_age_seconds), holders)
+        _cache_put(rpc, key, _cache_ttl(cache_seconds, max_data_age_seconds), holders)
     return holders, err
 
 
@@ -627,7 +632,9 @@ async def assemble_migrated(src: Sources, mint: str, now: datetime, c: Controls)
             inp.quote = quote
 
     if token is not None and pool_state is not None:
-        inp.holders, err = await _timed(ev, "holders_rpc", cached_holders(src.rpc, mint, token.supply_raw, {pool_addr}, creator, now, c.settings.max_data_age_seconds))
+        inp.holders, err = await _timed(ev, "holders_rpc", cached_holders(src.rpc, mint, token.supply_raw, {pool_addr}, creator, now,
+                                                                          c.settings.max_data_age_seconds,
+                                                                          cache_seconds=HOLDERS_CACHE_MIGRATED_SECONDS))
         if err:
             ev["errors"].append(err)
 

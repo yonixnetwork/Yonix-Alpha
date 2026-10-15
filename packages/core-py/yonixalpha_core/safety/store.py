@@ -459,6 +459,15 @@ async def account_state(
             )
         )
     ).scalar_one()
+    strategy_last_loss = None
+    if engine is not None:
+        strategy_last_loss = (
+            await session.execute(
+                select(func.max(PaperPosition.exit_at)).where(
+                    PaperPosition.account_id == account.id, PaperPosition.status == "closed",
+                    PaperPosition.realized_pnl < 0, PaperPosition.engine == engine)
+            )
+        ).scalar_one()
     return AccountState(
         equity=account.cash_balance + marked,
         available_balance=account.cash_balance,
@@ -470,6 +479,8 @@ async def account_state(
         kill_switch_engaged=kill_switch_engaged,
         strategy_daily_realized_pnl=strategy_daily,
         account_name=account.name,
+        strategy_last_loss_at=strategy_last_loss,
+        strategy_loss_known=engine is not None,
     )
 
 

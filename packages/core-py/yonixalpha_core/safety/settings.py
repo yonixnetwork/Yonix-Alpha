@@ -49,6 +49,11 @@ class SafetySettings:
     max_total_exposure_quote: Decimal = Decimal("3")
     max_token_exposure_quote: Decimal = Decimal("1")
     cooldown_after_loss_seconds: int = 300
+    # Whose loss starts the cooldown (R10, 2026-10-15): ACCOUNT = any losing
+    # exit pauses every strategy (the original behaviour, default);
+    # STRATEGY = only the strategy that lost waits. The daily loss limits are
+    # unchanged either way.
+    cooldown_scope: str = "ACCOUNT"
     # Futures only: notional allowed per unit of paper balance. 1 = no
     # leverage. Hard-capped below.
     max_leverage: Decimal = Decimal("1")
@@ -109,6 +114,14 @@ class SafetySettings:
     stop_volatility_multiple: Decimal = Decimal("2")
     min_stop_pct: Decimal = Decimal("0.05")
     max_stop_pct: Decimal = Decimal("0.30")
+    # Solana only (R3, 2026-10-15): when the measured volatility is below
+    # low_volatility_stop_threshold, the pool has barely moved and the
+    # volatility says nothing about where a stop is safe (ZEREBRO: a 5% stop
+    # filled at -13% on a quiet pool). The automatic stop is then at least
+    # low_volatility_min_stop_pct, so the size shrinks for the same planned
+    # loss. 0 disables.
+    low_volatility_stop_threshold: Decimal = Decimal("0.01")
+    low_volatility_min_stop_pct: Decimal = Decimal("0.10")
     tp_r_multiples: tuple[Decimal, ...] = (Decimal("1"), Decimal("2"), Decimal("3"))
     tp_exit_fractions: tuple[Decimal, ...] = (Decimal("0.4"), Decimal("0.3"), Decimal("0.3"))
     trailing_volatility_multiple: Decimal = Decimal("1.5")
@@ -145,6 +158,13 @@ class SafetySettings:
     # that the fresh engine did not already take.
     momentum_min_age_seconds: int = 1800
     momentum_near_migration_progress: Decimal = Decimal("0.70")
+    # Migration engine (R2, 2026-10-15): a completed pump.fun curve is worth
+    # about 410 SOL, so a token whose market cap at the decision is far above
+    # that is an established token, not a fresh migration. 17 such paper
+    # trades netted +0.0033 SOL, -0.1357 without one outlier. Above this
+    # market cap (SOL) the migration engine refuses the entry; the token is
+    # still followed in the outcomes ledger. 0 disables.
+    migration_max_entry_market_cap_sol: Decimal = Decimal("3000")
 
     # Bonding-curve tokens (fresh, momentum) trade on the pump.fun curve, not
     # a DEX pool: min_liquidity_quote applies to pools only. The curve must
@@ -327,6 +347,7 @@ HARD_LIMITS: dict[str, tuple[str, Any]] = {
 
 TRADE_SIZE_MODES = ("RISK_PCT", "FIXED_SOL")
 FIXED_SIZE_POLICIES = ("REJECT", "REDUCE")
+COOLDOWN_SCOPES = ("ACCOUNT", "STRATEGY")
 LAMPORT_DECIMALS = 9  # SOL amounts finer than one lamport cannot be executed
 CREATOR_ACTIONS = ("WARN", "REDUCE_SIZE", "REQUIRE_MANUAL_APPROVAL", "REJECT")
 INTEL_ACTIONS = ("WARN", "REQUIRE_MANUAL_APPROVAL", "WAIT", "NO_TRADE")
@@ -337,6 +358,7 @@ ENUM_FIELDS: dict[str, tuple[str, ...]] = {
     "max_risk_level_for_auto": ("LOW", "MODERATE", "HIGH"),
     "trade_size_mode": TRADE_SIZE_MODES,
     "fixed_size_policy": FIXED_SIZE_POLICIES,
+    "cooldown_scope": COOLDOWN_SCOPES,
     "mayhem_action": INTEL_ACTIONS,
     "manipulation_high_action": INTEL_ACTIONS,
     "manipulation_medium_action": INTEL_ACTIONS,
@@ -458,6 +480,14 @@ def validate(settings: SafetySettings) -> list[str]:
         errors.append("exit_liquidity_drop_exit must not exceed exit_emergency_liquidity_drop")
     if not (0 < settings.momentum_near_migration_progress <= 1):
         errors.append("momentum_near_migration_progress must be in (0, 1]")
+    if settings.migration_max_entry_market_cap_sol < 0:
+        errors.append("migration_max_entry_market_cap_sol must be 0 (off) or positive")
+    if not (0 <= settings.low_volatility_stop_threshold < 1):
+        errors.append("low_volatility_stop_threshold must be in [0, 1)")
+    if settings.low_volatility_min_stop_pct < 0 or settings.low_volatility_min_stop_pct > settings.max_stop_pct:
+        errors.append("low_volatility_min_stop_pct must be 0 (off) or at most max_stop_pct")
+    if settings.cooldown_scope not in COOLDOWN_SCOPES:
+        errors.append(f"cooldown_scope must be one of {', '.join(COOLDOWN_SCOPES)}")
     if not (0 < settings.exit_volume_collapse_ratio < 1):
         errors.append("exit_volume_collapse_ratio must be between 0 and 1")
     for name in ("creator_below_threshold_action", "creator_history_unknown_action"):

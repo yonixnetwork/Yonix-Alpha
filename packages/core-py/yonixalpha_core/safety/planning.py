@@ -361,6 +361,7 @@ def plan_trade(
     fixed_cost_quote: Decimal | None = None,
     fixed_cost_detail: dict | None = None,
     refuse_uneconomic: bool = False,
+    low_volatility_floor: Decimal = Decimal(0),
 ) -> TradePlan:
     """Builds the full risk plan or explains exactly why it can't. Every
     missing input that the plan depends on is a NO_TRADE finding: per the
@@ -421,14 +422,19 @@ def plan_trade(
                 )
             )
             return plan
-        stop_pct = max(raw_pct, settings.min_stop_pct)
+        floor, method = settings.min_stop_pct, "max(stop_volatility_multiple * volatility, min_stop_pct)"
+        inputs: dict[str, Any] = {"volatility": volatility, "multiple": settings.stop_volatility_multiple,
+                                  "min_stop_pct": settings.min_stop_pct}
+        # A volatility this low means the price has barely moved, not that a
+        # tight stop is safe (R3): the floor rises, and the size shrinks with it.
+        if low_volatility_floor > floor and volatility < settings.low_volatility_stop_threshold:
+            floor = low_volatility_floor
+            method = (f"volatility {volatility:.2%} below low_volatility_stop_threshold "
+                      f"{settings.low_volatility_stop_threshold:.2%}: low-volatility floor")
+            inputs["low_volatility_min_stop_pct"] = low_volatility_floor
+        stop_pct = max(raw_pct, floor)
         sl = entry_price * (1 - sign * stop_pct)
-        plan.stop_loss = PlannedValue(
-            sl,
-            Provenance.AUTO,
-            "max(stop_volatility_multiple * volatility, min_stop_pct)",
-            {"volatility": volatility, "multiple": settings.stop_volatility_multiple, "min_stop_pct": settings.min_stop_pct},
-        )
+        plan.stop_loss = PlannedValue(sl, Provenance.AUTO, method, inputs)
     plan.stop_distance_pct = stop_pct
 
     # --- Maximum loss ------------------------------------------------------
