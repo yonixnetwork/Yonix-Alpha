@@ -17,6 +17,8 @@ Sections (default: all)
   deep        full reconstruction of the selected winners / losers: plan, candidate states,
               the decision and what it knew, timeline, outcome, other engines on the token
   compare     winners vs losers at entry (medians of what the gate saw), per category
+  activity    candidates created per engine and service warnings / errors per hour (last 48 h):
+              finds hours in which nothing was discovered or evaluated
   migration   migration pipeline, last 48 h per hour; last discovery / decision / approval /
               buy / exit; today's realized PnL per engine with the moment each limit was crossed;
               the blockers the risk engine applies right now
@@ -27,7 +29,8 @@ Token category at entry: plan.token_category when recorded (since PR #76); befor
 that MOMENTUM = momentum engine, MIGRATED = migrated at the decision / entered as
 MIGRATED / migration engine, NEAR_MIGRATION = curve progress >= 0.70 at the
 decision, FRESH otherwise (the same rule as regression_report). Migrated tokens are
-split by pool age at the decision (snapshot age_seconds). Nothing is estimated: a
+split by pool age at the decision (snapshot age_seconds); one whose market cap at the
+decision is above 3,000 SOL (a curve completes near 410 SOL) is "established". Nothing is estimated: a
 value that was not recorded prints "-".
 """
 
@@ -48,7 +51,10 @@ from yonixalpha_core.config import get_settings
 from yonixalpha_core.db.base import make_engine, make_session_factory
 from yonixalpha_core.solana_performance import NUM
 
-SECTIONS = ("book", "settings", "trades", "top", "deep", "compare", "migration", "parity")
+SECTIONS = ("book", "settings", "trades", "top", "deep", "compare", "migration", "activity", "parity")
+# A Pump.fun curve completes near 410 SOL market cap (~85 SOL real reserve);
+# a "migrated" token far above that at the decision is not a fresh migration.
+ESTABLISHED_MCAP_SOL = Decimal(3000)
 SMALL = 20
 MAX_ROWS = 20000
 # Deploy times (UTC) taken from the operator's deploy output ("Updating a..b").
@@ -153,6 +159,9 @@ def category(r: Any) -> str:
         base = "NEAR_MIGRATION" if cp is not None and cp >= Decimal("0.70") else "FRESH"
     if base != "MIGRATED":
         return base
+    mcap = _d(snap.get("market_cap_sol"))
+    if mcap is not None and mcap > ESTABLISHED_MCAP_SOL:
+        return "MIGRATED established (mcap >3k SOL)"
     age = _d(snap.get("age_seconds"))
     if age is None:
         return "MIGRATED (pool age unknown)"
@@ -305,13 +314,13 @@ def section_top(rows: list[Any], top: int) -> tuple[list[str], list[Any]]:
     out.append(f"  flagged: {flagged} (difference above 25 points; a stop that fills far below its trigger, a drift or "
                "fixed cost on a tiny size, or a record error)")
     deep: list[Any] = []
-    for lst, k in ((by_pct, 6), (by_sol, 3), (worst, 3)):
-        for r in lst[:k]:
-            if r not in deep:
-                deep.append(r)
+    for lst, k, label in ((by_pct, 6, "best by return %"), (by_sol, 3, "best by SOL"), (worst, 3, "worst by SOL")):
+        for i, r in enumerate(lst[:k]):
+            if r not in [x for x, _ in deep]:
+                deep.append((r, f"{label} #{i + 1}"))
     for r in big:
-        if r not in deep and len(deep) < 14:
-            deep.append(r)
+        if r not in [x for x, _ in deep] and len(deep) < 14:
+            deep.append((r, "return >= +200%"))
     return out, deep
 
 
@@ -334,11 +343,11 @@ def _features(snapshot: dict) -> dict:
     return {k: v for k, v in f.items() if isinstance(v, (int, float, str, bool)) or v is None}
 
 
-async def section_deep(s, picks: list[Any]) -> list[str]:
+async def section_deep(s, picks: list[tuple[Any, str]]) -> list[str]:
     out = ["\n== DEEP: reconstruction of selected trades (what was known at entry vs afterwards) =="]
-    for r in picks:
+    for r, why in picks:
         pos = (await s.execute(text("SELECT * FROM paper_positions WHERE id = :id"), {"id": r.id})).mappings().one()
-        out.append(f"\n### {str(r.id)[:8]} {r.mode} {r.engine} {r.strategy} {r.symbol} mint {r.asset_id}")
+        out.append(f"\n### {str(r.id)[:8]} [{why}] {r.mode} {r.engine} {r.strategy} {r.symbol} mint {r.asset_id}")
         out.append(f"  category at entry: {category(r)}; lifecycle {pos['lifecycle']}; route {pos['execution_route']}; "
                    f"pool {pos['pool'] or '-'}; source {pos['source']}; provider {pos['execution_provider']}")
         out.append(f"  entry {_t(pos['entry_at'])} exit {_t(pos['exit_at'])} hold {_hold(pos['entry_at'], pos['exit_at'])}; "
@@ -622,6 +631,43 @@ async def section_migration(s, now: datetime) -> list[str]:
     return out
 
 
+# --- activity ----------------------------------------------------------------------------------
+
+async def section_activity(s, now: datetime) -> list[str]:
+    out = ["\n== ACTIVITY: candidates created per engine and service warnings / errors, last 48 h per hour (UTC) =="]
+    since = now - timedelta(hours=48)
+    cand = (await s.execute(text("SELECT date_trunc('hour', created_at) h, engine, count(*) n FROM trading_candidates "
+                                 "WHERE created_at >= :since GROUP BY 1, 2"), {"since": since})).all()
+    ev = (await s.execute(text("SELECT date_trunc('hour', created_at) h, service, severity, count(*) n FROM system_events "
+                               "WHERE created_at >= :since AND severity IN ('warning', 'error', 'critical') GROUP BY 1, 2, 3"),
+                          {"since": since})).all()
+    by: dict[datetime, dict[str, int]] = defaultdict(dict)
+    for r in cand:
+        by[r.h][r.engine] = r.n
+    errs: dict[datetime, list[str]] = defaultdict(list)
+    for r in ev:
+        errs[r.h].append(f"{r.service}:{r.severity} {r.n}")
+    hours = []
+    h = since.replace(minute=0, second=0, microsecond=0)
+    while h <= now:
+        hours.append(h)
+        h += timedelta(hours=1)
+    empty = 0
+    for h in hours:
+        c = by.get(h, {})
+        if not c:
+            empty += 1
+        out.append(f"  {h:%m-%d %H}h  candidates " + (", ".join(f"{k} {v}" for k, v in sorted(c.items())) or "NONE")
+                   + ("  | " + "; ".join(sorted(errs[h])[:6]) if errs.get(h) else ""))
+    out.append(f"  hours with no candidate at all: {empty} of {len(hours)}")
+    first = (await s.execute(text("SELECT created_at, service, event_type, severity FROM system_events WHERE created_at >= :since "
+                                  "AND (event_type ILIKE '%start%' OR event_type ILIKE '%stop%' OR event_type ILIKE '%crash%' "
+                                  "OR event_type ILIKE '%down%') ORDER BY created_at LIMIT 60"), {"since": since})).all()
+    out.append("  service start / stop events stored:")
+    out += [f"    {_t(r.created_at)} {r.service:28s} {r.event_type:36s} {r.severity}" for r in first] or ["    none stored"]
+    return out
+
+
 # --- paper vs live ---------------------------------------------------------------------------
 
 async def section_parity(s) -> list[str]:
@@ -671,7 +717,8 @@ async def section_parity(s) -> list[str]:
 
 # --- main -----------------------------------------------------------------------------------------
 
-async def build(s, sections: list[str], top: int, deep_n: int, marks: list[tuple[datetime, str]], now: datetime) -> list[str]:
+async def build(s, sections: list[str], top: int, deep_n: int, marks: list[tuple[datetime, str]], now: datetime,
+                pick: list[str] | None = None, skip: int = 0) -> list[str]:
     out = [f"STRATEGY RECOVERY EVIDENCE at {now:%Y-%m-%d %H:%M:%S} UTC (read-only transaction)"]
     out.append("periods (deploy times from the operator's deploy output): " + "; ".join(
         f"P{i + 1} from {at:%m-%d %H:%M} {name}" for i, (at, name) in enumerate(marks)))
@@ -690,11 +737,17 @@ async def build(s, sections: list[str], top: int, deep_n: int, marks: list[tuple
         if "top" in sections:
             out += lines
     if "deep" in sections:
-        out += await section_deep(s, picks[:deep_n])
+        if pick:
+            chosen = [(r, "picked") for r in rows if any(str(r.id).startswith(p) for p in pick)]
+        else:
+            chosen = picks[skip:skip + deep_n]
+        out += await section_deep(s, chosen)
     if "compare" in sections:
         out += section_compare(rows)
     if "migration" in sections:
         out += await section_migration(s, now)
+    if "activity" in sections:
+        out += await section_activity(s, now)
     if "parity" in sections:
         out += await section_parity(s)
     out.append("\nNothing was written.")
@@ -707,6 +760,8 @@ async def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--top", type=int, default=10)
     ap.add_argument("--deep", type=int, default=12)
     ap.add_argument("--split", action="append", default=[], help="extra period marker, ISO time (UTC)")
+    ap.add_argument("--pick", action="append", default=[], help="deep: position id prefix (repeatable)")
+    ap.add_argument("--skip", type=int, default=0, help="deep: skip the first N selected trades")
     a = ap.parse_args(argv)
     marks = [(datetime.fromisoformat(at), name) for at, name in DEPLOYS]
     for x in a.split:
@@ -719,7 +774,8 @@ async def main(argv: list[str] | None = None) -> int:
         async with make_session_factory(engine)() as s:
             await s.execute(text("SET TRANSACTION READ ONLY"))
             await s.execute(text("SET LOCAL statement_timeout = '60s'"))
-            lines = await build(s, a.section or list(SECTIONS), max(1, min(a.top, 50)), max(0, min(a.deep, 25)), marks, now)
+            lines = await build(s, a.section or list(SECTIONS), max(1, min(a.top, 50)), max(0, min(a.deep, 25)), marks, now,
+                                pick=a.pick, skip=max(0, a.skip))
             await s.rollback()
     finally:
         await engine.dispose()

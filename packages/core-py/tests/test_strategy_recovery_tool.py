@@ -113,7 +113,7 @@ async def test_report_reconstructs_the_winner_and_splits_migration_by_day(sf):
         await s.rollback()
     out = "\n".join(lines)
     # the winner: +1000% on a 0.01 SOL entry, realized (proceeds - cost), reconstructed with what the gate saw
-    assert f"### {str(winner.id)[:8]}" in out and "return 1000.00% = realized / entry cost" in out
+    assert f"### {str(winner.id)[:8]} [best by return % #1]" in out and "return 1000.00% = realized / entry cost" in out
     assert "post_migration_flow v1" in out and '"h1_buys":40' in out and "pool age >= 120 s" in out
     assert "AFTER entry (not known at decision): peak 1100" in out and "paper_exit.take_profit_1" in out
     assert "MIGRATED pool <10m" in out  # pool age at the decision, from the gate snapshot
@@ -127,7 +127,24 @@ async def test_report_reconstructs_the_winner_and_splits_migration_by_day(sf):
     # the risk engine's own view, computed inside the read-only transaction
     assert "risk engine right now" in out and "risk summary unavailable" not in out, out[-3000:]
     assert "LIVE" in out and "same token traded PAPER and LIVE within 10 minutes: 1" in out
+    assert "hours with no candidate at all:" in out
     assert "Nothing was written." in out
+
+
+async def test_pick_and_established_migrated_tokens(sf):
+    async with sf() as s:
+        winner = await seed(s)
+        o = (await s.execute(select(OpportunityOutcome))).scalar_one()
+        o.snapshot = {**o.snapshot, "market_cap_sol": "93350"}  # far above a completed curve (~410 SOL)
+        await s.commit()
+    async with sf() as s:
+        await s.execute(text("SET TRANSACTION READ ONLY"))
+        lines = await sr.build(s, ["deep", "trades"], 10, 12, [(datetime.fromisoformat(a), n) for a, n in sr.DEPLOYS], NOW,
+                               pick=[str(winner.id)[:8]])
+        await s.rollback()
+    out = "\n".join(lines)
+    assert out.count("### ") == 1 and f"### {str(winner.id)[:8]} [picked]" in out
+    assert "MIGRATED established (mcap >3k SOL)" in out
 
 
 async def test_the_tool_cannot_write(sf):
