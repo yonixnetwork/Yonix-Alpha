@@ -77,6 +77,8 @@ def validate_plan(plan: dict[str, Any] | None) -> dict[str, Any]:
     if not Decimal(1) <= gap <= Decimal(500):
         raise PlanError("min_stop_gap_bps: 1-500")
     out["min_stop_gap_bps"] = str(gap)
+    if plan.get("interval") in ("1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "1d"):
+        out["interval"] = plan["interval"]  # the bars trade management reads
     return out
 
 

@@ -25,7 +25,8 @@ from yonixalpha_crypto.db import ApiConnection, ExecTrade
 from yonixalpha_crypto.private import management, secretstore
 from yonixalpha_crypto.private.adapters import SpotAccount, account_for
 from yonixalpha_crypto.private.connections import view
-from yonixalpha_crypto.private.executor import ACTIVE_TRADE, Executor
+from yonixalpha_crypto.private.executor import ACTIVE_TRADE, EntryRefused, Executor
+from yonixalpha_crypto.private.sizing import SizingRules
 from yonixalpha_crypto.private.signedhttp import ExchangeRequestError, SignedHttp
 
 
@@ -98,3 +99,50 @@ class _NoAccount:
 
     def __init__(self, c: ApiConnection):
         self.exchange, self.environment = c.exchange, c.environment
+
+
+async def strategy_entry(session, cfg, strategy_id: str, symbol: str, decision, limits, taker_fee_bps: Decimal,
+                         entry_key: str) -> tuple[bool, list[str], str | None]:
+    """An EXCHANGE_DEMO strategy entry: the decision goes through the same
+    executor as every exchange order (guard, sizing, write-ahead, verified
+    protection). Practice connections only; returns (accepted, reasons, trade id)."""
+    c = await session.get(ApiConnection, cfg.connection_id) if cfg.connection_id else None
+    if c is None or c.environment not in ("DEMO", "TESTNET") or not c.enabled:
+        return False, ["exchange-demo: no enabled DEMO / TESTNET connection for this strategy"], None
+    acct = open_account(c)
+    if acct is None:
+        return False, ["exchange-demo: the connection's keys cannot be decrypted"], None
+    if limits.risk_pct > 0:
+        rules = SizingRules(limits.risk_pct, Decimal("1000000000"), limits.max_position_quote, taker_fee_bps,
+                            limits.slippage_bps, Decimal(30))
+    else:  # a fixed amount: 100% of equity as the percentage, capped by the fixed amount
+        rules = SizingRules(Decimal(100), limits.risk_per_trade_quote, limits.max_position_quote, taker_fee_bps,
+                            limits.slippage_bps, Decimal(30))
+    try:
+        t = await Executor(acct, c).open_long(
+            session, strategy_id=strategy_id, symbol=symbol, entry_key=entry_key, rules=rules,
+            stop_price=decision.stop_price, take_profit=decision.target_price,
+            plan={**(cfg.exits or {}), "interval": cfg.interval},
+            thesis={"reason": "; ".join(decision.reasons), "values": (decision.detail or {}).get("values"),
+                    "strategy": strategy_id, "interval": cfg.interval})
+    except EntryRefused as e:
+        return False, [f"exchange-demo: {r}" for r in e.reasons], None
+    except ExchangeRequestError as e:
+        return False, [f"exchange-demo: {e}"], None
+    finally:
+        await acct.aclose()
+    return t.status in ("OPEN", "PENDING_ENTRY"), [f"exchange-demo trade {t.status}"], str(t.id)
+
+
+async def strategy_exit(session, trade: ExecTrade, reason: str) -> str:
+    c = await session.get(ApiConnection, trade.connection_id)
+    acct = open_account(c) if c is not None else None
+    if acct is None:
+        return "keys unreadable: exit not sent (protection stays on the exchange)"
+    try:
+        await Executor(acct, c).close(session, trade, f"strategy exit: {reason}")
+    except ExchangeRequestError as e:
+        return f"exchange error: {e}"
+    finally:
+        await acct.aclose()
+    return trade.status

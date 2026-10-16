@@ -61,6 +61,27 @@ class BybitSpot:
         out = [Candle(ms(r[0]), dec(r[1]), dec(r[2]), dec(r[3]), dec(r[4]), dec(r[5]), interval) for r in rows]
         return sorted(out, key=lambda c: c.open_time)
 
+    async def history(self, symbol: str, interval: str, start_ms: int, end_ms: int) -> list[Candle]:
+        """Candles between two times, oldest first. Bybit returns the newest
+        first, so pages walk backwards from `end_ms`."""
+        base, quote = split_symbol(symbol)
+        out: dict[int, Candle] = {}
+        cursor = end_ms
+        while cursor > start_ms:
+            body = await self._get("/v5/market/kline", {"category": "spot", "symbol": base + quote,
+                                                        "interval": INTERVALS[interval], "start": start_ms,
+                                                        "end": cursor, "limit": 1000})
+            rows = (body.get("result") or {}).get("list") or []
+            if not rows:
+                break
+            for r in rows:
+                out[int(r[0])] = Candle(ms(r[0]), dec(r[1]), dec(r[2]), dec(r[3]), dec(r[4]), dec(r[5]), interval)
+            oldest = min(int(r[0]) for r in rows)
+            if oldest - 1 >= cursor:
+                break
+            cursor = oldest - 1
+        return [out[k] for k in sorted(out)]
+
     async def top_of_book(self, symbol: str) -> TopOfBook:
         base, quote = split_symbol(symbol)
         body = await self._get("/v5/market/tickers", {"category": "spot", "symbol": base + quote})

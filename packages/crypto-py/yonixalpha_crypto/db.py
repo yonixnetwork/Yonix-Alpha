@@ -57,6 +57,11 @@ class StrategyConfig(Base):
     params: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     risk: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # trade-management plan (private.management.validate_plan): trailing, partials, time stop
+    exits: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    # EXCHANGE_DEMO mode: the practice (DEMO / TESTNET) connection its orders go to
+    connection_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey(
+        "crypto.api_connections.id", ondelete="SET NULL", name="fk_strategy_configs_connection_id"), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
     updated_by: Mapped[str | None] = mapped_column(String(64))
 
@@ -144,6 +149,12 @@ class DemoPosition(Base):
     proceeds_quote: Mapped[Decimal | None] = mapped_column(AMOUNT)  # net of exit fee
     realized_pnl_quote: Mapped[Decimal | None] = mapped_column(AMOUNT)
     exit_reason: Mapped[str | None] = mapped_column(String(48))
+    # trade management in paper mode (strategy exits plan): the stop at entry,
+    # the highest bid seen, which partial targets were taken, and the
+    # realized P&L of partial exits while the position is still open
+    initial_stop: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    highest_price: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    exits_state: Mapped[dict | None] = mapped_column(JSONB)
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -278,6 +289,75 @@ class ExecGuard(Base):
     reason: Mapped[str | None] = mapped_column(Text)
     since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
+
+
+class Ohlcv(Base):
+    """Historical candles for backtests, with where they came from."""
+    __tablename__ = "ohlcv"
+    exchange: Mapped[str] = mapped_column(String(16), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(24), primary_key=True)
+    interval: Mapped[str] = mapped_column(String(8), primary_key=True)
+    open_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    open: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    high: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    low: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    close: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    volume: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
+
+
+class BacktestBatch(Base):
+    __tablename__ = "backtest_batches"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)  # QUEUED | RUNNING | DONE | CANCELLED
+    config: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cancelled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    note: Mapped[str | None] = mapped_column(String(300))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, index=True)
+    created_by: Mapped[str | None] = mapped_column(String(64))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class BacktestRun(Base):
+    """One strategy on one symbol in one batch. `result` holds the full study
+    (splits, walk-forward, sensitivity, benchmark, verdict); `summary` the
+    few figures list views need. Every run records the code version, the
+    configuration and the data it used."""
+    __tablename__ = "backtest_runs"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    batch_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("crypto.backtest_batches.id",
+                                                ondelete="CASCADE"), nullable=False, index=True)
+    strategy_id: Mapped[str] = mapped_column(String(48), nullable=False, index=True)
+    exchange: Mapped[str] = mapped_column(String(16), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(24), nullable=False)
+    interval: Mapped[str] = mapped_column(String(8), nullable=False)
+    # QUEUED | RUNNING | DONE | FAILED | CANCELLED | SKIPPED
+    status: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    phase: Mapped[str | None] = mapped_column(String(48))
+    config: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    code_version: Mapped[str | None] = mapped_column(String(64))
+    data: Mapped[dict | None] = mapped_column(JSONB)
+    summary: Mapped[dict | None] = mapped_column(JSONB)
+    result: Mapped[dict | None] = mapped_column(JSONB)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PortfolioSettings(Base):
+    """One row (id 1): portfolio-wide limits over every strategy and mode,
+    and the switches for optional heavy work (backtests, optimisation)."""
+    __tablename__ = "portfolio_settings"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    limits: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
+    updated_by: Mapped[str | None] = mapped_column(String(64))
 
 
 def make_session_factory(database_url: str, *, pool_size: int = 2, max_overflow: int = 1):

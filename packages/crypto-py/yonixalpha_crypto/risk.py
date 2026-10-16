@@ -27,7 +27,15 @@ RISK_RULES: dict[str, tuple[Decimal, Decimal, Decimal]] = {
     "max_spread_bps": (Decimal("20"), Decimal("0.1"), Decimal("500")),
     "slippage_bps": (Decimal("5"), Decimal("0"), Decimal("500")),
     "max_book_age_seconds": (Decimal("15"), Decimal("1"), Decimal("300")),
+    # 0 = risk the fixed risk_per_trade_quote; > 0 = risk this % of the paper account equity instead
+    "risk_pct": (Decimal("0"), Decimal("0"), Decimal("5")),
+    # pause new entries for cooldown_minutes after this many losing trades in a row (0 = off)
+    "max_consecutive_losses": (Decimal("0"), Decimal("0"), Decimal("20")),
+    "cooldown_minutes": (Decimal("0"), Decimal("0"), Decimal("10080")),
+    # minimum traded value (quote) of the signal candle (0 = off)
+    "min_bar_volume_quote": (Decimal("0"), Decimal("0"), Decimal("1000000000")),
 }
+INT_KEYS = ("max_open_positions", "max_consecutive_losses")
 
 
 @dataclass(frozen=True)
@@ -40,12 +48,23 @@ class RiskLimits:
     max_spread_bps: Decimal
     slippage_bps: Decimal
     max_book_age_seconds: Decimal
+    risk_pct: Decimal = Decimal(0)
+    max_consecutive_losses: int = 0
+    cooldown_minutes: Decimal = Decimal(0)
+    min_bar_volume_quote: Decimal = Decimal(0)
+
+    def budget(self, equity_quote: Decimal) -> tuple[Decimal, str]:
+        """The risk budget for one trade and how it was set."""
+        if self.risk_pct > 0:
+            return equity_quote * self.risk_pct / 100, f"{self.risk_pct}% of equity {equity_quote:.2f}"
+        return self.risk_per_trade_quote, f"fixed {self.risk_per_trade_quote}"
 
     @classmethod
     def from_dict(cls, d: dict[str, Any] | None) -> "RiskLimits":
         d = d or {}
         vals = {k: Decimal(str(d.get(k, rule[0]))) for k, rule in RISK_RULES.items()}
-        vals["max_open_positions"] = int(vals["max_open_positions"])
+        for k in INT_KEYS:
+            vals[k] = int(vals[k])
         return cls(**vals)
 
 
@@ -64,8 +83,8 @@ def validate_risk(d: dict[str, Any]) -> tuple[dict[str, str], list[str]]:
         if not x.is_finite() or x < lo or x > hi:
             errors.append(f"risk.{k}: must be between {lo} and {hi}")
             continue
-        if k == "max_open_positions" and x != x.to_integral_value():
-            errors.append("risk.max_open_positions: must be a whole number")
+        if k in INT_KEYS and x != x.to_integral_value():
+            errors.append(f"risk.{k}: must be a whole number")
             continue
         out[k] = str(x)
     return out, errors
@@ -119,7 +138,10 @@ def size_entry(limits: RiskLimits, exposure: Exposure, book: TopOfBook, spec: In
     if stop_price <= 0 or exit_at_stop >= entry:
         return RiskDecision(False, reasons=["stop is not below the expected entry"])
     loss_per_unit = (entry - exit_at_stop) + entry * fee + exit_at_stop * fee
-    qty = limits.risk_per_trade_quote / loss_per_unit
+    budget, how = limits.budget(exposure.cash_quote + exposure.open_exposure_quote)
+    if budget <= 0:
+        return RiskDecision(False, reasons=["risk budget is zero"])
+    qty = budget / loss_per_unit
     room = min(limits.max_position_quote, limits.max_total_exposure_quote - exposure.open_exposure_quote,
                exposure.cash_quote / (1 + fee))
     if room <= 0:
@@ -131,4 +153,5 @@ def size_entry(limits: RiskLimits, exposure: Exposure, book: TopOfBook, spec: In
         return RiskDecision(False, reasons=[f"size {qty} below the minimum quantity {spec.min_qty}"])
     if notional < spec.min_notional:
         return RiskDecision(False, reasons=[f"order value {notional:.4f} below the minimum {spec.min_notional}"])
-    return RiskDecision(True, qty, entry, notional, (qty * loss_per_unit).quantize(Decimal("0.00000001")), [])
+    return RiskDecision(True, qty, entry, notional, (qty * loss_per_unit).quantize(Decimal("0.00000001")),
+                        [f"risk budget: {how}"])

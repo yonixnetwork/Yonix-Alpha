@@ -45,6 +45,7 @@ from yonixalpha_crypto.db import (EXEC_ACTIVE, DemoPosition, EngineState, Event,
                                   make_session_factory, schema_ready)
 from yonixalpha_crypto.exchanges import EXCHANGES, market_data
 from yonixalpha_crypto.exchanges.base import MarketData
+from yonixalpha_crypto.guard import ACTIVE_MODES
 from yonixalpha_crypto.runner import InstrumentCache, protect_positions, step_strategy
 from yonixalpha_crypto.strategies import implementation
 
@@ -152,7 +153,7 @@ class Engine:
         if state == "IDLE":
             for sid, cfg in configs.items():
                 spec, impl = registry.get(sid), implementation(sid)
-                if not (cfg.enabled and cfg.mode == "DEMO" and spec and spec.status == registry.IMPLEMENTED and impl):
+                if not (cfg.enabled and cfg.mode in ACTIVE_MODES and spec and spec.status == registry.IMPLEMENTED and impl):
                     continue
                 result["state"] = "RUNNING"
                 if pressure:

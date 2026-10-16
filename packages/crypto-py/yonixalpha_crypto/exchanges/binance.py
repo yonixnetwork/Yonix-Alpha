@@ -58,6 +58,26 @@ class BinanceSpot:
         out = [Candle(ms(r[0]), dec(r[1]), dec(r[2]), dec(r[3]), dec(r[4]), dec(r[5]), interval) for r in rows or []]
         return sorted(out, key=lambda c: c.open_time)
 
+    async def history(self, symbol: str, interval: str, start_ms: int, end_ms: int) -> list[Candle]:
+        """Closed and open candles between two times, oldest first, paged by
+        1000 (public klines with startTime / endTime)."""
+        if interval not in INTERVALS:
+            raise ValueError(interval)
+        base, quote = split_symbol(symbol)
+        out: list[Candle] = []
+        cursor = start_ms
+        while cursor < end_ms:
+            rows = await self.http.get("/api/v3/klines", {"symbol": base + quote, "interval": interval,
+                                                          "startTime": cursor, "endTime": end_ms, "limit": 1000})
+            if not rows:
+                break
+            out += [Candle(ms(r[0]), dec(r[1]), dec(r[2]), dec(r[3]), dec(r[4]), dec(r[5]), interval) for r in rows]
+            nxt = int(rows[-1][0]) + 1
+            if nxt <= cursor:
+                break
+            cursor = nxt
+        return out
+
     async def top_of_book(self, symbol: str) -> TopOfBook:
         base, quote = split_symbol(symbol)
         b = await self.http.get("/api/v3/ticker/bookTicker", {"symbol": base + quote})

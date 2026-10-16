@@ -111,7 +111,8 @@ async def open_long(session: AsyncSession, *, mode: str, strategy_id: str, clien
         session.add(DemoPosition(strategy_id=strategy_id, exchange=spec.exchange, symbol=spec.symbol, qty=fill.qty,
                                  entry_price=fill.price, entry_cost_quote=fill.quote_amount + fill.fee_quote,
                                  stop_price=stop_price, target_price=target_price, fees_quote=fill.fee_quote,
-                                 last_price=fill.price, opened_at=now))
+                                 last_price=fill.price, opened_at=now, initial_stop=stop_price,
+                                 highest_price=fill.price, exits_state={}))
     session.add(order)
     await session.flush()
     return order
@@ -134,14 +135,54 @@ async def close_long(session: AsyncSession, *, mode: str, position: DemoPosition
     proceeds = fill.quote_amount - fill.fee_quote
     acc.cash = Decimal(acc.cash) + proceeds
     position.status, position.closed_at, position.exit_price, position.exit_reason = "CLOSED", now, fill.price, reason
+    earlier = Decimal((position.exits_state or {}).get("partial_realized_quote", "0"))
     position.proceeds_quote = proceeds
     position.fees_quote = Decimal(position.fees_quote) + fill.fee_quote
-    position.realized_pnl_quote = proceeds - Decimal(position.entry_cost_quote)
+    # entry_cost_quote is the cost of what is still held (partial exits reduce it)
+    position.realized_pnl_quote = proceeds - Decimal(position.entry_cost_quote) + earlier
     position.last_price = fill.price
     order = DemoOrder(client_id=client_id, strategy_id=position.strategy_id, exchange=spec.exchange,
                       symbol=spec.symbol, side="SELL", status="FILLED", reason=reason, qty=fill.qty, price=fill.price,
                       quote_amount=fill.quote_amount, fee_quote=fill.fee_quote, slippage_bps=slippage_bps,
                       spread_bps=book.spread_bps, book=_book(book), created_at=now)
+    session.add(order)
+    await session.flush()
+    return order
+
+
+async def partial_close(session: AsyncSession, *, mode: str, position: DemoPosition, fraction: Decimal, client_id: str,
+                        book: TopOfBook, spec: InstrumentSpec, fee_bps: Decimal, slippage_bps: Decimal, reason: str,
+                        now: datetime | None = None) -> DemoOrder | None:
+    """Sell `fraction` of an open demo position at the bid (minus slippage).
+    The position stays OPEN with the rest; its realized part is kept in
+    exits_state and added to the final realized P&L. None when the part or
+    the rest would be below the exchange minimum (nothing is sold)."""
+    require_demo(mode)
+    prior = await _existing(session, client_id)
+    if prior is not None:
+        return prior
+    now = now or datetime.now(timezone.utc)
+    qty = spec.round_qty(Decimal(position.qty) * fraction) if spec.qty_step > 0 else Decimal(position.qty) * fraction
+    rest = Decimal(position.qty) - qty
+    if qty <= 0 or qty < spec.min_qty or rest < spec.min_qty or qty * book.bid < spec.min_notional:
+        return None
+    fill, why = simulate("SELL", book, spec, qty, fee_bps, slippage_bps, None)
+    if fill is None:
+        return None
+    acc = await account(session, spec.exchange, spec.quote)
+    proceeds = fill.quote_amount - fill.fee_quote
+    acc.cash = Decimal(acc.cash) + proceeds
+    cost_part = Decimal(position.entry_cost_quote) * qty / Decimal(position.qty)
+    st = dict(position.exits_state or {})
+    st["partial_realized_quote"] = str(Decimal(st.get("partial_realized_quote", "0")) + proceeds - cost_part)
+    position.exits_state = st
+    position.entry_cost_quote = Decimal(position.entry_cost_quote) - cost_part
+    position.qty = rest
+    position.fees_quote = Decimal(position.fees_quote) + fill.fee_quote
+    order = DemoOrder(client_id=client_id, strategy_id=position.strategy_id, exchange=spec.exchange,
+                      symbol=spec.symbol, side="SELL", status="FILLED", reason=reason[:48], qty=fill.qty,
+                      price=fill.price, quote_amount=fill.quote_amount, fee_quote=fill.fee_quote,
+                      slippage_bps=slippage_bps, spread_bps=book.spread_bps, book=_book(book), created_at=now)
     session.add(order)
     await session.flush()
     return order

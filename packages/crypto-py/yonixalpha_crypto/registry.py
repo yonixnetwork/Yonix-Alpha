@@ -8,7 +8,7 @@ and commit that was read."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Any, Callable
 
@@ -40,6 +40,13 @@ class StrategySpec:
     max_symbols: int = 3
     # Extra validation of a merged config (returns error strings).
     check: Callable[[dict[str, Any]], list[str]] | None = None
+    # Strategy Center: plain-language rules and the research record (strategies.library).
+    description: str = ""
+    entry_rules: str = ""
+    exit_rules: str = ""
+    research: dict[str, Any] = field(default_factory=dict)
+    default_exits: dict[str, Any] = field(default_factory=dict)
+    library: bool = False
 
     def default_params(self) -> dict[str, Any]:
         return {k: (str(v[0]) if isinstance(v[0], Decimal) else v[0]) for k, v in self.params.items()}
@@ -55,6 +62,9 @@ def register(spec: StrategySpec) -> StrategySpec:
 
 def get(strategy_id: str) -> StrategySpec | None:
     return _REGISTRY.get(strategy_id)
+
+
+__all__ = ["replace"]  # dataclasses.replace, re-exported for strategies.library
 
 
 def all_specs() -> list[StrategySpec]:

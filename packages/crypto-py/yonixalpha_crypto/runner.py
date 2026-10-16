@@ -18,16 +18,16 @@ abandons a position: stops and targets keep being checked against the bid."""
 from __future__ import annotations
 
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yonixalpha_crypto import demo
-from yonixalpha_crypto.candles import clean
-from yonixalpha_crypto.db import DemoPosition, Event, Signal, StrategyConfig
+from yonixalpha_crypto import demo, portfolio
+from yonixalpha_crypto.candles import INTERVAL_SECONDS, clean
+from yonixalpha_crypto.db import EXEC_ACTIVE, DemoPosition, Event, ExecTrade, Signal, StrategyConfig
 from yonixalpha_crypto.exchanges.base import InstrumentSpec, MarketData
 from yonixalpha_crypto.exchanges.profiles import PROFILES
 from yonixalpha_crypto.registry import StrategySpec
@@ -99,15 +99,21 @@ async def step_strategy(session: AsyncSession, cfg: StrategyConfig, spec: Strate
         return "rejected" if sig else "duplicate"
 
     P = DemoPosition
+    exchange_demo = cfg.mode == "EXCHANGE_DEMO"
     position = (await session.execute(select(P).where(P.strategy_id == spec.id, P.exchange == cfg.exchange,
                                                       P.symbol == traded, P.status == "OPEN"))).scalar_one_or_none()
-    d = impl.evaluate({s: cs.candles for s, cs in sets.items()}, params, position is not None)
+    xtrade = None
+    if exchange_demo:
+        xtrade = (await session.execute(select(ExecTrade).where(
+            ExecTrade.strategy_id == spec.id, ExecTrade.symbol == traded, ExecTrade.connection_id == cfg.connection_id,
+            ExecTrade.status.in_(EXEC_ACTIVE)))).scalar_one_or_none()
+    d = impl.evaluate({s: cs.candles for s, cs in sets.items()}, params, (position or xtrade) is not None)
     detail = {**d.detail, "gaps": {s: len(cs.gaps) for s, cs in sets.items()}}
     action, reasons = d.action, list(d.reasons)
     order_kw = None
     if d.action == "ENTER" and d.side == "SHORT":
         action, reasons = "REJECTED", reasons + ["SHORT signal: spot is long-only here, not simulated"]
-    elif d.action == "ENTER" and position is not None:
+    elif d.action == "ENTER" and (position or xtrade) is not None:
         action, reasons = "HOLD", reasons + ["already in a position"]
     elif d.action == "ENTER":
         inst = await instruments.get(md, traded)
@@ -126,8 +132,26 @@ async def step_strategy(session: AsyncSession, cfg: StrategyConfig, spec: Strate
         if not rd.approved:
             action, reasons = "REJECTED", reasons + rd.reasons
         else:
-            order_kw = dict(kind="entry", inst=inst, book=book, qty=rd.qty, prof=prof, limits=limits,
-                            stop_pct=stop_pct, target_pct=target_pct)
+            extra = await _entry_filters(session, spec.id, limits, sets[traded].candles[-1], now)
+            extra += await portfolio.check_entry(session, symbol=traded, planned_loss=rd.planned_loss_quote,
+                                                 notional=rd.quote_amount, now=now)
+            detail["risk"]["budget"] = rd.reasons
+            if extra:
+                action, reasons = "REJECTED", reasons + extra
+            elif exchange_demo:
+                from yonixalpha_crypto.private.service import strategy_entry  # practice account orders
+                ok, why, trade_id = await strategy_entry(session, cfg, spec.id, traded, d, limits, prof.taker_fee_bps,
+                                                         f"{spec.id}:{cfg.exchange}:{traded}:{candle_time.isoformat()}")
+                detail["exchange_demo"] = {"trade_id": trade_id, "result": why}
+                if not ok:
+                    action, reasons = "REJECTED", reasons + why
+            else:
+                order_kw = dict(kind="entry", inst=inst, book=book, qty=rd.qty, prof=prof, limits=limits,
+                                stop_pct=stop_pct, target_pct=target_pct)
+    elif d.action == "EXIT" and xtrade is not None:
+        from yonixalpha_crypto.private.service import strategy_exit
+        detail["exchange_demo"] = {"trade_id": str(xtrade.id),
+                                   "result": await strategy_exit(session, xtrade, d.reasons[0] if d.reasons else "strategy exit")}
     elif d.action == "EXIT" and position is not None:
         inst = await instruments.get(md, traded)
         book = await md.top_of_book(traded)
@@ -158,6 +182,82 @@ async def step_strategy(session: AsyncSession, cfg: StrategyConfig, spec: Strate
     return action
 
 
+async def _entry_filters(session: AsyncSession, strategy_id: str, limits: RiskLimits, candle, now: datetime) -> list[str]:
+    """Per-strategy filters beyond sizing: candle traded value and the
+    cooldown after consecutive losses."""
+    out = []
+    if limits.min_bar_volume_quote > 0:
+        traded_value = Decimal(candle.volume) * Decimal(candle.close)
+        if traded_value < limits.min_bar_volume_quote:
+            out.append(f"liquidity: signal candle traded {traded_value:.2f}, minimum {limits.min_bar_volume_quote}")
+    n = limits.max_consecutive_losses
+    if n > 0:
+        P = DemoPosition
+        last = (await session.execute(select(P.realized_pnl_quote, P.closed_at).where(
+            P.strategy_id == strategy_id, P.status == "CLOSED").order_by(P.closed_at.desc()).limit(n))).all()
+        if len(last) == n and all((p or 0) <= 0 for p, _ in last):
+            until = last[0][1] + timedelta(minutes=float(limits.cooldown_minutes))
+            if now < until:
+                out.append(f"cooldown: {n} losses in a row; new entries paused until {until.isoformat()}")
+    return out
+
+
+async def manage_paper(session: AsyncSession, p: DemoPosition, cfg: StrategyConfig | None, book, inst, md,
+                       now: datetime) -> str | None:
+    """Trailing stop, breakeven, partial targets and the time stop of a paper
+    position, from its strategy's exits plan (private.management.decide, the
+    function the exchange executor and the backtester use). Returns the
+    action taken, or None."""
+    from yonixalpha_crypto.private import management as mg
+    if cfg is None or not cfg.exits:
+        return None
+    plan = mg.validate_plan(cfg.exits)
+    st = dict(p.exits_state or {})
+    done = set(st.get("partials_done", []))
+    plan["partials"] = [{**x, "done": i in done} for i, x in enumerate(plan["partials"])]
+    hi = max(Decimal(p.highest_price or p.entry_price), book.bid)
+    p.highest_price = hi
+    step = INTERVAL_SECONDS.get(cfg.interval, 3600)
+    bars_held = int((now - p.opened_at).total_seconds() // step)
+    bars = []
+    if plan["trailing"]["method"] in ("atr", "swing") and md is not None:
+        cs = clean(await md.candles(p.symbol, cfg.interval, 40), cfg.interval, now).candles
+        bars = [mg.Bar(c.high, c.low, c.close) for c in cs]
+    initial = Decimal(p.initial_stop if p.initial_stop is not None else p.stop_price or 0)
+    if initial <= 0:
+        return None
+    snap = mg.TradeSnapshot(Decimal(p.entry_price), initial, Decimal(p.stop_price or initial), Decimal(p.qty),
+                            None, hi, bars_held, plan, PROFILES[p.exchange].taker_fee_bps)
+    limits = RiskLimits.from_dict(cfg.risk)
+    taken = None
+    for dec_ in mg.decide(snap, mg.MarketSnapshot(book.bid, book.ask, bars), inst.tick_size or Decimal("0.00000001")):
+        if dec_.action == mg.MOVE_STOP:
+            p.stop_price = Decimal(dec_.detail["new_stop"])
+            taken = "MOVE_STOP"
+        elif dec_.action == mg.PARTIAL_EXIT:
+            idx = int(dec_.detail["index"])
+            o = await demo.partial_close(session, mode="DEMO", position=p, fraction=Decimal(dec_.detail["fraction"]),
+                                         client_id=f"partial:{p.id}:{idx}", book=book, spec=inst,
+                                         fee_bps=PROFILES[p.exchange].taker_fee_bps, slippage_bps=limits.slippage_bps,
+                                         reason=dec_.reason)
+            st = dict(p.exits_state or {})
+            st["partials_done"] = sorted(set(st.get("partials_done", [])) | {idx})
+            p.exits_state = st
+            taken = "PARTIAL_EXIT" if o is not None else "PARTIAL_SKIPPED"
+        elif dec_.action == mg.CLOSE:
+            await demo.close_long(session, mode="DEMO", position=p, client_id=f"manage:{p.id}:close", book=book,
+                                  spec=inst, fee_bps=PROFILES[p.exchange].taker_fee_bps,
+                                  slippage_bps=limits.slippage_bps, reason=dec_.reason[:48], now=now)
+            taken = "CLOSE"
+        if dec_.action != mg.HOLD:
+            session.add(Event(at=now, level="WARN" if dec_.action == mg.ALERT else "INFO", source=p.strategy_id,
+                              message=f"paper {p.symbol}: {dec_.action}: {dec_.reason}"[:2000],
+                              detail={"position": str(p.id), **{k: str(v) for k, v in dec_.detail.items()}}))
+        if taken == "CLOSE":
+            break
+    return taken
+
+
 async def protect_positions(session: AsyncSession, markets: dict[str, MarketData], instruments: InstrumentCache,
                             configs: dict[str, StrategyConfig], now: datetime) -> int:
     """Close OPEN demo positions whose stop or target the current bid has
@@ -177,6 +277,12 @@ async def protect_positions(session: AsyncSession, markets: dict[str, MarketData
         p.last_price = book.bid
         hit = ("stop_loss" if p.stop_price is not None and book.bid <= p.stop_price else
                "take_profit" if p.target_price is not None and book.bid >= p.target_price else None)
+        if not hit:
+            try:
+                await manage_paper(session, p, configs.get(p.strategy_id), book, inst, md, now)
+            except Exception as e:  # noqa: BLE001 - protection by stop / target above still ran
+                session.add(Event(level="WARN", source="protect",
+                                  message=f"{p.symbol}: trade management skipped ({e})"[:500]))
         if hit:
             cfg = configs.get(p.strategy_id)
             limits = RiskLimits.from_dict(cfg.risk if cfg else None)
