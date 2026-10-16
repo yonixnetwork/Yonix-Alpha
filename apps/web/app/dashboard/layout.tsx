@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Archive, Bell, CandlestickChart, KeyRound, ListChecks, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Server } from "lucide-react";
+import { Archive, Bell, BellRing, CandlestickChart, GitCompare, History, KeyRound, LayoutGrid, ListChecks, LogOut, ShieldCheck, Menu, PanelLeftClose, PanelLeftOpen, Server } from "lucide-react";
 import { isMemecoinPath, MEMECOIN_ARCHIVED, MEMECOIN_GROUPS, type NavGroup, type NavItem } from "@/components/archivedEngines";
 import NotificationsBell from "@/components/NotificationsBell";
 import RuntimeApply from "@/components/RuntimeApply";
@@ -23,9 +23,14 @@ const ACTIVE_GROUPS: NavGroup[] = [
     // from Memecoin Trading (yonixalpha_crypto).
     title: "Crypto Trading",
     items: [
-      { href: "/dashboard/crypto", label: "Strategy Lab", icon: CandlestickChart },
+      { href: "/dashboard/crypto/center", label: "Strategy Center", icon: LayoutGrid },
+      { href: "/dashboard/crypto", label: "Engine (Strategy Lab)", icon: CandlestickChart },
+      { href: "/dashboard/crypto/backtests", label: "Backtests", icon: History },
+      { href: "/dashboard/crypto/compare", label: "Compare", icon: GitCompare },
+      { href: "/dashboard/crypto/portfolio", label: "Portfolio Risk", icon: ShieldCheck },
       { href: "/dashboard/crypto/trades", label: "Exchange Trades", icon: ListChecks },
       { href: "/dashboard/crypto/connections", label: "Exchange Connections", icon: KeyRound },
+      { href: "/dashboard/crypto/alerts", label: "Alerts and Audit", icon: BellRing },
     ],
   },
   {

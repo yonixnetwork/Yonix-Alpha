@@ -217,6 +217,8 @@ SRC = {
                 "url": "https://github.com/EA31337/EA31337-strategies"},
     "trendbot": {"title": "arwensorcenelli/trend-bot @ab75bb1 (no licence): 10/50 MA trend with a 3 x ATR stop, rule "
                           "idea only", "url": "https://github.com/arwensorcenelli/trend-bot"},
+    "metamuse": {"title": "hoziertom44-arch/Meta_Muse_Crossover_strategy @a163ff7 (no licence): the original bot, rules "
+                          "read and re-implemented", "url": "https://github.com/hoziertom44-arch/Meta_Muse_Crossover_strategy"},
     "confluence": {"title": "siriusforex-ai/confluence_matrix_forex @f3beff9 (no licence): pivot breakout, rule idea "
                             "only; its backtest charges no costs", "url": "https://github.com/siriusforex-ai/confluence_matrix_forex"},
 }
@@ -674,7 +676,7 @@ MODULES: list[Module] = [
         P(fast=(9, "int", 2, 100), slow=(21, "int", 3, 400), trend_threshold=(D("0.0015"), "dec", "0", "0.05"),
           stop_pct=(D("0.01"), "dec", "0.001", "0.2"), target_pct=(D("0.02"), "dec", "0.001", "0.5"),
           candles=(150, "int", 30, 1000)),
-        "5m", research("trend divergence (pair)", "Binance USD-M futures, BTC/ETH, 5m", ["freqtrade"],
+        "5m", research("trend divergence (pair)", "Binance USD-M futures, BTC/ETH, 5m", ["metamuse"],
                        "none published; the author's README makes no verified performance claim",
                        "the two assets decouple for a while", "correlation snaps back; whipsaws on 5m",
                        "short ETH when BTC strong UP and ETH strong DOWN",

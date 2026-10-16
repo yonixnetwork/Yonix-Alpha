@@ -1133,3 +1133,46 @@ li.unread {
 button.chip { cursor: pointer; color: inherit; padding: 4px 12px; }
 button.chip.chip-active { border-color: var(--accent, #3b82f6); background: color-mix(in srgb, var(--accent, #3b82f6) 14%, var(--surface)); }
 button.chip b { font-variant-numeric: tabular-nums; }
+
+/* ---- charts (components/LineChart.tsx). Categorical palette validated
+   against the dark surface #141824 (dataviz validator: all checks pass;
+   worst adjacent CVD dE 8.4, normal-vision dE 19.3, contrast >= 3:1). ---- */
+.viz-root {
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+  --series-7: #9085e9;
+  --series-8: #e66767;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.viz-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 4px; }
+.viz-title { font-size: 13px; font-weight: 600; color: var(--text); }
+.viz-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
+.viz-legend i, .viz-tip i { display: inline-block; width: 10px; height: 3px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+.viz-svg { display: block; overflow: visible; outline: none; }
+.viz-svg:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.viz-grid { stroke: var(--border); stroke-width: 1; }
+.viz-cross { stroke: var(--text-dim); stroke-width: 1; stroke-dasharray: 3 3; }
+.viz-axis { fill: var(--text-dim); font-size: 11px; }
+.viz-label { fill: var(--text); font-size: 11px; }
+.viz-tip {
+  position: absolute; top: 8px; transform: translateX(-50%); pointer-events: none; min-width: 140px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; z-index: 2;
+}
+.strategy-filters { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.strategy-filters input, .strategy-filters select {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; color: var(--text); font-size: 13px;
+}
+.th-sort { cursor: pointer; user-select: none; }
+.info { display: inline-block; width: 14px; height: 14px; border-radius: 50%; border: 1px solid var(--text-dim); color: var(--text-dim);
+  font-size: 10px; line-height: 12px; text-align: center; margin-left: 4px; cursor: help; }
+.perf-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.sc-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.progress { height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+.progress > span { display: block; height: 100%; background: var(--accent); }

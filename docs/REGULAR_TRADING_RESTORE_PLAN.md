@@ -301,3 +301,10 @@ before either trades on a practice account automatically.
 
 Resource: importing the execution code adds about 8 MB (52.7 -> 60.8 MB peak
 RSS, measured locally); it is loaded only while an exchange trade is active.
+
+## 11. Multi-strategy expansion (2026-10-16, fourth round)
+
+The 20-module strategy library, Strategy Center, backtesting pipeline,
+portfolio risk, paper / exchange-demo modes and comparison are documented in
+`docs/STRATEGY_LIBRARY_REPORT.md` (research, rules, licences, tests,
+migration c0004 and rollback, resources, open issues).

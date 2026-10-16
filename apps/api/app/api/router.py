@@ -9,6 +9,7 @@ from app.api.routes import (
     control,
     copy,
     crypto,
+    crypto_center,
     crypto_connections,
     crypto_execution,
     evm,
@@ -70,3 +71,4 @@ api_router.include_router(entry_intel.router)
 api_router.include_router(crypto.router)
 api_router.include_router(crypto_connections.router)
 api_router.include_router(crypto_execution.router)
+api_router.include_router(crypto_center.router)
