@@ -19,6 +19,18 @@ from yonixalpha_crypto.publichttp import ExchangeUnavailable, PublicHttp
 INTERVALS = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "1d"}
 
 
+def instrument_from(exchange: str, s: dict) -> InstrumentSpec:
+    """One symbol of /api/v3/exchangeInfo (also used by the signed account
+    adapter, private.adapters)."""
+    f = {x.get("filterType"): x for x in s.get("filters") or []}
+    notional = (f.get("NOTIONAL") or {}).get("minNotional") or (f.get("MIN_NOTIONAL") or {}).get("minNotional") or "0"
+    return InstrumentSpec(exchange, f"{s['baseAsset']}/{s['quoteAsset']}", s["symbol"], s["baseAsset"],
+                          s["quoteAsset"], s.get("status", ""), s.get("status") == "TRADING",
+                          dec((f.get("PRICE_FILTER") or {}).get("tickSize") or "0"),
+                          dec((f.get("LOT_SIZE") or {}).get("stepSize") or "0"),
+                          dec((f.get("LOT_SIZE") or {}).get("minQty") or "0"), dec(notional))
+
+
 class BinanceSpot:
     def __init__(self, exchange: str, base_url: str, transport: httpx.AsyncBaseTransport | None = None):
         if exchange not in ("binance", "binance_us"):
@@ -35,14 +47,7 @@ class BinanceSpot:
         syms = (body.get("symbols") or []) if isinstance(body, dict) else []
         if not syms:
             raise ExchangeUnavailable(self.exchange, 200, f"{symbol} is not listed")
-        s = syms[0]
-        f = {x.get("filterType"): x for x in s.get("filters") or []}
-        notional = (f.get("NOTIONAL") or {}).get("minNotional") or (f.get("MIN_NOTIONAL") or {}).get("minNotional") or "0"
-        return InstrumentSpec(self.exchange, f"{s['baseAsset']}/{s['quoteAsset']}", s["symbol"], s["baseAsset"],
-                              s["quoteAsset"], s.get("status", ""), s.get("status") == "TRADING",
-                              dec((f.get("PRICE_FILTER") or {}).get("tickSize") or "0"),
-                              dec((f.get("LOT_SIZE") or {}).get("stepSize") or "0"),
-                              dec((f.get("LOT_SIZE") or {}).get("minQty") or "0"), dec(notional))
+        return instrument_from(self.exchange, syms[0])
 
     async def candles(self, symbol: str, interval: str, limit: int) -> list[Candle]:
         if interval not in INTERVALS:

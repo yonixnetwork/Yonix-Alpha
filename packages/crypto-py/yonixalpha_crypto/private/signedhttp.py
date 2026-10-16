@@ -38,13 +38,16 @@ RECV_WINDOW = 5000
 
 READ_PATHS: dict[str, frozenset[tuple[str, str]]] = {
     "bybit": frozenset({
-        ("GET", "/v5/market/time"), ("GET", "/v5/market/instruments-info"),
+        ("GET", "/v5/market/time"), ("GET", "/v5/market/instruments-info"), ("GET", "/v5/market/tickers"),
+        ("GET", "/v5/market/kline"),
         ("GET", "/v5/user/query-api"), ("GET", "/v5/account/wallet-balance"), ("GET", "/v5/account/info"),
         ("GET", "/v5/order/realtime"), ("GET", "/v5/order/history"), ("GET", "/v5/position/list"),
         ("GET", "/v5/execution/list"),
     }),
     "binance": frozenset({
-        ("GET", "/api/v3/time"), ("GET", "/api/v3/exchangeInfo"), ("GET", "/api/v3/account"),
+        ("GET", "/api/v3/time"), ("GET", "/api/v3/exchangeInfo"), ("GET", "/api/v3/ticker/bookTicker"),
+        ("GET", "/api/v3/klines"),
+        ("GET", "/api/v3/account"), ("GET", "/api/v3/orderList"),
         ("GET", "/api/v3/openOrders"), ("GET", "/api/v3/allOrders"), ("GET", "/api/v3/myTrades"),
         ("GET", "/api/v3/order"), ("GET", "/sapi/v1/account/apiRestrictions"),
     }),
@@ -59,7 +62,8 @@ ORDER_PATHS: dict[str, frozenset[tuple[str, str]]] = {
         ("POST", "/api/v3/orderList/oco"), ("POST", "/api/v3/orderList/oto"), ("DELETE", "/api/v3/orderList"),
     }),
 }
-UNSIGNED = frozenset({"/v5/market/time", "/v5/market/instruments-info", "/api/v3/time", "/api/v3/exchangeInfo"})
+UNSIGNED = frozenset({"/v5/market/time", "/v5/market/instruments-info", "/v5/market/tickers", "/v5/market/kline",
+                      "/api/v3/time", "/api/v3/exchangeInfo", "/api/v3/ticker/bookTicker", "/api/v3/klines"})
 LIVE_ONLY = frozenset({"/sapi/v1/account/apiRestrictions"})  # /sapi does not exist on the Binance testnet
 
 
@@ -71,6 +75,13 @@ class ExchangeRequestError(RuntimeError):
     def __init__(self, exchange: str, status: int | None, code: int | None, message: str):
         super().__init__(f"{exchange}: HTTP {status or '-'} code {code if code is not None else '-'}: {message}")
         self.exchange, self.status, self.code, self.message = exchange, status, code, message
+
+    @property
+    def ambiguous(self) -> bool:
+        """No answer (timeout, dropped connection) or a server error: the
+        request may or may not have been executed. Never retried blindly;
+        the order is looked up by its client id instead."""
+        return self.status is None or self.status >= 500
 
 
 def check(exchange: str, environment: str, method: str, path: str) -> bool:

@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Archive, Bell, CandlestickChart, KeyRound, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Server } from "lucide-react";
+import { Archive, Bell, CandlestickChart, KeyRound, ListChecks, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Server } from "lucide-react";
 import { isMemecoinPath, MEMECOIN_ARCHIVED, MEMECOIN_GROUPS, type NavGroup, type NavItem } from "@/components/archivedEngines";
 import NotificationsBell from "@/components/NotificationsBell";
 import RuntimeApply from "@/components/RuntimeApply";
@@ -24,6 +24,7 @@ const ACTIVE_GROUPS: NavGroup[] = [
     title: "Crypto Trading",
     items: [
       { href: "/dashboard/crypto", label: "Strategy Lab", icon: CandlestickChart },
+      { href: "/dashboard/crypto/trades", label: "Exchange Trades", icon: ListChecks },
       { href: "/dashboard/crypto/connections", label: "Exchange Connections", icon: KeyRound },
     ],
   },

@@ -203,3 +203,101 @@ the strategy engine, which stays public-data-only):
 Tests: crypto-py 81 passed (58 before + 23 new); crypto-trading 2 passed;
 API crypto suites 10 passed; web typecheck, lint and build clean; browser
 check of the new page with stubbed data.
+
+## 10. Execution and trade management (2026-10-16, third round)
+
+Everything is in `packages/crypto-py/yonixalpha_crypto/private/` (isolated
+from the strategy engine and from Memecoin). `LIVE_ORDERS_UNLOCKED` stays
+`False`: an entry on a LIVE connection is refused before anything is
+written, and the signing client refuses every LIVE order request again.
+
+| Part | File | What it does |
+|---|---|---|
+| Sizing | `sizing.py` | Size from equity, risk % (capped by a maximum loss), entry, stop-limit, taker fees on both legs and slippage; capped by the maximum position and the free balance; rounded DOWN to the step; planned loss re-checked after rounding. Rejects unknown precision, non-finite input, a stop closer than two ticks, a size below the exchange minimum. A wider stop always gives a smaller size. |
+| Adapters | `adapters.py` | Separate Binance and Bybit spot account adapters (see the table below). |
+| Executor | `executor.py` | Write-ahead orders, verified protection, reconciliation, recovery, the entry guard, exits, partial exits, stop moves. |
+| Management | `management.py` | Pure decisions with reasons: HOLD, MOVE_STOP (only up), PARTIAL_EXIT, CLOSE (strategy exit / invalidation, time stop, engine-managed target), ALERT. Trailing: percent, ATR, swing low. |
+| Worker pass | `service.py`, `engine.py` | Every loop, in every engine state: reconcile each connection with an active exchange trade, then manage its open trades. The worker does not exit while an exchange trade is active. |
+| Practice test | `practice_lifecycle.py` | The operator's end-to-end test on a DEMO / TESTNET connection (refuses LIVE). |
+| Tables | migration `c0003` | `exec_trades`, `exec_orders`, `trade_actions`, `exec_guard` (additive). |
+| API / UI | `crypto_execution.py`, Crypto Trading > Exchange Trades | Trades, orders, every decision with its reason, blocked-entry alerts, Close (password). |
+
+### Exchange differences (handled separately, not assumed identical)
+
+| | Binance spot | Bybit spot |
+|---|---|---|
+| Entry / exit | `POST /api/v3/order` MARKET, FULL answer with fills and commission | `POST /v5/order/create` Market, `marketUnit=baseCoin` (otherwise a BUY quantity is read in USDT); answer has ids only, so the order is looked up |
+| Exchange-side stop | STOP_LOSS_LIMIT | spot TP/SL order (`orderFilter=tpslOrder`) |
+| Exchange-side target | yes, OCO `POST /api/v3/orderList/oco` (LIMIT_MAKER above, STOP_LOSS_LIMIT below) | no: the stop reserves the coins, so the target is ENGINE-MANAGED (market sell when the bid reaches it, checked every loop) |
+| Moving the stop | cancel + place (an OCO cannot be amended): a few seconds with no stop, recorded | amended in place (`POST /v5/order/amend`): no gap |
+| Order lookup | `GET /api/v3/order` by client id; -2013 = not found | `/v5/order/realtime`, then `/v5/order/history` |
+| Fee asset on a buy | from the fills (commissionAsset) | assumed: the coin received; checked by the balance reconciliation |
+| Client id reuse | allowed once the first order is no longer open, so a lost-answer market order is NEVER re-sent | duplicate orderLinkId is rejected |
+
+### Failure handling (what the tests prove)
+
+- **Lost answer** (the order executed, the answer was lost): the order is
+  UNKNOWN, new entries are blocked, a fresh executor (restart) finds it by
+  client id, the trade continues, exactly one buy exists.
+- **Request never arrived**: stays blocked for 60 s, then NOT_FOUND and the
+  trade FAILED; the block lifts.
+- **Rejected entry**: FAILED, nothing else sent.
+- **Partial fill**: the stop covers exactly what was bought (after the fee).
+- **Stop rejected**: the position is closed and entries blocked.
+- **Stop removed by the exchange**: detected, replaced, verified.
+- **Coins missing from the account**: trade UNCERTAIN, entries blocked.
+- **Exit with a lost answer**: resumed after restart, booked once.
+- **Duplicates**: the same signal (entry_key) or a second trade on the same
+  symbol and connection is refused, also after a restart.
+- **Keys unreadable or exchange unreachable while a trade is open**: entries
+  blocked, ERROR event, nothing guessed.
+
+### Strategy research and selection (no profitability claim; nothing backtested yet)
+
+Sources re-read in this round (no code copied; none of the three has a licence):
+
+| Repository | Commit | What the source actually does | Findings |
+|---|---|---|---|
+| hoziertom44-arch/Meta_Muse_Crossover_strategy | a163ff7 | BTC and ETH 5m EMA 9/21 trends; "strong" = separation >= 0.15%; ETH is traded against BTC's divergent strong trend; SL 1% / TP 2% as exchange closePosition orders; early exit when either trend weakens or the signal changes; fixed 50 USDT margin at 10x | fixed-margin 10x sizing is replaced by risk-based sizing; futures both ways in the original, spot LONG only here |
+| hoziertom44-arch/hyperliquid_grid_trading_bot | 710cebb | 7-level grid, auto range (config value 0.5 with a comment saying ±3%: inconsistent), 5x leverage, PAUSES (does not close) on 15% drawdown or a 1.5% range break | a pause leaves the inventory open in a trend; ships a `trades.jsonl` (134 lines) that cannot be verified; not selected |
+| siriusforex-ai/confluence_matrix_forex | f3beff9 | M15 pivot breakout (lookback 12); SL beyond the opposite pivot + 5% of the wave; TP1 = +0.618 wave (close 50%, stop to breakeven), TP2 = +1.414 wave; 0.5% risk; V2 adds a confluence score (structure 30, liquidity 25, RSI 20, proximity 25, threshold 75) | its backtest charges no spread, commission or slippage, so its results are not evidence; MT5 only; forex blocked |
+
+Selected for the first practice / backtest round (explicit rules; each uses
+the executor above; all spot LONG):
+
+1. **Meta Muse (v1, already running in simulated DEMO).** Entry: BTC and ETH
+   both "strong" (EMA 9/21 separation >= 0.15%, closed 5m candles, 150
+   candles) with BTC down and ETH up -> long ETH. Stop: 1% below entry
+   (original). Target: 2% (original; exchange-held on Binance,
+   engine-managed on Bybit). Invalidation / early exit: either trend no
+   longer strong, or the signal no longer LONG (original rule). Trailing:
+   none (the original has none). Sizing: risk-based (deviation from the
+   original's fixed margin, documented).
+2. **Trend pullback (rule idea from arwensorcenelli/trend-bot, re-implemented,
+   to be backtested before any practice use).** 1h candles. Regime: SMA 10 >
+   SMA 50 and close > SMA 50. Entry: a close back above SMA 10 after a close
+   below it. Stop: entry - 3 x ATR(14). Target: none; trailing 3 x ATR from
+   the highest price after +1 R. Invalidation: close below SMA 50. Time stop:
+   48 bars below +0.5 R.
+3. **Not selected now:** the grid (inventory risk, unverifiable record),
+   Confluence on forex (no source, cost-free backtest), Gold vs BTC (gold
+   source not chosen).
+
+Next: a local backtest harness (never on the VPS) with fees, spread,
+slippage, chronological train / test split and walk-forward, for 1 and 2,
+before either trades on a practice account automatically.
+
+### Verification status (honest)
+
+| Capability | Status |
+|---|---|
+| Risk-based sizing | VERIFIED by unit tests |
+| Protective orders confirmed on the exchange before a trade counts as protected | VERIFIED against simulated Binance and Bybit; NOT yet against the real practice hosts |
+| Reconciliation, restart recovery, no duplicate orders | VERIFIED against simulated exchanges (lost answers, dropped requests, partial fills, rejections, removed stops, missing coins) |
+| Trailing stops, partial exits, breakeven, time stop, invalidation exits, reasons recorded | VERIFIED by unit and simulated-exchange tests |
+| Practice-account lifecycle on the real Bybit demo / Binance testnet | NOT RUN: this session's network refuses the practice hosts (HTTP 403 at its proxy), and no practice key exists yet. The tool is ready for the server. |
+| Strategy-driven entries on practice accounts | NOT WIRED yet: practice trades are started only by the lifecycle tool. Strategies still run in simulated DEMO. |
+| Live orders | LOCKED in code |
+
+Resource: importing the execution code adds about 8 MB (52.7 -> 60.8 MB peak
+RSS, measured locally); it is loaded only while an exchange trade is active.

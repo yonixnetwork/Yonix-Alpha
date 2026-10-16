@@ -144,6 +144,9 @@ async def delete_connection(conn_id: str, body: PasswordIn, request: Request, db
     await _ready(db)
     c = await _get(db, conn_id)
     await require_password(db, redis, username, body.password, request, "crypto_keys", {"action": "delete", "id": conn_id})
-    await connections.delete(db, c, username)
+    try:
+        await connections.delete(db, c, username)
+    except connections.ConnectionInputError as e:
+        raise HTTPException(409, str(e)) from None
     await db.commit()
     return {"deleted": conn_id}

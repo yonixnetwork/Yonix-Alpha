@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import (BigInteger, Boolean, DateTime, Integer, MetaData, Numeric, String, Text, UniqueConstraint,
+from sqlalchemy import (BigInteger, Boolean, DateTime, ForeignKey, Integer, MetaData, Numeric, String, Text, UniqueConstraint,
                         text)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -182,6 +182,102 @@ class ApiConnection(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
     updated_by: Mapped[str | None] = mapped_column(String(64))
+
+
+EXEC_ACTIVE = ("PENDING_ENTRY", "OPEN", "CLOSING", "UNCERTAIN")  # exec_trades statuses that still need the worker
+
+
+class ExecTrade(Base):
+    """One managed trade on an exchange account (practice or, once unlocked,
+    live). Written before any order is sent (private.executor), so a restart
+    always finds what was attempted. `entry_key` (strategy + symbol + candle)
+    is unique: the same signal can never open a second trade."""
+    __tablename__ = "exec_trades"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    connection_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("crypto.api_connections.id",
+                                                     ondelete="RESTRICT"), nullable=False, index=True)
+    exchange: Mapped[str] = mapped_column(String(16), nullable=False)
+    environment: Mapped[str] = mapped_column(String(8), nullable=False)
+    strategy_id: Mapped[str] = mapped_column(String(48), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(24), nullable=False)
+    entry_key: Mapped[str | None] = mapped_column(String(128), unique=True)
+    # PENDING_ENTRY | OPEN | CLOSING | CLOSED | FAILED | UNCERTAIN
+    status: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    protection: Mapped[str] = mapped_column(String(16), nullable=False, default="NONE")  # NONE | PENDING | VERIFIED | MISSING
+    protection_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    qty_planned: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    qty: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False, default=0)  # held now (after fees and partial exits)
+    entry_price: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    initial_stop: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    stop: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    stop_limit: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    take_profit: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    highest_price: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    risk_budget: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    planned_loss: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    plan: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)  # partials, trailing, time stop
+    thesis: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    realized_quote: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False, default=0)
+    fees_quote: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False, default=0)
+    close_reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
+    opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
+
+
+class ExecOrder(Base):
+    """Every order the executor intends to send, recorded BEFORE sending
+    (status PENDING_SEND), keyed by the client id the exchange also stores.
+    A request with no answer becomes UNKNOWN and is resolved by looking the
+    client id up, never by sending again."""
+    __tablename__ = "exec_orders"
+    client_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    trade_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("crypto.exec_trades.id", ondelete="RESTRICT"),
+                                                nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(12), nullable=False)  # ENTRY | STOP | TP | EXIT
+    side: Mapped[str] = mapped_column(String(4), nullable=False)
+    kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    qty: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    price: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    trigger_price: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    # PENDING_SEND | UNKNOWN | OPEN | PARTIAL | FILLED | CANCELED | REJECTED | EXPIRED | NOT_FOUND
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)  # part of the current protection
+    exchange_id: Mapped[str | None] = mapped_column(String(64))
+    filled_qty: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False, default=0)
+    avg_price: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    fee: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False, default=0)
+    fee_asset: Mapped[str | None] = mapped_column(String(16))
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class TradeAction(Base):
+    """Every trade-management decision and execution step, with its reason."""
+    __tablename__ = "trade_actions"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    trade_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("crypto.exec_trades.id", ondelete="RESTRICT"),
+                                                nullable=False, index=True)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
+    action: Mapped[str] = mapped_column(String(24), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    detail: Mapped[dict | None] = mapped_column(JSONB)
+
+
+class ExecGuard(Base):
+    """Per connection: new entries are blocked while the state is uncertain
+    (unknown order, missing protection, balance mismatch). Also the row that
+    serialises entries (SELECT ... FOR UPDATE)."""
+    __tablename__ = "exec_guard"
+    connection_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("crypto.api_connections.id",
+                                                     ondelete="CASCADE"), primary_key=True)
+    entries_blocked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    reason: Mapped[str | None] = mapped_column(Text)
+    since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
 
 
 def make_session_factory(database_url: str, *, pool_size: int = 2, max_overflow: int = 1):

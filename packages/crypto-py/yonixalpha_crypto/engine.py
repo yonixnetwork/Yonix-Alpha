@@ -10,11 +10,13 @@ States, worst first:
 - IDLE: on, but no strategy is enabled;
 - RUNNING: at least one enabled DEMO strategy is evaluated.
 In every state except WAITING_FOR_SCHEMA, open demo positions keep their
-stop / target protection (runner.protect_positions).
+stop / target protection (runner.protect_positions), and exchange-account
+trades are reconciled and managed (private.service).
 
 Exit when idle (worker mode): while the engine is OFF or in emergency stop
 and no demo position is open, the worker exits with status 0 to free its
-memory (compose restarts it only after a failure). It is started again by
+memory (compose restarts it only after a failure); it never exits while an
+exchange-account trade is still active. It is started again by
 the next deploy or by `docker compose ... up -d crypto-trading`, and exits
 again at once if there is still nothing to do.
 
@@ -39,7 +41,8 @@ from sqlalchemy import func, select
 from yonixalpha_crypto import REDIS_PREFIX, config_store, registry, resources
 from yonixalpha_crypto.candles import INTERVAL_SECONDS
 from yonixalpha_crypto.config import CryptoSettings, load_settings
-from yonixalpha_crypto.db import DemoPosition, EngineState, Event, StrategyConfig, make_session_factory, schema_ready
+from yonixalpha_crypto.db import (EXEC_ACTIVE, DemoPosition, EngineState, Event, ExecTrade, StrategyConfig,
+                                  make_session_factory, schema_ready)
 from yonixalpha_crypto.exchanges import EXCHANGES, market_data
 from yonixalpha_crypto.exchanges.base import MarketData
 from yonixalpha_crypto.runner import InstrumentCache, protect_positions, step_strategy
@@ -132,6 +135,20 @@ class Engine:
                 result["closed_by_protection"] = await protect_positions(s, self.markets, self.instruments, configs, now)
         result["open_positions"] = int(open_n or 0) - int(result["closed_by_protection"])
 
+        # Exchange-account trades (practice accounts; live ones only after the code
+        # unlock): reconciled and managed in EVERY state, like demo protection.
+        async with self.sf() as s:
+            exec_n = int(await s.scalar(select(func.count()).select_from(ExecTrade)
+                                        .where(ExecTrade.status.in_(EXEC_ACTIVE))) or 0)
+        result["exchange_trades"] = exec_n
+        if exec_n:
+            from yonixalpha_crypto.private.service import run_exchange_accounts  # loaded only when needed
+            try:
+                result["exchange_accounts"] = await run_exchange_accounts(self.sf, now)
+            except Exception as e:  # noqa: BLE001 - logged and visible; retried next loop
+                log.exception("exchange accounts pass failed")
+                await self._event("ERROR", "execution", f"exchange accounts pass failed: {e}"[:500])
+
         if state == "IDLE":
             for sid, cfg in configs.items():
                 spec, impl = registry.get(sid), implementation(sid)
@@ -170,7 +187,7 @@ class Engine:
     def idle(result: dict[str, Any]) -> bool:
         """Nothing to do: no entries are allowed and nothing needs protection."""
         return result.get("state") in ("DISABLED", "EMERGENCY_STOP", "WAITING_FOR_SCHEMA") and \
-            not result.get("open_positions")
+            not result.get("open_positions") and not result.get("exchange_trades")
 
     async def _heartbeat(self, now: datetime, result: dict[str, Any], mem: dict[str, Any]) -> None:
         await self.redis.set(HEARTBEAT_KEY, json.dumps({"at": now.isoformat(), **result, "memory": mem}, default=str),

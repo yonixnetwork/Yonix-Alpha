@@ -96,6 +96,9 @@ async def set_enabled(session: AsyncSession, c: ApiConnection, enabled: bool, ac
 
 
 async def delete(session: AsyncSession, c: ApiConnection, actor: str) -> None:
+    from yonixalpha_crypto.db import ExecTrade
+    if (await session.execute(select(ExecTrade.id).where(ExecTrade.connection_id == c.id).limit(1))).first():
+        raise ConnectionInputError("this connection has trade records: disable it instead (the history is kept)")
     await _event(session, "INFO", f"connection deleted: {c.exchange} {c.environment} '{c.label}'",
                  {"id": str(c.id), "by": actor})
     await session.delete(c)
