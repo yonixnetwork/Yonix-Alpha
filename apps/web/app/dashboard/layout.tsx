@@ -3,7 +3,8 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { ArrowRightLeft, BarChart3, Bell, Boxes, CandlestickChart, Copy, Fingerprint, FlaskRound, Layers, Link2, Brain, ClipboardCheck, Eye, FlaskConical, Filter, Gauge, LayoutDashboard, ListChecks, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Radio, Rocket, Search, Send, Server, Settings, ShieldAlert, SlidersHorizontal, Network, Sparkles, Timer, Wallet, WalletCards, Workflow, type LucideIcon } from "lucide-react";
+import { Archive, Bell, CandlestickChart, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Server } from "lucide-react";
+import { isMemecoinPath, MEMECOIN_ARCHIVED, MEMECOIN_GROUPS, type NavGroup, type NavItem } from "@/components/archivedEngines";
 import NotificationsBell from "@/components/NotificationsBell";
 import RuntimeApply from "@/components/RuntimeApply";
 import { modeClass, stateClass } from "@/components/ui";
@@ -13,88 +14,36 @@ import { EventsProvider, useLiveStatus } from "@/lib/events";
 import { accountOn, useProfile } from "@/lib/profile";
 import { useApi } from "@/lib/useApi";
 
-// `needs`: the chain or feature the page belongs to; left out of the menu
-// while the system profile switches it off (lib/profile).
-type NavItem = { href: string; label: string; icon: LucideIcon; needs?: "bsc" | "robinhood" | "evm" | "copy" };
-
-// YONIXALPHA: Solana, BSC and Robinhood Chain memecoin trading. Legacy
-// futures / forex / grid pages are not part of this navigation.
-const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
-  { title: "", items: [{ href: "/dashboard", label: "Dashboard", icon: LayoutDashboard }] },
-  {
-    title: "Chains",
-    items: [
-      { href: "/dashboard/chains/solana", label: "Solana", icon: Link2 },
-      { href: "/dashboard/chains/bsc", label: "BSC", icon: Link2, needs: "bsc" },
-      { href: "/dashboard/chains/robinhood", label: "Robinhood Chain", icon: Link2, needs: "robinhood" },
-    ],
-  },
-  {
-    title: "Market",
-    items: [
-      { href: "/dashboard/solana/fresh", label: "Fresh Tokens", icon: Sparkles },
-      { href: "/dashboard/solana/observing", label: "Observation", icon: Eye },
-      { href: "/dashboard/solana/migrated", label: "Migrated", icon: ArrowRightLeft },
-      { href: "/dashboard/solana/momentum", label: "Momentum", icon: Rocket },
-      { href: "/dashboard/entry-intel", label: "Entry Intelligence", icon: Timer },
-      { href: "/dashboard/evm", label: "EVM Markets", icon: Boxes, needs: "evm" },
-      { href: "/dashboard/tokens", label: "Token Explorer", icon: Search },
-      { href: "/dashboard/launchpads", label: "Launchpads", icon: Layers },
-    ],
-  },
-  {
-    title: "Wallet intelligence",
-    items: [
-      { href: "/dashboard/copy", label: "Copy Trading", icon: Copy, needs: "copy" },
-      { href: "/dashboard/smart-wallets", label: "Smart Wallets", icon: Fingerprint, needs: "copy" },
-    ],
-  },
-  {
-    title: "Trading",
-    items: [
-      { href: "/dashboard/paper", label: "Paper Trading", icon: FlaskRound },
-      { href: "/dashboard/performance", label: "Solana Performance", icon: BarChart3 },
-      { href: "/dashboard/positions", label: "Positions", icon: Wallet },
-      { href: "/dashboard/trades", label: "Trade History", icon: ListChecks },
-      { href: "/dashboard/decisions", label: "Decisions", icon: ClipboardCheck },
-      { href: "/dashboard/funnel", label: "Execution Funnel", icon: Workflow },
-      { href: "/dashboard/live", label: "Live Execution", icon: Send },
-      { href: "/dashboard/wallets", label: "Wallets", icon: WalletCards },
-    ],
-  },
+// Regular trading is the active navigation. Memecoin Trading is archived:
+// its pages stay reachable from Archived Engines and appear in the menu
+// while one of them is open (components/archivedEngines).
+const ACTIVE_GROUPS: NavGroup[] = [
   {
     // Regular crypto (Bybit / Binance spot, DEMO only): a separate engine
-    // from the Memecoin "Trading" group above (yonixalpha_crypto).
+    // from Memecoin Trading (yonixalpha_crypto).
     title: "Crypto Trading",
     items: [{ href: "/dashboard/crypto", label: "Strategy Lab", icon: CandlestickChart }],
-  },
-  {
-    title: "Machine learning",
-    items: [
-      { href: "/dashboard/ml", label: "ML Engine", icon: Brain },
-      { href: "/dashboard/ml/review", label: "ML Review", icon: Gauge },
-    ],
-  },
-  {
-    title: "Risk",
-    items: [
-      { href: "/dashboard/risk-settings", label: "Risk", icon: ShieldAlert },
-      { href: "/dashboard/rules", label: "Filters", icon: Filter },
-      { href: "/dashboard/risk", label: "Kill Switch", icon: Radio },
-    ],
   },
   {
     title: "System",
     items: [
       { href: "/dashboard/health", label: "System Health", icon: Server },
-      { href: "/dashboard/settings", label: "Settings", icon: Settings },
-      { href: "/dashboard/rpc", label: "RPC / Data Providers", icon: Network },
-      { href: "/dashboard/config", label: "Configuration Health", icon: SlidersHorizontal },
       { href: "/dashboard/notifications", label: "Notifications", icon: Bell },
-      { href: "/dashboard/smoke-test", label: "Live Smoke Test", icon: FlaskConical },
     ],
   },
 ];
+
+const ARCHIVE_GROUP: NavGroup = {
+  title: "Archived Engines",
+  items: [{ href: "/dashboard/archived", label: "Memecoin Trading", icon: Archive }],
+};
+
+function navGroups(pathname: string): NavGroup[] {
+  if (!MEMECOIN_ARCHIVED) return [...MEMECOIN_GROUPS, ...ACTIVE_GROUPS];
+  const memecoinOpen = pathname === "/dashboard/archived" || isMemecoinPath(pathname);
+  return [...ACTIVE_GROUPS, ARCHIVE_GROUP,
+    ...(memecoinOpen ? MEMECOIN_GROUPS.map((g) => ({ ...g, title: `Memecoin${g.title ? ` · ${g.title}` : ""}` })) : [])];
+}
 
 const COLLAPSE_KEY = "yonixalpha_nav_collapsed";
 
@@ -120,7 +69,7 @@ function LiveIndicator() {
   );
 }
 
-function TopbarSummary() {
+function TopbarSummary({ memecoin }: { memecoin: boolean }) {
   const { data } = useApi<SummaryOut>("/api/summary", undefined, {
     refreshMs: 30000,
     reloadOn: ["balance.updated", "trade.created", "trade.closed", "system.health.updated", "notification.created"],
@@ -129,6 +78,7 @@ function TopbarSummary() {
   if (!data) return <span className="muted">…</span>;
   return (
     <>
+      {memecoin && <>
       <div className="balances" aria-label="Paper balances">
         {data.accounts
           .filter((a) => ["solana", "live_solana", "evm_bsc", "evm_robinhood"].includes(a.name) && accountOn(profile, a.name))
@@ -156,6 +106,7 @@ function TopbarSummary() {
       <span className={data.env.live_permitted ? "pill pill-danger" : "pill pill-off"} title="Live execution needs the server's environment locks">
         {data.env.live_permitted ? "LIVE UNLOCKED" : "LIVE LOCKED"}
       </span>
+      </>}
       {data.kill_switch && <span className="pill pill-danger">KILL SWITCH ON</span>}
       <Link href="/dashboard/health" className={stateClass(data.system_status)}
         title={`Worst current connection state. ${notConnected(data.connections) || "Every checked connection is CONNECTED."} Open System Health for details.`}>
@@ -242,7 +193,7 @@ function Shell({ children }: { children: React.ReactNode }) {
           <RuntimeApply />
         </div>
         <div className="topbar-status">
-          <TopbarSummary />
+          <TopbarSummary memecoin={!MEMECOIN_ARCHIVED || isMemecoinPath(pathname)} />
           <LiveIndicator />
           <NotificationsBell />
           <button className="icon-btn" aria-label="Sign out" title="Sign out" onClick={handleLogout}>
@@ -253,7 +204,7 @@ function Shell({ children }: { children: React.ReactNode }) {
       <div className="dash-body">
         {drawerOpen && <div className="drawer-backdrop" onClick={() => setDrawerOpen(false)} aria-hidden />}
         <nav className={`side-nav ${collapsed ? "collapsed" : ""} ${drawerOpen ? "open" : ""}`} aria-label="Main">
-          {NAV_GROUPS.map((group) => ({ ...group, items: group.items.filter((i) => navShown(profile, i)) }))
+          {navGroups(pathname).map((group) => ({ ...group, items: group.items.filter((i) => navShown(profile, i)) }))
             .filter((group) => group.items.length > 0).map((group) => (
             <div key={group.title || "root"} className="nav-group">
               {group.title && <div className="nav-group-title">{group.title}</div>}
@@ -277,6 +228,13 @@ function Shell({ children }: { children: React.ReactNode }) {
           ))}
         </nav>
         <main className="dash-main" id="main" tabIndex={-1}>
+          {MEMECOIN_ARCHIVED && isMemecoinPath(pathname) && (
+            <div className="notice" role="note">
+              Archived engine: <strong>Memecoin Trading</strong>. Archiving only hides it from the main menu. Its workers,
+              settings and positions are unchanged, and the controls on this page still act on the running Memecoin
+              engine. <Link href="/dashboard/archived">About Archived Engines</Link>
+            </div>
+          )}
           {children}
         </main>
       </div>
