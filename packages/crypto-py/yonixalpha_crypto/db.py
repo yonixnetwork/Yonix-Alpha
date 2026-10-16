@@ -158,6 +158,32 @@ class Event(Base):
     detail: Mapped[dict | None] = mapped_column(JSONB)
 
 
+class ApiConnection(Base):
+    """One exchange account key (private.connections). The key and secret
+    are stored encrypted only; `key_fingerprint` (keyed HMAC) keeps one key
+    from being saved twice, so a demo key and a live key can never be the
+    same. Off by default; enabling it does not authorize any order."""
+    __tablename__ = "api_connections"
+    __table_args__ = (UniqueConstraint("exchange", "environment", "label", name="uq_api_connection_label"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    exchange: Mapped[str] = mapped_column(String(16), nullable=False)
+    environment: Mapped[str] = mapped_column(String(8), nullable=False)  # DEMO | TESTNET | LIVE
+    label: Mapped[str] = mapped_column(String(48), nullable=False)
+    key_enc: Mapped[str] = mapped_column(Text, nullable=False)
+    secret_enc: Mapped[str] = mapped_column(Text, nullable=False)
+    key_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    key_hint: Mapped[str] = mapped_column(String(12), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="UNTESTED")  # UNTESTED | OK | FAILED | NEEDS_REENTRY
+    permissions: Mapped[dict | None] = mapped_column(JSONB)
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_ok_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
+    updated_by: Mapped[str | None] = mapped_column(String(64))
+
+
 def make_session_factory(database_url: str, *, pool_size: int = 2, max_overflow: int = 1):
     """A small pool: this engine needs a handful of queries a minute."""
     engine = create_async_engine(database_url, pool_pre_ping=True, pool_size=pool_size, max_overflow=max_overflow)

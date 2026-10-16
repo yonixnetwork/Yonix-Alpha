@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Archive, Bell, CandlestickChart, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Server } from "lucide-react";
+import { Archive, Bell, CandlestickChart, KeyRound, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Server } from "lucide-react";
 import { isMemecoinPath, MEMECOIN_ARCHIVED, MEMECOIN_GROUPS, type NavGroup, type NavItem } from "@/components/archivedEngines";
 import NotificationsBell from "@/components/NotificationsBell";
 import RuntimeApply from "@/components/RuntimeApply";
@@ -22,7 +22,10 @@ const ACTIVE_GROUPS: NavGroup[] = [
     // Regular crypto (Bybit / Binance spot, DEMO only): a separate engine
     // from Memecoin Trading (yonixalpha_crypto).
     title: "Crypto Trading",
-    items: [{ href: "/dashboard/crypto", label: "Strategy Lab", icon: CandlestickChart }],
+    items: [
+      { href: "/dashboard/crypto", label: "Strategy Lab", icon: CandlestickChart },
+      { href: "/dashboard/crypto/connections", label: "Exchange Connections", icon: KeyRound },
+    ],
   },
   {
     title: "System",
@@ -55,7 +58,9 @@ function navShown(p: ReturnType<typeof useProfile>, item: NavItem): boolean {
 }
 
 function isActive(pathname: string, href: string): boolean {
-  if (href === "/dashboard" || href === "/dashboard/ml" || href === "/dashboard/tokens") return pathname === href;
+  if (href === "/dashboard" || href === "/dashboard/ml" || href === "/dashboard/tokens" || href === "/dashboard/crypto") {
+    return pathname === href;
+  }
   return pathname === href || pathname.startsWith(href + "/");
 }
 

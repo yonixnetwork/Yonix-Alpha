@@ -8,8 +8,9 @@ the Memecoin engine: everything here reads and writes the `crypto` schema
     POST /crypto/health-check         ask the worker for a public exchange check
     GET  /crypto/signals | orders | positions | events | metrics
 
-There is no live mode: settings accept DISABLED / DEMO only, and the engine
-package holds no exchange credential."""
+Strategies have no live mode: settings accept DISABLED / DEMO only. Exchange
+keys are handled only by crypto_connections.py (yonixalpha_crypto.private),
+and real orders are locked in code."""
 
 from __future__ import annotations
 

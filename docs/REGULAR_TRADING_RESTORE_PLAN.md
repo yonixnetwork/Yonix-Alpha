@@ -125,3 +125,81 @@ exchanges (an infrastructure change that needs approval), or Binance.US.
 3. Phase 5: trade thesis and management (ATR stop sizing, partial exits,
    trailing, invalidation, reasons recorded), demo first.
 4. Phase 4 / 12: research and local backtests, then a small strategy set.
+
+## 7. Operator decisions (2026-10-16, second message)
+
+1. Live trading: build it (secure API profiles, exchange-side protective
+   orders, monitoring, stop-loss, take-profit, trailing, reconciliation) but
+   keep it LOCKED. No real order until the operator reviews the code and
+   authorizes activation in writing. Demo / testnet and live keys stay
+   completely separate.
+2. The operator is in Nigeria; the server stays in New York unless the
+   operator approves a change. No proxy or VPN. Verify eligibility and test
+   the documented demo / testnet hosts; document any limitation.
+3. Binance.US is a separate provider, not a substitute for Binance.com; not
+   enabled without approval.
+
+## 8. Eligibility research (2026-10-16; NOT legal advice, NOT VERIFIED from official notices)
+
+- **Server location versus the operator's eligibility are two separate
+  questions.** The server's US IP is refused by Bybit (HTTP 403) and
+  Binance.com (HTTP 451) whatever the account holder's country, so API
+  calls from this server cannot work, and routing around that refusal is
+  not allowed. The operator's own eligibility (a Nigerian resident) is
+  decided by each exchange's terms for the operator's account.
+- **Bybit and Nigeria (third-party sources only):** no Nigerian SEC
+  registration found; one August 2026 review says Nigeria was not on
+  Bybit's restricted-country list; accounts linked to Bybit were reportedly
+  frozen by the EFCC in September 2024. Status: grey area, unlicensed
+  locally.
+- **Binance and Nigeria (third-party sources only):** not registered with
+  Nigeria's SEC; naira deposits / withdrawals stopped in March 2024; the NCC
+  ordered Nigerian ISPs to block Binance (reported still in place in late
+  2025); litigation with the Nigerian government was ongoing in 2026.
+- **What the operator should check directly:** the restricted-jurisdiction
+  section of each exchange's current Terms of Use, and the account's own
+  status page (KYC country, any restriction notices). I could not reach an
+  official restricted-country list in this session.
+- **Compliant options if the hosts stay refused from New York:**
+  (a) keep Bybit / Binance as code-complete but BLOCKED on this server;
+  (b) with the operator's approval, a server (or a second small server) in
+  a region that both exchanges serve and where the operator's use is
+  permitted; (c) a different, licensed provider (Binance.US only with
+  approval and only if the operator's account is eligible there).
+
+## 9. Implemented in this round: exchange connections and the live lock
+
+Code (all in `packages/crypto-py/yonixalpha_crypto/private/`, isolated from
+the strategy engine, which stays public-data-only):
+
+| Part | What it does |
+|---|---|
+| `environments.py` | Fixed host per (exchange, environment): Bybit DEMO `api-demo.bybit.com`, TESTNET `api-testnet.bybit.com`, LIVE `api.bybit.com`; Binance DEMO `demo-api.binance.com`, TESTNET `testnet.binance.vision`, LIVE `api.binance.com`. No override, no fallback. Binance.US and Hyperliquid are not listed. |
+| `secretstore.py` | Fernet encryption at rest with its own HKDF-derived key (from `CRYPTO_CREDENTIALS_KEY` or `JWT_SECRET`); a keyed fingerprint refuses the same key in two environments; only the last 4 characters are ever shown. |
+| `signedhttp.py` | The only signing client. Allowlist of (method, path): account reads and order management only. Transfer, withdrawal, deposit-address, sub-account and key-management endpoints are refused before sending. Errors and `repr` are scrubbed of key, secret and signature. |
+| `livelock.py` | `LIVE_ORDERS_UNLOCKED = False` in code, plus per-connection gates: LIVE environment, enabled, keys readable, tested OK within 24 h, withdrawal permission OFF (verified), IP-restricted (verified), trading permission present. All must pass. |
+| `connections.py` | Save (disabled by default), view (never the key), enable / disable, delete, and a read-only test that records the permissions the exchange reports. |
+| DB | Migration `c0002`: table `crypto.api_connections` (additive; downgrade drops only it). |
+| API | New file `apps/api/app/api/routes/crypto_connections.py` (+2 router lines): saving needs the dashboard password and the environment typed twice; LIVE changes need the password; tests are throttled (10 s). |
+| UI | Crypto Trading > Exchange Connections: add / test / enable / delete, permissions and every live gate shown with pass / fail. |
+
+### What is verified, and how
+
+| Requirement | Status | Evidence |
+|---|---|---|
+| Encrypted secret storage | VERIFIED (tests) | ciphertext never contains the key; another key cannot decrypt; rotated key -> NEEDS_REENTRY, never guessed |
+| Keys never returned to the browser | VERIFIED (tests) | API responses and listing contain neither key nor secret |
+| Demo and live keys separate | VERIFIED (tests) | fixed hosts per environment; env-var override ignored; same key refused in a second environment; typed confirmation |
+| Withdrawals / transfers impossible | VERIFIED (tests) | 9 refused requests, none reached the (mock) network |
+| Backend live-mode lock | VERIFIED (tests) | every LIVE order path refused before sending; each gate tested on its own |
+| Request signing | VERIFIED against the documented scheme (tests) | NOT yet verified against a real exchange: needs a demo key and a reachable host |
+| Least-privilege permission check | IMPLEMENTED, tested with the documented response shapes | NOT verified with a real key; Bybit demo and the Binance testnet may not report key permissions (shown as "not verified", which keeps the live gates closed) |
+| Order sizing for live orders | NOT IMPLEMENTED | demo sizing exists (`risk.size_entry`) |
+| Exchange-side protective orders | NOT IMPLEMENTED | the endpoints are on the allowlist only (Bybit `/v5/position/trading-stop`, Binance OCO / OTO) |
+| Failure recovery and order reconciliation | NOT IMPLEMENTED | next round (port of the removed providers' `order_status` / `fills_since` logic) |
+| Trailing stops, partial exits, trade thesis, invalidation monitor | NOT IMPLEMENTED | next rounds |
+| Live risk limits | NOT IMPLEMENTED for live | demo `RiskLimits` exist |
+
+Tests: crypto-py 81 passed (58 before + 23 new); crypto-trading 2 passed;
+API crypto suites 10 passed; web typecheck, lint and build clean; browser
+check of the new page with stubbed data.

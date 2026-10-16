@@ -31,7 +31,7 @@ async def test_upgrade_check_downgrade_cycle_leaves_public_alone():
     await migrate_fresh(url)
     t = await tables(url)
     assert {("crypto", n) for n in ("engine_state", "strategy_configs", "signals", "demo_orders", "demo_positions",
-                                    "demo_accounts", "config_audit", "events", "alembic_version")} <= t
+                                    "demo_accounts", "config_audit", "events", "api_connections", "alembic_version")} <= t
     cfg = alembic_config(url)
     await asyncio.to_thread(command.check, cfg)  # the models match the migrations
     await asyncio.to_thread(command.downgrade, cfg, "base")

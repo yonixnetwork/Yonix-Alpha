@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "yonixalpha-crypto"
 version = "0.1.0"
-description = "YonixAlpha Crypto Trading engine (Bybit / Binance spot, DEMO only). Separate from the Memecoin engine: own schema, own workers, no credentials."
+description = "YonixAlpha Crypto Trading engine (Bybit / Binance). Separate from the Memecoin engine: own schema, own worker; exchange keys only in the encrypted private subpackage, live orders locked in code."
 requires-python = ">=3.11"
 # Same pins as packages/core-py, so the API (which installs both) resolves one version of each.
 dependencies = [
@@ -14,6 +14,7 @@ dependencies = [
     "redis==5.2.1",
     "httpx==0.28.1",
     "alembic==1.20.0",
+    "cryptography==50.0.2",
 ]
 
 [tool.hatch.build.targets.wheel]
