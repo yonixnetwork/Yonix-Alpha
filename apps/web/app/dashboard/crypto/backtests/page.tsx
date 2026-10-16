@@ -98,13 +98,13 @@ function NewBatch({ onDone }: { onDone: () => void }) {
   const today = new Date().toISOString().slice(0, 10);
   const [f, setF] = useState({ symbols: "BTC/USDT, ETH/USDT, SOL/USDT", interval: "1h", exchange: "binance_us",
     start: `${Number(today.slice(0, 4)) - 2}${today.slice(4)}`, end: today, taker: "2", maker: "0", spread: "2", slippage: "5",
-    riskMode: "PERCENT", risk: "0.5", equity: "10000", optimize: true, note: "" });
+    riskMode: "PERCENT", risk: "0.5", equity: "10000", optimize: true, paramSource: "defaults", note: "" });
   const [msg, setMsg] = useState<string | null>(null);
   async function go() {
     try {
       const r = await apiPost<{ batch_id: string; runs: number; backtests_enabled: boolean; worker_hint: string }>("/api/crypto/backtests", {
         strategies: "all", symbols: f.symbols.split(",").map((x) => x.trim()).filter(Boolean), interval: f.interval, exchange: f.exchange,
-        start: `${f.start}T00:00:00Z`, end: `${f.end}T00:00:00Z`, optimize: f.optimize, note: f.note || null,
+        start: `${f.start}T00:00:00Z`, end: `${f.end}T00:00:00Z`, optimize: f.optimize, param_source: f.paramSource, note: f.note || null,
         costs: { taker_fee_bps: Number(f.taker), maker_fee_bps: Number(f.maker), spread_bps: Number(f.spread), slippage_bps: Number(f.slippage) },
         risk: { mode: f.riskMode, value: Number(f.risk), starting_equity: Number(f.equity) } });
       setMsg(`Queued ${r.runs} runs.${r.backtests_enabled ? "" : " Backtests are switched off on the Portfolio risk page: the worker will not run them until you switch them on."} ${r.worker_hint}`);
@@ -131,7 +131,9 @@ function NewBatch({ onDone }: { onDone: () => void }) {
           <option value="PERCENT">% of equity</option><option value="FIXED">Fixed USDT</option></select></div>
         {inp("risk", f.riskMode === "PERCENT" ? "Risk %" : "Risk USDT")}{inp("equity", "Starting equity (USDT)")}
         <div className="form-row"><label>Parameter grid (train only)</label><select value={f.optimize ? "1" : "0"} onChange={(e) => setF({ ...f, optimize: e.target.value === "1" })}>
-          <option value="1">On (3 x 3 grid, walk-forward)</option><option value="0">Off (default parameters only)</option></select></div>
+          <option value="1">On (3 x 3 grid, walk-forward)</option><option value="0">Off (the chosen parameters only)</option></select></div>
+        <div className="form-row"><label>Parameters</label><select value={f.paramSource} onChange={(e) => setF({ ...f, paramSource: e.target.value })}>
+          <option value="defaults">Published defaults</option><option value="saved">Each strategy&apos;s saved settings</option></select></div>
         {inp("note", "Note")}
       </div>
       <div className="btn-row" style={{ marginTop: 8 }}><button className="btn btn-sm" onClick={go}>Queue the batch</button>{msg && <span className="small">{msg}</span>}</div>

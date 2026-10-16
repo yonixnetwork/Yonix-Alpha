@@ -20,6 +20,11 @@ from yonixalpha_crypto.db import Ohlcv
 from yonixalpha_crypto.strategies.library import Series
 
 MAX_BARS = 40_000
+REFETCH_AFTER = timedelta(hours=1)
+# (exchange, symbol, interval) -> (start, end, when) of the last fetch in this
+# process. A range the exchange itself has gaps in stays below 98% after a
+# fetch; without this every run of a batch would download it again.
+_last_fetch: dict[tuple[str, str, str], tuple[datetime, datetime, datetime]] = {}
 
 
 async def ensure_history(sf, md, exchange: str, symbol: str, interval: str, start: datetime, end: datetime,
@@ -36,6 +41,12 @@ async def ensure_history(sf, md, exchange: str, symbol: str, interval: str, star
             Ohlcv.exchange == exchange, Ohlcv.symbol == symbol, Ohlcv.interval == interval,
             Ohlcv.open_time >= start, Ohlcv.open_time < end)) or 0
     fetched = 0
+    key = (exchange, symbol, interval)
+    prior = _last_fetch.get(key)
+    recent = prior is not None and prior[0] <= start and prior[1] >= end and now - prior[2] < REFETCH_AFTER
+    if have < expected * 0.98 and recent:
+        return {"expected_bars": expected, "already_stored": have, "fetched": 0,
+                "note": f"gaps remain; fetched at {prior[2].isoformat()}, not fetched again within {REFETCH_AFTER}"}
     if have < expected * 0.98:
         rows = await md.history(symbol, interval, int(start.timestamp() * 1000), int(end.timestamp() * 1000))
         closed = [c for c in rows if c.open_time + timedelta(seconds=step) <= now]
@@ -49,7 +60,27 @@ async def ensure_history(sf, md, exchange: str, symbol: str, interval: str, star
                 await s.execute(stmt.on_conflict_do_nothing())
             await s.commit()
         fetched = len(closed)
+        _last_fetch[key] = (start, end, now)
     return {"expected_bars": expected, "already_stored": have, "fetched": fetched}
+
+
+def apply_data_quality(result: dict[str, Any], prov: dict[str, Any], expected_bars: int) -> dict[str, Any]:
+    """Record gaps and coverage on a finished study and in its verdict. Below
+    98% coverage a "candidate" is lowered to "weak": missing candles can hide
+    losing trades."""
+    from yonixalpha_crypto.backtest.validation import TIERS
+
+    bars = int(prov.get("bars") or 0)
+    coverage = round(100 * bars / expected_bars, 2) if expected_bars else 100.0
+    q = {"bars": bars, "expected_bars": expected_bars, "coverage_pct": coverage, "gaps": int(prov.get("gaps") or 0)}
+    result["data_quality"] = q
+    v = result.get("verdict")
+    if v and (q["gaps"] or coverage < 98):
+        v["reasons"] = list(v["reasons"]) + [f"data: {q['gaps']} gap(s), {coverage}% of the expected candles"]
+        if coverage < 98 and v["tier"] == "candidate":
+            v["tier"], v["approved_for_consideration"] = "weak", False
+            v["rank_key"] = [TIERS.index("weak"), *v["rank_key"][1:]]
+    return q
 
 
 async def load(sf, exchange: str, symbol: str, interval: str, start: datetime, end: datetime) -> tuple[Series, dict]:

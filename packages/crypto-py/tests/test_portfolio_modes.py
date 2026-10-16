@@ -12,7 +12,7 @@ from yonixalpha_crypto import config_store, portfolio, registry
 from yonixalpha_crypto.db import (ApiConnection, DemoAccount, DemoPosition, EngineState, Event, ExecTrade, Signal,
                                   StrategyConfig)
 from yonixalpha_crypto.risk import RiskLimits
-from yonixalpha_crypto.strategies import IMPLEMENTATIONS
+from yonixalpha_crypto.strategies import IMPLEMENTATIONS, Decision
 
 from tests.conftest import NOW, FakeMarket, book, candles
 from tests.test_engine import TEST_ID, AlwaysLong, enable, engine, market, strategy  # noqa: F401
@@ -192,7 +192,8 @@ async def test_exchange_demo_strategy_orders_go_through_the_executor_on_the_prac
             await s.commit()
             await config_store.save_strategy(s, "test_binance_long", {
                 "enabled": True, "mode": "EXCHANGE_DEMO", "connection_id": str(tn.id),
-                "risk": {"risk_per_trade_quote": "5", "max_position_quote": "300"}}, 1, "t")
+                "risk": {"risk_per_trade_quote": "5", "max_position_quote": "300", "max_total_exposure_quote": "300"}},
+                1, "t")
             await config_store.set_engine(s, enabled=True, emergency_stop=None, note=None, actor="t")
             await s.commit()
         e = await engine(sf, redis, md)
@@ -210,3 +211,186 @@ async def test_exchange_demo_strategy_orders_go_through_the_executor_on_the_prac
     finally:
         IMPLEMENTATIONS.pop("test_binance_long", None)
         registry._REGISTRY.pop("test_binance_long", None)
+
+
+async def _exchange_demo_entry(sf, redis, monkeypatch, risk, portfolio_overrides=None, practice_usdt="1000"):
+    """One EXCHANGE_DEMO tick on a fake Binance testnet; returns (trades, last signal, fake)."""
+    from yonixalpha_crypto.private import adapters, service
+    from yonixalpha_crypto.private.signedhttp import SignedHttp
+    from tests.fake_exchanges import FakeBinance
+
+    registry.register(BinanceLong.spec)
+    IMPLEMENTATIONS["test_binance_long"] = BinanceLong()
+    fake = FakeBinance(bid="100", ask="100.02", usdt=practice_usdt)
+    monkeypatch.setattr(service, "open_account", lambda c, **kw: adapters.account_for(
+        SignedHttp(c.exchange, c.environment, "aaaaaaaabbbbbbbb0007", "ccccccccdddddddd0007", transport=fake.transport())))
+    try:
+        md = FakeMarket("binance")
+        md.series["BTC/USDT"] = candles(["100", "100", "100", "100"])
+        md.books["BTC/USDT"] = book("100", "100.02", exchange="binance")
+        async with sf() as s:
+            await config_store.ensure_defaults(s)
+            tn = ApiConnection(id=uuid.uuid4(), exchange="binance", environment="TESTNET", label="tn", key_enc="x",
+                               secret_enc="x", key_fingerprint=uuid.uuid4().hex, key_hint="…7", enabled=True,
+                               status="OK", created_at=NOW, updated_at=NOW)
+            s.add(tn)
+            await s.commit()
+            await config_store.save_strategy(s, "test_binance_long", {
+                "enabled": True, "mode": "EXCHANGE_DEMO", "connection_id": str(tn.id), "risk": risk}, 1, "t")
+            if portfolio_overrides:
+                await portfolio.save(s, portfolio_overrides, 1, "t")
+            await config_store.set_engine(s, enabled=True, emergency_stop=None, note=None, actor="t")
+            await s.commit()
+        await (await engine(sf, redis, md)).tick(NOW)
+        async with sf() as s:
+            trades = (await s.execute(select(ExecTrade))).scalars().all()
+        return trades, (await signals(sf))[-1], fake  # one signal: one tick, one candle
+    finally:
+        IMPLEMENTATIONS.pop("test_binance_long", None)
+        registry._REGISTRY.pop("test_binance_long", None)
+
+
+async def test_exchange_demo_final_size_is_checked_against_the_strategy_limits(sf, redis, monkeypatch):
+    # The practice account sizes the order itself (300 USDT here). The paper
+    # estimate passed, but the strategy's 200 USDT exposure limit must refuse
+    # the real size before anything is recorded or sent.
+    trades, sig, fake = await _exchange_demo_entry(sf, redis, monkeypatch,
+                                                   {"risk_per_trade_quote": "5", "max_position_quote": "300"})
+    assert trades == [] and fake.order_count("BUY") == 0
+    assert sig.action == "REJECTED" and any("strategy: exposure" in r and "above 200" in r for r in sig.reasons)
+
+
+async def test_exchange_demo_final_size_is_checked_against_the_portfolio_limits(sf, redis, monkeypatch):
+    # risk 0.2% of equity: the paper estimate (1,000 USDT paper account) is
+    # about 170 USDT and passes the 250 USDT portfolio limit; the practice
+    # account (10,000 USDT) sizes about 1,000 USDT, which must be refused.
+    trades, sig, fake = await _exchange_demo_entry(
+        sf, redis, monkeypatch,
+        {"risk_pct": "0.2", "max_position_quote": "1000", "max_total_exposure_quote": "2000"},
+        {"max_total_exposure_quote": "250"}, practice_usdt="10000")
+    assert trades == [] and fake.order_count("BUY") == 0
+    assert sig.action == "REJECTED" and any(r.startswith("exchange-demo: portfolio: exposure") for r in sig.reasons)
+
+
+class SecondLong(AlwaysLong):
+    spec = registry.StrategySpec(
+        id="test_always_2", name="test 2", version="t1", category="test", status=registry.IMPLEMENTED,
+        status_reason="", provenance={}, exchanges=("bybit",), intervals=("5m",), default_exchange="bybit",
+        default_symbols=("BTC/USDT",), default_interval="5m", params={"side": ("LONG", "choice:LONG|SHORT", None, None)})
+
+
+async def test_two_strategies_signalling_together_stay_within_the_global_limits(sf, redis, strategy):  # noqa: F811
+    registry.register(SecondLong.spec)
+    IMPLEMENTATIONS["test_always_2"] = SecondLong()
+    try:
+        md = market()
+        await enable(sf)
+        async with sf() as s:
+            await config_store.save_strategy(s, "test_always_2", {"enabled": True, "mode": "DEMO"}, 1, "t")
+            await portfolio.save(s, {"max_open_positions": "1"}, 1, "t")
+            await s.commit()
+        out = await (await engine(sf, redis, md)).tick(NOW)
+        assert set(out["evaluated"]) == {TEST_ID, "test_always_2"}  # both wanted to enter on this candle
+        async with sf() as s:
+            open_ = (await s.execute(select(DemoPosition).where(DemoPosition.status == "OPEN"))).scalars().all()
+            assert len(open_) == 1
+            st = await portfolio.state(s, NOW)
+            assert st["open_positions"] == 1
+        refused = [x for x in await signals(sf) if x.action == "REJECTED"]
+        assert len(refused) == 1 and any("portfolio: 1 open positions, max 1" in r for r in refused[0].reasons)
+    finally:
+        IMPLEMENTATIONS.pop("test_always_2", None)
+        registry._REGISTRY.pop("test_always_2", None)
+
+
+class ExitWhenAsked(AlwaysLong):
+    exit_now = False
+
+    def evaluate(self, candles, params, position_open):
+        if position_open and self.exit_now:
+            return Decision("LONG", "EXIT", reasons=["test exit rule"])
+        return super().evaluate(candles, params, position_open)
+
+
+@pytest.mark.parametrize("how", ["strategy", "engine", "emergency"])
+async def test_switching_off_keeps_the_exit_rule_running_for_open_positions(sf, redis, how):
+    impl = ExitWhenAsked()
+    registry.register(AlwaysLong.spec)
+    IMPLEMENTATIONS[TEST_ID] = impl
+    try:
+        md = market()
+        await enable(sf)
+        e = await engine(sf, redis, md)
+        await e.tick(NOW)
+        async with sf() as s:
+            assert (await s.execute(select(DemoPosition))).scalar_one().status == "OPEN"
+            if how == "strategy":
+                v = (await s.execute(select(StrategyConfig.version).where(
+                    StrategyConfig.strategy_id == TEST_ID))).scalar_one()
+                await config_store.save_strategy(s, TEST_ID, {"enabled": False, "mode": "DISABLED"}, v, "t")
+            else:
+                await config_store.set_engine(s, enabled=False if how == "engine" else None,
+                                              emergency_stop=True if how == "emergency" else None, note=None, actor="t")
+            await s.commit()
+        # next candle: no entry is possible, but the strategy's exit rule still runs
+        later = NOW + timedelta(minutes=5)
+        md.series["BTC/USDT"] = candles(["100", "100", "100", "100"], end=later)
+        md.books["BTC/USDT"] = book("99.98", "100.02", at=later)
+        impl.exit_now = True
+        out = await e.tick(later)
+        assert out["evaluated"].get(TEST_ID) == "EXIT"
+        async with sf() as s:
+            p = (await s.execute(select(DemoPosition))).scalar_one()
+            assert p.status == "CLOSED"
+        # and nothing new opens afterwards
+        impl.exit_now = False
+        later2 = later + timedelta(minutes=5)
+        md.series["BTC/USDT"] = candles(["100", "100", "100", "100"], end=later2)
+        md.books["BTC/USDT"] = book("99.98", "100.02", at=later2)
+        out = await e.tick(later2)
+        assert TEST_ID not in out["evaluated"]
+        async with sf() as s:
+            assert len((await s.execute(select(DemoPosition))).scalars().all()) == 1
+    finally:
+        IMPLEMENTATIONS.pop(TEST_ID, None)
+        registry._REGISTRY.pop(TEST_ID, None)
+
+
+async def test_disabled_strategy_entry_signal_is_refused_while_it_still_holds(sf, redis, strategy):  # noqa: F811
+    md = market()
+    await enable(sf)
+    e = await engine(sf, redis, md)
+    await e.tick(NOW)
+    async with sf() as s:
+        p = (await s.execute(select(DemoPosition))).scalar_one()
+        # the BTC trade is closed; the strategy still holds an ETH position, so it is evaluated (exits only)
+        p.status, p.closed_at = "CLOSED", NOW
+        s.add(DemoPosition(strategy_id=TEST_ID, exchange="bybit", symbol="ETH/USDT", qty=1, entry_price=1,
+                           entry_cost_quote=1, status="OPEN", opened_at=NOW))
+        v = (await s.execute(select(StrategyConfig.version).where(StrategyConfig.strategy_id == TEST_ID))).scalar_one()
+        await config_store.save_strategy(s, TEST_ID, {"enabled": False}, v, "t")
+        await s.commit()
+    later = NOW + timedelta(minutes=5)
+    md.series["BTC/USDT"] = candles(["100", "100", "100", "100"], end=later)
+    md.books["BTC/USDT"] = book("99.98", "100.02", at=later)
+    out = await e.tick(later)
+    assert out["evaluated"][TEST_ID] == "REJECTED"
+    sig = [x for x in await signals(sf) if x.candle_open_time > NOW - timedelta(minutes=5)][-1]
+    assert "exits only: strategy disabled" in sig.reasons
+    async with sf() as s:
+        assert len((await s.execute(select(DemoPosition).where(DemoPosition.symbol == "BTC/USDT"))).scalars().all()) == 1
+
+
+async def test_settings_that_would_detach_an_open_position_are_refused(sf, redis, strategy):  # noqa: F811
+    md = market()
+    await enable(sf)
+    await (await engine(sf, redis, md)).tick(NOW)  # opens a paper BTC position
+    async with sf() as s:
+        v = lambda: s.scalar(select(StrategyConfig.version).where(StrategyConfig.strategy_id == TEST_ID))  # noqa: E731
+        with pytest.raises(config_store.ConfigError, match="exchange or symbols"):
+            await config_store.save_strategy(s, TEST_ID, {"symbols": ["ETH/USDT"]}, await v(), "t")
+        await s.rollback()
+        # disabling and risk / exits changes stay allowed
+        out = await config_store.save_strategy(s, TEST_ID, {"enabled": False, "risk": {"risk_per_trade_quote": "3"}},
+                                               await v(), "t")
+        assert out["enabled"] is False

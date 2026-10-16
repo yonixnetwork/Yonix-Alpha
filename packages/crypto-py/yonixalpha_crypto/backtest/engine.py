@@ -4,8 +4,9 @@ Execution assumptions (conservative, documented in every result):
 - a signal on bar i (decided from bars <= i) fills at the OPEN of bar i+1,
   plus half the spread plus slippage; never at bar i's close;
 - if bar i+1 opens at or below the planned stop, the entry is skipped;
-- the size is limited to `max_participation` of bar i+1's volume; a capped
-  order is a PARTIAL FILL and the trade holds only what filled;
+- the size is limited to `max_participation` of the SIGNAL bar's (bar i)
+  volume, the last volume known when the order is placed; a capped order is
+  a PARTIAL FILL and the trade holds only what filled;
 - while in a trade, each bar is checked for the stop (low) and the target
   (high). If both are inside the same bar the STOP is assumed first. A gap
   through the stop fills at the open, worse than the stop;
@@ -182,7 +183,7 @@ def simulate(s: Series, module: Module, params: dict[str, Any], exits: dict[str,
                     per_unit = (px - stop_fill) + px * fee_t + stop_fill * fee_t
                     qty = budget / per_unit if per_unit > 0 else 0.0
                     qty = min(qty, risk.max_position_quote / px, cash / (px * (1 + fee_t)))
-                    cap = costs.max_participation * s.v[i]
+                    cap = costs.max_participation * s.v[i - 1]  # the signal bar: no look-ahead on volume
                     partial = qty > cap
                     qty = min(qty, cap)
                     if qty * px < costs.min_notional:

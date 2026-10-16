@@ -25,7 +25,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from yonixalpha_crypto import registry
 import uuid
 
-from yonixalpha_crypto.db import ApiConnection, ConfigAudit, EngineState, StrategyConfig
+from yonixalpha_crypto.db import (EXEC_ACTIVE, ApiConnection, ConfigAudit, DemoPosition, EngineState, ExecTrade,
+                                  StrategyConfig)
 from yonixalpha_crypto.exchanges.base import split_symbol
 from yonixalpha_crypto.guard import ACTIVE_MODES, MODES
 from yonixalpha_crypto.private import management
@@ -175,6 +176,31 @@ def validate(spec: registry.StrategySpec, current: dict[str, Any], change: dict[
     return new
 
 
+async def _holding_conflicts(session: AsyncSession, strategy_id: str, before: dict[str, Any],
+                             new: dict[str, Any]) -> list[str]:
+    """While a strategy holds a position, changes that would detach the engine
+    from it are refused (its exit rule would stop running for that trade).
+    Disabling, risk, exits and parameter changes stay allowed."""
+    paper = (await session.execute(select(DemoPosition.symbol).where(
+        DemoPosition.strategy_id == strategy_id, DemoPosition.status == "OPEN"))).scalars().all()
+    xch = (await session.execute(select(ExecTrade.symbol, ExecTrade.connection_id).where(
+        ExecTrade.strategy_id == strategy_id, ExecTrade.status.in_(EXEC_ACTIVE)))).all()
+    if not paper and not xch:
+        return []
+    what = ", ".join([f"paper {s}" for s in paper] + [f"exchange-demo {s}" for s, _ in xch])
+    out = []
+    if new["exchange"] != before["exchange"] or list(new["symbols"]) != list(before["symbols"]):
+        out.append("exchange or symbols")
+    if paper and new["mode"] == "EXCHANGE_DEMO":
+        out.append("switching to exchange demo")
+    if xch and new["mode"] == "DEMO":
+        out.append("switching to paper")
+    if xch and new["mode"] == "EXCHANGE_DEMO" and any(str(c) != new.get("connection_id") for _, c in xch):
+        out.append("the connection")
+    return [f"cannot change {x} while the strategy holds {what}: close it first (or disable the strategy; its "
+            "exit rule and protection keep running)" for x in out]
+
+
 async def save_strategy(session: AsyncSession, strategy_id: str, change: dict[str, Any], expected_version: int,
                         actor: str | None) -> dict[str, Any]:
     spec = registry.get(strategy_id)
@@ -203,6 +229,9 @@ async def save_strategy(session: AsyncSession, strategy_id: str, change: dict[st
                 problems.append("the connection is disabled")
         if problems:
             raise ConfigError(problems)
+    held = await _holding_conflicts(session, strategy_id, before, new)
+    if held:
+        raise ConfigError(held)
     for k in ("enabled", "mode", "exchange", "symbols", "interval", "params", "risk", "exits"):
         setattr(row, k, new[k])
     row.connection_id = uuid.UUID(new["connection_id"]) if new.get("mode") == "EXCHANGE_DEMO" else None

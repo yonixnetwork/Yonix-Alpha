@@ -15,7 +15,7 @@ from typing import Any
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yonixalpha_crypto.db import BacktestBatch, BacktestRun
+from yonixalpha_crypto.db import BacktestBatch, BacktestRun, StrategyConfig
 from yonixalpha_crypto.strategies.library import BY_ID
 
 STALE_AFTER = timedelta(minutes=20)
@@ -44,16 +44,31 @@ class BatchError(ValueError):
     pass
 
 
+PARAM_SOURCES = ("defaults", "saved")
+SAVED_PARAMS_NOTE = ("saved parameters: if they were chosen after looking at earlier out-of-sample results, these "
+                     "out-of-sample figures are no longer independent evidence")
+
+
 async def create_batch(s: AsyncSession, *, strategies: list[str], symbols: list[str], interval: str, exchange: str,
                        start: datetime, end: datetime, costs: dict[str, Any], risk: dict[str, Any],
-                       optimize: bool, actor: str | None, note: str | None = None) -> BacktestBatch:
+                       optimize: bool, actor: str | None, note: str | None = None,
+                       param_source: str = "defaults") -> BacktestBatch:
+    """param_source: "defaults" (the module's published defaults) or "saved"
+    (each strategy's saved parameters and exits from its settings page)."""
     unknown = [x for x in strategies if x not in BY_ID]
     if unknown:
         raise BatchError(f"unknown strategies: {unknown}")
     if not symbols or end <= start:
         raise BatchError("symbols and a valid date range are required")
+    if param_source not in PARAM_SOURCES:
+        raise BatchError(f"param_source must be one of {list(PARAM_SOURCES)}")
+    saved: dict[str, StrategyConfig] = {}
+    if param_source == "saved":
+        saved = {c.strategy_id: c for c in (await s.execute(
+            select(StrategyConfig).where(StrategyConfig.strategy_id.in_(strategies)))).scalars()}
     cfg = {"strategies": strategies, "symbols": symbols, "interval": interval, "exchange": exchange,
-           "start": start.isoformat(), "end": end.isoformat(), "costs": costs, "risk": risk, "optimize": optimize}
+           "start": start.isoformat(), "end": end.isoformat(), "costs": costs, "risk": risk, "optimize": optimize,
+           "param_source": param_source}
     b = BacktestBatch(status="QUEUED", config=cfg, created_at=_now(), created_by=actor, note=note)
     s.add(b)
     await s.flush()
@@ -67,11 +82,17 @@ async def create_batch(s: AsyncSession, *, strategies: list[str], symbols: list[
                 status, err = "SKIPPED", "pair strategy: needs a leading and a traded symbol (e.g. BTC/USDT, ETH/USDT)"
             if interval not in m.intervals:
                 status, err = "SKIPPED", f"{sid} supports {list(m.intervals)}, not {interval}"
+            sc = saved.get(sid)
+            params = dict(sc.params or {}) if sc is not None else {}
+            exits = (sc.exits or m.default_exits) if sc is not None else m.default_exits
             s.add(BacktestRun(batch_id=b.id, strategy_id=sid, exchange=exchange, symbol=sym, interval=interval,
                               status=status, error=err, created_at=_now(),
-                              config={"params": {}, "exits": m.default_exits, "costs": costs, "risk": risk,
+                              config={"params": params, "exits": exits, "costs": costs, "risk": risk,
                                       "lead": symbols[0] if m.needs_lead else None, "optimize": optimize,
-                                      "module_version": m.version}))
+                                      "module_version": m.version,
+                                      "param_source": param_source if sc is not None or param_source == "defaults"
+                                      else "defaults (nothing saved)",
+                                      "settings_version": sc.version if sc is not None else None}))
             runs += 1
     if runs > MAX_RUNS_PER_BATCH:
         raise BatchError(f"{runs} runs: at most {MAX_RUNS_PER_BATCH} per batch")
@@ -139,4 +160,6 @@ def summary(result: dict[str, Any]) -> dict[str, Any]:
             "oos_sharpe": oos["sharpe"], "wf_positive_folds": result["walk_forward"]["positive_folds"],
             "robust": result["sensitivity"]["robust"],
             "benchmark_oos_return_pct": result["benchmark_buy_and_hold_oos"]["return_pct"],
-            "oos_period": result["splits"]["out_of_sample"]}
+            "oos_period": result["splits"]["out_of_sample"],
+            "data_coverage_pct": (result.get("data_quality") or {}).get("coverage_pct"),
+            "data_gaps": (result.get("data_quality") or {}).get("gaps")}

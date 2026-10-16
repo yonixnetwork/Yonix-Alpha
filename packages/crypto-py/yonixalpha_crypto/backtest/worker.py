@@ -69,6 +69,11 @@ async def run_one(sf, md_factory=None, now=None) -> str | None:
         result = validation.study(series, m, r.config.get("params") or {}, r.config.get("exits"), costs, risk,
                                   r.interval, optimize=bool(r.config.get("optimize", True)))
         status = "FAILED" if "error" in result else "DONE"
+        if status == "DONE":
+            data.apply_data_quality(result, prov, int(fetch[r.symbol]["expected_bars"]))
+            result["param_source"] = r.config.get("param_source", "defaults")
+            if result["param_source"] == "saved":
+                result["verdict"]["reasons"].append(jobs.SAVED_PARAMS_NOTE)
         async with sf() as s:
             row = await s.get(BacktestRun, r.id)
             row.status, row.finished_at, row.phase = status, _now(), None

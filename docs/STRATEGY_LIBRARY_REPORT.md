@@ -114,7 +114,7 @@ not copied because no permission exists.
 - **Entry (LONG, closed bars only):** Long when SMA 20 crosses above SMA 50 on a closed bar.
 - **Exit:** Exit when SMA 20 crosses below SMA 50, or at the 2.5 x ATR stop; ATR trailing stop after +1 R.
 - **Default exits plan:** trailing atr ({'method': 'atr', 'activate_r': '1', 'atr_mult': '3'})
-- **Parameters (default, allowed range):** `fast` 20 (2..200); `slow` 50 (5..400); `stop_atr` 2 (0.5..10); `atr_period` 14 (5..50); `target_r` 0 (0..10); `min_volume_ratio` 0 (0..5)
+- **Parameters (default, allowed range):** `fast` 20 (2..200); `slow` 50 (5..400); `stop_atr` 2.5 (0.5..10); `atr_period` 14 (5..50); `target_r` 0 (0..10); `min_volume_ratio` 0 (0..5)
 - **Designed for:** equity index (daily); applied here to crypto 4h
 - **Short rule:** short when SMA 20 crosses below SMA 50 (not executed: spot is long-only)
 - **May work when:** long, persistent trends. **Fails when:** sideways markets (many small losses from whipsaws).
@@ -249,7 +249,7 @@ not copied because no permission exists.
 - **Entry (LONG, closed bars only):** Long when the close breaks above the last confirmed swing high (5 bars each side) + 0.1 x ATR, with volume at least 1.5 x its 20-bar average.
 - **Exit:** Exit after two closes back below the broken level - 0.5 x ATR (failed breakout), at 2 R, or the 2 x ATR stop.
 - **Default exits plan:** trailing none; partials [('1', '0.5', 'breakeven')]
-- **Parameters (default, allowed range):** `pivot_n` 5 (2..20); `buffer_atr` 0.1 (0..2); `volume_mult` 1.5 (1..5); `target_r` 0 (0..10); `atr_period` 14 (5..50); `stop_atr` 2 (0.5..10); `min_volume_ratio` 0 (0..5)
+- **Parameters (default, allowed range):** `pivot_n` 5 (2..20); `buffer_atr` 0.1 (0..2); `volume_mult` 1.5 (1..5); `target_r` 2 (0..10); `atr_period` 14 (5..50); `stop_atr` 2 (0.5..10); `min_volume_ratio` 0 (0..5)
 - **Designed for:** forex M15 (confluence repository's pivot breakout)
 - **Short rule:** short below the last confirmed swing low (not executed: spot is long-only)
 - **May work when:** range ends with participation. **Fails when:** low-volume fake-outs.
@@ -264,7 +264,7 @@ not copied because no permission exists.
 - **Entry (LONG, closed bars only):** After a close above the previous 20-bar high, within 10 bars: a bar whose low comes back to the broken level (within 0.25 x ATR) and closes above it and above its open.
 - **Exit:** Stop 0.5 x ATR below the retest low / level; exit below the prior 10-bar low; target 2 R.
 - **Default exits plan:** trailing none
-- **Parameters (default, allowed range):** `entry_len` 20 (5..200); `retest_window` 10 (2..50); `retest_atr` 0.25 (0..2); `exit_len` 10 (3..100); `target_r` 0 (0..10); `atr_period` 14 (5..50); `stop_atr` 2 (0.5..10); `min_volume_ratio` 0 (0..5)
+- **Parameters (default, allowed range):** `entry_len` 20 (5..200); `retest_window` 10 (2..50); `retest_atr` 0.25 (0..2); `exit_len` 10 (3..100); `target_r` 2 (0..10); `atr_period` 14 (5..50); `stop_atr` 2 (0.5..10); `min_volume_ratio` 0 (0..5)
 - **Designed for:** general practice
 - **Short rule:** short on a retest of a broken low (not executed: spot is long-only)
 - **May work when:** breakouts that become support. **Fails when:** breakouts that fail without a retest (missed) or fail after it.
@@ -294,7 +294,7 @@ not copied because no permission exists.
 - **Entry (LONG, closed bars only):** Long when SMA 10 > SMA 50, the close is above SMA 50, the previous close was below SMA 10 and this close is above it.
 - **Exit:** Stop 3 x ATR; exit on a close below SMA 50; ATR trailing after +1 R; time stop 48 bars below +0.5 R.
 - **Default exits plan:** trailing atr ({'method': 'atr', 'activate_r': '1', 'atr_mult': '3'}); time stop 48 bars
-- **Parameters (default, allowed range):** `fast` 10 (2..100); `slow` 50 (10..300); `stop_atr` 2 (0.5..10); `atr_period` 14 (5..50); `target_r` 0 (0..10); `min_volume_ratio` 0 (0..5)
+- **Parameters (default, allowed range):** `fast` 10 (2..100); `slow` 50 (10..300); `stop_atr` 3 (0.5..10); `atr_period` 14 (5..50); `target_r` 0 (0..10); `min_volume_ratio` 0 (0..5)
 - **Designed for:** index futures, daily (trend-bot)
 - **Short rule:** short on a recovery below SMA 10 in an SMA 10 < SMA 50 downtrend (not executed: spot is long-only)
 - **May work when:** steady trends. **Fails when:** trend reversals.
@@ -339,7 +339,7 @@ not copied because no permission exists.
 - **Entry (LONG, closed bars only):** Long when RSI(2) is below 10 and the close is above SMA 200.
 - **Exit:** Exit when the close is above SMA 5; 3 x ATR stop (a protective addition: the published rule has no stop); time stop 24 bars.
 - **Default exits plan:** trailing none; time stop 24 bars
-- **Parameters (default, allowed range):** `rsi_period` 2 (2..14); `rsi_entry` 10 (1..40); `trend` 200 (50..400); `exit_sma` 5 (2..50); `stop_atr` 2 (0.5..10); `atr_period` 14 (5..50); `target_r` 0 (0..10); `min_volume_ratio` 0 (0..5)
+- **Parameters (default, allowed range):** `rsi_period` 2 (2..14); `rsi_entry` 10 (1..40); `trend` 200 (50..400); `exit_sma` 5 (2..50); `stop_atr` 3 (0.5..10); `atr_period` 14 (5..50); `target_r` 0 (0..10); `min_volume_ratio` 0 (0..5)
 - **Designed for:** US equities and ETFs, daily (Connors & Alvarez)
 - **Short rule:** short when RSI(2) > 90 below SMA 200 (not executed: spot is long-only)
 - **May work when:** pullbacks inside long uptrends. **Fails when:** crashes (the published rule has no stop).
@@ -453,9 +453,9 @@ All run in this session on 2026-10-16 (local Postgres 16 and Redis; no exchange 
 | Command | Result |
 |---|---|
 | `cd packages/crypto-py && ruff check yonixalpha_crypto tests` | clean |
-| `cd packages/crypto-py && python -m pytest -q` | **212 passed** |
+| `cd packages/crypto-py && python -m pytest -q` | **244 passed** (after the PR review fixes; see `docs/PR82_REVIEW.md`) |
 | `cd services/crypto-trading && python -m pytest -q` | 2 passed |
-| `cd apps/api && ruff check app tests && python -m pytest -q` (full suite, Memecoin routes included) | clean; **209 passed** |
+| `cd apps/api && ruff check app tests && python -m pytest -q` (full suite, Memecoin routes included) | clean; **211 passed** (after the PR review fixes) |
 | `cd apps/web && npx tsc --noEmit && npx next lint && npx next build` | clean |
 | gitleaks on the staged changes | no leaks |
 | protected-path check (`git diff origin/main --stat -- packages/core-py services/{Memecoin workers} scripts apps/api/migrations apps/web/lib .env.example`) | empty |

@@ -127,7 +127,7 @@ class Module:
     needs_lead: bool = False
 
     def p(self, params: dict[str, Any]) -> dict[str, Any]:
-        merged = {k: v[0] for k, v in {**self.params, **COMMON_PARAMS}.items()}
+        merged = {k: v[0] for k, v in {**COMMON_PARAMS, **self.params}.items()}  # a module's own default wins
         merged.update({k: v for k, v in (params or {}).items() if k in merged})
         return {k: (float(v) if isinstance(v, (Decimal, str)) else v) for k, v in merged.items()}
 
@@ -426,9 +426,21 @@ class SrBreakout(Module):
         k = int(p["pivot_n"])
         lvl = s.get(("swing", k), lambda: ind.swing_high_level(s.h, k))
         a = s.atr(int(p["atr_period"]))
-        # a failed breakout: back under the broken level (the level known at i)
-        if lvl[i] is not None and s.c[i] < lvl[i] - 0.5 * a[i] and s.c[i - 1] < lvl[i - 1] - 0.5 * a[i - 1]:
-            return "failed breakout: two closes back below the broken level"
+        # The broken level is the one at the most recent bar where the entry
+        # rule fired, not the newest swing high: a higher pivot confirmed after
+        # the entry must not turn this into an undocumented trailing exit.
+        def fired(j):
+            try:
+                return self.entry(s, j, p)[0] is not None
+            except TypeError:  # indicators not warmed up at j
+                return False
+
+        j = next((j for j in range(i, max(i - 1000, 1), -1) if fired(j)), None)
+        if j is None:
+            return None
+        broken = lvl[j]
+        if s.c[i] < broken - 0.5 * a[i] and s.c[i - 1] < broken - 0.5 * a[i - 1]:
+            return f"failed breakout: two closes back below the broken level {broken:.6g} - 0.5 x ATR"
         return None
 
 
@@ -786,7 +798,8 @@ MODULES: list[Module] = [
                  "range ends with participation", "low-volume fake-outs", "short below the last confirmed swing low",
                  licence="rule idea from siriusforex-ai/confluence_matrix_forex @f3beff9 (no licence); independent "
                          "implementation"),
-        default_exits={"partials": [{"at_r": 1, "fraction": 0.5, "stop_to": "breakeven"}]}),
+        default_exits={"partials": [{"at_r": 1, "fraction": 0.5, "stop_to": "breakeven"}]},
+        version="2"),  # 2: the failed-breakout exit is anchored to the level actually broken
     BreakoutRetest(
         "breakout_retest", "Breakout retest", "breakout",
         "Waits for a broken level to be retested and hold before buying, instead of chasing the breakout bar.",

@@ -13,15 +13,15 @@ gets its new entries blocked and an ERROR event; nothing is guessed.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from yonixalpha_crypto.candles import INTERVAL_SECONDS
-from yonixalpha_crypto.db import ApiConnection, ExecTrade
+from yonixalpha_crypto.db import EXEC_ACTIVE, ApiConnection, ExecTrade
 from yonixalpha_crypto.private import management, secretstore
 from yonixalpha_crypto.private.adapters import SpotAccount, account_for
 from yonixalpha_crypto.private.connections import view
@@ -101,11 +101,45 @@ class _NoAccount:
         self.exchange, self.environment = c.exchange, c.environment
 
 
+async def strategy_exec_limits(session, strategy_id: str, limits, notional: Decimal, now: datetime) -> list[str]:
+    """The strategy's own limits counted over its exchange trades (paper
+    positions are counted by risk.size_entry): open trades, exposure and
+    today's realized loss."""
+    T = ExecTrade
+    active = (await session.execute(select(T).where(T.strategy_id == strategy_id,
+                                                    T.status.in_(EXEC_ACTIVE)))).scalars().all()
+    expo = sum((Decimal(t.qty or t.qty_planned) * Decimal(t.entry_price or t.stop) for t in active), Decimal(0))
+    day = now.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    realized = Decimal(await session.scalar(select(func.coalesce(func.sum(T.realized_quote), 0)).where(
+        T.strategy_id == strategy_id, T.closed_at >= day)) or 0)
+    out = []
+    if len(active) >= limits.max_open_positions:
+        out.append(f"strategy: {len(active)} exchange trade(s) open, max {limits.max_open_positions}")
+    if expo + notional > limits.max_total_exposure_quote:
+        out.append(f"strategy: exposure {expo:.2f} + {notional:.2f} above {limits.max_total_exposure_quote}")
+    if -realized >= limits.max_daily_loss_quote:
+        out.append(f"strategy: today's exchange loss {-realized:.2f} reached {limits.max_daily_loss_quote}")
+    return out
+
+
 async def strategy_entry(session, cfg, strategy_id: str, symbol: str, decision, limits, taker_fee_bps: Decimal,
-                         entry_key: str) -> tuple[bool, list[str], str | None]:
+                         entry_key: str, now: datetime | None = None) -> tuple[bool, list[str], str | None]:
     """An EXCHANGE_DEMO strategy entry: the decision goes through the same
     executor as every exchange order (guard, sizing, write-ahead, verified
-    protection). Practice connections only; returns (accepted, reasons, trade id)."""
+    protection). Practice connections only; returns (accepted, reasons, trade id).
+
+    The executor sizes on the practice account's own balance, so the
+    portfolio and strategy limits are checked again on that final size
+    (pre_trade_check) before anything is recorded or sent."""
+    from yonixalpha_crypto import portfolio  # late: portfolio imports the db layer only
+
+    now = now or datetime.now(timezone.utc)
+
+    async def check(planned_loss: Decimal, notional: Decimal) -> list[str]:
+        return (await portfolio.check_entry(session, symbol=symbol, planned_loss=planned_loss, notional=notional,
+                                            now=now)
+                + await strategy_exec_limits(session, strategy_id, limits, notional, now))
+
     c = await session.get(ApiConnection, cfg.connection_id) if cfg.connection_id else None
     if c is None or c.environment not in ("DEMO", "TESTNET") or not c.enabled:
         return False, ["exchange-demo: no enabled DEMO / TESTNET connection for this strategy"], None
@@ -124,7 +158,8 @@ async def strategy_entry(session, cfg, strategy_id: str, symbol: str, decision, 
             stop_price=decision.stop_price, take_profit=decision.target_price,
             plan={**(cfg.exits or {}), "interval": cfg.interval},
             thesis={"reason": "; ".join(decision.reasons), "values": (decision.detail or {}).get("values"),
-                    "strategy": strategy_id, "interval": cfg.interval})
+                    "strategy": strategy_id, "interval": cfg.interval},
+            pre_trade_check=check)
     except EntryRefused as e:
         return False, [f"exchange-demo: {r}" for r in e.reasons], None
     except ExchangeRequestError as e:

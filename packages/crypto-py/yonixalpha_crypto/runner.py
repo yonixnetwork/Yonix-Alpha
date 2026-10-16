@@ -73,7 +73,12 @@ async def _record_signal(session: AsyncSession, **kw) -> Signal | None:
 
 async def step_strategy(session: AsyncSession, cfg: StrategyConfig, spec: StrategySpec, impl: Strategy,
                         md: MarketData, instruments: InstrumentCache, now: datetime, *,
-                        blocked: str | None = None) -> str:
+                        blocked: str | None = None, exits_only: str | None = None) -> str:
+    """Evaluate one strategy on its newest closed candle. exits_only (the
+    reason) is set when the strategy may not open trades (it is disabled,
+    or the engine is off / stopped) but still holds a position: its exit
+    rule keeps running so a disabled strategy never abandons a trade; any
+    entry signal is recorded as refused."""
     params, symbols = dict(cfg.params or {}), list(cfg.symbols or [])
     traded = impl.traded_symbol(symbols)
     need = impl.required_candles(params)
@@ -103,10 +108,12 @@ async def step_strategy(session: AsyncSession, cfg: StrategyConfig, spec: Strate
     position = (await session.execute(select(P).where(P.strategy_id == spec.id, P.exchange == cfg.exchange,
                                                       P.symbol == traded, P.status == "OPEN"))).scalar_one_or_none()
     xtrade = None
-    if exchange_demo:
-        xtrade = (await session.execute(select(ExecTrade).where(
-            ExecTrade.strategy_id == spec.id, ExecTrade.symbol == traded, ExecTrade.connection_id == cfg.connection_id,
-            ExecTrade.status.in_(EXEC_ACTIVE)))).scalar_one_or_none()
+    if exchange_demo or exits_only:
+        q = select(ExecTrade).where(ExecTrade.strategy_id == spec.id, ExecTrade.symbol == traded,
+                                    ExecTrade.status.in_(EXEC_ACTIVE))
+        if not exits_only:  # entries: this connection; exits: whichever connection holds the trade
+            q = q.where(ExecTrade.connection_id == cfg.connection_id)
+        xtrade = (await session.execute(q.order_by(ExecTrade.created_at))).scalars().first()
     d = impl.evaluate({s: cs.candles for s, cs in sets.items()}, params, (position or xtrade) is not None)
     detail = {**d.detail, "gaps": {s: len(cs.gaps) for s, cs in sets.items()}}
     action, reasons = d.action, list(d.reasons)
@@ -115,6 +122,8 @@ async def step_strategy(session: AsyncSession, cfg: StrategyConfig, spec: Strate
         action, reasons = "REJECTED", reasons + ["SHORT signal: spot is long-only here, not simulated"]
     elif d.action == "ENTER" and (position or xtrade) is not None:
         action, reasons = "HOLD", reasons + ["already in a position"]
+    elif d.action == "ENTER" and exits_only:
+        action, reasons = "REJECTED", reasons + [exits_only]
     elif d.action == "ENTER":
         inst = await instruments.get(md, traded)
         book = await md.top_of_book(traded)
@@ -141,7 +150,8 @@ async def step_strategy(session: AsyncSession, cfg: StrategyConfig, spec: Strate
             elif exchange_demo:
                 from yonixalpha_crypto.private.service import strategy_entry  # practice account orders
                 ok, why, trade_id = await strategy_entry(session, cfg, spec.id, traded, d, limits, prof.taker_fee_bps,
-                                                         f"{spec.id}:{cfg.exchange}:{traded}:{candle_time.isoformat()}")
+                                                         f"{spec.id}:{cfg.exchange}:{traded}:{candle_time.isoformat()}",
+                                                         now=now)
                 detail["exchange_demo"] = {"trade_id": trade_id, "result": why}
                 if not ok:
                     action, reasons = "REJECTED", reasons + why
@@ -174,7 +184,7 @@ async def step_strategy(session: AsyncSession, cfg: StrategyConfig, spec: Strate
                                  target_price=d.target_price, top_size=order_kw["book"].ask_qty, signal_id=sig.id,
                                  now=now, stop_pct=order_kw["stop_pct"], target_pct=order_kw["target_pct"])
         else:
-            await demo.close_long(session, mode=cfg.mode, position=position, client_id=cid, book=order_kw["book"],
+            await demo.close_long(session, mode="DEMO", position=position, client_id=cid, book=order_kw["book"],
                                   spec=order_kw["inst"], fee_bps=order_kw["prof"].taker_fee_bps,
                                   slippage_bps=order_kw["limits"].slippage_bps,
                                   reason=(d.reasons[0] if d.reasons else "strategy exit")[:48], now=now)
@@ -192,9 +202,13 @@ async def _entry_filters(session: AsyncSession, strategy_id: str, limits: RiskLi
             out.append(f"liquidity: signal candle traded {traded_value:.2f}, minimum {limits.min_bar_volume_quote}")
     n = limits.max_consecutive_losses
     if n > 0:
-        P = DemoPosition
-        last = (await session.execute(select(P.realized_pnl_quote, P.closed_at).where(
+        P, T = DemoPosition, ExecTrade
+        paper = (await session.execute(select(P.realized_pnl_quote, P.closed_at).where(
             P.strategy_id == strategy_id, P.status == "CLOSED").order_by(P.closed_at.desc()).limit(n))).all()
+        xch = (await session.execute(select(T.realized_quote, T.closed_at).where(
+            T.strategy_id == strategy_id, T.status == "CLOSED", T.closed_at.is_not(None))
+            .order_by(T.closed_at.desc()).limit(n))).all()
+        last = sorted([*paper, *xch], key=lambda r: r[1], reverse=True)[:n]
         if len(last) == n and all((p or 0) <= 0 for p, _ in last):
             until = last[0][1] + timedelta(minutes=float(limits.cooldown_minutes))
             if now < until:

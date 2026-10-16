@@ -83,9 +83,17 @@ def test_size_risks_the_budget_and_fees_are_charged_on_both_legs():
 
 
 def test_volume_caps_the_fill_as_a_partial_fill():
-    s = bars([(100, 100, 100, 100, 1e9)] * 2 + [(100, 100, 100, 100, 0.5)] + [(100, 100, 100, 100, 1e9)] * 3)
+    # the signal bar (1) traded 0.5; the fill bar (2) traded far more, but its
+    # volume is not known when the order is placed, so it must not be used
+    s = bars([(100, 100, 100, 100, 1e9), (100, 100, 100, 100, 0.5)] + [(100, 100, 100, 100, 1e9)] * 4)
     t = simulate(s, Stub([1], stop_d=1), {}, None, Costs(max_participation=0.1, min_notional=0), RISK).trades[0]
     assert t.partial_fill and t.qty == pytest.approx(0.05)
+
+
+def test_the_fill_bar_volume_is_not_used_for_the_cap():
+    s = bars([(100, 100, 100, 100, 1e9)] * 2 + [(100, 100, 100, 100, 0.5)] + [(100, 100, 100, 100, 1e9)] * 3)
+    t = simulate(s, Stub([1], stop_d=1), {}, None, Costs(max_participation=0.1, min_notional=0), RISK).trades[0]
+    assert not t.partial_fill and t.qty > 0.05
 
 
 def test_the_entry_is_skipped_when_the_next_open_is_below_the_stop():
@@ -251,3 +259,39 @@ async def test_data_store_is_bounded_and_keeps_only_closed_candles(sf):
     ser, prov = await data.load(sf, "binance_us", "BTC/USDT", "1h", s.times[0], now)
     assert len(ser) == 49 and prov["gaps"] == 0 and prov["sources"] == ["test"]
     assert uuid.UUID(int=0)  # keep uuid import used
+
+
+@pytest.fixture(autouse=True)
+def _fresh_fetch_memory():
+    data._last_fetch.clear()
+    yield
+    data._last_fetch.clear()
+
+
+async def test_a_range_the_exchange_has_gaps_in_is_not_downloaded_again_on_every_run(sf):
+    full = walk([(100, 0.001)], seed=3)
+    keep = [i for i in range(len(full)) if not 40 <= i < 50]  # the exchange itself is missing 10 candles
+    gapped = Series(*[[getattr(full, f)[i] for i in keep] for f in ("o", "h", "l", "c", "v", "times")])
+    md = FakeMD({"BTC/USDT": gapped})
+    now = full.times[-1] + timedelta(hours=1)
+    first = await data.ensure_history(sf, md, "binance_us", "BTC/USDT", "1h", full.times[0], now, "test", now)
+    assert first["fetched"] == 90 and md.calls == 1
+    again = await data.ensure_history(sf, md, "binance_us", "BTC/USDT", "1h", full.times[0], now, "test",
+                                      now + timedelta(minutes=5))
+    assert md.calls == 1 and again["fetched"] == 0 and "not fetched again" in again["note"]
+    later = await data.ensure_history(sf, md, "binance_us", "BTC/USDT", "1h", full.times[0], now, "test",
+                                      now + timedelta(hours=2))
+    assert md.calls == 2 and later["already_stored"] == 90  # retried after the throttle window
+
+
+def test_data_gaps_are_reported_and_lower_a_candidate():
+    v = {"tier": "candidate", "reasons": ["ok"], "rank_key": [0, -0.2, 5.0], "approved_for_consideration": True}
+    result = {"verdict": dict(v)}
+    q = data.apply_data_quality(result, {"bars": 900, "gaps": 3}, 1000)
+    assert q["coverage_pct"] == 90.0 and result["data_quality"]["gaps"] == 3
+    assert result["verdict"]["tier"] == "weak" and result["verdict"]["rank_key"][0] == 1
+    assert not result["verdict"]["approved_for_consideration"]
+    assert any("3 gap(s)" in r for r in result["verdict"]["reasons"])
+    ok = {"verdict": dict(v)}
+    data.apply_data_quality(ok, {"bars": 995, "gaps": 1}, 1000)  # 99.5%: noted, tier kept
+    assert ok["verdict"]["tier"] == "candidate" and any("gap" in r for r in ok["verdict"]["reasons"])

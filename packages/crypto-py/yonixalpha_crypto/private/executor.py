@@ -150,9 +150,13 @@ class Executor:
 
     async def open_long(self, s: AsyncSession, *, strategy_id: str, symbol: str, entry_key: str | None,
                         rules: SizingRules, stop_price: Decimal, take_profit: Decimal | None,
-                        plan: dict[str, Any] | None, thesis: dict[str, Any]) -> ExecTrade:
+                        plan: dict[str, Any] | None, thesis: dict[str, Any],
+                        pre_trade_check: Callable[[Decimal, Decimal], Awaitable[list[str]]] | None = None,
+                        ) -> ExecTrade:
         """Size, record, send and protect one LONG entry. Raises EntryRefused
-        (nothing sent) when any check fails."""
+        (nothing sent) when any check fails. pre_trade_check(planned_loss,
+        notional) runs on the FINAL size, before anything is recorded or sent:
+        the caller's portfolio and strategy limits see the real numbers."""
         if self.conn.environment == LIVE:
             livelock.require_live_orders(connection_view(self.conn))
         if not self.conn.enabled:
@@ -186,6 +190,10 @@ class Executor:
             take_profit = spec.round_price(take_profit, up=True)
             if take_profit <= book.ask:
                 raise EntryRefused([f"target {take_profit} is not above the ask {book.ask}"])
+        if pre_trade_check is not None:
+            refused = await pre_trade_check(sized.planned_loss, sized.notional)
+            if refused:
+                raise EntryRefused(refused)
         plan["engine_take_profit"] = take_profit is not None and not self.acct.exchange_take_profit
         plan["taker_fee_bps"] = str(rules.taker_fee_bps)
 

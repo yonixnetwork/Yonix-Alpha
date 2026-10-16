@@ -23,7 +23,7 @@ import math
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_username, get_db
 from yonixalpha_crypto import config_store, metrics as demo_metrics, portfolio, registry
 from yonixalpha_crypto.backtest import jobs
+from yonixalpha_crypto.backtest.validation import TIERS
 from yonixalpha_crypto.db import (ApiConnection, BacktestBatch, BacktestRun, ConfigAudit, DemoPosition, Event,
                                   ExecTrade, Signal, StrategyConfig, schema_ready)
 from yonixalpha_crypto.private.livelock import LIVE_ORDERS_UNLOCKED
@@ -71,10 +72,15 @@ async def _ready(db: AsyncSession) -> None:
         raise HTTPException(503, "The crypto schema is not installed yet.")
 
 
-def lifecycle(spec: registry.StrategySpec, cfg: StrategyConfig | None, latest: BacktestRun | None) -> dict[str, str]:
+def lifecycle(spec: registry.StrategySpec, cfg: StrategyConfig | None, latest: Any | None,
+              agg: dict[str, Any] | None = None) -> dict[str, str]:
     """research | blocked | implemented | backtest pending | backtest failed | paper testing | demo testing |
     approved for consideration. Never 'live'. (Merged / rejected candidates are listed by /crypto/center/rejected;
-    whether a strategy is switched on is shown by its mode, not by this status.)"""
+    whether a strategy is switched on is shown by its mode, not by this status.)
+
+    `latest` is the WORST finished run of the strategy's latest batch (every
+    symbol counts); `agg` holds that batch's counts. A strategy is approved for
+    consideration only when every symbol finished and every one is a candidate."""
     if spec.status == registry.BLOCKED:
         return {"status": "blocked", "why": spec.status_reason}
     if spec.status in (registry.NOT_IMPLEMENTED, registry.RESEARCH_ONLY):
@@ -88,21 +94,62 @@ def lifecycle(spec: registry.StrategySpec, cfg: StrategyConfig | None, latest: B
     if latest.status == "FAILED":
         return {"status": "backtest failed", "why": latest.error or "the run failed"}
     tier = (latest.summary or {}).get("tier")
+    agg = agg or {}
+    of = f" (worst of {agg['finished']} symbol runs)" if agg.get("finished", 1) > 1 else ""
     if tier == "candidate":
+        if agg.get("errored") or agg.get("pending"):
+            return {"status": "implemented", "why": f"candidate on the finished runs, but {agg.get('errored', 0)} "
+                                                    f"failed and {agg.get('pending', 0)} still queued in this batch"}
         return {"status": "approved for consideration", "why": "positive out-of-sample result passed the documented "
-                                                               "checks; paper / demo testing next (never live)"}
+                                                               f"checks on every symbol{of}; paper / demo testing "
+                                                               "next (never live)"}
     if tier == "failed":
-        return {"status": "backtest failed", "why": "negative out-of-sample expectancy or profit factor below 1"}
+        return {"status": "backtest failed", "why": f"negative out-of-sample expectancy or profit factor below 1{of}"}
     # The status is the validation stage; whether the strategy is switched on is its mode.
-    return {"status": "implemented", "why": f"latest backtest: {tier or latest.status}"}
+    return {"status": "implemented", "why": f"latest backtest: {tier or latest.status}{of}"}
 
 
-async def _latest_runs(db: AsyncSession) -> dict[str, BacktestRun]:
-    sub = (select(BacktestRun.strategy_id, func.max(BacktestRun.finished_at).label("f"))
-           .where(BacktestRun.status.in_(("DONE", "FAILED"))).group_by(BacktestRun.strategy_id).subquery())
-    rows = (await db.execute(select(BacktestRun).join(sub, (BacktestRun.strategy_id == sub.c.strategy_id)
-                                                     & (BacktestRun.finished_at == sub.c.f)))).scalars().all()
-    return {r.strategy_id: r for r in rows}
+RUN_COLS = (BacktestRun.id, BacktestRun.strategy_id, BacktestRun.batch_id, BacktestRun.status, BacktestRun.symbol,
+            BacktestRun.interval, BacktestRun.finished_at, BacktestRun.summary, BacktestRun.error)
+
+
+def _worse(r) -> tuple:
+    """Sort key: larger = worse (tier, then lower expectancy, then deeper drawdown)."""
+    k = (r.summary or {}).get("rank_key") or [len(TIERS), 0, 0]
+    return tuple(float(x or 0) for x in k)
+
+
+async def _latest_runs(db: AsyncSession, sid: str | None = None) -> dict[str, tuple[Any, dict[str, Any]]]:
+    """Per strategy: (worst finished run, counts) over its LATEST batch, i.e.
+    the batch of its most recently finished run. Light columns only (no
+    study JSON)."""
+    q = (select(BacktestRun.strategy_id, BacktestRun.batch_id, BacktestRun.finished_at)
+         .where(BacktestRun.status.in_(("DONE", "FAILED"))))
+    if sid is not None:
+        q = q.where(BacktestRun.strategy_id == sid)
+    newest: dict[str, tuple[Any, Any]] = {}
+    for s_id, b_id, f in (await db.execute(q)).all():
+        if s_id not in newest or f > newest[s_id][1]:
+            newest[s_id] = (b_id, f)
+    if not newest:
+        return {}
+    rows = (await db.execute(select(*RUN_COLS).where(
+        BacktestRun.batch_id.in_({b for b, _ in newest.values()}),
+        BacktestRun.strategy_id.in_(list(newest))))).all()
+    out: dict[str, tuple[Any, dict[str, Any]]] = {}
+    for s_id, (b_id, _) in newest.items():
+        mine = [r for r in rows if r.strategy_id == s_id and r.batch_id == b_id]
+        done = [r for r in mine if r.status == "DONE"]
+        errored = [r for r in mine if r.status == "FAILED"]
+        tiers: dict[str, int] = {}
+        for r in done:
+            tier = (r.summary or {}).get("tier", "unknown")
+            tiers[tier] = tiers.get(tier, 0) + 1
+        worst = max(done, key=_worse) if done else max(errored, key=lambda r: r.finished_at)
+        out[s_id] = (worst, {"batch_id": str(b_id), "finished": len(done) + len(errored), "errored": len(errored),
+                             "pending": sum(1 for r in mine if r.status in ("QUEUED", "RUNNING")), "tiers": tiers,
+                             "basis": "worst finished run of the latest batch"})
+    return out
 
 
 async def _paper(db: AsyncSession, sid: str) -> dict[str, Any]:
@@ -143,14 +190,16 @@ async def center(db: AsyncSession = Depends(get_db), username: str = Depends(get
     latest = await _latest_runs(db)
     out = []
     for spec in registry.all_specs():
-        cfg, run = cfgs.get(spec.id), latest.get(spec.id)
+        cfg = cfgs.get(spec.id)
+        run, agg = latest.get(spec.id, (None, None))
         out.append({"id": spec.id, "name": spec.name, "category": spec.category, "description": spec.description,
-                    "registry_status": spec.status, "library": spec.library, **lifecycle(spec, cfg, run),
+                    "registry_status": spec.status, "library": spec.library, **lifecycle(spec, cfg, run, agg),
                     "enabled": bool(cfg and cfg.enabled), "mode": cfg.mode if cfg else "DISABLED",
                     "exchange": cfg.exchange if cfg else None, "symbols": list(cfg.symbols or []) if cfg else [],
                     "interval": cfg.interval if cfg else None, "risk": _risk_view(cfg),
                     "backtest": ({"run_id": str(run.id), "status": run.status, "finished_at": _j(run.finished_at),
-                                  "symbol": run.symbol, "interval": run.interval, **(run.summary or {})} if run else None)})
+                                  "symbol": run.symbol, "interval": run.interval, **(run.summary or {}),
+                                  "aggregate": agg} if run else None)})
     return {"strategies": _j(out), "live_orders_unlocked": LIVE_ORDERS_UNLOCKED,
             "ranking_rule": "candidate > weak > insufficient evidence > failed, then out-of-sample expectancy (R), then "
                             "drawdown; win rate is never used to rank"}
@@ -180,7 +229,7 @@ async def strategy_detail(sid: str, db: AsyncSession = Depends(get_db), username
     cfg = (await db.execute(select(StrategyConfig).where(StrategyConfig.strategy_id == sid))).scalar_one_or_none()
     runs = (await db.execute(select(BacktestRun).where(BacktestRun.strategy_id == sid)
                              .order_by(BacktestRun.created_at.desc()).limit(20))).scalars().all()
-    latest = next((r for r in runs if r.status in ("DONE", "FAILED")), None)
+    latest, agg = (await _latest_runs(db, sid)).get(sid, (None, None))
     sigs = (await db.execute(select(Signal).where(Signal.strategy_id == sid).order_by(Signal.id.desc()).limit(50))).scalars().all()
     events = (await db.execute(select(Event).where(Event.source == sid).order_by(Event.id.desc()).limit(50))).scalars().all()
     P = DemoPosition
@@ -194,7 +243,7 @@ async def strategy_detail(sid: str, db: AsyncSession = Depends(get_db), username
         "id": sid, "name": spec.name, "category": spec.category, "version": spec.version, "description": spec.description,
         "entry_rules": spec.entry_rules, "exit_rules": spec.exit_rules, "research": spec.research,
         "registry_status": spec.status, "status_reason": spec.status_reason, "notes": list(spec.notes),
-        "provenance": spec.provenance, **lifecycle(spec, cfg, latest),
+        "provenance": spec.provenance, **lifecycle(spec, cfg, latest, agg),
         "exchanges": list(spec.exchanges), "intervals": list(spec.intervals), "max_symbols": spec.max_symbols,
         "params_schema": _schema(spec),
         "risk_schema": [{"key": k, "default": str(v[0]), "min": str(v[1]), "max": str(v[2])} for k, v in RISK_RULES.items()],
@@ -217,7 +266,9 @@ async def strategy_detail(sid: str, db: AsyncSession = Depends(get_db), username
                           "summary": full.summary, "verdict": (full.result or {}).get("verdict"),
                           "out_of_sample": ((full.result or {}).get("default_params") or {}).get("metrics", {}).get("out_of_sample"),
                           "curve": (full.result or {}).get("oos_curve"), "data": full.data, "code_version": full.code_version,
-                          "label": "BACKTEST (simulation on historical data, out-of-sample period, default parameters)"}
+                          "aggregate": agg, "param_source": (full.result or {}).get("param_source", "defaults"),
+                          "label": "BACKTEST (simulation on historical data, out-of-sample period; the worst symbol "
+                                   "of the latest batch)"}
                          if full and full.status == "DONE" else None),
             "paper": await _paper(db, sid), "exchange_demo": await _exchange_demo(db, sid),
             "live": {"status": "locked", "label": "LIVE: locked in code; no live results exist"},
@@ -240,6 +291,7 @@ class BatchIn(BaseModel):
     costs: dict[str, float] = Field(default_factory=dict)
     risk: dict[str, Any] = Field(default_factory=dict)
     optimize: bool = True
+    param_source: Literal["defaults", "saved"] = "defaults"
     note: str | None = Field(None, max_length=300)
 
 
@@ -265,7 +317,8 @@ async def create_backtest(body: BatchIn, db: AsyncSession = Depends(get_db), use
     try:
         b = await jobs.create_batch(db, strategies=strategies, symbols=body.symbols, interval=body.interval,
                                     exchange=body.exchange, start=start, end=end, costs=body.costs, risk=body.risk,
-                                    optimize=body.optimize, actor=username, note=body.note)
+                                    optimize=body.optimize, actor=username, note=body.note,
+                                    param_source=body.param_source)
     except jobs.BatchError as e:
         raise HTTPException(422, str(e)) from None
     db.add(ConfigAudit(actor=username, scope="backtest", before=None, after=_j(b.config)))

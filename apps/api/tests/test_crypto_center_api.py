@@ -129,3 +129,76 @@ async def test_strategy_save_supports_risk_modes_exits_and_refuses_live(client, 
     r = await client.put("/api/crypto/strategies/ema_cross", headers=auth_headers,
                          json={"expected_version": d["config"]["version"], "mode": "LIVE"})
     assert r.status_code == 422 and "no live mode" in r.text
+
+
+async def _runs(rows):
+    """rows: (strategy, symbol, status, tier or None, rank_key or None) in ONE batch."""
+    eng = create_async_engine(os.environ["DATABASE_URL"])
+    sf = async_sessionmaker(eng, expire_on_commit=False)
+    async with sf() as s:
+        b = BacktestBatch(status="RUNNING", config={}, total=len(rows), created_at=NOW)
+        s.add(b)
+        await s.flush()
+        for sid, sym, status, tier, key in rows:
+            s.add(BacktestRun(batch_id=b.id, strategy_id=sid, exchange="binance_us", symbol=sym, interval="1h",
+                              status=status, config={}, created_at=NOW,
+                              finished_at=NOW if status in ("DONE", "FAILED") else None,
+                              summary={"tier": tier, "rank_key": key, "oos_trades": 40} if tier else None,
+                              error="boom" if status == "FAILED" else None))
+        await s.commit()
+    await eng.dispose()
+
+
+async def test_center_verdict_is_the_worst_symbol_of_the_latest_batch(client, auth_headers, crypto):  # noqa: F811
+    await _runs([("sma_cross", "BTC/USDT", "DONE", "candidate", [0, -0.3, 5]),
+                 ("sma_cross", "ETH/USDT", "DONE", "failed", [3, 0.1, 9]),
+                 ("ema_cross", "BTC/USDT", "DONE", "candidate", [0, -0.3, 5]),
+                 ("ema_cross", "ETH/USDT", "DONE", "candidate", [0, -0.1, 7]),
+                 ("ema_cross", "SOL/USDT", "QUEUED", None, None),
+                 ("adx_trend", "BTC/USDT", "DONE", "candidate", [0, -0.3, 5]),
+                 ("adx_trend", "ETH/USDT", "DONE", "candidate", [0, -0.2, 6])])
+    body = (await client.get("/api/crypto/center/strategies", headers=auth_headers)).json()
+    by = {x["id"]: x for x in body["strategies"]}
+    sma = by["sma_cross"]
+    assert sma["status"] == "backtest failed" and "worst of 2" in sma["why"]  # one good symbol does not hide a bad one
+    assert sma["backtest"]["symbol"] == "ETH/USDT"
+    assert sma["backtest"]["aggregate"]["tiers"] == {"candidate": 1, "failed": 1}
+    ema = by["ema_cross"]
+    assert ema["status"] == "implemented" and "still queued" in ema["why"]  # not approved while a symbol is pending
+    assert ema["backtest"]["symbol"] == "ETH/USDT"  # the lower expectancy of the two candidates
+    adx = by["adx_trend"]
+    assert adx["status"] == "approved for consideration" and adx["backtest"]["aggregate"]["finished"] == 2
+    det = (await client.get("/api/crypto/center/strategies/sma_cross", headers=auth_headers)).json()
+    assert det["status"] == "backtest failed" and det["performance"]["backtest"] is not None
+    assert det["performance"]["backtest"]["symbol"] == "ETH/USDT"
+
+
+async def test_a_batch_can_use_each_strategys_saved_parameters(client, auth_headers, crypto):  # noqa: F811
+    from sqlalchemy import select
+
+    from yonixalpha_crypto import config_store
+    from yonixalpha_crypto.db import StrategyConfig
+
+    await client.get("/api/crypto/center/strategies", headers=auth_headers)  # creates the default settings rows
+    eng = create_async_engine(os.environ["DATABASE_URL"])
+    sf = async_sessionmaker(eng, expire_on_commit=False)
+    async with sf() as s:
+        v = (await s.execute(select(StrategyConfig.version).where(StrategyConfig.strategy_id == "sma_cross"))).scalar_one()
+        await config_store.save_strategy(s, "sma_cross", {"params": {"fast": 10, "slow": 30}}, v, "t")
+        await s.commit()
+    base = {"start": "2025-01-01T00:00:00Z", "end": "2025-06-01T00:00:00Z", "symbols": ["BTC/USDT"],
+            "strategies": ["sma_cross", "ema_cross"]}
+    assert (await client.post("/api/crypto/backtests", headers=auth_headers,
+                              json={**base, "param_source": "tuned"})).status_code == 422
+    r = await client.post("/api/crypto/backtests", headers=auth_headers, json={**base, "param_source": "saved"})
+    assert r.status_code == 200, r.text
+    d = await client.post("/api/crypto/backtests", headers=auth_headers, json=base)
+    async with sf() as s:
+        saved = {x.strategy_id: x.config for x in (await s.execute(select(BacktestRun).where(
+            BacktestRun.batch_id == uuid.UUID(r.json()["batch_id"])))).scalars()}
+        default = (await s.execute(select(BacktestRun).where(BacktestRun.batch_id == uuid.UUID(d.json()["batch_id"]),
+                                                             BacktestRun.strategy_id == "sma_cross"))).scalar_one()
+    await eng.dispose()
+    assert saved["sma_cross"]["param_source"] == "saved" and saved["sma_cross"]["params"]["fast"] in (10, "10")
+    assert saved["sma_cross"]["settings_version"] == v + 1
+    assert default.config["param_source"] == "defaults" and default.config["params"] == {}

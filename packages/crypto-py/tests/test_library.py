@@ -200,3 +200,38 @@ def test_meta_muse_library_form_matches_the_live_rules():
     assert (e is not None) == (t1.strong and t2.strong and t1.direction == "down" and t2.direction == "up")
     if e:
         assert abs(e.stop - traded.c[199] * 0.99) < 1e-9
+
+
+def test_sr_breakout_exit_uses_the_level_that_was_broken_not_a_newer_swing_high():
+    # flat range (ATR about 2), one swing high at 105, a volume breakout above
+    # it, a rally to a NEW confirmed swing high at 115, then two closes at 110:
+    # below 115 - 0.5 ATR but well above the broken 105 - 0.5 ATR. Not a
+    # failed breakout, so no exit; two closes below 104 are.
+    rows = [(100, 101, 99, 100, 10)] * 30
+    rows += [(100, 105, 99, 100, 10), (100, 101, 99, 100, 10), (100, 101, 99, 100, 10)]  # pivot 105, confirmed
+    rows += [(100, 107, 105.5, 106.5, 40)]  # breakout bar: close 106.5 > 105 + 0.1 x ATR, volume 4x
+    rows += [(106.5 + 2 * k, 108.5 + 2 * k, 106.5 + 2 * k, 108 + 2 * k, 10) for k in range(3)]  # rally to ~113
+    rows += [(113, 115, 112, 113, 10), (112, 113, 111, 112, 10), (111, 112, 110, 111, 10)]  # new pivot 115
+    rows += [(111, 111.5, 109.5, 110, 10), (110, 110.5, 109.5, 110, 10)]  # two closes at 110
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    s = Series(*[list(x) for x in zip(*rows)], [t0 + timedelta(hours=k) for k in range(len(rows))])
+    m, p = BY_ID["sr_breakout"], {"pivot_n": 2}
+    i = len(rows) - 1
+    lvl = ind.swing_high_level(s.h, 2)
+    assert lvl[i] == 115 and m.entry(s, 33, m.p(p))[0] is not None  # the newer pivot exists; the entry was real
+    assert m.should_exit(s, i, p) is None
+    s2 = Series(*[list(x) for x in zip(*(rows + [(110, 110, 103, 103.5, 10), (103.5, 104, 103, 103.2, 10)]))],
+                [t0 + timedelta(hours=k) for k in range(len(rows) + 2)])
+    assert "failed breakout" in (m.should_exit(s2, len(rows) + 1, p) or "")
+
+
+@pytest.mark.parametrize("m", MODULES, ids=lambda m: m.id)
+def test_backtest_defaults_equal_the_defaults_shown_and_saved(m):
+    # A module's own default (e.g. sma_cross stop_atr 2.5, sr_breakout target_r 2)
+    # must win over the shared default, in the backtester AND in the registry
+    # the settings page and the live adapter read.
+    spec = registry.get(m.id)
+    used = m.p({})
+    for k, (default, kind, _lo, _hi) in spec.params.items():
+        if k in used and kind in ("int", "dec"):
+            assert used[k] == pytest.approx(float(default)), k

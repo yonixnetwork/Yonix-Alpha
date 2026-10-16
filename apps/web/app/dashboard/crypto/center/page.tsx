@@ -16,10 +16,23 @@ type Row = {
   risk: { per_trade: string; mode: string };
   backtest: null | { status: string; tier?: string; oos_trades?: number; oos_expectancy_r?: number | null;
     oos_profit_factor?: number | null; oos_max_drawdown_pct?: number | null; oos_net_return_pct?: number | null;
-    oos_win_rate?: number | null; symbol: string; interval: string; finished_at: string; rank_key?: number[] };
+    oos_win_rate?: number | null; symbol: string; interval: string; finished_at: string; rank_key?: number[];
+    aggregate?: { finished: number; errored: number; pending: number; tiers: Record<string, number> } };
 };
 type Rejected = { id: string; name: string; status: string; reason: string };
 type SortKey = "name" | "category" | "status" | "rank" | "expectancy" | "drawdown" | "trades";
+
+// The figures are the WORST symbol of the strategy's latest batch, so one
+// lucky symbol never makes a strategy look better than it is.
+function aggText(r: Row): string {
+  const b = r.backtest;
+  if (!b) return "";
+  const a = b.aggregate;
+  if (!a || a.finished <= 1) return `${b.symbol} ${b.interval}`;
+  const tiers = Object.entries(a.tiers).map(([k, v]) => `${v} ${k}`).join(", ");
+  return `worst of ${a.finished}: ${b.symbol} ${b.interval}` + (tiers ? ` (${tiers})` : "") +
+    (a.errored ? `, ${a.errored} failed` : "") + (a.pending ? `, ${a.pending} queued` : "");
+}
 
 export default function StrategyCenter() {
   const { data, error } = useApi<{ strategies: Row[]; ranking_rule: string }>("/api/crypto/center/strategies",
@@ -98,7 +111,8 @@ export default function StrategyCenter() {
                 <StatusPill status={r.status} /><ModePill mode={r.mode} enabled={r.enabled} /><TierPill tier={r.backtest?.tier} />
               </div>
               {r.backtest && <div className="small mono" style={{ marginTop: 6 }}>
-                OOS {n(r.backtest.oos_trades, 0)} trades · {n(r.backtest.oos_expectancy_r, 3)} R · DD {n(r.backtest.oos_max_drawdown_pct)}%</div>}
+                OOS {n(r.backtest.oos_trades, 0)} trades · {n(r.backtest.oos_expectancy_r, 3)} R · DD {n(r.backtest.oos_max_drawdown_pct)}%
+                <div className="muted">{aggText(r)}</div></div>}
             </Link>
           ))}
         </div></div>
@@ -120,7 +134,7 @@ export default function StrategyCenter() {
                   <td><StatusPill status={r.status} /><div className="muted small">{r.why}</div></td>
                   <td><ModePill mode={r.mode} enabled={r.enabled} /><div className="muted small">risk {r.risk.per_trade}</div></td>
                   <td><TierPill tier={r.backtest?.tier} />
-                    {r.backtest && <div className="muted small">{r.backtest.symbol} {r.backtest.interval}</div>}</td>
+                    {r.backtest && <div className="muted small">{aggText(r)}</div>}</td>
                   <td className="mono">{n(r.backtest?.oos_trades, 0)}</td>
                   <td className="mono">{n(r.backtest?.oos_expectancy_r, 3)}</td>
                   <td className="mono">{n(r.backtest?.oos_profit_factor, 2)}</td>
