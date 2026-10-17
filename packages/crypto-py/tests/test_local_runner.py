@@ -161,3 +161,39 @@ def test_the_cli_plans_and_runs(batch, tmp_path, capsys):
     bp = next((tmp_path / "o").glob("bundle-*.json"))
     assert local.main(["verify", "--bundle", str(bp), "--data", str(data_dir)]) == 0
     assert "REPRODUCED" in capsys.readouterr().out
+
+
+def test_all_20_strategies_run_from_local_files_without_any_key_or_network(batch, monkeypatch):
+    # The whole library through the one shared interface (backtest.run.execute)
+    # on local candle files, with per-strategy parameters, exits, costs and
+    # risk; any network call would fail the test.
+    import httpx
+
+    from yonixalpha_crypto.strategies.library import MODULES
+
+    def no_network(*a, **k):
+        raise AssertionError("a local backtest must not use the network")
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", no_network)
+    monkeypatch.setattr(httpx.Client, "send", no_network)
+    cfg, data_dir = batch
+    cfg = local.resolve_config({**cfg, "strategies": "all",
+                                "params": {"sma_cross": {"fast": 10, "slow": 40}, "rsi_reversion": {"rsi_entry": 15}},
+                                "exits": {"ema_cross": {"trailing": {"method": "percent", "activate_r": 1, "percent": 2},
+                                                        "partials": [{"at_r": 1, "fraction": 0.5, "stop_to": "breakeven"}],
+                                                        "time_stop_bars": 48}},
+                                "costs": {"taker_fee_bps": 10, "maker_fee_bps": 2, "spread_bps": 3, "slippage_bps": 8},
+                                "risk": {"mode": "FIXED", "value": 25, "max_position_quote": 2000, "starting_equity": 5000}})
+    b = local.run_batch(cfg, data_dir, progress=lambda _m: None)
+    ran = {r["strategy_id"] for r in b["runs"]}
+    assert ran == {m.id for m in MODULES} and len(ran) == 20
+    assert len(b["runs"]) == 39  # 19 single-symbol modules x 2 symbols + the pair strategy once
+    bad = [(r["strategy_id"], r["symbol"], r["error"]) for r in b["runs"] if r["status"] != "DONE"]
+    assert bad == []
+    for r in b["runs"]:
+        assert r["config"]["costs_effective"]["slippage_bps"] == 8 and r["config"]["risk_effective"]["mode"] == "FIXED"
+        assert r["summary"]["oos_fees"] is not None and "oos_net_profit" in r["summary"]
+    sma = next(r for r in b["runs"] if r["strategy_id"] == "sma_cross")
+    assert sma["config"]["params"] == {"fast": 10, "slow": 40} and sma["config"]["param_source"] == "config"
+    ema = next(r for r in b["runs"] if r["strategy_id"] == "ema_cross")
+    assert ema["config"]["exits"]["time_stop_bars"] == 48

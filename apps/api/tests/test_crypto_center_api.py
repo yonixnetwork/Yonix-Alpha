@@ -28,7 +28,7 @@ async def test_center_lists_twenty_modules_with_honest_status(client, auth_heade
     lib = [x for x in body["strategies"] if x["library"]]
     assert len(lib) == 20 and body["live_orders_unlocked"] is False
     assert all(x["status"] == "backtest pending" and x["backtest"] is None for x in lib)  # nothing has run
-    assert {x["status"] for x in body["strategies"] if not x["library"]} <= {"blocked", "research"}
+    assert {x["status"] for x in body["strategies"] if not x["library"]} <= {"rejected / disabled"}
     assert "win rate is never used" in body["ranking_rule"]
     d = (await client.get("/api/crypto/center/strategies/trend_pullback", headers=auth_headers)).json()
     assert d["entry_rules"] and d["research"]["sources"] and d["params_schema"]
@@ -86,7 +86,10 @@ async def test_status_ranking_and_comparison_use_stored_results(client, auth_hea
     b, ids = await seed_runs()
     body = (await client.get("/api/crypto/center/strategies", headers=auth_headers)).json()
     st = {x["id"]: x["status"] for x in body["strategies"]}
-    assert st["sma_cross"] == "approved for consideration" and st["donchian_breakout"] == "backtest failed"
+    assert st["sma_cross"] == "backtest completed" and st["donchian_breakout"] == "backtest completed"
+    by = {x["id"]: x for x in body["strategies"]}
+    assert by["sma_cross"]["approved_for_consideration"] is True and by["donchian_breakout"]["approved_for_consideration"] is False
+    assert "verdict failed" in by["donchian_breakout"]["why"]  # a poor result is a completed run, not a failed one
     det = (await client.get(f"/api/crypto/backtests/{b.id}", headers=auth_headers)).json()
     assert [r["strategy_id"] for r in det["runs"]] == ["sma_cross", "donchian_breakout"]  # documented ranking
     cmp = (await client.get(f"/api/crypto/compare?runs={','.join(ids)}", headers=auth_headers)).json()
@@ -154,16 +157,17 @@ async def test_center_verdict_is_the_worst_symbol_of_the_latest_batch(client, au
     body = (await client.get("/api/crypto/center/strategies", headers=auth_headers)).json()
     by = {x["id"]: x for x in body["strategies"]}
     sma = by["sma_cross"]
-    assert sma["status"] == "backtest failed" and "worst of 2" in sma["why"]  # one good symbol does not hide a bad one
+    assert sma["status"] == "backtest completed" and "verdict failed" in sma["why"] and "worst of 2" in sma["why"]  # one good symbol does not hide a bad one
     assert sma["backtest"]["symbol"] == "ETH/USDT"
     assert sma["backtest"]["aggregate"]["tiers"] == {"candidate": 1, "failed": 1}
     ema = by["ema_cross"]
-    assert ema["status"] == "implemented" and "still queued" in ema["why"]  # not approved while a symbol is pending
+    assert ema["status"] == "backtest running" and not ema["approved_for_consideration"]  # not approved while a symbol is pending
     assert ema["backtest"]["symbol"] == "ETH/USDT"  # the lower expectancy of the two candidates
     adx = by["adx_trend"]
-    assert adx["status"] == "approved for consideration" and adx["backtest"]["aggregate"]["finished"] == 2
+    assert adx["status"] == "backtest completed" and adx["approved_for_consideration"] is True
+    assert adx["backtest"]["aggregate"]["finished"] == 2
     det = (await client.get("/api/crypto/center/strategies/sma_cross", headers=auth_headers)).json()
-    assert det["status"] == "backtest failed" and det["performance"]["backtest"] is not None
+    assert det["status"] == "backtest completed" and det["performance"]["backtest"] is not None
     assert det["performance"]["backtest"]["symbol"] == "ETH/USDT"
 
 
@@ -200,3 +204,47 @@ async def test_a_queue_batch_can_use_each_strategys_saved_parameters(client, aut
     assert sc["param_source"] == "saved" and sc["params"]["fast"] in (10, "10") and sc["settings_version"] == v + 1
     dc = runs[(default.id, "sma_cross")]
     assert dc["param_source"] == "defaults" and dc["params"] == {}
+
+
+async def test_center_shows_paper_active_exchange_demo_unavailable_and_paper_balances(client, auth_headers, crypto):  # noqa: F811
+    from datetime import timedelta
+    from decimal import Decimal
+
+    from sqlalchemy import select
+
+    from yonixalpha_crypto import config_store
+    from yonixalpha_crypto.db import ApiConnection, DemoAccount, DemoPosition, StrategyConfig
+
+    await client.get("/api/crypto/center/strategies", headers=auth_headers)
+    eng = create_async_engine(os.environ["DATABASE_URL"])
+    sf = async_sessionmaker(eng, expire_on_commit=False)
+    async with sf() as s:
+        conn = ApiConnection(id=uuid.uuid4(), exchange="binance", environment="DEMO", label="d", key_enc="x",
+                             secret_enc="x", key_fingerprint=uuid.uuid4().hex, key_hint="…1", enabled=True,
+                             status="BLOCKED", created_at=NOW, updated_at=NOW,
+                             last_error="binance refused requests from this server's location (HTTP 451)")
+        s.add(conn)
+        s.add(DemoAccount(exchange="binance_us", quote="USDT", starting_balance=Decimal(1000), cash=Decimal(900)))
+        s.add(DemoPosition(strategy_id="ema_cross", exchange="binance_us", symbol="BTC/USDT", qty=1, entry_price=100,
+                           entry_cost_quote=100, status="OPEN", opened_at=NOW))
+        s.add(DemoPosition(strategy_id="ema_cross", exchange="binance_us", symbol="BTC/USDT", qty=1, entry_price=100,
+                           entry_cost_quote=100, status="CLOSED", realized_pnl_quote=Decimal("-2.5"),
+                           fees_quote=Decimal("0.2"), opened_at=NOW - timedelta(hours=2), closed_at=NOW))
+        await s.commit()
+        v = lambda sid: s.scalar(select(StrategyConfig.version).where(StrategyConfig.strategy_id == sid))  # noqa: E731
+        await config_store.save_strategy(s, "ema_cross", {"enabled": True, "mode": "DEMO"}, await v("ema_cross"), "t")
+        await config_store.save_strategy(s, "sma_cross", {"enabled": False, "mode": "EXCHANGE_DEMO", "exchange": "binance",
+                                                          "connection_id": str(conn.id)}, await v("sma_cross"), "t")
+        cfg = (await s.execute(select(StrategyConfig).where(StrategyConfig.strategy_id == "sma_cross"))).scalar_one()
+        cfg.enabled = True  # enabled on a connection that has since been blocked
+        await s.commit()
+    await eng.dispose()
+    body = (await client.get("/api/crypto/center/strategies", headers=auth_headers)).json()
+    by = {x["id"]: x for x in body["strategies"]}
+    assert len(body["strategies"]) >= 20 and sum(1 for x in body["strategies"] if x["library"]) == 20
+    assert by["ema_cross"]["status"] == "paper trading active"
+    assert by["ema_cross"]["paper"] == {"open_positions": 1, "open_cost_quote": "100.000000000000000000",
+                                        "closed_trades": 1, "realized_pnl_quote": "-2.500000000000000000",
+                                        "fees_quote": "0.200000000000000000"}
+    assert by["sma_cross"]["status"] == "exchange demo unavailable" and "HTTP 451" in by["sma_cross"]["why"]
+    assert body["paper_accounts"][0]["exchange"] == "binance_us" and body["paper_accounts"][0]["cash"].startswith("900")

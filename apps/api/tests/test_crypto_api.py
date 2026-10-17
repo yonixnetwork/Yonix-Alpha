@@ -59,7 +59,7 @@ async def test_status_before_the_schema_exists_is_honest_not_an_error(client, au
 async def test_status_lists_exchanges_and_strategies_off_by_default(client, auth_headers, crypto):
     body = (await client.get("/api/crypto/status", headers=auth_headers)).json()
     assert body["schema_ready"] and body["engine"]["enabled"] is False and body["engine"]["emergency_stop"] is False
-    assert [e["id"] for e in body["exchanges"]] == ["bybit", "binance", "binance_us"]
+    assert [e["id"] for e in body["exchanges"]] == ["bybit", "binance", "binance_us", "binance_data"]  # the last: public market data only
     assert all("ASSUMED" in e["fee_source"] for e in body["exchanges"])
     st = {s["id"]: s for s in body["strategies"]}
     assert st["gold_vs_btc"]["status"] == "BLOCKED" and st["confluence_matrix"]["status"] == "BLOCKED"

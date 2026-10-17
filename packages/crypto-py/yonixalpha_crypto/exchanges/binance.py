@@ -33,7 +33,7 @@ def instrument_from(exchange: str, s: dict) -> InstrumentSpec:
 
 class BinanceSpot:
     def __init__(self, exchange: str, base_url: str, transport: httpx.AsyncBaseTransport | None = None):
-        if exchange not in ("binance", "binance_us"):
+        if exchange not in ("binance", "binance_us", "binance_data"):
             raise ValueError(exchange)
         self.exchange = exchange
         self.http = PublicHttp(exchange, base_url, transport=transport)

@@ -53,10 +53,11 @@ export function ModePill({ mode, enabled }: { mode: string; enabled?: boolean })
   return <span className={`pill ${cls}`}>{MODE_LABEL[mode] ?? mode}{enabled === false && mode !== "DISABLED" ? " (off)" : ""}</span>;
 }
 
+// One pill per lifecycle status (crypto_center.lifecycle).
 export function StatusPill({ status }: { status: string }) {
-  const cls = status === "approved for consideration" ? "pill-ok"
-    : ["backtest failed", "blocked", "rejected"].includes(status) ? "pill-danger"
-      : ["paper testing", "demo testing"].includes(status) ? "pill-warn" : "pill-off";
+  const cls = ["backtest completed", "exchange demo active"].includes(status) ? "pill-ok"
+    : ["backtest failed", "exchange demo unavailable", "rejected / disabled"].includes(status) ? "pill-danger"
+      : ["paper trading active", "backtest running"].includes(status) ? "pill-warn" : "pill-off";
   return <span className={`pill ${cls}`}>{status}</span>;
 }
 

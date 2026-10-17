@@ -1,7 +1,12 @@
 """Exchange connections: save (encrypted), describe (never the key), test
 (read-only requests only) and assess least privilege.
 
-A test proves three things and records them on the row:
+A test runs separate checks (private/diagnose.py) and records them on the
+row (`checks`): public reachability of the environment's host (no key),
+account authentication, practice order validation (never placed; never on
+LIVE). A failure on one check is never shown as another (a 451 location
+block is not reported as an authentication failure). When the key works, it
+also records:
 - the key authenticates (status OK / FAILED, the exchange's error scrubbed);
 - what the key may do (permissions): trade spot / derivatives, withdraw,
   IP restriction, as reported by the exchange itself;
@@ -21,9 +26,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yonixalpha_crypto.db import ApiConnection, Event
-from yonixalpha_crypto.private import environments, livelock, secretstore
+from yonixalpha_crypto.private import diagnose, environments, livelock, secretstore
 from yonixalpha_crypto.private.environments import LIVE, PRACTICE
-from yonixalpha_crypto.private.signedhttp import ExchangeRequestError, SignedHttp
+from yonixalpha_crypto.private.signedhttp import BlockedRequest, ExchangeRequestError, SignedHttp
 
 _CRED = re.compile(r"^[A-Za-z0-9_\-+/=]{8,256}$")
 _LABEL = re.compile(r"^[A-Za-z0-9 _.\-]{1,48}$")
@@ -46,6 +51,7 @@ def view(c: ApiConnection) -> dict[str, Any]:
             "key_hint": c.key_hint, "enabled": c.enabled, "status": c.status, "permissions": c.permissions,
             "checked_at": c.checked_at.isoformat() if c.checked_at else None,
             "last_ok_at": c.last_ok_at.isoformat() if c.last_ok_at else None, "last_error": c.last_error,
+            "checks": c.checks,
             "created_at": c.created_at.isoformat() if c.created_at else None,
             "updated_at": c.updated_at.isoformat() if c.updated_at else None, "updated_by": c.updated_by}
 
@@ -169,44 +175,120 @@ def _balances_binance(acct: dict[str, Any]) -> list[dict[str, str]]:
     return out[:10]
 
 
+PUBLIC_CHECK = {"binance": "/api/v3/time", "bybit": "/v5/market/time"}  # unsigned, on the environment's own host
+TEST_ORDER = {"symbol": "BTCUSDT", "side": "BUY", "type": "MARKET", "quoteOrderQty": "10"}  # validated, never placed
+
+
+def _blank_checks(c: ApiConnection) -> dict[str, Any]:
+    live = c.environment == LIVE
+    return {
+        "public_market_data": diagnose.result(diagnose.SKIPPED, "not run"),
+        "account_auth": diagnose.result(diagnose.SKIPPED, "not run"),
+        "order_validation": (diagnose.result(diagnose.LOCKED, "LIVE: no order request is ever sent (live orders are "
+                                                              "locked in code)") if live else
+                             diagnose.result(diagnose.SKIPPED, "not run")),
+        "live_orders": diagnose.result(diagnose.LOCKED, "live orders are locked in code (LIVE_ORDERS_UNLOCKED = "
+                                                        "False); no test can unlock them"),
+        "host": environments.get(c.exchange, c.environment).base_url, "environment": c.environment,
+        "origin": "the YonixAlpha API container on the server (not your browser)",
+    }
+
+
 async def test(session: AsyncSession, c: ApiConnection, *, transport: httpx.AsyncBaseTransport | None = None,
                env: dict[str, str] | None = None, now: datetime | None = None) -> dict[str, Any]:
-    """Read-only connection test. Updates the row and returns the outcome."""
+    """Read-only connection test in separate checks (diagnose). Updates the row
+    and returns the outcome. Only the environment's own fixed host is ever
+    contacted: a failed DEMO / TESTNET test never falls back to LIVE."""
     now = now or _now()
     key, secret = secretstore.decrypt(c.key_enc, env), secretstore.decrypt(c.secret_enc, env)
     c.checked_at = now
+    checks = _blank_checks(c)
     if key is None or secret is None:
         c.status, c.last_error = "NEEDS_REENTRY", "saved keys cannot be decrypted (the encryption key changed)"
+        c.checks = checks
         await _event(session, "WARN", f"connection test: keys unreadable ({c.exchange} {c.environment})", {"id": str(c.id)})
-        return {"ok": False, "status": c.status, "error": c.last_error}
+        return {"ok": False, "status": c.status, "error": c.last_error, "checks": checks}
+    host = checks["host"]
     http = SignedHttp(c.exchange, c.environment, key, secret, connection=view(c), transport=transport)
-    perms: dict[str, Any]
+    perms: dict[str, Any] = {}
     try:
-        if c.exchange == "bybit":
-            wallet = await http.request("GET", "/v5/account/wallet-balance", {"accountType": "UNIFIED"})
-            try:
-                info = await http.request("GET", "/v5/user/query-api")
-            except ExchangeRequestError:
-                if c.environment == LIVE:
-                    raise
-                info = None
-            perms = assess_bybit(info)
-            perms["balances"] = _balances_bybit(wallet)
-        else:
-            acct = await http.request("GET", "/api/v3/account", {"omitZeroBalances": "true"})
-            restr = await http.request("GET", "/sapi/v1/account/apiRestrictions") if c.environment == LIVE else None
-            perms = assess_binance(acct, restr)
-            perms["balances"] = _balances_binance(acct)
-    except ExchangeRequestError as e:
-        c.status, c.last_error = "FAILED", str(e)
-        await _event(session, "WARN", f"connection test failed: {c.exchange} {c.environment} '{c.label}'",
-                     {"id": str(c.id), "error": str(e)})
-        return {"ok": False, "status": c.status, "error": c.last_error}
+        # 1. public reachability of this environment's host (no key sent)
+        try:
+            await http.request("GET", PUBLIC_CHECK[c.exchange])
+            checks["public_market_data"] = diagnose.result(
+                diagnose.OK, f"{host} is reachable from this server (public endpoint, no key). This does not prove "
+                             "the key, its permissions or the account's eligibility.")
+        except (ExchangeRequestError, BlockedRequest) as e:
+            checks["public_market_data"] = diagnose.classify(e, c.exchange, host)
+        if checks["public_market_data"]["state"] in diagnose.HOST_UNUSABLE:
+            why = f"skipped: {host} cannot be used from this server ({checks['public_market_data']['state']})"
+            checks["account_auth"] = diagnose.result(diagnose.SKIPPED, why)
+            if c.environment != LIVE:
+                checks["order_validation"] = diagnose.result(diagnose.SKIPPED, why)
+            return await _finish(session, c, checks, None, now)
+        # 2. the key: a signed account read
+        try:
+            if c.exchange == "bybit":
+                wallet = await http.request("GET", "/v5/account/wallet-balance", {"accountType": "UNIFIED"})
+                try:
+                    info = await http.request("GET", "/v5/user/query-api")
+                except ExchangeRequestError:
+                    if c.environment == LIVE:
+                        raise
+                    info = None
+                perms = assess_bybit(info)
+                perms["balances"] = _balances_bybit(wallet)
+            else:
+                acct = await http.request("GET", "/api/v3/account", {"omitZeroBalances": "true"})
+                restr = await http.request("GET", "/sapi/v1/account/apiRestrictions") if c.environment == LIVE else None
+                perms = assess_binance(acct, restr)
+                perms["balances"] = _balances_binance(acct)
+            checks["account_auth"] = diagnose.result(diagnose.OK, "the key authenticated and the account was read")
+        except (ExchangeRequestError, BlockedRequest) as e:
+            checks["account_auth"] = diagnose.classify(e, c.exchange, host)
+            if c.environment != LIVE:
+                checks["order_validation"] = diagnose.result(diagnose.SKIPPED, "skipped: the account check failed")
+            return await _finish(session, c, checks, None, now)
+        # 3. practice order path: validated by the exchange, never placed (never on LIVE)
+        if c.environment != LIVE:
+            if c.exchange == "binance":
+                try:
+                    await http.request("POST", "/api/v3/order/test", TEST_ORDER)
+                    checks["order_validation"] = diagnose.result(
+                        diagnose.OK, "the practice order endpoint accepted a test order (validated only, nothing "
+                                     "was placed)")
+                except (ExchangeRequestError, BlockedRequest) as e:
+                    r = diagnose.classify(e, c.exchange, host)
+                    if r["state"] == diagnose.ERROR:  # e.g. a filter rule: reachable, but this order was refused
+                        r = {**r, "state": diagnose.REJECTED, "ok": False}
+                    checks["order_validation"] = r
+            else:
+                checks["order_validation"] = diagnose.result(
+                    diagnose.NOT_CHECKED, "Bybit has no test-order endpoint; the practice lifecycle tool places one "
+                                          "real practice order when you choose to run it")
     finally:
         await http.aclose()
+    return await _finish(session, c, checks, perms, now)
+
+
+async def _finish(session: AsyncSession, c: ApiConnection, checks: dict[str, Any], perms: dict[str, Any] | None,
+                  now: datetime) -> dict[str, Any]:
+    c.checks = checks
+    pub, auth = checks["public_market_data"]["state"], checks["account_auth"]["state"]
+    if perms is None:  # failed before the key was proven
+        failed = checks["public_market_data"] if pub != diagnose.OK else checks["account_auth"]
+        state = failed["state"]
+        c.status = ("BLOCKED" if state in (diagnose.GEO, diagnose.FORBIDDEN) else
+                    "UNREACHABLE" if state in (diagnose.TIMEOUT, diagnose.UNREACHABLE) else
+                    "AUTH_FAILED" if state == diagnose.AUTH else "FAILED")
+        c.last_error = failed["message"]
+        await _event(session, "WARN", f"connection test {c.status}: {c.exchange} {c.environment} '{c.label}'",
+                     {"id": str(c.id), "public_market_data": pub, "account_auth": auth,
+                      "http_status": failed.get("http_status"), "code": failed.get("code"), "host": checks["host"]})
+        return {"ok": False, "status": c.status, "error": c.last_error, "checks": checks}
     c.status, c.last_error, c.last_ok_at, c.permissions = "OK", None, now, perms
     await _event(session, "INFO", f"connection test OK: {c.exchange} {c.environment} '{c.label}'",
                  {"id": str(c.id), "withdraw_enabled": perms.get("withdraw_enabled"),
-                  "ip_restricted": perms.get("ip_restricted")})
-    return {"ok": True, "status": c.status, "permissions": perms,
+                  "ip_restricted": perms.get("ip_restricted"), "order_validation": checks["order_validation"]["state"]})
+    return {"ok": True, "status": c.status, "permissions": perms, "checks": checks,
             "live_gates": livelock.gates_json(view(c), now) if c.environment == LIVE else None}

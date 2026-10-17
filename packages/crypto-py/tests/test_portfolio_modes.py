@@ -394,3 +394,31 @@ async def test_settings_that_would_detach_an_open_position_are_refused(sf, redis
         out = await config_store.save_strategy(s, TEST_ID, {"enabled": False, "risk": {"risk_per_trade_quote": "3"}},
                                                await v(), "t")
         assert out["enabled"] is False
+
+
+async def test_paper_trading_never_builds_an_exchange_order_client(sf, redis, strategy, monkeypatch):  # noqa: F811
+    # Paper (DEMO) mode: simulated balance, simulated fills on public prices,
+    # stop loss and trade history; the signing client used for exchange orders
+    # must never even be constructed, and no exchange connection is needed.
+    from yonixalpha_crypto.db import DemoOrder
+    from yonixalpha_crypto.private import signedhttp
+
+    def forbidden(*a, **k):
+        raise AssertionError("paper trading tried to build an exchange order client")
+
+    monkeypatch.setattr(signedhttp.SignedHttp, "__init__", forbidden)
+    md = market()
+    await enable(sf)
+    e = await engine(sf, redis, md)
+    await e.tick(NOW)
+    md.books["BTC/USDT"] = book("98.5", "98.52")  # through the 1% stop: closed by the paper stop loss
+    await e.tick(NOW + timedelta(seconds=30))
+    async with sf() as s:
+        p = (await s.execute(select(DemoPosition))).scalar_one()
+        assert p.status == "CLOSED" and p.realized_pnl_quote < 0 and p.fees_quote > 0
+        orders = (await s.execute(select(DemoOrder).order_by(DemoOrder.created_at))).scalars().all()
+        assert [o.side for o in orders] == ["BUY", "SELL"] and all(o.status == "FILLED" for o in orders)
+        acc = (await s.execute(select(DemoAccount))).scalar_one()
+        assert acc.cash < acc.starting_balance  # the simulated balance carries the loss and fees
+        assert (await s.execute(select(ExecTrade))).scalars().all() == []  # no exchange trade of any kind
+        assert (await s.execute(select(ApiConnection))).scalars().all() == []  # no connection was needed
