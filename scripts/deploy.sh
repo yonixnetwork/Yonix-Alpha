@@ -29,8 +29,16 @@ fi
 # run. SOLANA_ONLY (default) starts neither data-evm (BSC / Robinhood) nor,
 # with COPY_TRADING_ENABLED=false, copy-engine. Read from .env on every
 # deploy, so a change there takes effect on the next deploy.
-OPTIONAL_SERVICES="data-evm:evm copy-engine:copy"
-active_profiles() { bash scripts/compose-profiles.sh .env; }
+#
+# Memecoin pause (scripts/memecoin.sh): while runtime/memecoin-paused exists,
+# scripts/active-profiles.sh returns no Memecoin profile, so this deploy
+# neither builds nor starts any Memecoin worker, and the loop after `up`
+# removes any Memecoin container still running. Only api, web, crypto-trading
+# and the shared infrastructure are deployed. `scripts/memecoin.sh resume`
+# brings Memecoin back. (active-profiles.sh adds "memecoin" to the optional
+# profiles of scripts/compose-profiles.sh.)
+OPTIONAL_SERVICES="data-solana:memecoin engine-solana-discovery:memecoin decision-engine:memecoin ml:memecoin paper-trading:memecoin data-evm:evm copy-engine:copy"
+active_profiles() { bash scripts/active-profiles.sh .env; }
 
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 if [ -z "${DEPLOY_PULLED:-}" ]; then
@@ -63,6 +71,10 @@ fi
 export COMPOSE_PROFILES="$(active_profiles)"
 echo "==> System profile: $(grep -E '^SYSTEM_PROFILE=' .env | tail -1 | cut -d= -f2- || true) (default SOLANA_ONLY);" \
      "optional workers on: ${COMPOSE_PROFILES:-none}"
+if [ -f runtime/memecoin-paused ]; then
+    echo "==> MEMECOIN IS PAUSED ($(head -1 runtime/memecoin-paused)): no Memecoin worker is built or started." \
+         "Resume with: bash scripts/memecoin.sh resume"
+fi
 
 echo "==> Building images"
 df -h / | tail -1 | awk '{print "    disk: " $4 " free of " $2}'
@@ -107,7 +119,7 @@ for entry in ${OPTIONAL_SERVICES}; do
         *",${prof},"*) ;;
         *)
             if [ -n "$(docker ps -aq --filter "label=com.docker.compose.service=${svc}")" ]; then
-                echo "==> Stopping ${svc} (off in this system profile)"
+                echo "==> Stopping ${svc} (Memecoin paused, or off in this system profile)"
                 COMPOSE_PROFILES="${prof}" ${COMPOSE} rm -s -f "${svc}" || echo "    stopping ${svc} failed" >&2
             fi
             ;;

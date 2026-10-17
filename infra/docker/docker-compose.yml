@@ -3,6 +3,11 @@
 #   docker compose -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.prod.yml up -d
 # Both expect a .env file in the repo root (see .env.example / docs/DEPLOYMENT.md).
 #
+# The Memecoin workers (data-solana, engine-solana-discovery, decision-engine,
+# ml, paper-trading) are behind the "memecoin" profile: a plain `up -d` never
+# starts them. scripts/active-profiles.sh turns the profile on unless Memecoin
+# is paused (runtime/memecoin-paused, set by `scripts/memecoin.sh pause`).
+#
 # Every service loads the same env_file (repo-root .env) rather than relying
 # on docker compose's ${VAR} substitution, which resolves against the
 # *compose file's* directory by default, not the repo root — mixing the two
@@ -86,6 +91,7 @@ services:
     networks: [yonixalpha]
 
   data-solana:
+    profiles: ["memecoin"]  # paused / resumed with scripts/memecoin.sh
     build:
       context: ../..
       dockerfile: services/data-solana/Dockerfile
@@ -133,6 +139,7 @@ services:
     networks: [yonixalpha]
 
   engine-solana-discovery:
+    profiles: ["memecoin"]  # paused / resumed with scripts/memecoin.sh
     build:
       context: ../..
       dockerfile: services/engine-solana-discovery/Dockerfile
@@ -182,6 +189,7 @@ services:
     networks: [yonixalpha]
 
   decision-engine:
+    profiles: ["memecoin"]  # paused / resumed with scripts/memecoin.sh
     build:
       context: ../..
       dockerfile: services/decision-engine/Dockerfile
@@ -197,6 +205,7 @@ services:
     networks: [yonixalpha]
 
   ml:
+    profiles: ["memecoin"]  # paused / resumed with scripts/memecoin.sh
     build:
       context: ../..
       dockerfile: services/ml/Dockerfile
@@ -210,6 +219,7 @@ services:
     networks: [yonixalpha]
 
   paper-trading:
+    profiles: ["memecoin"]  # paused / resumed with scripts/memecoin.sh
     build:
       context: ../..
       dockerfile: services/paper-trading/Dockerfile

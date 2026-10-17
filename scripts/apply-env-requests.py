@@ -85,9 +85,10 @@ def apply_one(path: str) -> str:
         f.write(merged)
 
     try:
-        # The optional workers (data-evm, copy-engine) of the system profile in
-        # .env, as scripts/deploy.sh starts them; a worker that is off stays off.
-        profiles = subprocess.run(["bash", "scripts/compose-profiles.sh", ENV_FILE], cwd=REPO, capture_output=True,
+        # The same profiles scripts/deploy.sh turns on (scripts/active-profiles.sh):
+        # a worker that is off stays off, and nothing Memecoin starts while
+        # Memecoin is paused (runtime/memecoin-paused).
+        profiles = subprocess.run(["bash", "scripts/active-profiles.sh", ENV_FILE], cwd=REPO, capture_output=True,
                                   text=True, timeout=30).stdout.strip()
         proc = subprocess.run(COMPOSE + ["up", "-d"], cwd=REPO, capture_output=True, text=True, timeout=600,
                               env={**os.environ, "COMPOSE_PROFILES": profiles})

@@ -189,4 +189,4 @@ unset helius_key url
 echo
 echo "Nothing has been restarted. To apply:"
 echo "   cd ${REPO_ROOT}"
-echo '   docker compose --env-file .env -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.prod.yml up -d'
+echo '   COMPOSE_PROFILES="$(bash scripts/active-profiles.sh .env)" docker compose --env-file .env -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.prod.yml up -d'
