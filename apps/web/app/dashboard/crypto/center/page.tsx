@@ -12,11 +12,15 @@ import { useApi } from "@/lib/useApi";
 
 type Row = {
   id: string; name: string; category: string; description: string; library: boolean; status: string; why: string;
+  approved_for_consideration: boolean;
+  paper: { open_positions?: number; open_cost_quote?: string; closed_trades?: number; realized_pnl_quote?: string; fees_quote?: string };
   enabled: boolean; mode: string; exchange: string | null; symbols: string[]; interval: string | null;
   risk: { per_trade: string; mode: string };
   backtest: null | { status: string; tier?: string; oos_trades?: number; oos_expectancy_r?: number | null;
     oos_profit_factor?: number | null; oos_max_drawdown_pct?: number | null; oos_net_return_pct?: number | null;
     oos_win_rate?: number | null; symbol: string; interval: string; finished_at: string; rank_key?: number[];
+    oos_net_profit?: number | null; oos_fees?: number | null; oos_slippage?: number | null; data_source?: string | null;
+    oos_period?: { from?: string; to?: string } | null;
     aggregate?: { finished: number; errored: number; pending: number; tiers: Record<string, number> } };
 };
 type Rejected = { id: string; name: string; status: string; reason: string };
@@ -34,8 +38,20 @@ function aggText(r: Row): string {
     (a.errored ? `, ${a.errored} failed` : "") + (a.pending ? `, ${a.pending} queued` : "");
 }
 
+function pct(x: number | null | undefined): string {
+  return x == null ? "–" : `${(x * 100).toFixed(1)}%`;
+}
+
+// Paper figures straight from the stored simulated positions (no estimate).
+function paperText(r: Row): string {
+  const p = r.paper;
+  if (!p || (!p.open_positions && !p.closed_trades)) return "";
+  return `${p.open_positions ?? 0} open · ${p.closed_trades ?? 0} closed · realized ${n(p.realized_pnl_quote)} USDT`;
+}
+
 export default function StrategyCenter() {
-  const { data, error } = useApi<{ strategies: Row[]; ranking_rule: string }>("/api/crypto/center/strategies",
+  const { data, error } = useApi<{ strategies: Row[]; ranking_rule: string;
+    paper_accounts: { exchange: string; quote: string; starting_balance: string; cash: string }[] }>("/api/crypto/center/strategies",
     undefined, { refreshMs: 30000 });
   const rejected = useApi<Rejected[]>("/api/crypto/center/rejected");
   const [q, setQ] = useState("");
@@ -86,6 +102,10 @@ export default function StrategyCenter() {
         labeled otherwise; published research is cited on each strategy&apos;s page, not counted as evidence.
       </div>
       {data && <div className="muted small" style={{ marginTop: 6 }}>Ranking rule: {data.ranking_rule}.</div>}
+      {data && data.paper_accounts.length > 0 && <div className="small" style={{ marginTop: 6 }}>
+        Paper balances (simulated): {data.paper_accounts.map((a) => `${a.exchange} ${n(a.cash)} ${a.quote} cash (started ${n(a.starting_balance)})`).join(" · ")}</div>}
+      <div className="muted small" style={{ marginTop: 4 }}>Backtest figures are the out-of-sample period of the worst symbol of
+        the latest stored batch, after fees and slippage; nothing is shown until a result is stored.</div>
       {error && <div className="error">{error}</div>}
       <div className="strategy-filters" role="search">
         <input aria-label="Search strategies" placeholder="Search" value={q} onChange={(e) => setQ(e.target.value)} />
@@ -110,8 +130,9 @@ export default function StrategyCenter() {
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
                 <StatusPill status={r.status} /><ModePill mode={r.mode} enabled={r.enabled} /><TierPill tier={r.backtest?.tier} />
               </div>
+              {paperText(r) && <div className="small" style={{ marginTop: 6 }}>{paperText(r)}</div>}
               {r.backtest && <div className="small mono" style={{ marginTop: 6 }}>
-                OOS {n(r.backtest.oos_trades, 0)} trades · {n(r.backtest.oos_expectancy_r, 3)} R · DD {n(r.backtest.oos_max_drawdown_pct)}%
+                OOS {n(r.backtest.oos_trades, 0)} trades · PnL {n(r.backtest.oos_net_profit)} · win {pct(r.backtest.oos_win_rate)} · DD {n(r.backtest.oos_max_drawdown_pct)}%
                 <div className="muted">{aggText(r)}</div></div>}
             </Link>
           ))}
@@ -123,7 +144,9 @@ export default function StrategyCenter() {
             <thead><tr>
               {th("name", "Strategy")}{th("category", "Category")}{th("status", "Status")}<th>Mode / risk</th>
               {th("rank", "Verdict", "tier")}{th("trades", "OOS trades", "trades")}{th("expectancy", "OOS expectancy (R)", "expectancy_r")}
-              <th>OOS PF<Info k="profit_factor" /></th>{th("drawdown", "OOS max DD %", "max_drawdown_pct")}<th>OOS return %</th>
+              <th>OOS net PnL</th><th>Win rate</th>
+              <th>OOS PF<Info k="profit_factor" /></th>{th("drawdown", "OOS max DD %", "max_drawdown_pct")}<th>Fees + slippage</th>
+              <th>Period · data</th><th>Paper (simulated)</th>
             </tr></thead>
             <tbody>
               {rows.map((r) => (
@@ -137,9 +160,14 @@ export default function StrategyCenter() {
                     {r.backtest && <div className="muted small">{aggText(r)}</div>}</td>
                   <td className="mono">{n(r.backtest?.oos_trades, 0)}</td>
                   <td className="mono">{n(r.backtest?.oos_expectancy_r, 3)}</td>
+                  <td className="mono">{n(r.backtest?.oos_net_profit, 2)}</td>
+                  <td className="mono">{pct(r.backtest?.oos_win_rate)}</td>
                   <td className="mono">{n(r.backtest?.oos_profit_factor, 2)}</td>
                   <td className="mono">{n(r.backtest?.oos_max_drawdown_pct, 2)}</td>
-                  <td className="mono">{n(r.backtest?.oos_net_return_pct, 2)}</td>
+                  <td className="mono">{r.backtest && r.backtest.oos_fees != null ? n((r.backtest.oos_fees ?? 0) + (r.backtest.oos_slippage ?? 0), 2) : "–"}</td>
+                  <td className="small">{r.backtest?.oos_period ? `${(r.backtest.oos_period.from ?? "").slice(0, 10)} to ${(r.backtest.oos_period.to ?? "").slice(0, 10)}` : "–"}
+                    {r.backtest?.data_source && <div className="muted">{r.backtest.data_source}</div>}</td>
+                  <td className="small">{paperText(r) || "–"}</td>
                 </tr>
               ))}
             </tbody>

@@ -59,6 +59,9 @@ ORDER_PATHS: dict[str, frozenset[tuple[str, str]]] = {
     }),
     "binance": frozenset({
         ("POST", "/api/v3/order"), ("DELETE", "/api/v3/order"), ("POST", "/api/v3/order/cancelReplace"),
+        # validated by the exchange, never placed; listed as an order path so a
+        # LIVE environment still needs the live-order lock (it is never sent there)
+        ("POST", "/api/v3/order/test"),
         ("POST", "/api/v3/orderList/oco"), ("POST", "/api/v3/orderList/oto"), ("DELETE", "/api/v3/orderList"),
     }),
 }

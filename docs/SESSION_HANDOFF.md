@@ -461,6 +461,7 @@ Spread limit, slippage and book age are also in `RiskLimits`.
   - pre-deploy backup: `/opt/yonixalpha-backups/yonixalpha-20261017T112205Z.sql.gz` (3.3 GB, verified "dump complete").
 - Server resources (2026-10-17): 2 cores, about 450-500 MB RAM available, swap about 1.1 of 2 GB in use, 35 GB disk free, Postgres database 24 GB. Memory is the tight resource.
 - Memecoin pause (operator request 2026-10-17): `scripts/memecoin.sh pause` stops every Memecoin worker and writes `runtime/memecoin-paused`. While that file exists, `deploy.sh`, the key updater and `docker compose up -d` do not start Memecoin (compose profile `memecoin`). Check with `bash scripts/memecoin.sh status`. Only the operator decides on `resume` (docs/DEPLOYMENT.md, "Pausing Memecoin").
+- Binance HTTP 451 (2026-10-17): Binance's own response to a connection test sent from the server (US). The connection test now records separate checks (public reachability without a key, account authentication, practice order validation, live locked) and reports 451 as a location block, never as a key problem. Binance's market-data-only host is health-checked but not selectable for strategies until the operator decides on its terms (docs/MARKET_DATA_AND_451.md).
 - Not yet verified:
   - the local backtest runner on real candles (`docs/LOCAL_BACKTESTS.md` section 7; result import stays off);
   - exchange demo against a real practice host and key.

@@ -26,6 +26,10 @@ PUBLIC_PATHS: dict[str, frozenset[str]] = {
                           "/api/v3/ticker/bookTicker", "/api/v3/depth"}),
 }
 PUBLIC_PATHS["binance_us"] = PUBLIC_PATHS["binance"]
+# Binance's market-data-only host (data-api.binance.vision): public data only,
+# no API key, no account or order endpoint exists there (Binance FAQ
+# "market_data_only.md"). Same REST shape as binance.com.
+PUBLIC_PATHS["binance_data"] = PUBLIC_PATHS["binance"] | {"/api/v3/ticker/price"}
 
 FORBIDDEN_PARAMS = frozenset({"signature", "sign", "apikey", "api_key", "recvwindow", "recv_window"})
 FORBIDDEN_HEADERS = frozenset({"authorization", "x-mbx-apikey", "x-bapi-api-key", "x-bapi-sign",

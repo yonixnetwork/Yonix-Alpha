@@ -45,9 +45,24 @@ PROFILES: dict[str, ExchangeProfile] = {
         "binance_us", "Binance.US (spot)", "https://api.binance.us", "spot", Decimal("0"), Decimal("2"),
         f"{FEE_ASSUMED}: Binance.US blog (April 2026) 0% maker / 0.02% taker",
         "a separate exchange from binance.com, with its own listings"),
+    # Public market data only (no account, no orders): Binance's official
+    # market-data host. Prices are binance.com spot prices, so the fee
+    # assumption is binance.com's. Health-checked from the server like the
+    # others; NOT selectable for strategies (registry.SPOT_EXCHANGES) until the
+    # operator has checked that its terms allow the intended use from this
+    # server's location (docs/MARKET_DATA_AND_451.md).
+    "binance_data": ExchangeProfile(
+        "binance_data", "Binance public market data (data-api.binance.vision)", "https://data-api.binance.vision",
+        "spot", Decimal("10"), Decimal("10"),
+        f"{FEE_ASSUMED}: binance.com Regular tier 0.10% / 0.10% (prices are binance.com spot prices)",
+        "market data only: no account or order endpoint exists on this host; reachability is checked from "
+        "the server before it is shown as healthy"),
 }
 
 EXCHANGES = tuple(PROFILES)
+# Hosts that serve public market data only: never an account environment,
+# so no key can be sent there (private.environments has no such host).
+PUBLIC_DATA_ONLY = frozenset({"binance_data"})
 
 
 def profile(exchange: str, base_url: str | None = None) -> ExchangeProfile:

@@ -185,11 +185,12 @@ class ApiConnection(Base):
     key_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     key_hint: Mapped[str] = mapped_column(String(12), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    status: Mapped[str] = mapped_column(String(16), nullable=False, default="UNTESTED")  # UNTESTED | OK | FAILED | NEEDS_REENTRY
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="UNTESTED")  # UNTESTED | OK | FAILED | BLOCKED | AUTH_FAILED | UNREACHABLE | NEEDS_REENTRY
     permissions: Mapped[dict | None] = mapped_column(JSONB)
     checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_ok_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
+    checks: Mapped[dict | None] = mapped_column(JSONB)  # the last test's separate checks (diagnose)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
     updated_by: Mapped[str | None] = mapped_column(String(64))

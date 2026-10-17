@@ -22,8 +22,37 @@ type Conn = {
   id: string; exchange: string; environment: string; label: string; host: string; environment_label: string;
   practice: boolean; key_hint: string; enabled: boolean; status: string; permissions: Perms | null;
   checked_at: string | null; last_ok_at: string | null; last_error: string | null; updated_by: string | null;
-  live_gates: Gate[] | null;
+  live_gates: Gate[] | null; checks: Checks | null;
 };
+type Check = { state: string; ok: boolean; message: string; http_status?: number | null; code?: number | null };
+type Checks = { public_market_data: Check; account_auth: Check; order_validation: Check; live_orders: Check;
+  host: string; environment: string; origin: string };
+
+// The four checks of a connection test, each with its own result: a public
+// endpoint answering never proves the key, and a 451 location block is never
+// shown as an authentication failure.
+const CHECK_LABEL: [keyof Checks, string][] = [["public_market_data", "Public market data (this host, no key)"],
+  ["account_auth", "Account authentication (signed)"], ["order_validation", "Practice order validation (never placed)"],
+  ["live_orders", "Live orders"]];
+const STATE_LABEL: Record<string, string> = {
+  ok: "OK", geo_restricted: "BLOCKED: location (HTTP 451)", forbidden: "BLOCKED (HTTP 403)", rate_limited: "rate limited",
+  auth_failed: "key rejected", timeout: "timeout", unreachable: "unreachable", malformed: "bad response",
+  exchange_error: "exchange error", rejected: "order refused", error: "error", blocked_locally: "refused locally",
+  skipped: "skipped", not_applicable: "n/a", not_checked: "not checked", locked: "LOCKED" };
+
+function CheckList({ checks }: { checks: Checks }) {
+  return (
+    <div className="small" style={{ marginTop: 4 }}>
+      {CHECK_LABEL.map(([k, label]) => {
+        const ch = checks[k] as Check;
+        const cls = ch.ok ? "pill-ok" : ["skipped", "not_applicable", "not_checked", "locked"].includes(ch.state) ? "pill-off" : "pill-danger";
+        return <div key={k} title={ch.message}><span className={`pill ${cls}`}>{STATE_LABEL[ch.state] ?? ch.state}</span> {label}
+          {!ch.ok && !["skipped", "locked"].includes(ch.state) && <div className="muted">{ch.message}</div>}</div>;
+      })}
+      <div className="muted">Tested from {checks.origin}.</div>
+    </div>
+  );
+}
 type Env = { exchange: string; environment: string; host: string; label: string; note: string };
 type Listing = { live_orders_unlocked: boolean; environments: Env[]; connections: Conn[] };
 
@@ -138,7 +167,7 @@ function ConnRow({ c, onChanged }: { c: Conn; onChanged: () => void }) {
       <td>
         <span className={`pill ${c.status === "OK" ? "pill-ok" : c.status === "UNTESTED" ? "pill-off" : "pill-danger"}`}>{c.status}</span>
         <div className="muted small">checked {formatDate(c.checked_at)}</div>
-        {c.last_error && <div className="neg small">{c.last_error}</div>}
+        {c.checks ? <CheckList checks={c.checks} /> : c.last_error && <div className="neg small">{c.last_error}</div>}
       </td>
       <td className="small">
         {p ? <>

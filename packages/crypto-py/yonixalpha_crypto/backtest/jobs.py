@@ -26,7 +26,7 @@ FINAL = ("DONE", "FAILED", "CANCELLED", "SKIPPED")
 _PKG = Path(__file__).resolve().parents[1]
 _CODE_FILES = ("strategies/indicators.py", "strategies/library.py", "strategies/meta_muse.py",
                "backtest/engine.py", "backtest/metrics.py", "backtest/validation.py", "backtest/data.py",
-               "backtest/run.py", "private/management.py")
+               "backtest/run.py", "backtest/jobs.py", "private/management.py")
 
 
 def code_version() -> str:
@@ -156,6 +156,7 @@ def summary(result: dict[str, Any]) -> dict[str, Any]:
     return {"tier": result["verdict"]["tier"], "rank_key": result["verdict"]["rank_key"],
             "oos_trades": oos["trades"], "oos_net_return_pct": oos["net_return_pct"],
             "oos_expectancy_r": oos["expectancy_r"], "oos_profit_factor": oos["profit_factor"],
+            "oos_net_profit": oos.get("net_profit"), "oos_fees": oos.get("fees"), "oos_slippage": oos.get("slippage"),
             "oos_max_drawdown_pct": oos["max_drawdown_pct"], "oos_win_rate": oos["win_rate"],
             "oos_sharpe": oos["sharpe"], "wf_positive_folds": result["walk_forward"]["positive_folds"],
             "robust": result["sensitivity"]["robust"],

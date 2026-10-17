@@ -192,7 +192,8 @@ async def test_saved_keys_are_encrypted_hidden_and_never_shared_between_environm
 
 async def test_bybit_test_reads_permissions_and_flags_a_withdrawing_key(sf):
     sent = []
-    routes = {"/v5/account/wallet-balance": bybit_ok({"list": [{"coin": [{"coin": "USDT", "walletBalance": "50000"},
+    routes = {"/v5/market/time": bybit_ok({}),
+              "/v5/account/wallet-balance": bybit_ok({"list": [{"coin": [{"coin": "USDT", "walletBalance": "50000"},
                                                                          {"coin": "BTC", "walletBalance": "0"}]}]}),
               "/v5/user/query-api": bybit_ok({"readOnly": 0, "ips": ["203.0.113.7"],
                                               "permissions": {"Spot": ["SpotTrade"], "ContractTrade": [],
@@ -225,13 +226,17 @@ async def test_binance_live_test_uses_key_restrictions_and_testnet_skips_them(sf
         live.enabled = True
         await s.flush()
         sent_live, sent_tn = [], []
-        out = await connections.test(s, live, transport=mock({"/api/v3/account": acct,
+        out = await connections.test(s, live, transport=mock({"/api/v3/time": {"serverTime": 1}, "/api/v3/account": acct,
                                                               "/sapi/v1/account/apiRestrictions": restr}, sent_live),
                                      env=ENV, now=NOW)
-        await connections.test(s, tn, transport=mock({"/api/v3/account": acct}, sent_tn), env=ENV, now=NOW)
+        tn_out = await connections.test(s, tn, transport=mock({"/api/v3/time": {"serverTime": 1}, "/api/v3/account": acct,
+                                                               "/api/v3/order/test": {}}, sent_tn), env=ENV, now=NOW)
         await s.commit()
-    assert [r.url.path for r in sent_live] == ["/api/v3/account", "/sapi/v1/account/apiRestrictions"]
-    assert [r.url.path for r in sent_tn] == ["/api/v3/account"]
+    # LIVE: public check, account, key restrictions; never an order request (not even a test order)
+    assert [r.url.path for r in sent_live] == ["/api/v3/time", "/api/v3/account", "/sapi/v1/account/apiRestrictions"]
+    assert out["checks"]["order_validation"]["state"] == "locked" and out["checks"]["live_orders"]["state"] == "locked"
+    assert [r.url.path for r in sent_tn] == ["/api/v3/time", "/api/v3/account", "/api/v3/order/test"]
+    assert tn_out["checks"]["order_validation"]["state"] == "ok" and tn.checks["account_auth"]["state"] == "ok"
     assert live.permissions["withdraw_enabled"] is False and live.permissions["ip_restricted"] is True
     assert [g["id"] for g in out["live_gates"] if not g["ok"]] == ["code_lock"]  # only the code lock remains
     assert tn.permissions["verified"] is False and tn.permissions["withdraw_enabled"] is None
@@ -242,8 +247,10 @@ async def test_a_failed_or_unreadable_connection_is_recorded_without_secrets(sf)
     async with sf() as s:
         c = await connections.create(s, exchange="bybit", environment="DEMO", label="d", api_key=KEY,
                                      api_secret=SECRET, actor="admin", env=ENV)
-        out = await connections.test(s, c, transport=mock({"/v5/account/wallet-balance": geo}, []), env=ENV, now=NOW)
-        assert out["ok"] is False and c.status == "FAILED" and "HTTP 403" in c.last_error and KEY not in c.last_error
+        out = await connections.test(s, c, transport=mock({"/v5/market/time": bybit_ok({}),
+                                                           "/v5/account/wallet-balance": geo}, []), env=ENV, now=NOW)
+        assert out["ok"] is False and c.status == "BLOCKED" and "HTTP 403" in c.last_error and KEY not in c.last_error
+        assert out["checks"]["public_market_data"]["state"] == "ok" and out["checks"]["account_auth"]["state"] == "forbidden"
         out2 = await connections.test(s, c, transport=mock({}, []), env={"JWT_SECRET": "z" * 40}, now=NOW)
         assert out2["ok"] is False and c.status == "NEEDS_REENTRY"
         await s.commit()
@@ -259,3 +266,90 @@ async def test_practice_orders_need_no_live_gate_but_stay_on_the_practice_host()
     await http.aclose()
     assert sent[0].url.host == "testnet.binance.vision"
     assert dict(parse_qsl(urlsplit(str(sent[0].url)).query))["side"] == "BUY"
+
+
+# ---- connection test: separate checks and plain diagnoses ----------------
+
+def _err(status, body=None, text=None):
+    if text is not None:
+        return httpx.Response(status, text=text)
+    return httpx.Response(status, json=body or {})
+
+
+async def _test_binance_demo(sf, routes):
+    sent = []
+    async with sf() as s:
+        c = await connections.create(s, exchange="binance", environment="DEMO", label="demo", api_key=KEY,
+                                     api_secret=SECRET, actor="admin", env=ENV)
+        out = await connections.test(s, c, transport=mock(routes, sent), env=ENV, now=NOW)
+        await s.commit()
+    return out, c, sent
+
+
+async def test_a_451_location_block_is_reported_as_such_and_never_as_an_auth_failure(sf):
+    geo = _err(451, {"code": 0, "msg": "Service unavailable from a restricted location according to 'b. Eligibility'"})
+    out, c, sent = await _test_binance_demo(sf, {"/api/v3/time": geo})
+    ch = out["checks"]
+    assert ch["public_market_data"]["state"] == "geo_restricted" and ch["public_market_data"]["http_status"] == 451
+    assert ch["public_market_data"]["host"] == "https://demo-api.binance.com"
+    assert ch["account_auth"]["state"] == "skipped" and ch["order_validation"]["state"] == "skipped"
+    assert c.status == "BLOCKED" and "not a key or password problem" in c.last_error
+    assert "auth" not in c.status.lower() and "VPN" in c.last_error  # explains that nothing tries to get around it
+    # only the DEMO host's public endpoint was contacted: no key sent, no fallback to the live host
+    assert [r.url.path for r in sent] == ["/api/v3/time"] and {r.url.host for r in sent} == {"demo-api.binance.com"}
+    assert "x-mbx-apikey" not in sent[0].headers and "signature" not in str(sent[0].url)
+    assert KEY not in json.dumps(out) and SECRET not in json.dumps(out)
+
+
+async def test_public_ok_but_the_key_rejected_is_an_auth_failure_not_a_location_block(sf):
+    out, c, sent = await _test_binance_demo(sf, {"/api/v3/time": {"serverTime": 1},
+                                                 "/api/v3/account": _err(401, {"code": -2015, "msg": "Invalid API-key, IP, or permissions for action."})})
+    assert out["checks"]["public_market_data"]["state"] == "ok"
+    assert "does not prove the key" in out["checks"]["public_market_data"]["message"]  # public data is not proof of trading
+    assert out["checks"]["account_auth"]["state"] == "auth_failed" and c.status == "AUTH_FAILED"
+    assert out["checks"]["order_validation"]["state"] == "skipped"
+    assert all(r.url.host == "demo-api.binance.com" for r in sent)
+
+
+@pytest.mark.parametrize("response,state,status", [
+    (httpx.Response(403, text="<html>blocked</html>"), "forbidden", "BLOCKED"),
+    (_err(429, {"code": -1003, "msg": "Too many requests"}), "rate_limited", "FAILED"),
+    (_err(418, {"code": -1003, "msg": "banned"}), "rate_limited", "FAILED"),
+    (httpx.Response(200, text="not json"), "malformed", "FAILED"),
+    (_err(503, {"code": -1001, "msg": "internal"}), "exchange_error", "FAILED"),
+])
+async def test_other_public_failures_are_classified_from_the_status_and_code(sf, response, state, status):
+    out, c, _ = await _test_binance_demo(sf, {"/api/v3/time": response,
+                                              "/api/v3/account": {"balances": []}, "/api/v3/order/test": {}})
+    assert out["checks"]["public_market_data"]["state"] == state
+    if state in ("forbidden",):
+        assert c.status == status and out["checks"]["account_auth"]["state"] == "skipped"
+
+
+async def test_a_timeout_is_unreachable_not_an_auth_failure(sf):
+    def handler(request):
+        raise httpx.ConnectTimeout("timed out", request=request)
+    async with sf() as s:
+        c = await connections.create(s, exchange="binance", environment="TESTNET", label="t", api_key=KEY,
+                                     api_secret=SECRET, actor="admin", env=ENV)
+        out = await connections.test(s, c, transport=httpx.MockTransport(handler), env=ENV, now=NOW)
+    assert out["checks"]["public_market_data"]["state"] == "timeout" and c.status == "UNREACHABLE"
+
+
+async def test_order_validation_failure_is_shown_separately_and_the_key_still_counts_as_working(sf):
+    out, c, sent = await _test_binance_demo(sf, {"/api/v3/time": {"serverTime": 1}, "/api/v3/account": {"balances": []},
+                                                 "/api/v3/order/test": _err(400, {"code": -1013, "msg": "Filter failure: NOTIONAL"})})
+    assert out["ok"] is True and c.status == "OK"
+    assert out["checks"]["order_validation"]["state"] == "rejected"
+    test_order = [r for r in sent if r.url.path == "/api/v3/order/test"]
+    assert len(test_order) == 1 and not [r for r in sent if r.url.path == "/api/v3/order"]  # never a real order
+
+
+def test_public_data_only_host_cannot_receive_a_key():
+    from yonixalpha_crypto.exchanges.profiles import PROFILES, PUBLIC_DATA_ONLY
+    assert PROFILES["binance_data"].base_url == "https://data-api.binance.vision"
+    for ex in PUBLIC_DATA_ONLY:
+        for env in environments.ENVIRONMENTS:
+            with pytest.raises(environments.UnknownEnvironment):
+                SignedHttp(ex, env, KEY, SECRET)
+    assert all(e.base_url != "https://data-api.binance.vision" for e in environments.ACCOUNT_ENVIRONMENTS.values())

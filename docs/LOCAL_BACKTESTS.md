@@ -49,7 +49,7 @@ Edit `batch.json`:
 
 | Key | Meaning |
 |---|---|
-| `exchange` | Whose candles: `binance_us`, `binance` (Binance.com) or `bybit` |
+| `exchange` | Whose candles: `binance_us`, `binance` (Binance.com), `binance_data` (Binance's market-data-only host, data-api.binance.vision: binance.com prices, no key) or `bybit` |
 | `symbols` | e.g. `["BTC/USDT", "ETH/USDT", "SOL/USDT"]`. Pair strategies (meta_muse) use the first as the lead and the last as the traded symbol. |
 | `interval` | `15m`, `1h`, `4h` or `1d` |
 | `start`, `end` | UTC period, e.g. two years. At most 40,000 candles per symbol. |
@@ -76,6 +76,12 @@ Binance's public bulk files from https://data.binance.vision.
    python -m yonixalpha_crypto.backtest.local convert --symbol BTC/USDT --interval 1h --data data --exchange binance BTCUSDT-1h-*.zip
    ```
 3. Set `"exchange": "binance"` in `batch.json`, because these are Binance.com candles.
+
+Verify each downloaded ZIP against Binance's checksum file first:
+`sha256sum -c BTCUSDT-1h-2025-01.zip.CHECKSUM` (macOS: `shasum -a 256 -c ...`).
+Binance's Vision Dataset Terms (CC BY-NC-SA 4.0) allow "algorithmic
+historical backtesting for purely personal non-production research"; they
+exclude live trading execution (docs/MARKET_DATA_AND_451.md).
 
 The converter reads both timestamp formats (milliseconds before 2025,
 microseconds since) and removes duplicate rows.

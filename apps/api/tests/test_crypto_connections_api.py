@@ -97,3 +97,29 @@ async def test_connection_test_is_read_only_and_throttled(client, auth_headers, 
         events = (await c.execute(text("SELECT message, detail FROM crypto.events WHERE source = 'connections'"))).all()
     await eng.dispose()
     assert len(events) >= 3 and all(KEY not in m + json.dumps(d) for m, d in events)
+
+
+async def test_a_451_shows_as_a_location_block_with_separate_checks_and_no_secrets(client, auth_headers, crypto, monkeypatch):  # noqa: F811
+    sent = []
+
+    def handler(request):
+        sent.append(request)
+        return httpx.Response(451, json={"code": 0, "msg": "Service unavailable from a restricted location according "
+                                                          "to 'b. Eligibility' in https://www.binance.com/en/terms."})
+
+    original = connections.test
+
+    async def mocked(session, c, **kw):
+        return await original(session, c, transport=httpx.MockTransport(handler), **kw)
+
+    monkeypatch.setattr(connections, "test", mocked)
+    cid = (await client.post("/api/crypto/connections", json=body(exchange="binance", label="bdemo"),
+                             headers=auth_headers)).json()["id"]
+    out = (await client.post(f"/api/crypto/connections/{cid}/test", headers=auth_headers)).json()
+    assert out["ok"] is False and out["status"] == "BLOCKED"
+    ch = out["checks"]
+    assert ch["public_market_data"]["state"] == "geo_restricted" and ch["public_market_data"]["http_status"] == 451
+    assert ch["account_auth"]["state"] == "skipped" and ch["live_orders"]["state"] == "locked"
+    assert out["connection"]["checks"]["public_market_data"]["state"] == "geo_restricted"
+    assert [q.url.host for q in sent] == ["demo-api.binance.com"]  # its own host only; no fallback, no key sent
+    assert KEY not in json.dumps(out) and SECRET not in json.dumps(out)

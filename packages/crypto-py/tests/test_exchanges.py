@@ -98,3 +98,61 @@ def test_candle_hygiene_duplicates_order_forming_gaps_stale():
     assert out.dropped_duplicates == 1 and out.dropped_forming == 1 and len(out.gaps) == 1 and not out.stale
     assert clean(cs, "5m", NOW + timedelta(minutes=30)).stale
     assert clean([], "5m", NOW).stale_reason == "no closed candle"
+
+
+# ---- Binance's public market-data-only host (data-api.binance.vision) -----
+
+def _data_api(seen):
+    t0 = int((NOW - timedelta(hours=3)).timestamp()) // 3600 * 3600 * 1000
+
+    def handler(r: httpx.Request) -> httpx.Response:
+        seen.append(r)
+        assert r.method == "GET" and r.url.host == "data-api.binance.vision"
+        assert not {"x-mbx-apikey", "authorization"} & {k.lower() for k in r.headers}
+        assert "signature" not in r.url.params and "timestamp" not in r.url.params
+        if r.url.path == "/api/v3/klines":
+            rows = [[t0 + i * 3600000, "1", "2", "0.5", str(100 + i), "3", t0 + (i + 1) * 3600000 - 1] for i in range(3)]
+            return httpx.Response(200, json=rows)
+        if r.url.path == "/api/v3/ping":
+            return httpx.Response(200, json={})
+        return httpx.Response(404, json={"code": -1, "msg": "not mocked"})
+    return handler
+
+
+async def test_public_data_only_provider_reads_candles_without_any_credential():
+    seen = []
+    md = market_data("binance_data", transport=httpx.MockTransport(_data_api(seen)))
+    await md.ping()
+    cs = await md.candles("BTC/USDT", "1h", 3)
+    assert [c.close for c in cs] == [Decimal(100), Decimal(101), Decimal(102)]
+    assert cs[0].open_time.tzinfo is not None and md.exchange == "binance_data"  # millisecond open times -> UTC datetimes
+    assert [r.url.path for r in seen] == ["/api/v3/ping", "/api/v3/klines"]
+    await md.aclose()
+
+
+@pytest.mark.parametrize("status", [451, 403, 429, 503])
+async def test_public_data_only_provider_reports_blocks_and_limits_as_unavailable(status):
+    md = market_data("binance_data", transport=httpx.MockTransport(
+        lambda r: httpx.Response(status, json={"code": 0, "msg": "refused"}, headers={"Retry-After": "2"})))
+    with pytest.raises(ExchangeUnavailable) as e:
+        await md.ping()
+    assert e.value.status == status
+    await md.aclose()
+
+
+def test_public_data_only_provider_refuses_private_paths_before_sending():
+    from yonixalpha_crypto.publichttp import RealOrderBlocked, check_request
+    for method, path in [("GET", "/api/v3/account"), ("POST", "/api/v3/order"), ("POST", "/api/v3/order/test"),
+                         ("GET", "/api/v3/myTrades")]:
+        with pytest.raises(RealOrderBlocked):
+            check_request("binance_data", method, path, {}, {})
+    with pytest.raises(RealOrderBlocked):
+        check_request("binance_data", "GET", "/api/v3/klines", {"signature": "x"}, {})
+    check_request("binance_data", "GET", "/api/v3/ticker/price", {"symbol": "BTCUSDT"}, {})  # allowed
+
+
+def test_public_data_only_provider_is_health_checked_but_not_selectable_for_strategies():
+    from yonixalpha_crypto import registry
+    from yonixalpha_crypto.exchanges import EXCHANGES
+    assert "binance_data" in EXCHANGES  # the worker's health check probes it from the server
+    assert "binance_data" not in registry.SPOT_EXCHANGES  # strategies cannot use it until the operator decides
