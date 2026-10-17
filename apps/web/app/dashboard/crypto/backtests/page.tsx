@@ -1,10 +1,10 @@
 "use client";
 
-// Backtests: queue a batch over the whole library, follow its progress,
-// cancel it, read the ranked results and each run's full study (splits,
+// Backtests: read stored results and each run's full study (splits,
 // walk-forward, sensitivity, benchmark, data provenance, code version and
-// cost assumptions). The server runs the queue one study at a time at low
-// priority; nothing here runs a backtest in the browser.
+// cost assumptions). Historical backtests run LOCALLY on downloaded public
+// candles (backtest.policy); this server never runs them, and importing
+// local results stays off until that workflow is verified.
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -94,57 +94,11 @@ function RunStudy({ id }: { id: string }) {
   );
 }
 
-function NewBatch({ onDone }: { onDone: () => void }) {
-  const today = new Date().toISOString().slice(0, 10);
-  const [f, setF] = useState({ symbols: "BTC/USDT, ETH/USDT, SOL/USDT", interval: "1h", exchange: "binance_us",
-    start: `${Number(today.slice(0, 4)) - 2}${today.slice(4)}`, end: today, taker: "2", maker: "0", spread: "2", slippage: "5",
-    riskMode: "PERCENT", risk: "0.5", equity: "10000", optimize: true, paramSource: "defaults", note: "" });
-  const [msg, setMsg] = useState<string | null>(null);
-  async function go() {
-    try {
-      const r = await apiPost<{ batch_id: string; runs: number; backtests_enabled: boolean; worker_hint: string }>("/api/crypto/backtests", {
-        strategies: "all", symbols: f.symbols.split(",").map((x) => x.trim()).filter(Boolean), interval: f.interval, exchange: f.exchange,
-        start: `${f.start}T00:00:00Z`, end: `${f.end}T00:00:00Z`, optimize: f.optimize, param_source: f.paramSource, note: f.note || null,
-        costs: { taker_fee_bps: Number(f.taker), maker_fee_bps: Number(f.maker), spread_bps: Number(f.spread), slippage_bps: Number(f.slippage) },
-        risk: { mode: f.riskMode, value: Number(f.risk), starting_equity: Number(f.equity) } });
-      setMsg(`Queued ${r.runs} runs.${r.backtests_enabled ? "" : " Backtests are switched off on the Portfolio risk page: the worker will not run them until you switch them on."} ${r.worker_hint}`);
-      onDone();
-    } catch (e) {
-      setMsg(errText(e));
-    }
-  }
-  const inp = (k: keyof typeof f, label: string, type = "text") => (
-    <div className="form-row"><label>{label}</label><input type={type} value={String(f[k])} onChange={(e) => setF({ ...f, [k]: e.target.value })} /></div>);
-  return (
-    <div className="card" style={{ padding: 12 }}>
-      <div className="small" style={{ marginBottom: 8 }}>Runs every library strategy on every symbol. Costs default to Binance.US&apos;s
-        published spot fees (0 maker / 2 bps taker, an assumption, not account-verified) plus spread and slippage.</div>
-      <div className="form-grid">
-        {inp("symbols", "Symbols")}
-        <div className="form-row"><label>Timeframe</label><select value={f.interval} onChange={(e) => setF({ ...f, interval: e.target.value })}>
-          {["15m", "1h", "4h", "1d"].map((x) => <option key={x}>{x}</option>)}</select></div>
-        <div className="form-row"><label>Data (public candles)</label><select value={f.exchange} onChange={(e) => setF({ ...f, exchange: e.target.value })}>
-          <option value="binance_us">Binance.US (reachable from the server)</option><option value="bybit">Bybit</option><option value="binance">Binance</option></select></div>
-        {inp("start", "From", "date")}{inp("end", "To", "date")}
-        {inp("taker", "Taker fee (bps)")}{inp("maker", "Maker fee (bps)")}{inp("spread", "Spread (bps)")}{inp("slippage", "Slippage (bps)")}
-        <div className="form-row"><label>Risk per trade</label><select value={f.riskMode} onChange={(e) => setF({ ...f, riskMode: e.target.value })}>
-          <option value="PERCENT">% of equity</option><option value="FIXED">Fixed USDT</option></select></div>
-        {inp("risk", f.riskMode === "PERCENT" ? "Risk %" : "Risk USDT")}{inp("equity", "Starting equity (USDT)")}
-        <div className="form-row"><label>Parameter grid (train only)</label><select value={f.optimize ? "1" : "0"} onChange={(e) => setF({ ...f, optimize: e.target.value === "1" })}>
-          <option value="1">On (3 x 3 grid, walk-forward)</option><option value="0">Off (the chosen parameters only)</option></select></div>
-        <div className="form-row"><label>Parameters</label><select value={f.paramSource} onChange={(e) => setF({ ...f, paramSource: e.target.value })}>
-          <option value="defaults">Published defaults</option><option value="saved">Each strategy&apos;s saved settings</option></select></div>
-        {inp("note", "Note")}
-      </div>
-      <div className="btn-row" style={{ marginTop: 8 }}><button className="btn btn-sm" onClick={go}>Queue the batch</button>{msg && <span className="small">{msg}</span>}</div>
-    </div>
-  );
-}
-
 function Backtests() {
   const params = useSearchParams();
   const runParam = params.get("run");
-  const list = useApi<{ batches: Batch[]; backtests_enabled: boolean; optimization_enabled: boolean }>("/api/crypto/backtests", undefined, { refreshMs: 10000 });
+  const list = useApi<{ batches: Batch[]; server_backtests_enabled: boolean; result_import_enabled: boolean; policy: string }>(
+    "/api/crypto/backtests", undefined, { refreshMs: 30000 });
   const [open, setOpen] = useState<string | null>(null);
   const [run, setRun] = useState<string | null>(runParam);
   const batch = useApi<Batch & { runs: RunRow[] }>(open ? `/api/crypto/backtests/${open}` : null, undefined, { refreshMs: 10000 });
@@ -161,15 +115,17 @@ function Backtests() {
         bar touches both levels, fills are capped by volume, and fees, spread and slippage are charged. Parameters are
         only ever chosen on the training period. A backtest is not evidence that a strategy will make money.
       </div>
-      {list.data && !list.data.backtests_enabled && <div className="notice notice-warn">Backtests are switched off. Turn them on
-        under <Link href="/dashboard/crypto/portfolio">Portfolio risk</Link>; queued batches wait until then.</div>}
+      {list.data && <div className="notice notice-warn">
+        Disabled here: historical backtests run on your own computer with the local runner, on downloaded public candles,
+        never on this server.{" "}
+        {list.data.result_import_enabled ? "Results are imported from the runner's exported bundle."
+          : "Importing local results is not enabled yet: the local-runner workflow must be verified first."}
+        {" "}See docs/LOCAL_BACKTESTS.md.</div>}
       {msg && <div className="error">{msg}</div>}
       {run && <><div className="btn-row" style={{ marginTop: 8 }}><button className="btn btn-sm btn-ghost" onClick={() => setRun(null)}>Close the study</button></div><RunStudy id={run} /></>}
-      <div className="section-title" style={{ marginTop: 16 }}>New batch</div>
-      <NewBatch onDone={list.reload} />
       <div className="section-title" style={{ marginTop: 16 }}>Batches</div>
       {list.error && <div className="error">{list.error}</div>}
-      {list.data && list.data.batches.length === 0 && <div className="empty-state">No batch yet.</div>}
+      {list.data && list.data.batches.length === 0 && <div className="empty-state">No results yet. Every strategy is &quot;backtest pending&quot;.</div>}
       {list.data && list.data.batches.length > 0 && (
         <div className="table-scroll"><table className="data-table"><thead><tr><th>Created</th><th>Scope</th><th>Status</th><th>Progress</th><th /></tr></thead>
           <tbody>{list.data.batches.map((b) => (

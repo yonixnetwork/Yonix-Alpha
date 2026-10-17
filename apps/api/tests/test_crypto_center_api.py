@@ -40,24 +40,18 @@ async def test_center_lists_twenty_modules_with_honest_status(client, auth_heade
     assert any(x["id"] == "volume_momentum" and x["status"] == "MERGED" for x in rej)
 
 
-async def test_backtest_batches_are_validated_queued_and_cancellable(client, auth_headers, crypto):  # noqa: F811
+async def test_server_backtests_are_refused_by_policy(client, auth_headers, crypto):  # noqa: F811
+    # Historical backtests run locally on downloaded candles, never on the server (backtest.policy).
     base = {"start": "2025-01-01T00:00:00Z", "end": "2025-06-01T00:00:00Z", "symbols": ["BTC/USDT", "ETH/USDT"]}
-    bad = await client.post("/api/crypto/backtests", headers=auth_headers, json={**base, "costs": {"taker_fee_bps": 500}})
-    assert bad.status_code == 422
-    bad = await client.post("/api/crypto/backtests", headers=auth_headers, json={**base, "strategies": ["nope"]})
-    assert bad.status_code == 422
-    r = await client.post("/api/crypto/backtests", headers=auth_headers, json={**base, "costs": {"taker_fee_bps": 10}})
-    assert r.status_code == 200, r.text
-    out = r.json()
-    assert out["runs"] == 39 and out["backtests_enabled"] is False  # 19 single-symbol x 2 + meta_muse once
+    r = await client.post("/api/crypto/backtests", headers=auth_headers, json=base)
+    assert r.status_code == 409 and "run locally" in r.json()["detail"]
     listing = (await client.get("/api/crypto/backtests", headers=auth_headers)).json()
-    assert listing["batches"][0]["counts"] == {"QUEUED": 39}
-    bid = out["batch_id"]
-    det = (await client.get(f"/api/crypto/backtests/{bid}", headers=auth_headers)).json()
-    assert len(det["runs"]) == 39
-    assert (await client.post(f"/api/crypto/backtests/{bid}/cancel", headers=auth_headers)).json()["cancelled_runs"] == 39
-    audit = (await client.get("/api/crypto/audit", headers=auth_headers)).json()
-    assert any(a["scope"] == "backtest" for a in audit)
+    assert listing["batches"] == [] and listing["server_backtests_enabled"] is False
+    assert listing["result_import_enabled"] is False and "run locally" in listing["policy"]
+    p = (await client.get("/api/crypto/portfolio", headers=auth_headers)).json()
+    r = await client.put("/api/crypto/portfolio", headers=auth_headers,
+                         json={"expected_version": p["limits"]["version"], "backtests_enabled": True})
+    assert r.status_code == 422 and "run locally" in r.text
 
 
 async def seed_runs():
@@ -109,7 +103,7 @@ async def test_portfolio_limits_round_trip_with_versions(client, auth_headers, c
     p = (await client.get("/api/crypto/portfolio", headers=auth_headers)).json()
     assert p["limits"]["version"] == 1 and p["state"]["open_positions"] == 0
     r = await client.put("/api/crypto/portfolio", headers=auth_headers,
-                         json={"expected_version": 1, "max_portfolio_risk_quote": "30", "backtests_enabled": True})
+                         json={"expected_version": 1, "max_portfolio_risk_quote": "30", "backtests_enabled": False})
     assert r.status_code == 200 and r.json()["version"] == 2
     assert (await client.put("/api/crypto/portfolio", headers=auth_headers,
                              json={"expected_version": 1, "max_portfolio_risk_quote": "31"})).status_code == 409
@@ -173,32 +167,36 @@ async def test_center_verdict_is_the_worst_symbol_of_the_latest_batch(client, au
     assert det["performance"]["backtest"]["symbol"] == "ETH/USDT"
 
 
-async def test_a_batch_can_use_each_strategys_saved_parameters(client, auth_headers, crypto):  # noqa: F811
+async def test_a_queue_batch_can_use_each_strategys_saved_parameters(client, auth_headers, crypto):  # noqa: F811
+    # The queue itself is server-disabled; its batch builder is still checked
+    # because it shares the run configuration format with the local runner.
+    from datetime import timedelta
+
     from sqlalchemy import select
 
     from yonixalpha_crypto import config_store
+    from yonixalpha_crypto.backtest import jobs
     from yonixalpha_crypto.db import StrategyConfig
 
     await client.get("/api/crypto/center/strategies", headers=auth_headers)  # creates the default settings rows
     eng = create_async_engine(os.environ["DATABASE_URL"])
     sf = async_sessionmaker(eng, expire_on_commit=False)
+    kw = dict(symbols=["BTC/USDT"], interval="1h", exchange="binance_us", start=NOW, end=NOW + timedelta(days=30),
+              costs={}, risk={}, optimize=False, actor="t", strategies=["sma_cross", "ema_cross"])
     async with sf() as s:
         v = (await s.execute(select(StrategyConfig.version).where(StrategyConfig.strategy_id == "sma_cross"))).scalar_one()
         await config_store.save_strategy(s, "sma_cross", {"params": {"fast": 10, "slow": 30}}, v, "t")
+        try:
+            await jobs.create_batch(s, **kw, param_source="tuned")
+            raise AssertionError("expected BatchError")
+        except jobs.BatchError:
+            pass
+        saved = await jobs.create_batch(s, **kw, param_source="saved")
+        default = await jobs.create_batch(s, **kw)
         await s.commit()
-    base = {"start": "2025-01-01T00:00:00Z", "end": "2025-06-01T00:00:00Z", "symbols": ["BTC/USDT"],
-            "strategies": ["sma_cross", "ema_cross"]}
-    assert (await client.post("/api/crypto/backtests", headers=auth_headers,
-                              json={**base, "param_source": "tuned"})).status_code == 422
-    r = await client.post("/api/crypto/backtests", headers=auth_headers, json={**base, "param_source": "saved"})
-    assert r.status_code == 200, r.text
-    d = await client.post("/api/crypto/backtests", headers=auth_headers, json=base)
-    async with sf() as s:
-        saved = {x.strategy_id: x.config for x in (await s.execute(select(BacktestRun).where(
-            BacktestRun.batch_id == uuid.UUID(r.json()["batch_id"])))).scalars()}
-        default = (await s.execute(select(BacktestRun).where(BacktestRun.batch_id == uuid.UUID(d.json()["batch_id"]),
-                                                             BacktestRun.strategy_id == "sma_cross"))).scalar_one()
+        runs = {(r.batch_id, r.strategy_id): r.config for r in (await s.execute(select(BacktestRun))).scalars()}
     await eng.dispose()
-    assert saved["sma_cross"]["param_source"] == "saved" and saved["sma_cross"]["params"]["fast"] in (10, "10")
-    assert saved["sma_cross"]["settings_version"] == v + 1
-    assert default.config["param_source"] == "defaults" and default.config["params"] == {}
+    sc = runs[(saved.id, "sma_cross")]
+    assert sc["param_source"] == "saved" and sc["params"]["fast"] in (10, "10") and sc["settings_version"] == v + 1
+    dc = runs[(default.id, "sma_cross")]
+    assert dc["param_source"] == "defaults" and dc["params"] == {}

@@ -90,7 +90,7 @@ deployed on 2026-10-16):**
 | Gold vs BTC | BLOCKED | Needs a gold source; the operator must choose. Candidates: PAXG, or `xyz:GOLD` on Hyperliquid (not verified). Binance XAUUSDT is refused (451). It must use the original 31 candles. |
 | Hyperliquid grid | NOT IMPLEMENTED | Hyperliquid's public API is reachable from the server (BTC, ETH, PAXG listed; the `xyz` perp dex exists). It is a separate venue and must never be shown as Bybit or Binance. |
 | Confluence | BLOCKED | No forex data source (the original uses MT5, which is Windows-only). EURUSD and GBPUSD stay blocked. Operator decision: gold perp demo allowed, forex blocked. Default rule = the original proximity rule. |
-| Backtests | NOT IMPLEMENTED | Run them locally, never on the VPS. The metrics show "unavailable" below 20 closed demo trades (`metrics.MIN_SAMPLE`). |
+| Backtests | LOCAL ONLY (operator decision 2026-10-17) | Historical backtests run on the operator's computer with `python -m yonixalpha_crypto.backtest.local` (`docs/LOCAL_BACKTESTS.md`), never on the VPS. In code (`backtest/policy.py`): `SERVER_BACKTESTS_ENABLED = False` (worker, API queue and switch refuse) and `RESULT_IMPORT_ENABLED = False` (import into a localhost database only, until the workflow is verified). No real backtest has run yet. |
 | R6 recovery count | NEEDS VERIFICATION | `recovery_check` printed "curve price used after the migration 201". The 24 h window starts before the R6 deploy (PR #79 merged 2026-10-15 11:53 UTC), so these may all be old rows. The hourly split query in section 15 settles it. If counts continue after the paper-trading / decision-engine start time, R6 has a bug. |
 | R6 "unavailable 2327" | Known limitation, not a bug | Pool trades are recorded only while a migrated token is evaluated or held. Other horizons are left UNAVAILABLE rather than given a wrong price. |
 | Health check probes blocked venues | Minor | Every 10 minutes the worker pings Bybit (403) and Binance.com (451). This is harmless log noise. A proposed improvement is to check only the exchanges used by enabled strategies; it has not been done. |
@@ -487,7 +487,10 @@ Spread limit, slippage and book age are also in `RiskLimits`.
 6. **Confluence.** Use the gold perp, demo only, with the original proximity
    rule as the default. Forex stays blocked.
 7. **Backtests.** Run them locally on downloaded public candles, never on the
-   VPS. Report them separately from demo results.
+   VPS (operator decision 2026-10-17; `docs/LOCAL_BACKTESTS.md`). Never
+   schedule a backtest on the server or enable the backtest worker there.
+   Keep the dashboard backtest feature disabled until the local workflow is
+   verified (runbook section 7). Report them separately from demo results.
 8. **Deploy procedure** (after the operator approves a merged PR). Back up,
    pull, then rebuild and start only the changed Crypto services:
    ```

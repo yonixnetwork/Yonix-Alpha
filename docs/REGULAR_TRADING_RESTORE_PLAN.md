@@ -47,7 +47,7 @@ is copied from the unlicensed research repositories.
 | Demo/testnet and live API profiles, encrypted keys | NOT IMPLEMENTED | the project's encryption approach exists (`yonixalpha_core/secretbox.py`, Fernet from `JWT_SECRET`); crypto-py needs its own copy, since it must not import core |
 | Trade thesis, ATR / swing stops, partial exits, trailing stops, invalidation monitor | NOT IMPLEMENTED (only fixed stop / target in `runner.protect_positions`) | Phase 5 |
 | Risk page for crypto (drawdown, consecutive losses, per-exchange limits) | PARTIAL | `risk.RiskLimits` has per-trade, position, exposure, daily loss, open positions, spread, age |
-| Backtesting | NOT IMPLEMENTED | to run locally, never on the VPS |
+| Backtesting | IMPLEMENTED (local runner); import off until verified | runs locally on downloaded public candles, never on the VPS (`docs/LOCAL_BACKTESTS.md`) |
 | Hyperliquid grid | NOT IMPLEMENTED | Hyperliquid info API reachable from the server; separate venue |
 | Gold vs BTC | BLOCKED | gold source not chosen |
 | Confluence (forex) | BLOCKED | no forex source; MT5 is Windows-only |

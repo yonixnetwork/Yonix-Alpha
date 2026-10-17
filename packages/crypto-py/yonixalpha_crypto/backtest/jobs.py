@@ -15,6 +15,7 @@ from typing import Any
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from yonixalpha_crypto.backtest.run import SAVED_PARAMS_NOTE  # noqa: F401  (one wording everywhere)
 from yonixalpha_crypto.db import BacktestBatch, BacktestRun, StrategyConfig
 from yonixalpha_crypto.strategies.library import BY_ID
 
@@ -24,7 +25,8 @@ MAX_RUNS_PER_BATCH = 120
 FINAL = ("DONE", "FAILED", "CANCELLED", "SKIPPED")
 _PKG = Path(__file__).resolve().parents[1]
 _CODE_FILES = ("strategies/indicators.py", "strategies/library.py", "strategies/meta_muse.py",
-               "backtest/engine.py", "backtest/metrics.py", "backtest/validation.py", "private/management.py")
+               "backtest/engine.py", "backtest/metrics.py", "backtest/validation.py", "backtest/data.py",
+               "backtest/run.py", "private/management.py")
 
 
 def code_version() -> str:
@@ -45,8 +47,6 @@ class BatchError(ValueError):
 
 
 PARAM_SOURCES = ("defaults", "saved")
-SAVED_PARAMS_NOTE = ("saved parameters: if they were chosen after looking at earlier out-of-sample results, these "
-                     "out-of-sample figures are no longer independent evidence")
 
 
 async def create_batch(s: AsyncSession, *, strategies: list[str], symbols: list[str], interval: str, exchange: str,

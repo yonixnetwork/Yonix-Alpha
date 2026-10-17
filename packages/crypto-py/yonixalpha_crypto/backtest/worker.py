@@ -1,15 +1,10 @@
-"""The backtest worker: works through the queue one run at a time.
+"""The database queue worker for backtests.
 
-    python -m yonixalpha_crypto.backtest.worker --once          # one run, then exit
-    python -m yonixalpha_crypto.backtest.worker --max-runs 60   # until the queue is empty or 60 runs
-
-Server-safe by design: one run at a time, lowest CPU priority (nice 19),
-bounded data (backtest.data.MAX_BARS), refuses to start while
-portfolio_settings.limits.backtests_enabled is false, stops between runs
-when a batch is cancelled. Run it with the crypto-trading service's memory
-and CPU limits:
-    docker compose ... run --rm crypto-trading python -m yonixalpha_crypto.backtest.worker --max-runs 60
-"""
+DISABLED on the server by policy (backtest.policy): historical backtests run
+locally (`python -m yonixalpha_crypto.backtest.local`), never on the
+production VPS. `main` refuses to start. The queue code (run_one) is kept
+for tests and shares `execute` with the local runner, so both compute a
+run in exactly the same way."""
 
 from __future__ import annotations
 
@@ -21,13 +16,11 @@ import traceback
 from datetime import datetime, timezone
 
 from yonixalpha_crypto import portfolio
-from yonixalpha_crypto.backtest import data, jobs, validation
-from yonixalpha_crypto.backtest.engine import Costs, RiskConfig
+from yonixalpha_crypto.backtest import data, jobs, policy, run
 from yonixalpha_crypto.config import load_settings
 from yonixalpha_crypto.db import BacktestBatch, BacktestRun, Event, make_session_factory
 from yonixalpha_crypto.exchanges import market_data
 from yonixalpha_crypto.exchanges.profiles import PROFILES
-from yonixalpha_crypto.strategies.library import BY_ID
 
 log = logging.getLogger("backtest-worker")
 
@@ -50,7 +43,6 @@ async def run_one(sf, md_factory=None, now=None) -> str | None:
         b = await _batch(sf, r)
         cfg = b.config
         start, end = datetime.fromisoformat(cfg["start"]), datetime.fromisoformat(cfg["end"])
-        m = BY_ID[r.strategy_id]
         md = (md_factory or market_data)(r.exchange)
         source = PROFILES[r.exchange].base_url if r.exchange in PROFILES else r.exchange
         await _phase(sf, r, "loading data")
@@ -64,22 +56,14 @@ async def run_one(sf, md_factory=None, now=None) -> str | None:
             _, series = data.align(lead, series)
             prov["lead"] = lprov
         await _phase(sf, r, f"studying {len(series)} bars")
-        costs = Costs(**{k: float(v) for k, v in (r.config.get("costs") or {}).items()})
-        risk = RiskConfig(**{k: (v if k == "mode" else float(v)) for k, v in (r.config.get("risk") or {}).items()})
-        result = validation.study(series, m, r.config.get("params") or {}, r.config.get("exits"), costs, risk,
-                                  r.interval, optimize=bool(r.config.get("optimize", True)))
-        status = "FAILED" if "error" in result else "DONE"
-        if status == "DONE":
-            data.apply_data_quality(result, prov, int(fetch[r.symbol]["expected_bars"]))
-            result["param_source"] = r.config.get("param_source", "defaults")
-            if result["param_source"] == "saved":
-                result["verdict"]["reasons"].append(jobs.SAVED_PARAMS_NOTE)
+        out = run.execute(series, prov, r.strategy_id, r.interval, r.config, int(fetch[r.symbol]["expected_bars"]))
+        status, result = out["status"], out["result"]
         async with sf() as s:
             row = await s.get(BacktestRun, r.id)
             row.status, row.finished_at, row.phase = status, _now(), None
-            row.data, row.result, row.summary = prov, result, jobs.summary(result)
-            row.error = result.get("error")
-            row.config = {**row.config, "costs_effective": costs.__dict__, "risk_effective": risk.__dict__}
+            row.data, row.result, row.summary = prov, result, out["summary"]
+            row.error = out["error"]
+            row.config = {**row.config, "costs_effective": out["costs_effective"], "risk_effective": out["risk_effective"]}
             await jobs.refresh_batch(s, await s.get(BacktestBatch, r.batch_id))
             s.add(Event(at=_now(), level="INFO" if status == "DONE" else "WARN", source="backtest",
                         message=f"backtest {status.lower()}: {r.strategy_id} {r.symbol} {r.interval}"
@@ -115,6 +99,9 @@ async def _phase(sf, r: BacktestRun, phase: str) -> None:
 
 
 async def main_async(once: bool, max_runs: int) -> int:
+    if not policy.SERVER_BACKTESTS_ENABLED:
+        print("Refused: " + policy.SERVER_REFUSAL + ". Nothing was run.")
+        return 2
     settings = load_settings()
     engine, sf = make_session_factory(settings.database_url)
     try:

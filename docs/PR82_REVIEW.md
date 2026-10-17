@@ -123,7 +123,7 @@ a 200 USDT exposure limit and sent a 300 USDT order. Its limit is now 300.
 | Command | Result |
 |---|---|
 | `packages/crypto-py`: `ruff check yonixalpha_crypto tests` | clean |
-| `packages/crypto-py`: `python -m pytest -q` | **244 passed** (212 before the review) |
+| `packages/crypto-py`: `python -m pytest -q` | **251 passed** (212 before the review; 244 after the fixes; 251 with the local runner) |
 | `services/crypto-trading`: `python -m pytest -q` | 2 passed |
 | `apps/api`: `ruff check app tests` and the full `python -m pytest -q` (Memecoin routes included) | clean; **211 passed** (209 before the review + 2 new) |
 | `apps/web`: `npx tsc --noEmit`, `npx next lint`, `npx next build` | clean |
@@ -149,47 +149,41 @@ Nothing below changes anything. Run each one, then paste the output.
 
 | Item | Value | Reading |
 |---|---|---|
-| CPU | 2 cores, load average about 1.1 | about half busy; room for one low-priority study |
-| Memory | 1,967 MB total, **464 MB available**, swap **1,032 of 2,047 MB used** | enough for one 128 MB-capped study, but the machine already swaps: watch it |
-| Disk `/` | 87 GB, 35 GB free (61%) | ample for about 15 MB of candles |
+| CPU | 2 cores, load average about 1.1 | about half busy |
+| Memory | 1,967 MB total, **464 MB available**, swap **1,032 of 2,047 MB used** | the machine already swaps: deploy at a quiet time |
+| Disk `/` | 87 GB, 35 GB free (61%) | enough for a full backup (about 3 GB) and the image builds |
 | Docker | images 4.2 GB (1.1 GB reclaimable), volumes 26.3 GB, build cache 3.4 GB (0.7 GB reclaimable) | nothing to clean for this change |
 | Postgres database | **24 GB** (almost all Memecoin data) | a full dump is large; the crypto schema alone is small |
 | crypto-trading container | 54 MB of its 128 MB limit | running now |
 | Largest containers | postgres 362 MB, redis 222 MB, engine-solana-discovery 112 MB, decision-engine 89 MB, paper-trading 84 MB | the Memecoin workers take most of the memory |
-| Binance.US public candles | HTTP 200 | historical data is reachable |
+| Binance.US public candles | HTTP 200 | live paper trading has its data |
 
 Conclusions:
-- **The proposed batch fits.** One study at a time inside the existing 128 MB / 0.25 CPU cap is well within the 464 MB available, and the disk is not a constraint.
-- **The tight resource is memory, not CPU or disk.** The machine already uses 1 GB of swap, so:
-  - run backtests only while watching `free -m`;
-  - stop the batch if available memory falls below about 200 MB.
-- **The heaviest deploy step is building the web image** (`next build`, several hundred MB for a short time). Prefer a quiet period, and check `free -m` first.
-- **Back up the crypto schema only** before deploying (the migrations touch nothing else), rather than a full 24 GB dump.
-- **Pilot first:** after an approved deploy, run one small batch (one strategy, one symbol) to measure real time and memory before the full 58-run batch.
+- **The tight resource is memory.** The machine already uses 1 GB of swap. This supports the operator's decision (2026-10-17): **no historical backtests run on this server**.
+- **The heaviest deploy step is building the web image** (`next build`, several hundred MB for a short time). Prefer a quiet period, and check `free -m` first. Build the three images one at a time.
+- **Backups:** the nightly script dumps the whole database (24 GB live, about 3 GB compressed). 35 GB is free, so a pre-deploy backup fits.
 
-## 7. Backtest workload (estimate; nothing heavy has run)
+## 7. Backtests: local only (decision 2026-10-17)
 
-- **Proposed first batch:**
-  - 20 strategies on BTC/USDT, ETH/USDT and SOL/USDT; 1h candles; Binance.US; two years.
-  - That is 58 runs: 19 single-symbol modules × 3 symbols, plus meta_muse once as a pair.
-- **Data:**
-  - About 17,500 candles per symbol, 52,600 rows in all (well under the 40,000-per-symbol cap).
-  - Roughly 15 MB in Postgres, including indexes.
-  - Downloaded once per symbol: about 18 requests of 1,000 candles each. With F5, a range with exchange gaps is not downloaded again for every run.
-- **Compute:**
-  - Measured locally: about 15 s and 37 MB per study at full speed (8,000 bars).
-  - At the container's 0.25 CPU: roughly 1 minute per run, about 1 hour for the batch.
-  - It runs one study at a time at the lowest priority (`nice 19`), inside the existing 128 MB / 0.25 CPU limit.
-- **Before running it:**
-  - Check the outputs of section 6.
-  - Proceed only if free memory and disk leave clear headroom: at least 300 MB of free RAM and 2 GB of free disk is a safe margin for a 128 MB container and 15 MB of data.
-  - During the first runs, watch `docker stats`.
-  - The batch can be cancelled from the Backtests page.
+The operator decided that historical backtests run locally, on downloaded public candles, **never on the production VPS**. Runbook: `docs/LOCAL_BACKTESTS.md`.
+
+- **Code** (`backtest/policy.py`):
+  - `SERVER_BACKTESTS_ENABLED = False`: the queue worker refuses to start, the API refuses to queue a batch (409), and the "backtests" switch cannot be turned on.
+  - `RESULT_IMPORT_ENABLED = False`: a results bundle can be imported only into a localhost database until the workflow is verified.
+- **Dashboard:** the Backtests page has no "New batch" form. It explains the policy and shows only stored results (none yet). The server-backtest switches on Portfolio Risk are read-only.
+- **Local runner** (`python -m yonixalpha_crypto.backtest.local`):
+  - commands: `fetch` (public API) or `convert` (data.binance.vision files), `plan`, `run`, `verify`, `import`;
+  - every bundle and report carries data provenance, fees, spread, slippage, the configuration, the code version and git commit, and every run's train / validation / out-of-sample periods;
+  - the same code and data give the same `content_crc`, and `verify` re-runs a bundle to prove it.
+- **Workload on a normal computer** (measured on synthetic candles of the real size):
+  - about 15 s per run for 17,520 hourly candles with the grid on, under 100 MB;
+  - the 58-run first batch takes about 15 minutes on one core.
+- **Shared code:** the 20-strategy registry, metrics and dashboard are unchanged. The worker and the runner share one run function (`backtest/run.py`).
 
 ## 8. Deployment prerequisites (all need your approval first)
 
 1. Your separate approval to merge and to deploy.
-2. The outputs of section 6, with enough free memory and disk.
+2. The outputs of section 6 (received 2026-10-17): enough disk; deploy at a quiet time because of memory.
 3. A database backup before deploying (the existing backup procedure in the handoff).
 4. A targeted deploy of api, web and crypto-trading only. Do not restart the Memecoin workers.
 5. At API start, migrations c0002-c0004 run automatically on the `crypto` schema only (all additive).
@@ -198,12 +192,12 @@ Conclusions:
    - Strategy Center lists 20 modules, all "backtest pending";
    - the Memecoin pages still load from Archived Engines;
    - `LIVE_ORDERS_UNLOCKED` is still `False`.
-7. Leave the engine and backtests switched off until you choose to start them.
+7. Leave the engine switched off until you choose to start it. Backtests are never run or scheduled on the server.
 8. Run only one crypto-trading worker.
 
 ## 9. Rollback
 
-1. Turn off the Crypto Trading engine and backtests on the dashboard. Paper and practice positions keep their protection.
+1. Turn off the Crypto Trading engine on the dashboard. Paper and practice positions keep their protection.
 2. **Code rollback (enough on its own):** redeploy the previous `main` commit (042a627) for api, web and crypto-trading only.
    - The database changes are additive, and the old code works with the extra tables and columns.
    - The old API's start-up step `python -m yonixalpha_crypto.migrate upgrade` will log "crypto schema migration failed" because it does not know c0002-c0004. The API still starts (the Dockerfile tolerates that step failing).
@@ -224,11 +218,11 @@ Conclusions:
 - **Outputs still needed from you:**
   - the R6 count command;
   - the practice-host reachability check;
-  - the server resources (section 6).
+  - (the server resources arrived on 2026-10-17; see section 6).
 - **Exchange demo** needs:
   - the server to reach the practice hosts;
   - a practice key entered in the app (never in chat).
 - **Data access from the US server:**
   - Bybit and Binance.com public data are refused (403 / 451).
-  - Paper trading and backtests use Binance.US public data.
+  - Paper trading uses Binance.US public data. Backtests run locally, on whatever public source is reachable there (`docs/LOCAL_BACKTESTS.md`).
 - **Live trading:** stays locked until you review and authorize it in writing.

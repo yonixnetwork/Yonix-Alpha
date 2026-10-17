@@ -11,9 +11,9 @@ paper and exchange-demo modes exist in code and pass automated tests.
 **No backtest has been run on real market data yet**, so no strategy has a
 YonixAlpha result: every module shows "backtest pending". This session's
 network cannot reach any exchange or market-data host (the session's own
-proxy refuses them). The server can reach Binance.US public candles
-(verified 2026-10-16), so the first real batch runs there, queued and
-throttled (section 7). Every number shown in tests or screenshots during
+proxy refuses them). Operator decision (2026-10-17): historical backtests
+run **locally on the operator's computer** on downloaded public candles,
+never on the production server (section 7, `docs/LOCAL_BACKTESTS.md`). Every number shown in tests or screenshots during
 development came from SYNTHETIC data and is not a result. Live trading stays
 locked in code (`LIVE_ORDERS_UNLOCKED = False`).
 
@@ -26,7 +26,8 @@ locked in code (`LIVE_ORDERS_UNLOCKED = False`).
 | Backtest engine | `backtest/engine.py` | Next-open fills; stop assumed first when a bar touches stop and target; gaps fill at the open; fills capped by bar volume (partial fills); taker / maker fees, spread, slippage, funding; trade management reused from the live executor. |
 | Metrics | `backtest/metrics.py` | One definition for every metric; small samples labeled "insufficient evidence"; ratios need 30 days. |
 | Validation | `backtest/validation.py` | Train / validation / out-of-sample (60 / 20 / 20) in time order; defaults never fitted; a 3 x 3 grid chosen on train only; 4-fold anchored walk-forward; sensitivity; buy-and-hold benchmark; verdict tiers. |
-| Data and queue | `backtest/data.py`, `jobs.py`, `worker.py` | Candle store with provenance (bounded); batch / run queue with claim (skip-locked), cancel, stale recovery, code fingerprint; a low-priority worker that refuses while backtests are switched off. |
+| Local runner | `backtest/local.py`, `run.py`, `policy.py` | Downloads or loads public candles with provenance, runs the batch on your own computer, exports a reproducible bundle and report, verifies it, imports it (localhost only until verified). Server-side backtests are refused by policy. |
+| Data and queue | `backtest/data.py`, `jobs.py`, `worker.py` | Candle store with provenance and the database queue; the queue's server entry point is disabled by policy and shares `run.execute` with the local runner. |
 | Risk | `risk.py`, `portfolio.py` | Per strategy: fixed or % of equity, position / exposure / daily loss / open positions, spread, slippage, cooldown after N losses, minimum candle value. Portfolio: total open risk, positions, total and per-coin exposure, daily loss, drawdown shutdown (sets the emergency stop). |
 | Modes | `guard.py`, `config_store.py`, `runner.py`, `private/service.py` | DISABLED, DEMO (paper: simulated fills on live data), EXCHANGE_DEMO (official demo / testnet account through the existing executor); LIVE is not selectable. Paper positions get trailing stops, partial exits and breakeven. |
 | API | `apps/api/app/api/routes/crypto_center.py` | Strategy Center, backtests, comparison, portfolio, alerts and audit endpoints. |
@@ -422,8 +423,8 @@ Portfolio-wide (`/dashboard/crypto/portfolio`), checked before every entry of
 every strategy in every mode: total open risk, open positions, total
 exposure, exposure per coin (three BTC strategies count as one BTC
 exposure), daily loss, drawdown shutdown (sets the emergency stop; open
-positions keep their protection). Plus the switches for backtests and
-parameter optimisation. Every change is audited (`crypto.config_audit`).
+positions keep their protection). The server-backtest switches are shown
+read-only: backtests run locally. Every change is audited (`crypto.config_audit`).
 
 A reliable risk boundary is required: missing ATR, a stop not below the
 entry, unknown precision, stale data or a size below the exchange minimum
@@ -438,13 +439,25 @@ reject the trade with the reason shown on the strategy page.
 - Every run stores its code fingerprint, configuration, effective costs and risk, data provenance (exchange, host, first / last candle, gaps) and timestamps.
 - Metrics: net profit / return, gross profit / loss, realized vs closed-at-end, win / loss rate, average win / loss, expectancy (USDT and R), profit factor, max drawdown, Sharpe / Sortino (30+ days), holding time, fees, slippage, funding, exposure, capital utilisation, partial fills, consecutive wins / losses, monthly and weekly returns, exit reasons, skipped signals. Short side: n/a on spot.
 
-## 7. Running the first real batch (server, after an approved deploy)
+## 7. Running the first real batch (locally, never on the server)
 
-1. Turn on backtests: Crypto Trading > Portfolio Risk > Backtests = On.
-2. Queue a batch: Crypto Trading > Backtests > New batch (all strategies; BTC/USDT, ETH/USDT, SOL/USDT; 1h; Binance.US; two years). That is 58 runs (19 single-symbol modules x 3 symbols, plus meta_muse once as a pair).
-3. Run the queue with the crypto-trading container's limits (128 MB, 0.25 CPU), lowest priority:
-   `cd /opt/yonixalpha && docker compose --env-file .env -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.prod.yml run --rm crypto-trading python -m yonixalpha_crypto.backtest.worker --max-runs 60`
-   Expected cost (measured locally on 8,000 bars: about 15 s and 37 MB per study at full speed): roughly one minute per run at 0.25 CPU, about one hour for the batch. Data: about 17,500 candles per symbol (well under the 40,000 limit). It can be cancelled from the page; a stopped worker's run is re-queued (twice at most).
+Decision (2026-10-17): historical backtests run on the operator's own computer. The full runbook is `docs/LOCAL_BACKTESTS.md`.
+
+1. Install the package locally: `pip install -e packages/crypto-py`.
+2. Write the batch: `python -m yonixalpha_crypto.backtest.local example-config > batch.json`.
+   The example covers all strategies on BTC/USDT, ETH/USDT and SOL/USDT, 1h, two years, with Binance.US fees.
+3. Get the candles:
+   - `fetch`, from the exchange's public API; or
+   - `convert`, from Binance's public bulk files (data.binance.vision).
+4. Run and verify:
+   - `run` gives 58 runs, about 15 minutes on one core and under 100 MB, measured on synthetic data of that size;
+   - then `verify` must print `REPRODUCED`.
+5. The bundle and report carry data provenance, fees, slippage, configuration, code version and the test periods of every run.
+6. Import into YonixAlpha stays off until the workflow is verified (`backtest.policy.RESULT_IMPORT_ENABLED = False`). Until then, import only into a local database.
+
+The server never runs the batch:
+- the worker, the API queue and the "backtests" switch all refuse;
+- the dashboard shows the results it holds, with no "New batch" form.
 
 ## 8. Tests (commands and results)
 
@@ -453,7 +466,7 @@ All run in this session on 2026-10-16 (local Postgres 16 and Redis; no exchange 
 | Command | Result |
 |---|---|
 | `cd packages/crypto-py && ruff check yonixalpha_crypto tests` | clean |
-| `cd packages/crypto-py && python -m pytest -q` | **244 passed** (after the PR review fixes; see `docs/PR82_REVIEW.md`) |
+| `cd packages/crypto-py && python -m pytest -q` | **251 passed** (after the PR review fixes and the local runner; see `docs/PR82_REVIEW.md`) |
 | `cd services/crypto-trading && python -m pytest -q` | 2 passed |
 | `cd apps/api && ruff check app tests && python -m pytest -q` (full suite, Memecoin routes included) | clean; **211 passed** (after the PR review fixes) |
 | `cd apps/web && npx tsc --noEmit && npx next lint && npx next build` | clean |
@@ -491,8 +504,7 @@ page overflow on the phone width.
 ## 10. Resources and operational limits
 
 - Worker: the strategy library adds no measurable idle memory (pure Python, loaded with the engine); the execution code loads only while an exchange trade is active (+8 MB measured earlier). A paper strategy reads up to 3 x its longest window of candles once per closed bar (at most 624 candles, for `mtf_trend`).
-- Backtests: one study at a time, `nice 19`, inside the 128 MB / 0.25 CPU container; peak about 40 MB locally for 8,000 bars; candles capped at 40,000 per symbol and interval; at most 120 runs per batch.
-- Not measured on the server yet: actual run times and the effect on the API during a batch. Check `docker stats` during the first batch.
+- Backtests: none on the server (policy). Locally: about 15 s per run and under 100 MB for 17,520 hourly candles; candles capped at 40,000 per symbol and interval.
 
 ## 11. Unresolved issues, blockers and rejected candidates
 

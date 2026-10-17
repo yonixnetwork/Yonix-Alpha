@@ -181,7 +181,8 @@ class FakeMD:
 
 
 async def test_the_queue_runs_a_batch_records_provenance_and_survives_failures(sf):
-    from yonixalpha_crypto import portfolio
+    # The queue code is kept (it shares backtest.run.execute with the local
+    # runner); only its server entry point is refused by policy.
     btc = walk([(700, 0.001), (700, -0.001)], seed=8)
     eth = walk([(700, -0.001), (700, 0.0012)], seed=9)
     eth.times = btc.times
@@ -189,7 +190,6 @@ async def test_the_queue_runs_a_batch_records_provenance_and_survives_failures(s
     start, end = btc.times[0], btc.times[-1] + timedelta(hours=1)
     now = end + timedelta(days=1)
     async with sf() as s:
-        await portfolio.save(s, {"backtests_enabled": True}, 1, "test")
         b = await jobs.create_batch(s, strategies=["donchian_breakout", "rsi_reversion", "meta_muse"],
                                     symbols=["BTC/USDT", "ETH/USDT"], interval="1h", exchange="binance_us",
                                     start=start, end=end, costs={"taker_fee_bps": 2}, risk={"mode": "PERCENT", "value": 0.5},
@@ -241,11 +241,19 @@ async def test_cancel_and_stale_recovery(sf):
                                     start=start, end=start + timedelta(days=1), costs={}, risk={}, optimize=False, actor="t")
 
 
-async def test_the_worker_refuses_while_backtests_are_switched_off(sf, capsys, monkeypatch):
+async def test_the_server_worker_and_switch_refuse_by_policy(sf, capsys, monkeypatch):
     import os
+
+    from yonixalpha_crypto import portfolio
+    from yonixalpha_crypto.backtest import policy
     monkeypatch.setenv("DATABASE_URL", os.environ["DATABASE_URL"])
+    assert policy.SERVER_BACKTESTS_ENABLED is False and policy.RESULT_IMPORT_ENABLED is False
     assert await worker.main_async(True, 1) == 2
-    assert "switched off" in capsys.readouterr().out
+    assert "run locally" in capsys.readouterr().out
+    async with sf() as s:
+        with pytest.raises(portfolio.PortfolioError, match="run locally"):
+            await portfolio.save(s, {"backtests_enabled": True}, 1, "t")
+        assert (await portfolio.save(s, {"backtests_enabled": False}, 1, "t"))["backtests_enabled"] is False
 
 
 async def test_data_store_is_bounded_and_keeps_only_closed_candles(sf):

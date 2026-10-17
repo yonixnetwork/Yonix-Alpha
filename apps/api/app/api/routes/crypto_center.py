@@ -8,7 +8,7 @@ are kept apart; live is reported as locked.
                                               performance by mode, backtest runs
     GET  /crypto/center/rejected              candidates merged into others or rejected, with reasons
     GET  /crypto/backtests                    batches with progress
-    POST /crypto/backtests                    queue a batch (strategies x symbols)
+    POST /crypto/backtests                    refused: backtests run locally (backtest.policy)
     GET  /crypto/backtests/{batch_id}         its runs, ranked by the documented rule
     POST /crypto/backtests/{batch_id}/cancel
     GET  /crypto/backtests/runs/{run_id}      one run's full study
@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_username, get_db
 from yonixalpha_crypto import config_store, metrics as demo_metrics, portfolio, registry
 from yonixalpha_crypto.backtest import jobs
+from yonixalpha_crypto.backtest import policy as backtest_policy
 from yonixalpha_crypto.backtest.validation import TIERS
 from yonixalpha_crypto.db import (ApiConnection, BacktestBatch, BacktestRun, ConfigAudit, DemoPosition, Event,
                                   ExecTrade, Signal, StrategyConfig, schema_ready)
@@ -301,6 +302,8 @@ COST_KEYS = {"taker_fee_bps": (0, 100), "maker_fee_bps": (0, 100), "spread_bps":
 
 @router.post("/crypto/backtests")
 async def create_backtest(body: BatchIn, db: AsyncSession = Depends(get_db), username: str = Depends(get_current_username)):
+    if not backtest_policy.SERVER_BACKTESTS_ENABLED:
+        raise HTTPException(409, backtest_policy.SERVER_REFUSAL)
     await _ready(db)
     lim = await portfolio.load(db)
     if body.optimize and not lim.get("optimization_enabled"):
@@ -342,6 +345,9 @@ async def list_backtests(db: AsyncSession = Depends(get_db), username: str = Dep
     rows = (await db.execute(select(BacktestBatch).order_by(BacktestBatch.created_at.desc()).limit(30))).scalars().all()
     lim = await portfolio.load(db)
     return {"batches": [await _progress(db, b) for b in rows], "backtests_enabled": lim.get("backtests_enabled"),
+            "server_backtests_enabled": backtest_policy.SERVER_BACKTESTS_ENABLED,
+            "result_import_enabled": backtest_policy.RESULT_IMPORT_ENABLED,
+            "policy": backtest_policy.SERVER_REFUSAL,
             "optimization_enabled": lim.get("optimization_enabled")}
 
 

@@ -21,9 +21,12 @@ const LABEL: Record<string, [string, string]> = {
   max_exposure_per_asset_quote: ["Max exposure per coin (USDT)", "BTC from three strategies counts as one BTC exposure."],
   max_daily_loss_quote: ["Max daily loss (USDT)", "Realized losses since 00:00 UTC; new entries stop when reached."],
   max_drawdown_pct: ["Drawdown shutdown (%)", "Paper equity below its high by this much sets the emergency stop. Open positions keep their protection."],
-  backtests_enabled: ["Backtests", "Lets the backtest worker run queued batches (one at a time, low priority)."],
-  optimization_enabled: ["Parameter grid in backtests", "Small train-only grid and walk-forward. Off = default parameters only."],
+  backtests_enabled: ["Server backtests", "Always off: historical backtests run locally on your own computer, never on this server (docs/LOCAL_BACKTESTS.md)."],
+  optimization_enabled: ["Parameter grid in backtests", "Only for the server queue, which is disabled; the local runner's own config decides this."],
 };
+
+// Server backtests are disabled by policy (backtest.policy); shown, not editable.
+const READ_ONLY = new Set(["backtests_enabled", "optimization_enabled"]);
 
 export default function Portfolio() {
   const { data, error, reload } = useApi<P>("/api/crypto/portfolio", undefined, { refreshMs: 15000 });
@@ -65,7 +68,8 @@ export default function Portfolio() {
             {Object.entries(LABEL).map(([k, [label, help]]) => (
               <div key={k} className="form-row"><label>{label}<Info text={help} /></label>
                 {typeof data.limits[k] === "boolean" ? (
-                  <select value={form[k] ? "1" : "0"} onChange={(e) => setForm({ ...form, [k]: e.target.value === "1" })}>
+                  <select value={form[k] ? "1" : "0"} disabled={READ_ONLY.has(k)}
+                    onChange={(e) => setForm({ ...form, [k]: e.target.value === "1" })}>
                     <option value="0">Off</option><option value="1">On</option></select>
                 ) : <input value={String(form[k] ?? "")} inputMode="decimal" onChange={(e) => setForm({ ...form, [k]: e.target.value })} />}
               </div>

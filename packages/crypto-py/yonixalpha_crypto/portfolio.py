@@ -78,6 +78,12 @@ def validate(change: dict[str, Any]) -> dict[str, Any]:
         if rule[1] is None:
             if not isinstance(v, bool):
                 errors.append(f"{k}: true or false")
+            elif k == "backtests_enabled" and v:
+                from yonixalpha_crypto.backtest import policy
+                if not policy.SERVER_BACKTESTS_ENABLED:
+                    errors.append(f"{k}: {policy.SERVER_REFUSAL}")
+                else:
+                    out[k] = v
             else:
                 out[k] = v
             continue
