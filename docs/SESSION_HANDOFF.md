@@ -440,18 +440,31 @@ Spread limit, slippage and book age are also in `RiskLimits`.
 
 ## 14. Exact current state
 
-- `origin/main` is at `042a627` (merge of PR #81), deployed on the server
-  (`git log --oneline -1` there shows `042a627`).
-- The branch `claude/yonixalpha-platform-architecture-804nb5` was reset to
-  `origin/main`, with only this handoff file added on top.
+- `origin/main` is at `3696e06` (merge of PR #82), deployed on the server on
+  2026-10-17. The operator ran the checks:
+  - `git log --oneline -1` shows `3696e06`;
+  - `crypto.alembic_version` is `c0004`;
+  - `LIVE_ORDERS_UNLOCKED` is `False`;
+  - no "migration failed" in the API log;
+  - the backtest worker refuses (exit 2);
+  - API ready: database and Redis ok.
+- PR #82 brought:
+  - the Memecoin menu archive;
+  - exchange connections and execution (live locked);
+  - the 20-strategy library and Strategy Center;
+  - portfolio risk;
+  - the review fixes (`docs/PR82_REVIEW.md`);
+  - the local-only backtest runner (`docs/LOCAL_BACKTESTS.md`).
 - Production:
-  - Memecoin containers are unchanged and still on the images they had before
-    this deploy;
+  - the Memecoin containers were not restarted by this deploy;
   - api, web and crypto-trading run the new images;
-  - the crypto engine is ON, Meta Muse is enabled in DEMO on binance_us, and
-    the worker is Up;
-  - no demo position had opened at handoff time.
-- Disk: 38 GB free after the cleanup (before the rebuild); check `df -h /` again. Backup retention is 3 days.
+  - pre-deploy backup: `/opt/yonixalpha-backups/yonixalpha-20261017T112205Z.sql.gz` (3.3 GB, verified "dump complete").
+- Server resources (2026-10-17): 2 cores, about 450-500 MB RAM available, swap about 1.1 of 2 GB in use, 35 GB disk free, Postgres database 24 GB. Memory is the tight resource.
+- Not yet verified:
+  - the local backtest runner on real candles (`docs/LOCAL_BACKTESTS.md` section 7; result import stays off);
+  - exchange demo against a real practice host and key.
+- Open question to the operator: `/api/health/ready` reports the Memecoin setting `"live_trading_enabled": true`. Confirm that this is intended. It is unrelated to Crypto Trading, which stays locked in code.
+- Backup retention: the nightly cron keeps 3 days; a manual `scripts/backup-db.sh` run prunes after 14 days.
 - Older pending items from previous phases (not started; verify they are
   still wanted before working on them):
   - "Manual BUY: operator overrides preference filters";
