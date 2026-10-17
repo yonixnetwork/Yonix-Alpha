@@ -145,6 +145,28 @@ Nothing below changes anything. Run each one, then paste the output.
 4. Database size: `cd /opt/yonixalpha && docker compose --env-file .env -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.prod.yml exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "select pg_size_pretty(pg_database_size(current_database()))"'`
 5. Binance.US reachability for candles (public, no key): `curl -s -o /dev/null -w "%{http_code}\n" "https://api.binance.us/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=1"`
 
+### Measured on the server (2026-10-17, read-only, run by the operator)
+
+| Item | Value | Reading |
+|---|---|---|
+| CPU | 2 cores, load average about 1.1 | about half busy; room for one low-priority study |
+| Memory | 1,967 MB total, **464 MB available**, swap **1,032 of 2,047 MB used** | enough for one 128 MB-capped study, but the machine already swaps: watch it |
+| Disk `/` | 87 GB, 35 GB free (61%) | ample for about 15 MB of candles |
+| Docker | images 4.2 GB (1.1 GB reclaimable), volumes 26.3 GB, build cache 3.4 GB (0.7 GB reclaimable) | nothing to clean for this change |
+| Postgres database | **24 GB** (almost all Memecoin data) | a full dump is large; the crypto schema alone is small |
+| crypto-trading container | 54 MB of its 128 MB limit | running now |
+| Largest containers | postgres 362 MB, redis 222 MB, engine-solana-discovery 112 MB, decision-engine 89 MB, paper-trading 84 MB | the Memecoin workers take most of the memory |
+| Binance.US public candles | HTTP 200 | historical data is reachable |
+
+Conclusions:
+- **The proposed batch fits.** One study at a time inside the existing 128 MB / 0.25 CPU cap is well within the 464 MB available, and the disk is not a constraint.
+- **The tight resource is memory, not CPU or disk.** The machine already uses 1 GB of swap, so:
+  - run backtests only while watching `free -m`;
+  - stop the batch if available memory falls below about 200 MB.
+- **The heaviest deploy step is building the web image** (`next build`, several hundred MB for a short time). Prefer a quiet period, and check `free -m` first.
+- **Back up the crypto schema only** before deploying (the migrations touch nothing else), rather than a full 24 GB dump.
+- **Pilot first:** after an approved deploy, run one small batch (one strategy, one symbol) to measure real time and memory before the full 58-run batch.
+
 ## 7. Backtest workload (estimate; nothing heavy has run)
 
 - **Proposed first batch:**
