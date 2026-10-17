@@ -1,6 +1,7 @@
-"""Demo-only enforcement: no request other than public market data can be
-built, no mode other than DEMO executes, and the package holds no
-credential or signing code."""
+"""Demo-only enforcement of the strategy engine: no request other than
+public market data can be built by it, no strategy mode other than DEMO
+executes, and credentials / signing exist only in yonixalpha_crypto.private
+(tested in test_private_accounts.py)."""
 
 import re
 from decimal import Decimal
@@ -89,12 +90,22 @@ def test_configuration_cannot_select_a_live_mode():
         config_store.validate(spec_, current, {"api_key": "x"})
 
 
-def test_the_package_has_no_credentials_signing_or_memecoin_imports():
+def test_only_the_private_subpackage_holds_credentials_or_signs():
+    """Outside yonixalpha_crypto/private nothing may sign, hold a key or
+    build an HTTP client other than PublicHttp; nothing anywhere imports
+    the Memecoin package or a wallet / exchange SDK."""
     src = {p: p.read_text() for p in PKG.rglob("*.py")}
-    imports = r"^\s*(?:from|import)\s+(?:hmac|hashlib|eth_account|solders|ccxt|nacl|yonixalpha_core)\b"
-    secrets = r"API_SECRET|API_KEY|PRIVATE_KEY|SECRET_KEY"
-    hits = [(p.name, m.group(0)) for p, t in src.items() for m in re.finditer(imports, t, re.M)]
-    hits += [(p.name, m.group(0)) for p, t in src.items() for m in re.finditer(secrets, t)]
+    private = PKG / "private"
+    public = {p: t for p, t in src.items() if private not in p.parents}
+    imports = r"^\s*(?:from|import)\s+(?:hmac|hashlib|cryptography|eth_account|solders|ccxt|nacl|yonixalpha_core)\b"
+    secrets = r"API_SECRET|API_KEY|PRIVATE_KEY|SECRET_KEY|api_secret|secretstore|signedhttp"
+    hits = [(p.name, m.group(0)) for p, t in public.items() for m in re.finditer(imports, t, re.M)]
+    hits += [(p.name, m.group(0)) for p, t in public.items() for m in re.finditer(secrets, t)]
     assert hits == []
-    # the only HTTP client is publichttp.PublicHttp
-    assert [p.name for p, t in src.items() if "httpx.AsyncClient(" in t] == ["publichttp.py"]
+    everywhere = r"^\s*(?:from|import)\s+(?:eth_account|solders|ccxt|nacl|yonixalpha_core|pybit|binance)\b"
+    assert [p.name for p, t in src.items() if re.search(everywhere, t, re.M)] == []
+    # HTTP clients: PublicHttp (public data) and SignedHttp (accounts), nothing else
+    assert sorted(p.name for p, t in src.items() if "httpx.AsyncClient(" in t) == ["publichttp.py", "signedhttp.py"]
+    # inside private, only signedhttp signs and only secretstore fingerprints
+    signers = sorted(p.name for p, t in src.items() if private in p.parents and re.search(r"^import hmac", t, re.M))
+    assert signers == ["secretstore.py", "signedhttp.py"]

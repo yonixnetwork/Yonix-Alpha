@@ -282,6 +282,14 @@ A routine that works:
 
 Nothing is ever upgraded or deployed automatically (master §66).
 
+### Crypto Trading: targeted deploys, and no backtests on the server
+
+- **Targeted deploys.** Crypto-only changes rebuild and restart only `api`, `web` and `crypto-trading` (see `docs/SESSION_HANDOFF.md`, "Deploy procedure"). Do not use `scripts/deploy.sh` for them, because it recreates every container, Memecoin included.
+- **No backtests on the server** (operator decision 2026-10-17). Historical backtests run on the operator's own computer, on downloaded public candles (`docs/LOCAL_BACKTESTS.md`).
+  - Never run `python -m yonixalpha_crypto.backtest.worker` on the VPS. Never schedule a backtest there (no cron entry, no `docker compose run`).
+  - The code enforces this: `backtest/policy.py` has `SERVER_BACKTESTS_ENABLED = False`, so the worker refuses to start, the API refuses to queue a batch and the "backtests" switch cannot be turned on.
+- **Results import stays off** (`RESULT_IMPORT_ENABLED = False`) until the local workflow is verified (runbook section 7). Turning it on is a reviewed code change. Even then, the server only stores a finished bundle: a small database write, never a backtest.
+
 ## 4. Rollback
 
 ```

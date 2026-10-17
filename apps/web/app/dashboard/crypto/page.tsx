@@ -4,7 +4,8 @@
 // spot public market data with simulated (DEMO) execution. A separate engine
 // from Memecoin Trading: its own switch, settings, tables and worker
 // (yonixalpha_crypto, /api/crypto/*). Nothing on this page can place a real
-// order: the engine has no live mode and holds no exchange key.
+// order: strategies have no live mode, and exchange keys are only handled
+// on the Exchange Connections page (live orders locked in code).
 
 import { useState } from "react";
 import { apiPost, apiPut, ApiError } from "@/lib/api";
@@ -197,7 +198,8 @@ export default function CryptoStrategyLab() {
       </div>
       <div className="notice">
         Regular crypto strategies on public Bybit / Binance spot market data. Separate from Memecoin Trading: its own
-        switch, settings and records. There is no live mode and no exchange key.
+        switch, settings and records. Strategies run in DEMO only (simulated fills). Exchange keys are kept on the
+        Exchange Connections page, and real orders are locked.
       </div>
       {error && <div className="error">{error}</div>}
       {msg && <div className="notice notice-warn">{msg}</div>}

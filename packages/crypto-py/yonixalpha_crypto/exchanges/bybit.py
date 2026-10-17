@@ -18,6 +18,17 @@ INTERVALS = {"1m": "1", "3m": "3", "5m": "5", "15m": "15", "30m": "30", "1h": "6
              "1d": "D"}
 
 
+def instrument_from(it: dict) -> InstrumentSpec:
+    """One spot item of /v5/market/instruments-info (also used by the signed
+    account adapter, private.adapters)."""
+    lot, pf = it.get("lotSizeFilter") or {}, it.get("priceFilter") or {}
+    step = dec(lot.get("basePrecision") or "0")
+    return InstrumentSpec("bybit", f"{it['baseCoin']}/{it['quoteCoin']}", it["symbol"], it["baseCoin"],
+                          it["quoteCoin"], it.get("status", ""), it.get("status") == "Trading",
+                          dec(pf.get("tickSize") or "0"), step,
+                          dec(lot.get("minOrderQty") or step), dec(lot.get("minOrderAmt") or "0"))
+
+
 class BybitSpot:
     exchange = "bybit"
 
@@ -40,13 +51,7 @@ class BybitSpot:
         items = (body.get("result") or {}).get("list") or []
         if not items:
             raise ExchangeUnavailable("bybit", 200, f"{symbol} is not listed on Bybit spot")
-        it = items[0]
-        lot, pf = it.get("lotSizeFilter") or {}, it.get("priceFilter") or {}
-        step = dec(lot.get("basePrecision") or "0")
-        return InstrumentSpec("bybit", f"{it['baseCoin']}/{it['quoteCoin']}", it["symbol"], it["baseCoin"],
-                              it["quoteCoin"], it.get("status", ""), it.get("status") == "Trading",
-                              dec(pf.get("tickSize") or "0"), step,
-                              dec(lot.get("minOrderQty") or step), dec(lot.get("minOrderAmt") or "0"))
+        return instrument_from(items[0])
 
     async def candles(self, symbol: str, interval: str, limit: int) -> list[Candle]:
         base, quote = split_symbol(symbol)
@@ -55,6 +60,27 @@ class BybitSpot:
         rows = (body.get("result") or {}).get("list") or []
         out = [Candle(ms(r[0]), dec(r[1]), dec(r[2]), dec(r[3]), dec(r[4]), dec(r[5]), interval) for r in rows]
         return sorted(out, key=lambda c: c.open_time)
+
+    async def history(self, symbol: str, interval: str, start_ms: int, end_ms: int) -> list[Candle]:
+        """Candles between two times, oldest first. Bybit returns the newest
+        first, so pages walk backwards from `end_ms`."""
+        base, quote = split_symbol(symbol)
+        out: dict[int, Candle] = {}
+        cursor = end_ms
+        while cursor > start_ms:
+            body = await self._get("/v5/market/kline", {"category": "spot", "symbol": base + quote,
+                                                        "interval": INTERVALS[interval], "start": start_ms,
+                                                        "end": cursor, "limit": 1000})
+            rows = (body.get("result") or {}).get("list") or []
+            if not rows:
+                break
+            for r in rows:
+                out[int(r[0])] = Candle(ms(r[0]), dec(r[1]), dec(r[2]), dec(r[3]), dec(r[4]), dec(r[5]), interval)
+            oldest = min(int(r[0]) for r in rows)
+            if oldest - 1 >= cursor:
+                break
+            cursor = oldest - 1
+        return [out[k] for k in sorted(out)]
 
     async def top_of_book(self, symbol: str) -> TopOfBook:
         base, quote = split_symbol(symbol)

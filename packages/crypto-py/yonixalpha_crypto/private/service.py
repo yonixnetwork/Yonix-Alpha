@@ -1,0 +1,183 @@
+"""The worker's pass over exchange-account trades (called by engine.Engine
+on every loop while any exchange trade is not final):
+
+1. reconcile every connection that has an active trade (after a restart
+   this is the recovery: the exchange's state is read back first);
+2. manage each OPEN trade on that connection's own market data: decisions
+   run every loop (so a stop or an engine-managed target reacts within one
+   loop), a HOLD is recorded once per closed bar.
+
+A connection whose keys cannot be read, or whose exchange cannot be reached,
+gets its new entries blocked and an ERROR event; nothing is guessed.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from decimal import Decimal
+from typing import Any
+
+import httpx
+from sqlalchemy import func, select
+
+from yonixalpha_crypto.candles import INTERVAL_SECONDS
+from yonixalpha_crypto.db import EXEC_ACTIVE, ApiConnection, ExecTrade
+from yonixalpha_crypto.private import management, secretstore
+from yonixalpha_crypto.private.adapters import SpotAccount, account_for
+from yonixalpha_crypto.private.connections import view
+from yonixalpha_crypto.private.executor import ACTIVE_TRADE, EntryRefused, Executor
+from yonixalpha_crypto.private.sizing import SizingRules
+from yonixalpha_crypto.private.signedhttp import ExchangeRequestError, SignedHttp
+
+
+def open_account(c: ApiConnection, *, transport: httpx.AsyncBaseTransport | None = None,
+                 env: dict[str, str] | None = None) -> SpotAccount | None:
+    key, secret = secretstore.decrypt(c.key_enc, env), secretstore.decrypt(c.secret_enc, env)
+    if key is None or secret is None:
+        return None
+    return account_for(SignedHttp(c.exchange, c.environment, key, secret, connection=view(c), transport=transport))
+
+
+async def run_exchange_accounts(sf, now: datetime, *, transport: httpx.AsyncBaseTransport | None = None,
+                                env: dict[str, str] | None = None) -> dict[str, Any]:
+    async with sf() as s:
+        ids = select(ExecTrade.connection_id).where(ExecTrade.status.in_(ACTIVE_TRADE))
+        conns = (await s.execute(select(ApiConnection).where(ApiConnection.id.in_(ids)))).scalars().all()
+    out: dict[str, Any] = {}
+    for c in conns:
+        acct = open_account(c, transport=transport, env=env)
+        if acct is None:
+            async with sf() as s:
+                ex = Executor(_NoAccount(c), c, clock=lambda: now)
+                await ex.block(s, "keys cannot be decrypted: open trades cannot be reconciled")
+                await s.commit()
+            out[str(c.id)] = "keys unreadable"
+            continue
+        ex = Executor(acct, c)
+        try:
+            async with sf() as s:
+                rec = await ex.reconcile(s)
+            managed = 0
+            async with sf() as s:
+                trades = (await s.execute(select(ExecTrade).where(ExecTrade.connection_id == c.id,
+                                                                  ExecTrade.status == "OPEN"))).scalars().all()
+                for t in trades:
+                    managed += await _manage_one(s, ex, acct, t, now)
+            out[str(c.id)] = {"reconciled": rec, "managed": managed}
+        except ExchangeRequestError as e:
+            async with sf() as s:
+                await ex.block(s, f"exchange unreachable while trades are open: {e}"[:400])
+                await s.commit()
+            out[str(c.id)] = f"error: {e}"[:300]
+        finally:
+            await acct.aclose()
+    return out
+
+
+async def _manage_one(s, ex: Executor, acct: SpotAccount, t: ExecTrade, now: datetime) -> int:
+    interval = t.plan.get("interval", "5m")
+    step = INTERVAL_SECONDS.get(interval, 300)
+    rows = await acct.bars(t.symbol, interval, 60)
+    closed = [r for r in rows if r[0] / 1000 + step <= now.timestamp()]
+    book = await acct.book(t.symbol)
+    last_bar = closed[-1][0] if closed else None
+    new_bar = last_bar is not None and t.thesis.get("last_managed_bar") != last_bar
+    held = sum(1 for r in closed if t.opened_at and r[0] / 1000 >= t.opened_at.timestamp())
+    m = management.MarketSnapshot(book.bid, book.ask, [management.Bar(h, lo, cl) for _, h, lo, cl in closed])
+    await ex.manage(s, t, m, held, Decimal(t.plan.get("taker_fee_bps", "10")), record_hold=new_bar)
+    if new_bar and t.status == "OPEN":
+        t.thesis = {**t.thesis, "last_managed_bar": last_bar}
+        await s.commit()
+    return 1
+
+
+class _NoAccount:
+    """Stands in for an account whose keys cannot be read, so the guard can
+    still be set through the executor."""
+    exchange_take_profit = False
+    stop_amendable = False
+
+    def __init__(self, c: ApiConnection):
+        self.exchange, self.environment = c.exchange, c.environment
+
+
+async def strategy_exec_limits(session, strategy_id: str, limits, notional: Decimal, now: datetime) -> list[str]:
+    """The strategy's own limits counted over its exchange trades (paper
+    positions are counted by risk.size_entry): open trades, exposure and
+    today's realized loss."""
+    T = ExecTrade
+    active = (await session.execute(select(T).where(T.strategy_id == strategy_id,
+                                                    T.status.in_(EXEC_ACTIVE)))).scalars().all()
+    expo = sum((Decimal(t.qty or t.qty_planned) * Decimal(t.entry_price or t.stop) for t in active), Decimal(0))
+    day = now.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    realized = Decimal(await session.scalar(select(func.coalesce(func.sum(T.realized_quote), 0)).where(
+        T.strategy_id == strategy_id, T.closed_at >= day)) or 0)
+    out = []
+    if len(active) >= limits.max_open_positions:
+        out.append(f"strategy: {len(active)} exchange trade(s) open, max {limits.max_open_positions}")
+    if expo + notional > limits.max_total_exposure_quote:
+        out.append(f"strategy: exposure {expo:.2f} + {notional:.2f} above {limits.max_total_exposure_quote}")
+    if -realized >= limits.max_daily_loss_quote:
+        out.append(f"strategy: today's exchange loss {-realized:.2f} reached {limits.max_daily_loss_quote}")
+    return out
+
+
+async def strategy_entry(session, cfg, strategy_id: str, symbol: str, decision, limits, taker_fee_bps: Decimal,
+                         entry_key: str, now: datetime | None = None) -> tuple[bool, list[str], str | None]:
+    """An EXCHANGE_DEMO strategy entry: the decision goes through the same
+    executor as every exchange order (guard, sizing, write-ahead, verified
+    protection). Practice connections only; returns (accepted, reasons, trade id).
+
+    The executor sizes on the practice account's own balance, so the
+    portfolio and strategy limits are checked again on that final size
+    (pre_trade_check) before anything is recorded or sent."""
+    from yonixalpha_crypto import portfolio  # late: portfolio imports the db layer only
+
+    now = now or datetime.now(timezone.utc)
+
+    async def check(planned_loss: Decimal, notional: Decimal) -> list[str]:
+        return (await portfolio.check_entry(session, symbol=symbol, planned_loss=planned_loss, notional=notional,
+                                            now=now)
+                + await strategy_exec_limits(session, strategy_id, limits, notional, now))
+
+    c = await session.get(ApiConnection, cfg.connection_id) if cfg.connection_id else None
+    if c is None or c.environment not in ("DEMO", "TESTNET") or not c.enabled:
+        return False, ["exchange-demo: no enabled DEMO / TESTNET connection for this strategy"], None
+    acct = open_account(c)
+    if acct is None:
+        return False, ["exchange-demo: the connection's keys cannot be decrypted"], None
+    if limits.risk_pct > 0:
+        rules = SizingRules(limits.risk_pct, Decimal("1000000000"), limits.max_position_quote, taker_fee_bps,
+                            limits.slippage_bps, Decimal(30))
+    else:  # a fixed amount: 100% of equity as the percentage, capped by the fixed amount
+        rules = SizingRules(Decimal(100), limits.risk_per_trade_quote, limits.max_position_quote, taker_fee_bps,
+                            limits.slippage_bps, Decimal(30))
+    try:
+        t = await Executor(acct, c).open_long(
+            session, strategy_id=strategy_id, symbol=symbol, entry_key=entry_key, rules=rules,
+            stop_price=decision.stop_price, take_profit=decision.target_price,
+            plan={**(cfg.exits or {}), "interval": cfg.interval},
+            thesis={"reason": "; ".join(decision.reasons), "values": (decision.detail or {}).get("values"),
+                    "strategy": strategy_id, "interval": cfg.interval},
+            pre_trade_check=check)
+    except EntryRefused as e:
+        return False, [f"exchange-demo: {r}" for r in e.reasons], None
+    except ExchangeRequestError as e:
+        return False, [f"exchange-demo: {e}"], None
+    finally:
+        await acct.aclose()
+    return t.status in ("OPEN", "PENDING_ENTRY"), [f"exchange-demo trade {t.status}"], str(t.id)
+
+
+async def strategy_exit(session, trade: ExecTrade, reason: str) -> str:
+    c = await session.get(ApiConnection, trade.connection_id)
+    acct = open_account(c) if c is not None else None
+    if acct is None:
+        return "keys unreadable: exit not sent (protection stays on the exchange)"
+    try:
+        await Executor(acct, c).close(session, trade, f"strategy exit: {reason}")
+    except ExchangeRequestError as e:
+        return f"exchange error: {e}"
+    finally:
+        await acct.aclose()
+    return trade.status

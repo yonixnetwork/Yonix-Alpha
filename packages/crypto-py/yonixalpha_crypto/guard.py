@@ -9,7 +9,12 @@ a separate review and the operator's explicit approval."""
 
 from __future__ import annotations
 
-MODES = ("DISABLED", "DEMO")
+# DEMO = paper trading (simulated fills on live public data);
+# EXCHANGE_DEMO = orders on an exchange's official demo / testnet account
+# (private.executor, practice hosts only). There is no LIVE mode to select:
+# live orders are locked in code (private.livelock).
+MODES = ("DISABLED", "DEMO", "EXCHANGE_DEMO")
+ACTIVE_MODES = ("DEMO", "EXCHANGE_DEMO")
 
 
 class LiveTradingNotAvailable(RuntimeError):

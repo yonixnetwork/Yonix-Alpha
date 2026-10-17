@@ -7,7 +7,8 @@
   cannot overwrite another's, and two tabs cannot silently overwrite each
   other.
 - Unknown keys, unknown exchanges, bad symbols, out-of-range numbers and any
-  mode other than DISABLED / DEMO are rejected, never coerced.
+  mode other than DISABLED / DEMO (paper) / EXCHANGE_DEMO (a practice
+  connection) are rejected, never coerced. There is no LIVE mode.
 - A strategy can be enabled only when its registry status is IMPLEMENTED
   and the chosen exchange is one it supports.
 - Every change is written to crypto.config_audit (before / after)."""
@@ -22,12 +23,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yonixalpha_crypto import registry
-from yonixalpha_crypto.db import ConfigAudit, EngineState, StrategyConfig
+import uuid
+
+from yonixalpha_crypto.db import (EXEC_ACTIVE, ApiConnection, ConfigAudit, DemoPosition, EngineState, ExecTrade,
+                                  StrategyConfig)
 from yonixalpha_crypto.exchanges.base import split_symbol
-from yonixalpha_crypto.guard import MODES
+from yonixalpha_crypto.guard import ACTIVE_MODES, MODES
+from yonixalpha_crypto.private import management
 from yonixalpha_crypto.risk import RISK_RULES, validate_risk
 
-ALLOWED_KEYS = {"enabled", "mode", "exchange", "symbols", "interval", "params", "risk"}
+ALLOWED_KEYS = {"enabled", "mode", "exchange", "symbols", "interval", "params", "risk", "exits", "connection_id"}
+PRACTICE_ENVIRONMENTS = ("DEMO", "TESTNET")
 
 
 class ConfigError(ValueError):
@@ -47,7 +53,8 @@ def _now() -> datetime:
 def config_dict(c: StrategyConfig) -> dict[str, Any]:
     return {"strategy_id": c.strategy_id, "enabled": c.enabled, "mode": c.mode, "exchange": c.exchange,
             "symbols": list(c.symbols or []), "interval": c.interval, "params": dict(c.params or {}),
-            "risk": dict(c.risk or {}), "version": c.version,
+            "risk": dict(c.risk or {}), "exits": dict(c.exits or {}),
+            "connection_id": str(c.connection_id) if c.connection_id else None, "version": c.version,
             "updated_at": c.updated_at.isoformat() if c.updated_at else None, "updated_by": c.updated_by}
 
 
@@ -65,7 +72,8 @@ async def ensure_defaults(session: AsyncSession) -> None:
             session.add(StrategyConfig(strategy_id=spec.id, enabled=False, mode="DISABLED",
                                        exchange=spec.default_exchange, symbols=list(spec.default_symbols),
                                        interval=spec.default_interval, params=spec.default_params(),
-                                       risk={k: str(v[0]) for k, v in RISK_RULES.items()}, version=1))
+                                       risk={k: str(v[0]) for k, v in RISK_RULES.items()},
+                                       exits=management.validate_plan(spec.default_exits), version=1))
     await session.flush()
 
 
@@ -108,14 +116,31 @@ def validate(spec: registry.StrategySpec, current: dict[str, Any], change: dict[
         errors.append(f"unknown keys: {sorted(unknown)}")
     new = {**current, **{k: v for k, v in change.items() if k in ALLOWED_KEYS}}
     if new["mode"] not in MODES:
-        errors.append(f"mode must be one of {list(MODES)} (there is no live mode)")
+        errors.append(f"mode must be one of {list(MODES)} (there is no live mode: live orders are locked in code)")
     if not isinstance(new["enabled"], bool):
         errors.append("enabled must be true or false")
     if new["enabled"]:
         if spec.status != registry.IMPLEMENTED:
             errors.append(f"{spec.id} cannot be enabled: {spec.status} ({spec.status_reason})")
-        if new["mode"] != "DEMO":
-            errors.append("an enabled strategy must be in DEMO mode")
+        if new["mode"] not in ACTIVE_MODES:
+            errors.append(f"an enabled strategy must be in {' or '.join(ACTIVE_MODES)} mode")
+    if new["mode"] == "EXCHANGE_DEMO":
+        if not new.get("connection_id"):
+            errors.append("EXCHANGE_DEMO needs a practice (DEMO / TESTNET) connection")
+        else:
+            try:
+                new["connection_id"] = str(uuid.UUID(str(new["connection_id"])))
+            except ValueError:
+                errors.append("connection_id is not a valid id")
+    elif "connection_id" in change and change["connection_id"] not in (None, ""):
+        errors.append("connection_id is only used in EXCHANGE_DEMO mode")
+    if "exits" in change:
+        try:
+            new["exits"] = management.validate_plan(change["exits"] if isinstance(change["exits"], dict) else None)
+            if not isinstance(change["exits"], dict):
+                raise management.PlanError("exits must be an object")
+        except (management.PlanError, ValueError, TypeError) as e:
+            errors.append(f"exits: {e}")
     if spec.exchanges and new["exchange"] not in spec.exchanges:
         errors.append(f"exchange must be one of {list(spec.exchanges)}")
     syms = new.get("symbols")
@@ -151,6 +176,31 @@ def validate(spec: registry.StrategySpec, current: dict[str, Any], change: dict[
     return new
 
 
+async def _holding_conflicts(session: AsyncSession, strategy_id: str, before: dict[str, Any],
+                             new: dict[str, Any]) -> list[str]:
+    """While a strategy holds a position, changes that would detach the engine
+    from it are refused (its exit rule would stop running for that trade).
+    Disabling, risk, exits and parameter changes stay allowed."""
+    paper = (await session.execute(select(DemoPosition.symbol).where(
+        DemoPosition.strategy_id == strategy_id, DemoPosition.status == "OPEN"))).scalars().all()
+    xch = (await session.execute(select(ExecTrade.symbol, ExecTrade.connection_id).where(
+        ExecTrade.strategy_id == strategy_id, ExecTrade.status.in_(EXEC_ACTIVE)))).all()
+    if not paper and not xch:
+        return []
+    what = ", ".join([f"paper {s}" for s in paper] + [f"exchange-demo {s}" for s, _ in xch])
+    out = []
+    if new["exchange"] != before["exchange"] or list(new["symbols"]) != list(before["symbols"]):
+        out.append("exchange or symbols")
+    if paper and new["mode"] == "EXCHANGE_DEMO":
+        out.append("switching to exchange demo")
+    if xch and new["mode"] == "DEMO":
+        out.append("switching to paper")
+    if xch and new["mode"] == "EXCHANGE_DEMO" and any(str(c) != new.get("connection_id") for _, c in xch):
+        out.append("the connection")
+    return [f"cannot change {x} while the strategy holds {what}: close it first (or disable the strategy; its "
+            "exit rule and protection keep running)" for x in out]
+
+
 async def save_strategy(session: AsyncSession, strategy_id: str, change: dict[str, Any], expected_version: int,
                         actor: str | None) -> dict[str, Any]:
     spec = registry.get(strategy_id)
@@ -165,8 +215,26 @@ async def save_strategy(session: AsyncSession, strategy_id: str, change: dict[st
                              "reload and try again")
     before = config_dict(row)
     new = validate(spec, before, change)
-    for k in ("enabled", "mode", "exchange", "symbols", "interval", "params", "risk"):
+    if new["mode"] == "EXCHANGE_DEMO":
+        conn = await session.get(ApiConnection, uuid.UUID(new["connection_id"]))
+        problems = []
+        if conn is None:
+            problems.append("the connection does not exist")
+        else:
+            if conn.environment not in PRACTICE_ENVIRONMENTS:
+                problems.append(f"the connection is {conn.environment}: EXCHANGE_DEMO uses DEMO / TESTNET only")
+            if conn.exchange != new["exchange"]:
+                problems.append(f"the connection is for {conn.exchange}, the strategy trades on {new['exchange']}")
+            if new["enabled"] and not conn.enabled:
+                problems.append("the connection is disabled")
+        if problems:
+            raise ConfigError(problems)
+    held = await _holding_conflicts(session, strategy_id, before, new)
+    if held:
+        raise ConfigError(held)
+    for k in ("enabled", "mode", "exchange", "symbols", "interval", "params", "risk", "exits"):
         setattr(row, k, new[k])
+    row.connection_id = uuid.UUID(new["connection_id"]) if new.get("mode") == "EXCHANGE_DEMO" else None
     row.version += 1
     row.updated_at, row.updated_by = _now(), actor
     await session.flush()

@@ -41,3 +41,4 @@ def implementation(strategy_id: str) -> Strategy | None:
 
 # Built-in strategy modules register themselves on import.
 from yonixalpha_crypto.strategies import meta_muse  # noqa: E402,F401
+from yonixalpha_crypto.strategies import library  # noqa: E402,F401  (the 20-module library)
