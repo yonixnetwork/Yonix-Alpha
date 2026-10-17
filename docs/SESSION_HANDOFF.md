@@ -460,6 +460,7 @@ Spread limit, slippage and book age are also in `RiskLimits`.
   - api, web and crypto-trading run the new images;
   - pre-deploy backup: `/opt/yonixalpha-backups/yonixalpha-20261017T112205Z.sql.gz` (3.3 GB, verified "dump complete").
 - Server resources (2026-10-17): 2 cores, about 450-500 MB RAM available, swap about 1.1 of 2 GB in use, 35 GB disk free, Postgres database 24 GB. Memory is the tight resource.
+- Memecoin pause (operator request 2026-10-17): `scripts/memecoin.sh pause` stops every Memecoin worker and writes `runtime/memecoin-paused`. While that file exists, `deploy.sh`, the key updater and `docker compose up -d` do not start Memecoin (compose profile `memecoin`). Check with `bash scripts/memecoin.sh status`. Only the operator decides on `resume` (docs/DEPLOYMENT.md, "Pausing Memecoin").
 - Not yet verified:
   - the local backtest runner on real candles (`docs/LOCAL_BACKTESTS.md` section 7; result import stays off);
   - exchange demo against a real practice host and key.

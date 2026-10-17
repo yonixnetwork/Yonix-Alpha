@@ -282,6 +282,22 @@ A routine that works:
 
 Nothing is ever upgraded or deployed automatically (master §66).
 
+### Pausing Memecoin (operator request 2026-10-17)
+
+The whole Memecoin system can be paused, and it then stays paused through
+deploys, `.env` updates and reboots until the operator resumes it.
+
+- **Commands** (on the server, from `/opt/yonixalpha`):
+  - `bash scripts/memecoin.sh status`: paused or not, which Memecoin containers exist, and the open positions (LIVE and PAPER).
+  - `bash scripts/memecoin.sh pause`: stops data-solana, engine-solana-discovery, decision-engine, ml and paper-trading (and data-evm, copy-engine and the legacy engines if present), then writes `runtime/memecoin-paused`.
+  - `bash scripts/memecoin.sh resume`: deletes the marker, rebuilds the Memecoin images from the current code (one at a time) and starts them.
+- **Pause refuses while LIVE Memecoin positions or LIVE orders are active.** paper-trading also manages their exits. Close them first: Archived Engines > Launchpads, turn off New entries, then CLOSE POSITIONS. PAPER positions are only frozen.
+- **While paused:**
+  - `scripts/active-profiles.sh` returns no Memecoin profile. `deploy.sh` then builds and starts only api, web, crypto-trading and the shared infrastructure, and removes any Memecoin container still present.
+  - The dashboard key updater (`apply-env-requests.py`) uses the same profiles.
+  - The Memecoin workers sit behind the compose profile `memecoin`, so a plain `docker compose ... up -d` cannot start them either.
+- **Nothing is deleted:** images, settings, history and positions stay in the database.
+
 ### Crypto Trading: targeted deploys, and no backtests on the server
 
 - **Targeted deploys.** Crypto-only changes rebuild and restart only `api`, `web` and `crypto-trading` (see `docs/SESSION_HANDOFF.md`, "Deploy procedure"). Do not use `scripts/deploy.sh` for them, because it recreates every container, Memecoin included.
