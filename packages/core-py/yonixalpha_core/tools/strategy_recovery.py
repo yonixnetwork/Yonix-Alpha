@@ -8,6 +8,9 @@ time windows, LIMITs); no full scans of the large event tables.
 
 Sections (default: all)
   book        paper accounts; positions per mode / engine / status with first / last entry
+  equity      the Solana PAPER account's realized equity curve (start balance + realized PnL in
+              exit order): peak, trough, maximum drawdown, end, the same without the single best
+              trade, per period and per day; open PAPER positions at cost (not marked)
   settings    every risk_settings version per scope (only the keys that changed), strategy
               modes and configs, paper-execution settings, operator audit log since Sep 25
   trades      every closed Solana position, PAPER and LIVE apart: per strategy, per token
@@ -54,7 +57,7 @@ from yonixalpha_core.config import get_settings
 from yonixalpha_core.db.base import make_engine, make_session_factory
 from yonixalpha_core.solana_performance import NUM
 
-SECTIONS = ("book", "settings", "trades", "top", "deep", "compare", "migration", "activity", "parity")
+SECTIONS = ("book", "equity", "settings", "trades", "top", "deep", "compare", "migration", "activity", "parity")
 # A Pump.fun curve completes near 410 SOL market cap (~85 SOL real reserve);
 # a "migrated" token far above that at the decision is not a fresh migration.
 ESTABLISHED_MCAP_SOL = Decimal(3000)
@@ -535,6 +538,85 @@ async def section_book(s) -> list[str]:
     return out
 
 
+def _curve(start: Decimal, pnls: list[Decimal]) -> dict[str, Decimal]:
+    """Realized equity path from `start`: peak, trough, end and the largest
+    fall from a running peak (absolute and as a share of that peak)."""
+    eq = peak = trough = start
+    dd = dd_pct = Decimal(0)
+    for p in pnls:
+        eq += p
+        peak = max(peak, eq)
+        trough = min(trough, eq)
+        if peak - eq > dd:
+            dd = peak - eq
+            dd_pct = dd / peak if peak > 0 else Decimal(0)
+    return {"end": eq, "peak": peak, "trough": trough, "dd": dd, "dd_pct": dd_pct}
+
+
+async def section_equity(s, rows: list[Any], marks: list[tuple[datetime, str]]) -> list[str]:
+    out = ["\n== EQUITY: Solana PAPER account, realized equity in exit order (SOL) =="]
+    acc = (await s.execute(text("SELECT id, starting_balance, cash_balance, reset_at FROM paper_accounts "
+                                "WHERE name = 'solana' LIMIT 1"))).first()
+    if acc is None:
+        return out + ["  no Solana paper account"]
+    start = Decimal(acc.starting_balance)
+    paper = sorted((r for r in rows if r.mode == "PAPER" and r.account_id == acc.id and r.exit_at is not None),
+                   key=lambda r: r.exit_at)
+    if acc.reset_at is not None:
+        paper = [r for r in paper if r.exit_at >= acc.reset_at]
+    pnls = [Decimal(r.pnl or 0) for r in paper]
+    c = _curve(start, pnls)
+    out.append(f"  start {start:.4f} (reset {_t(acc.reset_at)}); closed trades {len(paper)}; cash now {_u(acc.cash_balance)}")
+    if not paper:
+        return out + ["  no closed PAPER trade on this account"]
+    eq, peak_at, trough_at, hi, lo = start, paper[0].exit_at, paper[0].exit_at, start, start
+    for r, p in zip(paper, pnls):
+        eq += p
+        if eq > hi:
+            hi, peak_at = eq, r.exit_at
+        if eq < lo:
+            lo, trough_at = eq, r.exit_at
+    out.append(f"  end {c['end']:.4f} ({c['end'] - start:+.4f}, {_p((c['end'] - start) / start, 2)}); "
+               f"peak {c['peak']:.4f} at {_t(peak_at) if c['peak'] > start else 'start'}; "
+               f"trough {c['trough']:.4f} at {_t(trough_at) if c['trough'] < start else 'start'}; "
+               f"max drawdown {c['dd']:.4f} ({_p(c['dd_pct'], 2)} of the peak before it)")
+    best = max(range(len(paper)), key=lambda i: pnls[i])
+    wo = _curve(start, [p for i, p in enumerate(pnls) if i != best])
+    out.append(f"  without the single best trade ({str(paper[best].id)[:8]} {paper[best].engine} {_n(pnls[best], 5)}): "
+               f"end {wo['end']:.4f} ({wo['end'] - start:+.4f}), max drawdown {wo['dd']:.4f}")
+    out.append("  per period (by exit time): trades, net, drawdown inside the period, equity at its end")
+    per: dict[str, list[Decimal]] = defaultdict(list)
+    for r, p in zip(paper, pnls):
+        per[period_of(r.exit_at, marks)].append(p)
+    eq = start
+    for k in sorted(per, key=lambda x: int(x[1:].split()[0])):
+        pc = _curve(eq, per[k])
+        out.append(f"    {k:60s} n={len(per[k]):<4} net {sum(per[k]):+.4f} DD {pc['dd']:.4f} end {pc['end']:.4f}")
+        eq = pc["end"]
+    out.append("  per day (UTC, by exit time): trades, net, equity at the end of the day")
+    eq = start
+    days: dict[str, list[Decimal]] = defaultdict(list)
+    for r, p in zip(paper, pnls):
+        days[f"{r.exit_at.astimezone(timezone.utc):%Y-%m-%d}"].append(p)
+    for d in sorted(days):
+        eq += sum(days[d])
+        out.append(f"    {d}  n={len(days[d]):<4} net {sum(days[d]):+.5f}  equity {eq:.4f}")
+    last_at, last_name = marks[-1]
+    recent = [(r, p) for r, p in zip(paper, pnls) if r.exit_at >= last_at]
+    out.append(f"  every trade closed after the last marker ({last_name}, {_t(last_at)}): {len(recent)}"
+               + (" (latest 60 shown)" if len(recent) > 60 else ""))
+    for r, p in recent[-60:]:
+        out.append(f"    {str(r.id)[:8]} {r.engine:16s} {(r.symbol or '-')[:10]:10s} {category(r)[:28]:28s} in {_t(r.entry_at)} "
+                   f"out {_t(r.exit_at)} hold {_hold(r.entry_at, r.exit_at):>6} cost {_u(r.cost)} pnl {_n(p, 5)} "
+                   f"({_p(r.pnl_pct)}) {r.exit_reason or '-'}")
+    opn = (await s.execute(text("SELECT count(*) n, coalesce(sum(entry_cost_quote), 0) cost FROM paper_positions "
+                                "WHERE account_id = :a AND coalesce(execution_mode, 'PAPER') = 'PAPER' "
+                                "AND status IN ('open', 'pending_entry', 'needs_review')"), {"a": acc.id})).one()
+    out.append(f"  open PAPER positions on this account: {opn.n} at cost {_u(opn.cost)} (not marked to market here)")
+    out.append("  (realized only: unrealized PnL of a position is counted when it closes)")
+    return out
+
+
 # --- migration pipeline ---------------------------------------------------------------------
 
 async def section_migration(s, now: datetime) -> list[str]:
@@ -743,10 +825,12 @@ async def build(s, sections: list[str], top: int, deep_n: int, marks: list[tuple
     out.append("periods (deploy times from the operator's deploy output): " + "; ".join(
         f"P{i + 1} from {at:%m-%d %H:%M} {name}" for i, (at, name) in enumerate(marks)))
     rows: list[Any] = []
-    if any(x in sections for x in ("trades", "top", "deep", "compare")):
+    if any(x in sections for x in ("equity", "trades", "top", "deep", "compare")):
         rows = await load_trades(s)
     if "book" in sections:
         out += await section_book(s)
+    if "equity" in sections:
+        out += await section_equity(s, rows, marks)
     if "settings" in sections:
         out += await section_settings(s)
     if "trades" in sections:

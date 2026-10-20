@@ -176,3 +176,34 @@ async def test_the_tool_cannot_write(sf):
     async with sf() as s:
         assert (await s.execute(select(func.count()).select_from(PaperPosition))).scalar_one() == 6
         assert (await s.execute(select(PaperAccount.cash_balance))).scalar_one() == Decimal("9.5")
+
+
+async def test_equity_curve_peak_drawdown_and_without_the_best_trade(sf):
+    async with sf() as s:
+        await seed(s)
+        acct = (await s.execute(select(PaperAccount))).scalar_one()
+        acct.reset_at = datetime(2026, 9, 26, tzinfo=timezone.utc)  # trades before a reset belong to an older book
+        await s.commit()
+    async with sf() as s:
+        await s.execute(text("SET TRANSACTION READ ONLY"))
+        lines = await sr.build(s, ["equity"], 10, 12, [(datetime.fromisoformat(a), n) for a, n in sr.DEPLOYS], NOW)
+        await s.rollback()
+    out = "\n".join(lines)
+    # PAPER exits in order: +0.1, -0.002, -0.0015, -0.0968, -0.005 from 10 SOL (the LIVE trade is not counted)
+    assert "closed trades 5" in out, out
+    assert "end 9.9947 (-0.0053" in out and "peak 10.1000" in out, out
+    # largest fall from the 10.1 peak: 10.1 -> 9.9947
+    assert "max drawdown 0.1053 (1.04% of the peak before it)" in out, out
+    # without the +0.1 winner the account only loses
+    assert "without the single best trade" in out and "end 9.8947 (-0.1053)" in out, out
+    assert "2026-10-06  n=2" in out and "open PAPER positions on this account: 0" in out
+    # the last marker is #74 (Oct 11): only the Oct 12 and the recent fresh trade closed after it
+    assert "every trade closed after the last marker (#74 migration pool detection, 10-11 08:09:00): 2" in out, out
+    assert "MIGRATED" in out and "stop_loss" in out
+    assert "Nothing was written." in out
+
+
+def test_curve_math():
+    c = sr._curve(Decimal(10), [Decimal(1), Decimal(-3), Decimal(1)])
+    assert c == {"end": Decimal(9), "peak": Decimal(11), "trough": Decimal(8), "dd": Decimal(3),
+                 "dd_pct": Decimal(3) / Decimal(11)}

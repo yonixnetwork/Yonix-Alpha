@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 
-/** Regular trading is the active dashboard; the Memecoin overview moved to
- * /dashboard/memecoin (Archived Engines); the Strategy Center is the start page. */
+/** Solana memecoin trading is the active product: the start page is the
+ * memecoin dashboard. Crypto / exchange trading is under Archived Engines. */
 export default function DashboardIndex() {
-  redirect("/dashboard/crypto/center");
+  redirect("/dashboard/memecoin");
 }

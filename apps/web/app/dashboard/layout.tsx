@@ -3,8 +3,8 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Archive, Bell, BellRing, CandlestickChart, GitCompare, History, KeyRound, LayoutGrid, ListChecks, LogOut, ShieldCheck, Menu, PanelLeftClose, PanelLeftOpen, Server } from "lucide-react";
-import { isMemecoinPath, MEMECOIN_ARCHIVED, MEMECOIN_GROUPS, type NavGroup, type NavItem } from "@/components/archivedEngines";
+import { Archive, LogOut, Menu, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { CRYPTO_ARCHIVED, CRYPTO_GROUPS, isCryptoPath, MEMECOIN_GROUPS, type NavGroup, type NavItem } from "@/components/archivedEngines";
 import NotificationsBell from "@/components/NotificationsBell";
 import RuntimeApply from "@/components/RuntimeApply";
 import { modeClass, stateClass } from "@/components/ui";
@@ -14,44 +14,20 @@ import { EventsProvider, useLiveStatus } from "@/lib/events";
 import { accountOn, useProfile } from "@/lib/profile";
 import { useApi } from "@/lib/useApi";
 
-// Regular trading is the active navigation. Memecoin Trading is archived:
-// its pages stay reachable from Archived Engines and appear in the menu
-// while one of them is open (components/archivedEngines).
-const ACTIVE_GROUPS: NavGroup[] = [
-  {
-    // Regular crypto (Bybit / Binance spot, DEMO only): a separate engine
-    // from Memecoin Trading (yonixalpha_crypto).
-    title: "Crypto Trading",
-    items: [
-      { href: "/dashboard/crypto/center", label: "Strategy Center", icon: LayoutGrid },
-      { href: "/dashboard/crypto", label: "Engine (Strategy Lab)", icon: CandlestickChart },
-      { href: "/dashboard/crypto/backtests", label: "Backtests", icon: History },
-      { href: "/dashboard/crypto/compare", label: "Compare", icon: GitCompare },
-      { href: "/dashboard/crypto/portfolio", label: "Portfolio Risk", icon: ShieldCheck },
-      { href: "/dashboard/crypto/trades", label: "Exchange Trades", icon: ListChecks },
-      { href: "/dashboard/crypto/connections", label: "Exchange Connections", icon: KeyRound },
-      { href: "/dashboard/crypto/alerts", label: "Alerts and Audit", icon: BellRing },
-    ],
-  },
-  {
-    title: "System",
-    items: [
-      { href: "/dashboard/health", label: "System Health", icon: Server },
-      { href: "/dashboard/notifications", label: "Notifications", icon: Bell },
-    ],
-  },
-];
-
+// Memecoin Trading (Solana) is the active navigation. Regular crypto /
+// exchange trading is archived: its pages stay reachable from Archived
+// Engines and appear in the menu while one of them is open
+// (components/archivedEngines).
 const ARCHIVE_GROUP: NavGroup = {
   title: "Archived Engines",
-  items: [{ href: "/dashboard/archived", label: "Memecoin Trading", icon: Archive }],
+  items: [{ href: "/dashboard/archived", label: "Crypto / Exchange Trading", icon: Archive }],
 };
 
 function navGroups(pathname: string): NavGroup[] {
-  if (!MEMECOIN_ARCHIVED) return [...MEMECOIN_GROUPS, ...ACTIVE_GROUPS];
-  const memecoinOpen = pathname === "/dashboard/archived" || isMemecoinPath(pathname);
-  return [...ACTIVE_GROUPS, ARCHIVE_GROUP,
-    ...(memecoinOpen ? MEMECOIN_GROUPS.map((g) => ({ ...g, title: `Memecoin${g.title ? ` · ${g.title}` : ""}` })) : [])];
+  if (!CRYPTO_ARCHIVED) return [...MEMECOIN_GROUPS, ...CRYPTO_GROUPS];
+  const cryptoOpen = pathname === "/dashboard/archived" || isCryptoPath(pathname);
+  return [...MEMECOIN_GROUPS, ARCHIVE_GROUP,
+    ...(cryptoOpen ? CRYPTO_GROUPS.map((g) => ({ ...g, title: `Archived · ${g.title}` })) : [])];
 }
 
 const COLLAPSE_KEY = "yonixalpha_nav_collapsed";
@@ -204,7 +180,7 @@ function Shell({ children }: { children: React.ReactNode }) {
           <RuntimeApply />
         </div>
         <div className="topbar-status">
-          <TopbarSummary memecoin={!MEMECOIN_ARCHIVED || isMemecoinPath(pathname)} />
+          <TopbarSummary memecoin={!isCryptoPath(pathname)} />
           <LiveIndicator />
           <NotificationsBell />
           <button className="icon-btn" aria-label="Sign out" title="Sign out" onClick={handleLogout}>
@@ -239,11 +215,11 @@ function Shell({ children }: { children: React.ReactNode }) {
           ))}
         </nav>
         <main className="dash-main" id="main" tabIndex={-1}>
-          {MEMECOIN_ARCHIVED && isMemecoinPath(pathname) && (
+          {CRYPTO_ARCHIVED && isCryptoPath(pathname) && (
             <div className="notice" role="note">
-              Archived engine: <strong>Memecoin Trading</strong>. Archiving only hides it from the main menu. Its workers,
-              settings and positions are unchanged, and the controls on this page still act on the running Memecoin
-              engine. <Link href="/dashboard/archived">About Archived Engines</Link>
+              Archived engine: <strong>Crypto / Exchange Trading</strong>. It is out of the main menu and no Memecoin
+              page or worker uses it. Archiving did not stop its worker: the controls on this page still act on it, and
+              the Engine (Strategy Lab) page turns it off. <Link href="/dashboard/archived">About Archived Engines</Link>
             </div>
           )}
           {children}
