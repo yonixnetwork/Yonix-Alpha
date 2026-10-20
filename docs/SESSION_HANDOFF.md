@@ -1,5 +1,17 @@
 # Session handoff (2026-10-16)
 
+> **Update 2026-10-20: the objective changed.** The operator's "MEMECOIN
+> INTELLIGENCE & PROFITABILITY RECOVERY UPGRADE" brief makes YonixAlpha a
+> Solana memecoin platform again. Exchange trading (everything below about
+> Crypto Trading) is archived:
+> - from the menu, under Archived Engines;
+> - on the git branch `archive/crypto-exchange-trading-2026-10-20`.
+>
+> The current audit, gap matrix, open decisions and plan are in
+> `docs/MEMECOIN_REFOCUS_AUDIT.md`; read it first. The rules in section 11
+> still apply, except that Memecoin is now the system being upgraded, in
+> place and with live trading kept locked.
+
 This file is the handoff from one Claude Code session to the next. It covers
 what was done, what runs on the server today, the rules the operator set,
 and the next steps. Read it fully before changing anything. Detailed plans
