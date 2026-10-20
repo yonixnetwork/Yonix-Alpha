@@ -214,6 +214,9 @@ async def test_stop_realism_compares_the_planned_stop_with_the_realized_loss(sf)
         await seed(s)
         for p in (await s.execute(select(PaperPosition))).scalars():
             p.plan = {**(p.plan or {}), "stop_distance_pct": "0.10"}
+            if p.engine == "solana_fresh":  # a curve entry whose token migrated while held, planned to lose 0.0025
+                p.plan = {**p.plan, "venue": {"decimals": 6, "type": "pump_curve"}}
+                p.lifecycle, p.max_loss_quote = "MIGRATED", Decimal("0.0025")
         await s.commit()
     async with sf() as s:
         await s.execute(text("SET TRANSACTION READ ONLY"))
@@ -223,5 +226,12 @@ async def test_stop_realism_compares_the_planned_stop_with_the_realized_loss(sf)
     # PAPER stop exits: -20%, -15%, -20.6% (migration) and -20% (fresh); the planned stop is 10%
     row = next(x for x in lines if x.strip().startswith("PAPER MIGRATED stop_loss"))
     assert row.split()[3] == "3" and "10.0%" in row, row
+    # the migrated-while-held curve entry is its own group; it lost 0.005, twice its planned max loss
+    fresh = next(x for x in lines if x.strip().startswith("PAPER FRESH ->migrated stop_loss"))
+    assert fresh.split()[4] == "1" and fresh.rstrip().endswith("2.00x / 2.00x"), fresh
+    assert "worst 5 stop exits by realized loss" in out
+    worst = [x for x in lines if x.startswith("    ")]
+    assert len(worst) == 5 and "-20.6%" in worst[0] and "P4" in worst[0], worst  # MINT_D, entered Oct 12 (after #74)
+    assert any("FRESH ->migrated" in x and "pump_curve" in x and "2.00x" in x for x in worst), worst
     assert "LIVE" in out and "Nothing was written." in out
     assert sr._pct([0.1, 0.2, 0.3, 0.4], 0.9) == 0.4 and sr._pct([], 0.5) is None

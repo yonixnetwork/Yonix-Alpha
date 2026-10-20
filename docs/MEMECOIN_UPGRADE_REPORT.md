@@ -116,7 +116,18 @@ The existing reconnect-with-backoff (PumpPortal), stream gap fill (`stream_guard
 Existing fixed-cost / fixed-SOL tests now pin the gap off explicitly, because they test the loss at the stop. Gap behaviour has its own tests.
 
 **Limitations:**
-- Gap defaults come from a small sample (2 curve stops, 7 pool stops after Oct 15). Run `--section stops` on the server to check them against all history.
+- **Gap defaults checked against all history** (server, 2026-10-20 12:52 UTC, `--section stops`, VERIFIED). p90 is the realized loss that 90% of stop exits stayed within.
+
+  | Stop exits (stop_loss) | n | p90 loss | worst | Default that applies | Covered? |
+  |---|---|---|---|---|---|
+  | PAPER MIGRATED (pool) | 54 | 25.0% | 29.1% | pool 0.25 | p90 yes, worst no |
+  | LIVE MIGRATED (pool) | 11 | 20.0% | 23.7% | pool 0.25 | yes |
+  | PAPER MOMENTUM | 22 | 26.3% | 34.6% | pool or curve | depends on venue |
+  | PAPER FRESH | 2 | 44.4% | 44.4% | curve 0.50 | yes (2 trades only) |
+  | **PAPER NEAR_MIGRATION** | 10 | **91.3%** | **93.1%** | curve 0.50 | **no: median 57.3%** |
+  | LIVE NEAR_MIGRATION | 6 | 29.8% | 53.5% | curve 0.50 | p90 yes, worst no |
+
+  Near-migration curve entries (bought at 70% or more of the curve) are the one group the 0.50 curve default does not cover. On paper they lost most of the position at the stop. Not yet established: whether those are tokens that migrated while held (priced at the pool after the crossing, R4) and whether they came before or after the Oct 15 changes. The updated `--section stops` separates "->migrated" entries and lists the worst stop exits with entry time, period and loss as a multiple of the planned max loss.
 - Smaller sizes make fixed LIVE costs a larger share; LIVE stays locked.
 - A small live wallet can no longer pass a LIVE smoke test on a curve token. At 0.3 SOL and 1% risk, the gap-sized buy is about 0.005 SOL. Its network fees are 4.3% of that (the maximum is 2%), so it is refused with FIXED_COSTS_TOO_HIGH, never enlarged. A capped 0.02 SOL smoke buy needs about 1.2 SOL in the wallet at 1% risk.
 
