@@ -1,103 +1,116 @@
 # Memecoin Refocus: Phase 2 root-cause report (2026-10-20)
 
-This report extends `docs/YONIXALPHA_DEEP_STRATEGY_RECOVERY_REPORT.md` (Oct 15, "the recovery report") with the server evidence of 2026-10-20 09:47 UTC. It changes no trading code or setting. Evidence labels:
+This report extends `docs/YONIXALPHA_DEEP_STRATEGY_RECOVERY_REPORT.md` (Oct 15, "the recovery report") with the server evidence of 2026-10-20. Evidence labels:
 - VERIFIED: shown by server output, code or git;
 - INFERRED: follows from verified facts; the check that would prove it is named;
-- UNKNOWN: no evidence yet.
+- UNKNOWN: no evidence.
 
 Sources:
-- **S4:** `git log -1`, `scripts/memecoin.sh status`, the live-lock values, and `strategy_recovery --section book --section compare --split 2026-10-15T12:00` plus `--section activity`. All were operator pastes from 2026-10-20 09:47 to 09:48 UTC.
+- **S4** (09:47 UTC): `git log -1`, `memecoin.sh status`, the live locks, `strategy_recovery --section book/compare/activity`.
+- **S5** (10:14 UTC): `strategy_recovery --section equity --split 2026-10-15T12:00` and `--section trades` (by category).
+
+All amounts are SOL, realized, net of every fee the simulator charged.
 
 ---
 
-## 1. Findings that need action before anything else
+## 1. Findings that needed action first
 
-### 1.1 The environment permits LIVE trading (VERIFIED, S4)
+### 1.1 The environment permitted LIVE trading. Fixed by the operator on 2026-10-20.
 
-```
-TRADING_ENABLED True  LIVE_TRADING_ENABLED True  PAPER_TRADING False
-```
+- At 09:47 UTC: `TRADING_ENABLED True`, `LIVE_TRADING_ENABLED True`, `PAPER_TRADING False`. All three environment locks were open; only the database `global_mode` (PAPER since Oct 10) prevented LIVE entries.
+- At about 10:00 UTC the operator set `LIVE_TRADING_ENABLED=false` and `PAPER_TRADING=true` in `.env` (backup kept) and restarted the API. The API now reports `LIVE_TRADING_ENABLED False PAPER_TRADING True` (VERIFIED).
+- No LIVE position has opened since Oct 10 07:25 (S4).
+- The LIVE wallet account holds 0.1032 SOL.
 
-- `safety/store.py live_trading_permitted()` is true when `TRADING_ENABLED` and `LIVE_TRADING_ENABLED` are true and `PAPER_TRADING` is false. All three conditions hold now, so the **environment locks are open**.
-- Today the only remaining barrier is the database `global_mode`. It was set to PAPER on Oct 10 (recovery report section 2). No LIVE position has opened since Oct 10 07:25 (S4 book: the last LIVE entry is `10-10 07:25:18`).
-- The brief requires live trading disabled by default. `.env.example` ships `TRADING_ENABLED=false`, `LIVE_TRADING_ENABLED=false`, `PAPER_TRADING=true`.
-- **Recommended operator action before any Memecoin resume:** set `LIVE_TRADING_ENABLED=false` and `PAPER_TRADING=true` in `.env`. These keys are server-only; neither the dashboard nor `set-keys.sh` changes them.
-- The LIVE wallet account still holds funds: `live_solana` start 0.0829, cash 0.1032 SOL (S4).
+### 1.2 Memecoin has been paused since 2026-10-17 13:16 UTC (VERIFIED, S4)
 
-### 1.2 The Memecoin system has been stopped since 2026-10-17 13:16 UTC (VERIFIED, S4)
-
-- `Memecoin: PAUSED since 2026-10-17T13:16:50Z by root`.
 - No Memecoin container exists.
-- The activity section shows **no candidate in any of the last 49 hours** and no service error. That is the pause (no worker), not a scanner fault.
-- No paper evidence has accumulated since Oct 17 12:42 (the last paper exit).
-- The paper book has no open Solana position. `memecoin.sh` counts 7 open PAPER positions across all chains. The Solana book (S4) lists only closed and failed rows, so those 7 belong to the EVM paper books (`evm_bsc` and `evm_robinhood` cash is below their start). They stay frozen until a resume. INFERRED; the new `equity` section prints the Solana open count directly.
+- No candidate appeared in 49 hours and no service error was logged. That is the pause, not a scanner fault.
+- No open Solana paper position (S5: `open PAPER positions on this account: 0`). The 7 open PAPER positions counted by `memecoin.sh` belong to the EVM books.
 
-## 2. Paper results now (VERIFIED, S4 book; SOL, net of every fee charged)
+## 2. The paper account over time (VERIFIED, S5)
 
-| Engine (PAPER) | Closed trades | Realized | At Oct 15 04:27 (recovery report) | Change since |
-|---|---|---|---|---|
-| solana_fresh | 49 | **-0.25400** | 44, -0.0633 | +5 trades, **-0.1907** |
-| solana_migration | 105 | -0.13352 | 93, -0.1737 | +12 trades, +0.0402 |
-| solana_momentum | 49 | -0.49241 | 49, -0.4924 | none (off since Oct 11) |
-| **Total** | 203 | **-0.87993** | -0.7294 | -0.1505 |
+| | SOL |
+|---|---|
+| Start (09-26) | 10.0000 |
+| **Peak** | **10.2916 at 10-06 04:52** |
+| Trough | 9.0634 at 10-17 12:22 |
+| **Maximum drawdown** | **1.2282 (11.93% of the peak)** |
+| End (10-17) | 9.1201 (-0.8799, -8.80%) |
+| End without the single best trade (`5e6b350e`, momentum, +0.1924) | 8.9277 |
 
-- The account started at 10 SOL; cash is 9.1201 = 10 - 0.87993, consistent with no open Solana position.
-- LIVE (all closed): 72 trades, -0.04786 SOL; 33 failed entries (no fill).
-- **Fresh lost 0.1907 SOL in 5 trades**, an average of -0.038 SOL per trade.
-  - That is more than the whole 0.025 SOL fresh token-exposure cap recorded in the recovery report (section 2).
-  - So fresh positions after Oct 14 were larger than 0.025 SOL. INFERRED: a trade cannot lose much more than its cost. The SOL-denominated sizing of #76 (Oct 14) is the likely change.
-  - Which trades, at what size and with which exit reason is UNKNOWN until the `equity` section below is run. It lists every trade closed after the marker.
-- Migration gained 0.040 SOL over 12 trades in the same window. That is a small sample; no conclusion.
+**Per period, by exit time:**
 
-## 3. Winners vs losers at entry (VERIFIED, S4 compare; medians, PAPER)
-
-| Group | n | Median curve progress | Median buyers | Median top-10 share |
-|---|---|---|---|---|
-| fresh WIN (incl. 2 big wins) | 22 | 0.90-0.98 | 241-292 | 0.215-0.226 |
-| fresh LOSS | 26 | **0.81** | **125.5** | 0.219 |
-| migration WIN | 39 (+1 big) | - | 14 | 0.209 |
-| migration LOSS | 65 | - | 13 | 0.237 |
-| momentum WIN | 16 (+2 big) | 0.74 | 29.5 | 0.232 |
-| momentum LOSS | 30 | 0.67 | 22 | 0.231 |
-
-Read with care: these are medians of small groups, and the wins are counted by number, not by size. The pattern is consistent across engines: **losing fresh entries were earlier on the curve (median 0.81 vs about 0.90) with half the buyers.** This is a candidate feature for Phase 5, to be tested out of sample. It is not a rule to apply now.
-
-**"MIGRATED established" (market cap above 3,000 SOL at the decision):**
-- PAPER: 13 wins and 1 big win vs 4 losses (18 trades).
-- R2 (deployed Oct 15) refuses these entries for `solana_migration`. That rule came from a few large losses (recovery report sections 3 and 5).
-- With a 14/18 win count, R2 may be refusing a profitable category. The net SOL of that group is not in the compare section. **Check:** `--section trades`, the "by category" lines. R2 stays as is until that number is known (no change without evidence).
-
-## 4. Questions from the brief (§3), updated
-
-| # | Question | Answer | Label |
+| Period | Trades | Net | Equity at the end |
 |---|---|---|---|
-| 1-2 | Strategy and code in the profitable period | rules from `strategies/solana.py` (unchanged since Sep 25), code `871e46a` on Oct 6 | VERIFIED |
-| 3 | Start, peak, end, drawdown | start 10.0000, end 9.1201 realized. Peak and maximum drawdown come from the new `equity` section (section 6). | VERIFIED / pending |
-| 6 | When performance changed | It never was positive without trade `915561d1` (+0.139 SOL, Oct 6). From Oct 15 to 17 fresh lost a further 0.19 SOL in 5 trades. | VERIFIED |
-| 7 | Discovery stopped, or trades unprofitable? | Oct 13-14: discovery stopped (provider rate limit, recovery report section 6). Oct 14: migration blocked by its daily limit. Since Oct 17: everything stopped by the operator pause. Trades lost money throughout. | VERIFIED |
-| 8-9 | Realism of fills and costs | paper optimism corrected by R3-R5 (Oct 15); paper paid LIVE fixed costs from Oct 7 | VERIFIED |
-| 10 | Provider changes | pump.fun change Oct 8 (fixed Oct 11), Helius rate limit Oct 13 | VERIFIED |
+| P0, to Oct 7 13:15 (before #53: paper did not pay LIVE fixed costs) | 108 | **+0.2704** | 10.2704 |
+| P1, to Oct 9 23:29 | 13 | +0.0107 | 10.2811 |
+| P2, from the Oct 9 23:29 risk save (sizes up: GLOBAL max size 2, migration lost its 0.01 cap) | 18 | **-0.3641** | 9.9170 |
+| P3, from Oct 10 16:44 (#69-#71: faster promotion and re-checks) | 28 | -0.2929 | 9.6241 |
+| P4, from Oct 11 08:09 (#74: migration pool detection) | 21 | -0.2867 | 9.3375 |
+| P5, from Oct 15 12:00 (R2-R10 deployed) | 15 | -0.2174 | 9.1201 |
 
-## 5. Confirmed, probable, unresolved
+**What the "profitable period" was:**
+- P0 made +0.2704 over 108 trades.
+- Two trades made more than all of it: momentum `5e6b350e` +0.1924 and the migration trade "D O T F" +0.1390 (Oct 6).
+  - The momentum trade most likely closed on Sep 29: that day netted +0.1957 over 5 trades. INFERRED; check with `--section top`.
+- Together that is +0.3314. **Without those two trades, P0 was about -0.061 SOL.** INFERRED: the arithmetic of the two VERIFIED trades against the VERIFIED P0 net.
+- In the same period, paper did not yet pay LIVE fixed costs (#53, Oct 7).
+
+**When it turned:**
+- The account peaked on Oct 6.
+- The large losses start in P2, right after the Oct 9 23:29 risk save that raised sizes.
+- Oct 10 alone lost 0.4487 SOL in 32 trades (momentum, average size about 0.26 SOL).
+- The strategy rules did not change (`strategies/solana.py`, last changed Sep 25). **The same negative-expectancy rules traded larger, so the losses grew.**
+
+## 3. Every trade after the R2-R10 deploy (P5, 15 trades, VERIFIED, S5)
+
+| | Trades | Net | Notes |
+|---|---|---|---|
+| fresh | 6 | -0.1907 | **MEIZHU** (NEAR_MIGRATION) cost **0.3971**, trailing stop after 70 s at **-44.7%**: -0.1776. **SPDOPE** cost 0.1072, trailing stop at **-53.9%**: -0.0577. Last trade AZUMA +0.0566 (+22.1%). |
+| migration | 9 | -0.0267 | sizes 0.027-0.048; 7 stop-loss exits at -6.6% to -22.2%; 2 small trailing-stop gains |
+
+**Root cause of the P5 loss: position size, not entry selection alone (VERIFIED):**
+- The planner sizes a position as `max loss / (stop distance + costs)`.
+- A 0.397 SOL fresh position was planned to lose about 0.02 at its stop. It lost 0.178 because the price fell through the stop between ticks, on a thin bonding curve.
+- Two of the four fresh stop exits filled at -45% and -54%.
+- Migration stops (about 10%) filled at -12% to -22%.
+- Paper models this gap correctly. The **sizing** assumed it away.
+
+## 4. Results per token category, all history (VERIFIED, S5 `trades`, PAPER)
+
+| Category at entry | Trades | Win | Net | Profit factor | Max DD | Comment |
+|---|---|---|---|---|---|---|
+| MIGRATED established (> 3,000 SOL mcap) | 18 | 78% | **+0.0807** | 1.56 | 0.139 | includes D O T F (+0.139); **without it -0.058**. R2 (refusing these) stays. |
+| NEAR_MIGRATION, migrated while held | 8 | 88% | +0.0536 | 188.5 | 0.000 | small sample; before R4 (Oct 15) the crossing filled optimistically |
+| MIGRATED pool <10m | 1 | - | +0.0005 | - | - | |
+| MIGRATED pool 10-30m | 14 | 21% | -0.0117 | 0.32 | 0.013 | |
+| MIGRATED pool 30m-24h | 72 | 31% | **-0.2030** | 0.52 | 0.221 | the largest group: steady losses |
+| FRESH | 15 | 33% | -0.0310 | 0.67 | 0.088 | |
+| NEAR_MIGRATION (not migrated while held) | 26 | 38% | **-0.2766** | 0.14 | 0.277 | includes MEIZHU -0.178 |
+| MOMENTUM | 49 | 37% | **-0.4924** | 0.55 | 0.721 | average size 0.2565; off since Oct 11 |
+
+LIVE (72 closed trades at 0.005-0.012 SOL): every category is negative; total -0.0479.
+
+**Winners vs losers at entry (S4 compare, PAPER fresh):** losing entries came earlier on the curve (median progress 0.81 vs about 0.90) with about half the buyers (125 vs 241). This is a candidate feature to test out of sample, not a rule.
+
+## 5. Conclusions
 
 **Confirmed:**
-- No strategy has a demonstrated positive net edge in paper. The only large profit is a single trade.
-- Discovery outages had a known external cause (Oct 13-14) and an operator pause (Oct 17 onward).
-- The environment currently permits LIVE trading.
-
-**Probable:**
-- Early fresh entries (lower curve progress, fewer buyers) lose more often. Needs out-of-sample confirmation.
+1. **No strategy has a demonstrated positive net edge.** The earlier profitable period was two outlier trades (+0.33 SOL). Without them it was slightly negative. Every category that looks positive depends on one trade or has fewer than 20 trades.
+2. **Deterioration = larger sizes on the same rules.** From the Oct 9 23:29 risk save, sizes rose and the losses scaled with them.
+3. **Stops gap on memecoin liquidity, and sizing ignored it.** Fresh stops filled at -45% and -54%; migrated-pool stops at -12% to -22%. A position sized for a 0.02 loss lost 0.178.
+4. **Discovery outages:**
+   - Oct 13-14: the only Helius provider was rate-limited and its replacement was disabled (recovery report section 6).
+   - From Oct 17: operator pause.
+5. **The environment locks allowed LIVE** until 2026-10-20 (now locked).
 
 **Unresolved:**
-- the 5 fresh trades from Oct 15 to 17 (sizes, exits);
-- the net SOL of "MIGRATED established" (and so whether R2 is right);
-- whether any rejected candidate before Oct 12 was a missed winner (deleted by retention; cannot be established).
+- whether the early-curve / buyer-count pattern holds out of sample (needs new paper data);
+- whether any rejected candidate before about Oct 12 was a missed winner (deleted by retention; cannot be established).
 
-## 6. Next read-only check (after this tool change is on `main`)
+## 6. What changed because of these findings (Phase 5, see `docs/MEMECOIN_UPGRADE_REPORT.md`)
 
-This runs the updated tool straight from git; no deploy is needed. It prints:
-- the equity curve (peak, drawdown, per period, per day);
-- every trade closed after Oct 15 12:00;
-- the per-category nets.
-
-The two commands are in the operator instructions of the PR that adds this report.
+- **Stop-gap sizing:** Solana positions are sized as if a stop fills at least 50% (bonding curve) or 25% (migrated pool) below entry. Under the same budget the MEIZHU position would have been about 0.04-0.06 SOL, not 0.397. Sizes only shrink.
+- **`strategy_recovery --section stops`** measures the real gap on every historical stop exit, so the operator can check those defaults against all history.
+- **R2 stays.** The established-token category is positive only because of one trade.

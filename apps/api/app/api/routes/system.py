@@ -13,6 +13,7 @@ from app.api.util import audit
 from app.schemas.common import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, Page
 from app.schemas.system import KillSwitchSummary, ServiceStatus, SystemEventOut, SystemStatusOut
 from yonixalpha_core import config_validation, events, kill_switch, update_monitor
+from yonixalpha_core.scanner_health import report as scanner_health_report
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import (DataQualityEvent, Notification, RiskAssessment, SystemEvent, UpdateEvent,
                                        UpdateWatch)
@@ -109,6 +110,16 @@ async def health(
 ) -> dict:
     items = await health_state.connections(db, redis, settings)
     return {"overall": health_state.worst([c["state"] for c in items]), "states": health_state.STATES, "connections": items}
+
+
+@router.get("/scanner-health")
+async def scanner_health(db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
+                         _: str = Depends(get_current_username)) -> dict:
+    """Memecoin scanner pipeline: when each stage last actually did
+    something (stream, PumpPortal, discovery, promotion, gate, paper trade),
+    queue depth, PumpPortal counters and the last hour's RPC outcomes.
+    CONNECTED / STALE / DISCONNECTED / DATA GAP from evidence only."""
+    return await scanner_health_report(db, redis)
 
 
 @router.get("/config-validation")

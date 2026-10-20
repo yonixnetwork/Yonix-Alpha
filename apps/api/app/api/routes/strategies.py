@@ -26,6 +26,7 @@ from yonixalpha_core.db.models import PaperPosition, RiskAssessment
 from yonixalpha_core.safety import store
 from yonixalpha_core.safety.models import StrategyMode
 from yonixalpha_core.strategies.catalog import CATALOG, Entry, validate_config
+from yonixalpha_core.strategy_comparison import compare as strategy_comparison_report
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
 
@@ -88,6 +89,15 @@ async def list_strategies(db: AsyncSession = Depends(get_db), _: str = Depends(g
     out = [await _describe(db, e) for e in CATALOG.values()]
     await db.commit()  # get_paper_account may create default books
     return out
+
+
+@router.get("/comparison")
+async def strategy_comparison(since: datetime | None = None, db: AsyncSession = Depends(get_db),
+                              _: str = Depends(get_current_username)) -> dict:
+    """Closed Solana positions by strategy, token category and both (PAPER and
+    LIVE apart), with the net without the single best trade. Read-only;
+    declared before /{name} so "comparison" is not taken for a strategy."""
+    return await strategy_comparison_report(db, since)
 
 
 @router.get("/{name}")

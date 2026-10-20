@@ -8,6 +8,9 @@ time windows, LIMITs); no full scans of the large event tables.
 
 Sections (default: all)
   book        paper accounts; positions per mode / engine / status with first / last entry
+  stops       stop realism: for every closed Solana position that left through a stop (stop_loss,
+              trailing_stop), the planned stop distance vs the realized return, per mode and token
+              category: how far below the stop it really filled (the gap the sizing must survive)
   equity      the Solana PAPER account's realized equity curve (start balance + realized PnL in
               exit order): peak, trough, maximum drawdown, end, the same without the single best
               trade, per period and per day; open PAPER positions at cost (not marked)
@@ -57,7 +60,7 @@ from yonixalpha_core.config import get_settings
 from yonixalpha_core.db.base import make_engine, make_session_factory
 from yonixalpha_core.solana_performance import NUM
 
-SECTIONS = ("book", "equity", "settings", "trades", "top", "deep", "compare", "migration", "activity", "parity")
+SECTIONS = ("book", "equity", "stops", "settings", "trades", "top", "deep", "compare", "migration", "activity", "parity")
 # A Pump.fun curve completes near 410 SOL market cap (~85 SOL real reserve);
 # a "migrated" token far above that at the decision is not a fresh migration.
 ESTABLISHED_MCAP_SOL = Decimal(3000)
@@ -553,6 +556,43 @@ def _curve(start: Decimal, pnls: list[Decimal]) -> dict[str, Decimal]:
     return {"end": eq, "peak": peak, "trough": trough, "dd": dd, "dd_pct": dd_pct}
 
 
+STOP_EXITS = ("stop_loss", "trailing_stop")
+
+
+def _pct(values: list[float], q: float) -> float | None:
+    if not values:
+        return None
+    v = sorted(values)
+    return v[min(len(v) - 1, max(0, int(round(q * (len(v) - 1)))))]
+
+
+def section_stops(rows: list[Any]) -> list[str]:
+    """Realized loss on stop exits vs the planned stop distance. Losses are
+    positive fractions (0.45 = the position returned -45%)."""
+    out = ["\n== STOPS: stop exits, planned stop distance vs realized loss (fractions of the entry cost) =="]
+    groups: dict[str, list[Any]] = defaultdict(list)
+    for r in rows:
+        if r.exit_reason in STOP_EXITS and r.pnl_pct is not None:
+            cat = category(r).split(" pool")[0].split(" (")[0].split(" ->")[0]
+            groups[f"{r.mode} {cat} {r.exit_reason}"].append(r)
+    if not groups:
+        return out + ["  no stop exit recorded"]
+    out.append("  group                                            n  stop(med)  loss med   p75    p90    worst  "
+               "gap beyond the stop: med / p90 / worst")
+    for k in sorted(groups):
+        g = groups[k]
+        loss = [max(0.0, -float(r.pnl_pct)) for r in g]
+        stop = [float(r.stop_pct) for r in g if r.stop_pct not in (None, "")]
+        beyond = [max(0.0, -float(r.pnl_pct)) - float(r.stop_pct) for r in g if r.stop_pct not in (None, "")]
+        f = lambda x: "-" if x is None else f"{x:6.1%}"  # noqa: E731
+        out.append(f"  {k:46s} {len(g):>4}  {f(statistics.median(stop) if stop else None)}  {f(statistics.median(loss))} "
+                   f"{f(_pct(loss, 0.75))} {f(_pct(loss, 0.90))} {f(max(loss))}   "
+                   f"{f(statistics.median(beyond) if beyond else None)} / {f(_pct(beyond, 0.90))} / {f(max(beyond) if beyond else None)}")
+    out.append("  (the sizing assumption sizing_stop_gap_curve_pct / _pool_pct should cover the realized loss of most stop "
+               "exits: compare it with p90)")
+    return out
+
+
 async def section_equity(s, rows: list[Any], marks: list[tuple[datetime, str]]) -> list[str]:
     out = ["\n== EQUITY: Solana PAPER account, realized equity in exit order (SOL) =="]
     acc = (await s.execute(text("SELECT id, starting_balance, cash_balance, reset_at FROM paper_accounts "
@@ -825,12 +865,14 @@ async def build(s, sections: list[str], top: int, deep_n: int, marks: list[tuple
     out.append("periods (deploy times from the operator's deploy output): " + "; ".join(
         f"P{i + 1} from {at:%m-%d %H:%M} {name}" for i, (at, name) in enumerate(marks)))
     rows: list[Any] = []
-    if any(x in sections for x in ("equity", "trades", "top", "deep", "compare")):
+    if any(x in sections for x in ("equity", "stops", "trades", "top", "deep", "compare")):
         rows = await load_trades(s)
     if "book" in sections:
         out += await section_book(s)
     if "equity" in sections:
         out += await section_equity(s, rows, marks)
+    if "stops" in sections:
+        out += section_stops(rows)
     if "settings" in sections:
         out += await section_settings(s)
     if "trades" in sections:

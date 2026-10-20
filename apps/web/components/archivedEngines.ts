@@ -64,6 +64,7 @@ export const MEMECOIN_GROUPS: NavGroup[] = [
     title: "Trading",
     items: [
       { href: "/dashboard/strategies", label: "Strategies", icon: Layers },
+      { href: "/dashboard/strategy-comparison", label: "Strategy Comparison", icon: GitCompare },
       { href: "/dashboard/paper", label: "Paper Trading", icon: FlaskRound },
       { href: "/dashboard/performance", label: "Solana Performance", icon: BarChart3 },
       { href: "/dashboard/positions", label: "Positions", icon: Wallet },

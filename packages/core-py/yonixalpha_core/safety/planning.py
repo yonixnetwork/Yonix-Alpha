@@ -88,6 +88,11 @@ class TradePlan:
     # Modelled loss if the stop fills (size x loss fraction + fixed costs).
     # An estimate, not a guarantee: gaps and failed sells can lose more.
     planned_loss_at_stop: Decimal | None = None
+    # Loss fraction the SIZE was computed with: max(stop distance, the
+    # engine's stop-gap assumption). Equal to stop_distance_pct when no gap
+    # assumption applies. planned_loss_at_gap = size x loss at that fraction.
+    sizing_loss_pct: Decimal | None = None
+    planned_loss_at_gap: Decimal | None = None
     # FRESH / NEAR_MIGRATION / MIGRATED / MOMENTUM at the decision (gate.token_category)
     token_category: str | None = None
     findings: list[Finding] = field(default_factory=list)
@@ -123,6 +128,8 @@ class TradePlan:
             "fixed_cost_detail": self.fixed_cost_detail,
             "leverage": str(self.leverage),
             "planned_loss_at_stop": str(self.planned_loss_at_stop) if self.planned_loss_at_stop is not None else None,
+            "sizing_loss_pct": str(self.sizing_loss_pct) if self.sizing_loss_pct is not None else None,
+            "planned_loss_at_gap": str(self.planned_loss_at_gap) if self.planned_loss_at_gap is not None else None,
             "token_category": self.token_category,
         }
 
@@ -234,7 +241,7 @@ def _cap_code(name: str) -> str:
 def _fixed_size(plan: "TradePlan", settings: SafetySettings, caps: dict[str, Decimal], max_loss: Decimal, budget: Decimal,
                 fixed: Decimal, stop_pct: Decimal, model, quote, slip: Decimal, tfee: Decimal, side: str,
                 overrides: ManualOverrides, size_multiplier: Decimal,
-                refuse_uneconomic: bool) -> tuple[Decimal, tuple[Decimal, Decimal], Provenance, str] | None:
+                refuse_uneconomic: bool, size_pct: Decimal | None = None) -> tuple[Decimal, tuple[Decimal, Decimal], Provenance, str] | None:
     """FIXED_SOL sizing: the size is fixed_trade_size_sol. Every cap, the
     planned loss at the stop and the soft-warning reduction are checked
     against it; under policy REJECT any of them refuses the trade with the
@@ -289,16 +296,18 @@ def _fixed_size(plan: "TradePlan", settings: SafetySettings, caps: dict[str, Dec
                         f"round-trip costs {(costs[0] + costs[1] + fixed_bps) / 100:.2f}% at {size:.9f} SOL meet or exceed the "
                         f"stop distance {stop_pct:.2%} — the trade can't be profitable before the stop", RiskCategory.EXECUTION))
         return None
-    loss = size * _loss_fraction(stop_pct, costs[0], costs[1], side) + fixed
+    loss_pct = size_pct if size_pct is not None else stop_pct
+    gap_note = f", sized for a stop gap of {loss_pct:.0%}" if loss_pct > stop_pct else ""
+    loss = size * _loss_fraction(loss_pct, costs[0], costs[1], side) + fixed
     if loss > max_loss:
         if not reduce:
             f.append(_block("TRADE_SIZE_EXCEEDS_RISK",
-                            f"planned loss at the stop {loss:.9f} SOL (size {size:.9f} SOL, stop {stop_pct:.2%}, costs "
+                            f"planned loss at the stop {loss:.9f} SOL (size {size:.9f} SOL, stop {stop_pct:.2%}{gap_note}, costs "
                             f"{(costs[0] + costs[1]) / 100:.2f}%" + (f", fixed costs {fixed:.9f} SOL" if fixed else "")
                             + f") exceeds max_loss_per_trade_sol {max_loss} SOL; {policy}: refused"))
             return None
         for _ in range(SIZE_ITERATIONS * 2):
-            allowed = budget / _loss_fraction(stop_pct, costs[0], costs[1], side)
+            allowed = budget / _loss_fraction(loss_pct, costs[0], costs[1], side)
             if size <= allowed:
                 break
             size = allowed
@@ -306,7 +315,7 @@ def _fixed_size(plan: "TradePlan", settings: SafetySettings, caps: dict[str, Dec
             if costs is None:
                 return None
         plan.binding_cap = "risk"
-        notes.append(f"reduced to {size:.9f} so the planned loss at the stop stays within {max_loss} SOL")
+        notes.append(f"reduced to {size:.9f} so the planned loss at the stop{gap_note} stays within {max_loss} SOL")
     if size_multiplier < 1:
         if not reduce:
             f.append(_block("FIXED_SIZE_REDUCTION_REQUIRED",
@@ -362,6 +371,7 @@ def plan_trade(
     fixed_cost_detail: dict | None = None,
     refuse_uneconomic: bool = False,
     low_volatility_floor: Decimal = Decimal(0),
+    sizing_gap_pct: Decimal = Decimal(0),
 ) -> TradePlan:
     """Builds the full risk plan or explains exactly why it can't. Every
     missing input that the plan depends on is a NO_TRADE finding: per the
@@ -436,6 +446,11 @@ def plan_trade(
         sl = entry_price * (1 - sign * stop_pct)
         plan.stop_loss = PlannedValue(sl, Provenance.AUTO, method, inputs)
     plan.stop_distance_pct = stop_pct
+    # The SIZE assumes a loss of at least sizing_gap_pct: thin memecoin
+    # liquidity gaps through stops (see SafetySettings.sizing_stop_gap_*).
+    # The stop level and the STOP_INSIDE_COSTS check keep the real stop.
+    size_pct = max(stop_pct, sizing_gap_pct) if sizing_gap_pct > 0 else stop_pct
+    plan.sizing_loss_pct = size_pct
 
     # --- Maximum loss ------------------------------------------------------
     # FIXED_SOL: the operator's absolute SOL limit; equity plays no part.
@@ -521,7 +536,7 @@ def plan_trade(
 
     if fixed_mode:
         fixed_result = _fixed_size(plan, settings, caps, max_loss, budget, fixed, stop_pct, model, quote, slip, tfee,
-                                   side, overrides, size_multiplier, refuse_uneconomic)
+                                   side, overrides, size_multiplier, refuse_uneconomic, size_pct)
         if fixed_result is None:
             return plan
         final_size, final_costs, prov, method = fixed_result
@@ -544,7 +559,7 @@ def plan_trade(
                     )
                 )
                 return plan
-            loss_frac = _loss_fraction(stop_pct, costs[0], costs[1], side)
+            loss_frac = _loss_fraction(size_pct, costs[0], costs[1], side)
             if loss_frac <= 0:
                 f.append(_block("LOSS_UNDEFINED", "loss fraction non-positive — invalid cost/stop inputs"))
                 return plan
@@ -595,6 +610,8 @@ def plan_trade(
                 final_size, prov, method = requested, Provenance.MANUAL, "operator-specified, validated against every cap"
         else:
             final_size, prov, method = size, Provenance.AUTO, f"min(max_loss / loss_fraction, caps) — bound by {plan.binding_cap}"
+            if size_pct > stop_pct:
+                method += f"; loss fraction at the stop-gap assumption {size_pct:.0%} (stop {stop_pct:.2%})"
 
         if size_multiplier < 1:
             final_size = final_size * size_multiplier
@@ -610,7 +627,7 @@ def plan_trade(
             final_costs = _costs_at(final_size, model, quote, slip, tfee, side) or final_costs
             if final_costs is None:
                 break
-            allowed = budget / _loss_fraction(stop_pct, final_costs[0], final_costs[1], side)
+            allowed = budget / _loss_fraction(size_pct, final_costs[0], final_costs[1], side)
             if final_size <= allowed:
                 break
             final_size = allowed
@@ -638,6 +655,7 @@ def plan_trade(
 
     plan.entry_cost_bps, plan.exit_cost_bps = final_costs
     plan.planned_loss_at_stop = final_size * _loss_fraction(stop_pct, final_costs[0], final_costs[1], side) + fixed
+    plan.planned_loss_at_gap = final_size * _loss_fraction(size_pct, final_costs[0], final_costs[1], side) + fixed
     plan.position_size = PlannedValue(
         final_size, prov, method, {k: v for k, v in caps.items()} | {"risk_size": risk_size, "max_loss": max_loss}
         | ({"fixed_costs": fixed, "risk_budget_after_fixed_costs": budget} if fixed else {})

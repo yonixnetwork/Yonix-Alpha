@@ -1,5 +1,7 @@
 # Memecoin Refocus: Phase 1 audit and preservation (2026-10-20)
 
+> **Later the same day:** Phases 2-7 changed several rows of the gap matrix below. They added scanner pipeline health, Smart Wallets refreshed without copy trading, stop-gap position sizing and Strategy Comparison. The current status and what is still open are in `docs/MEMECOIN_UPGRADE_REPORT.md`.
+
 Scope: the operator's "MEMECOIN INTELLIGENCE & PROFITABILITY RECOVERY UPGRADE" brief, Phase 1 (audit and preservation). This round touched two things:
 - the dashboard navigation (section 2);
 - one git archive branch.

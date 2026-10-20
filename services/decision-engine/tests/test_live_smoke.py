@@ -44,7 +44,8 @@ async def _arm(db, redis, category="FRESH", sol="0.02") -> LiveSmokeTest:
 
 async def test_armed_fresh_run_queues_one_capped_live_buy_and_keeps_global_paper(db_session, redis_client):
     curve = await seed_healthy_launch(redis_client, NOW)
-    await _wallet(db_session, redis_client, "0.3")
+    # 2 SOL: at 1% risk and the 50% curve stop-gap sizing the risk size is above the run's 0.02 cap, so the cap binds
+    await _wallet(db_session, redis_client, "2")
     run = await _arm(db_session, redis_client)
     cand = await make_candidate(db_session)
     await evaluate_with_gate(db_session, redis_client, SMOKE_ENV, Sources(redis_client, FakeRpc(curve)), cand, NOW)
@@ -65,6 +66,20 @@ async def test_armed_fresh_run_queues_one_capped_live_buy_and_keeps_global_paper
         raise AssertionError("armed past LIVE_SMOKE_TEST_MAX_TRADES")
     except live_smoke.SmokeRefused as exc:
         assert "MAX_TRADES" in exc.reason
+
+
+async def test_small_wallet_gap_sized_buy_too_small_for_its_fees_is_refused(db_session, redis_client):
+    # 0.3 SOL at 1% risk with the 50% curve stop-gap sizing allows about 0.005 SOL: the fixed network fees
+    # would be over max_fixed_cost_pct of it, so the run records the refusal and queues no buy (never enlarged)
+    curve = await seed_healthy_launch(redis_client, NOW)
+    await _wallet(db_session, redis_client, "0.3")
+    run = await _arm(db_session, redis_client)
+    cand = await make_candidate(db_session)
+    await evaluate_with_gate(db_session, redis_client, SMOKE_ENV, Sources(redis_client, FakeRpc(curve)), cand, NOW)
+    assert (await db_session.execute(select(ExecutionOrder))).first() is None
+    await db_session.refresh(run)
+    assert run.status == "ARMED" and run.attempts[-1]["stage"] == "RISK_REJECTED"
+    assert "FIXED_COSTS_TOO_HIGH" in run.attempts[-1]["codes"]
 
 
 async def test_other_category_leaves_normal_paper_trading_untouched(db_session, redis_client):

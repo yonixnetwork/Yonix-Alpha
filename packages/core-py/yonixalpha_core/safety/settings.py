@@ -122,6 +122,16 @@ class SafetySettings:
     # loss. 0 disables.
     low_volatility_stop_threshold: Decimal = Decimal("0.01")
     low_volatility_min_stop_pct: Decimal = Decimal("0.10")
+    # Solana only (2026-10-20): stops do not fill at their price on thin
+    # memecoin liquidity. Paper evidence after Oct 15: curve-token stops filled
+    # at -44.7% and -53.9% (a 0.397 SOL fresh position lost 0.178 SOL, about
+    # 9x its planned loss); migrated-pool stops at -12% to -22% against ~10%
+    # stops. Position SIZE is computed as if the loss at the stop were at
+    # least this fraction (curve tokens / migrated pools), so a gap costs at
+    # most the planned loss. The stop level itself is unchanged. Sizes only
+    # shrink. 0 = off (size from the stop distance alone, the old behaviour).
+    sizing_stop_gap_curve_pct: Decimal = Decimal("0.50")
+    sizing_stop_gap_pool_pct: Decimal = Decimal("0.25")
     tp_r_multiples: tuple[Decimal, ...] = (Decimal("1"), Decimal("2"), Decimal("3"))
     tp_exit_fractions: tuple[Decimal, ...] = (Decimal("0.4"), Decimal("0.3"), Decimal("0.3"))
     trailing_volatility_multiple: Decimal = Decimal("1.5")
@@ -486,6 +496,9 @@ def validate(settings: SafetySettings) -> list[str]:
         errors.append("low_volatility_stop_threshold must be in [0, 1)")
     if settings.low_volatility_min_stop_pct < 0 or settings.low_volatility_min_stop_pct > settings.max_stop_pct:
         errors.append("low_volatility_min_stop_pct must be 0 (off) or at most max_stop_pct")
+    for name in ("sizing_stop_gap_curve_pct", "sizing_stop_gap_pool_pct"):
+        if not (0 <= getattr(settings, name) < 1):
+            errors.append(f"{name} must be in [0, 1): 0 = off, 0.5 = size as if the stop filled 50% below entry")
     if settings.cooldown_scope not in COOLDOWN_SCOPES:
         errors.append(f"cooldown_scope must be one of {', '.join(COOLDOWN_SCOPES)}")
     if not (0 < settings.exit_volume_collapse_ratio < 1):

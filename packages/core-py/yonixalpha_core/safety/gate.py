@@ -1045,6 +1045,17 @@ LIVE_SUSPENDED_ENGINES = frozenset({"solana_momentum"})
 TOKEN_CATEGORIES = ("FRESH", "NEAR_MIGRATION", "MIGRATED", "MOMENTUM")
 
 
+def sizing_gap_pct(inp: AssessmentInput, settings: SafetySettings) -> Decimal:
+    """The stop-gap assumption the position SIZE uses (Solana only): a
+    migrated pool (or the migration engine) uses sizing_stop_gap_pool_pct, a
+    bonding-curve token sizing_stop_gap_curve_pct. Other engines: 0."""
+    if not inp.engine.startswith("solana_"):
+        return Decimal(0)
+    if inp.engine == "solana_migration" or _migrated_applies(inp):
+        return settings.sizing_stop_gap_pool_pct
+    return settings.sizing_stop_gap_curve_pct
+
+
 def token_category(inp: AssessmentInput, settings: SafetySettings) -> str | None:
     """The token's actual state at the decision, independent of which
     strategy evaluated it: MOMENTUM (momentum engine), MIGRATED (a pool exists
@@ -1121,6 +1132,7 @@ def assess(inp: AssessmentInput, settings: SafetySettings, versions: dict[str, A
         fixed_cost_detail=inp.fixed_cost_detail,
         refuse_uneconomic=_live_target(inp),
         low_volatility_floor=settings.low_volatility_min_stop_pct if inp.engine.startswith("solana_") else Decimal(0),
+        sizing_gap_pct=sizing_gap_pct(inp, settings),
     )
     plan.token_category = token_category(inp, settings)
     findings.extend(plan.findings)

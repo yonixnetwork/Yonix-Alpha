@@ -71,6 +71,8 @@ const HELP: Record<string, string> = {
   min_stop_pct: "Floor on the automatic stop distance. Must exceed round-trip costs.",
   low_volatility_stop_threshold: "Solana only. Below this measured volatility (0.01 = 1%) the pool has barely moved and the volatility says nothing about a safe stop. 0 = off.",
   low_volatility_min_stop_pct: "Solana only. The automatic stop is at least this wide when volatility is below low_volatility_stop_threshold (ZEREBRO: a 5% stop filled at -13%). The size shrinks so the planned loss stays the same. 0 = off.",
+  sizing_stop_gap_curve_pct: "Solana only, bonding-curve tokens (fresh / momentum). The position size is computed as if the stop filled this far below entry (0.50 = 50%), because thin curves gap through stops (Oct 15-17 paper: -44.7% and -53.9%). The stop itself is unchanged; sizes only shrink. 0 = off.",
+  sizing_stop_gap_pool_pct: "Solana only, migrated pools. Same as above for PumpSwap pools (paper: stops filled at -12% to -22%). 0 = off.",
   migration_max_entry_market_cap_sol: "Migration engine only: refuse entries whose market cap at the decision is above this (SOL). 0 = off. An operator's manual BUY is not refused.",
   cooldown_scope: "Whose loss starts cooldown_after_loss_seconds: ACCOUNT (any losing exit pauses every strategy, the original behaviour) or STRATEGY (only the strategy that lost waits). Daily loss limits are unchanged.",
   trailing_activation_r: "When the trailing stop starts. 0 = at TP1 (default); 1.5 = once price is 1.5× the stop distance above entry.",
