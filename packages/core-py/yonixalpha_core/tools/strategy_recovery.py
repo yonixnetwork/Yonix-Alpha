@@ -566,30 +566,58 @@ def _pct(values: list[float], q: float) -> float | None:
     return v[min(len(v) - 1, max(0, int(round(q * (len(v) - 1)))))]
 
 
-def section_stops(rows: list[Any]) -> list[str]:
+def _stop_group(r: Any) -> str:
+    cat = category(r)
+    base = cat.split(" pool")[0].split(" (")[0].split(" ->")[0]
+    return base + (" ->migrated" if "migrated while held" in cat else "")
+
+
+def _budget_ratio(r: Any) -> float | None:
+    """Realized loss as a multiple of the planned max loss (1.0 = lost exactly the budget)."""
+    budget, pnl = _d(r.max_loss_quote), _d(r.pnl)
+    if budget is None or budget <= 0 or pnl is None:
+        return None
+    return max(0.0, -float(pnl)) / float(budget)
+
+
+def section_stops(rows: list[Any], marks: list[tuple[datetime, str]] | None = None, worst_n: int = 15) -> list[str]:
     """Realized loss on stop exits vs the planned stop distance. Losses are
-    positive fractions (0.45 = the position returned -45%)."""
+    positive fractions (0.45 = the position returned -45%). "->migrated": a
+    curve entry whose token migrated while held."""
     out = ["\n== STOPS: stop exits, planned stop distance vs realized loss (fractions of the entry cost) =="]
     groups: dict[str, list[Any]] = defaultdict(list)
     for r in rows:
         if r.exit_reason in STOP_EXITS and r.pnl_pct is not None:
-            cat = category(r).split(" pool")[0].split(" (")[0].split(" ->")[0]
-            groups[f"{r.mode} {cat} {r.exit_reason}"].append(r)
+            groups[f"{r.mode} {_stop_group(r)} {r.exit_reason}"].append(r)
     if not groups:
         return out + ["  no stop exit recorded"]
     out.append("  group                                            n  stop(med)  loss med   p75    p90    worst  "
-               "gap beyond the stop: med / p90 / worst")
+               "gap beyond the stop: med / p90 / worst   loss / planned max loss: med / worst")
+    f = lambda x: "-" if x is None else f"{x:6.1%}"  # noqa: E731
+    g_ = lambda x: "-" if x is None else f"{x:.2f}x"  # noqa: E731
     for k in sorted(groups):
         g = groups[k]
         loss = [max(0.0, -float(r.pnl_pct)) for r in g]
         stop = [float(r.stop_pct) for r in g if r.stop_pct not in (None, "")]
         beyond = [max(0.0, -float(r.pnl_pct)) - float(r.stop_pct) for r in g if r.stop_pct not in (None, "")]
-        f = lambda x: "-" if x is None else f"{x:6.1%}"  # noqa: E731
+        ratio = [x for x in (_budget_ratio(r) for r in g) if x is not None]
         out.append(f"  {k:46s} {len(g):>4}  {f(statistics.median(stop) if stop else None)}  {f(statistics.median(loss))} "
                    f"{f(_pct(loss, 0.75))} {f(_pct(loss, 0.90))} {f(max(loss))}   "
-                   f"{f(statistics.median(beyond) if beyond else None)} / {f(_pct(beyond, 0.90))} / {f(max(beyond) if beyond else None)}")
+                   f"{f(statistics.median(beyond) if beyond else None)} / {f(_pct(beyond, 0.90))} / {f(max(beyond) if beyond else None)}"
+                   f"   {g_(statistics.median(ratio) if ratio else None)} / {g_(max(ratio) if ratio else None)}")
     out.append("  (the sizing assumption sizing_stop_gap_curve_pct / _pool_pct should cover the realized loss of most stop "
-               "exits: compare it with p90)")
+               "exits: compare it with p90; a loss / planned max loss above 1.00x lost more than the trade's budget)")
+    stops = sorted((r for g in groups.values() for r in g), key=lambda r: float(r.pnl_pct))[:worst_n]
+    out.append(f"  worst {len(stops)} stop exits by realized loss: id, mode, group, symbol, entry, period, hold, venue, "
+               "planned stop, realized, SOL, planned max loss, multiple")
+    for r in stops:
+        hold = (r.exit_at - r.entry_at).total_seconds() if r.exit_at and r.entry_at else None
+        per = period_of(r.entry_at, marks) if marks else "-"
+        ratio = _budget_ratio(r)
+        out.append(f"    {str(r.id)[:8]} {r.mode:5s} {_stop_group(r):26s} {str(r.symbol or '?')[:10]:10s} {_t(r.entry_at)} "
+                   f"{per.split(' ')[0]:3s} {'-' if hold is None else f'{hold:.0f}s':>6} {str(r.venue_type or '-'):10s} "
+                   f"stop {_p(r.stop_pct)} realized {_p(r.pnl_pct)} {_n(r.pnl, 5)} max {_u(r.max_loss_quote, 5)} "
+                   f"{g_(ratio)} ({r.exit_reason})")
     return out
 
 
@@ -872,7 +900,7 @@ async def build(s, sections: list[str], top: int, deep_n: int, marks: list[tuple
     if "equity" in sections:
         out += await section_equity(s, rows, marks)
     if "stops" in sections:
-        out += section_stops(rows)
+        out += section_stops(rows, marks)
     if "settings" in sections:
         out += await section_settings(s)
     if "trades" in sections:
