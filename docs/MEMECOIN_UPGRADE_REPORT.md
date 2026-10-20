@@ -118,6 +118,7 @@ Existing fixed-cost / fixed-SOL tests now pin the gap off explicitly, because th
 **Limitations:**
 - Gap defaults come from a small sample (2 curve stops, 7 pool stops after Oct 15). Run `--section stops` on the server to check them against all history.
 - Smaller sizes make fixed LIVE costs a larger share; LIVE stays locked.
+- A small live wallet can no longer pass a LIVE smoke test on a curve token. At 0.3 SOL and 1% risk, the gap-sized buy is about 0.005 SOL. Its network fees are 4.3% of that (the maximum is 2%), so it is refused with FIXED_COSTS_TOO_HIGH, never enlarged. A capped 0.02 SOL smoke buy needs about 1.2 SOL in the wallet at 1% risk.
 
 **Open (not built this round):**
 - the replay harness (old vs new rules on the same recorded snapshots);
