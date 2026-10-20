@@ -79,7 +79,63 @@ Afterwards the ledger also records:
 | `replay` | Every recorded momentum decision with a complete outcome (traded or not, plus WATCH rows):<br>- v1 vs each v2 check and combinations;<br>- scored on the ledger's **executable** return (0.05 SOL reference, pump fee both legs, curve impact, 2 s latency, network costs) at T+60 s / T+5 m / T+15 m;<br>- chronological: the first 60 % selects, the last 40 % is out of sample;<br>- two threshold sweeps choose on the first part only. |
 | `exits` | By exit reason: net, median MFE, give-back (MFE - realized), post-exit classification. |
 
-**Run it after the deploy (section 8).** Its output is the root-cause evidence per trade. I will not fill these answers in before the data is read.
+**Run it after the deploy (section 8).** Its output is the root-cause evidence per trade. The results are in section 2.3.
+
+### 2.3 What the server data shows (VERIFIED, `momentum_research` run 2026-10-20 22:26 UTC, read-only)
+
+**Coverage.**
+- 82 closed momentum positions: LIVE 33, PAPER 49. Entries from 2026-09-27 to 2026-10-11 (momentum has not traded since).
+- Decision-time intelligence is recorded for 75 of 82. The other 7 (the first trades, Sep 27-28, and one on Oct 10) cannot be explained from decision-time data; they are not reconstructed.
+- Qualified-wallet participation is UNKNOWN on every row (not measured for momentum tokens).
+- Replay: 2105 recorded gate decisions, 129 qualified by v1, executable T+5m known for 1641. Out of sample starts 2026-10-03 17:34 UTC.
+
+**Net results.**
+
+| Mode | Trades | Net SOL (sum by exit reason) |
+|---|---|---|
+| LIVE | 33 | -0.0213 |
+| PAPER | 49 | -0.4923 |
+
+**Root cause by group.**
+
+| Group | What happened | Class |
+|---|---|---|
+| LIVE, all 33 | Median MFE about -40 % on stops, -20 % on TP2: the price "never went up" because the cost basis includes everything the wallet paid (`live_trading.py:404-406`). At about 0.004 SOL per buy, fees and the new token-account rent are 30-110 % of the size. The trade starts deep under water before the market moves. | EXECUTION_QUALITY (size too small for its fixed costs), not a signal finding |
+| PAPER stops, 22 | -0.9695 SOL, median MFE -1.3 %: the price fell from the first second. 0.02-0.10 SOL each. | SIGNAL_FAILURE / BAD_ENTRY: the strategy entered at a local top |
+| PAPER winners | TP3 4 trades +0.3809, TP2 4 trades +0.0600, trailing 11 trades +0.1331. Median give-back 15-21 % of the move. | The exits worked; the entries did not feed them enough winners |
+| PAPER intel exits, 6 | -0.0716 SOL | MARKET_REVERSAL mostly |
+
+Creator sells were not a cause: `creator_sold` was True on 1 of 61 losers. No trade shows a failed price feed in its loss class (`DATA_FAILURE` does not occur).
+
+**Winners vs losers (21 vs 61, decision-time medians).** The two groups look almost the same:
+- breadth 0.70 vs 0.71, top-3 share 0.72 vs 0.73, 1-minute return +5.8 % vs +5.9 %;
+- winners had a **higher** 5-minute return (+36 % vs +27 %), so an exhaustion cap points the wrong way;
+- winners had higher volume (1.29 vs 0.83) and buyer (1.06 vs 0.86) acceleration, lower seller acceleration (0.60 vs 0.73), were closer to the high (-13 % vs -20 %), further along the curve (75 % vs 67 %), and slightly larger and younger.
+These differences are small at n = 21 and are hypotheses only.
+
+**Replay, executable return of a 0.05 SOL reference trade.**
+
+| Variant | T+5m selection | T+5m out of sample |
+|---|---|---|
+| every decision (context) | n=1012, mean -4.86 %, PF 0.28 | n=629, mean -4.21 %, PF 0.33 |
+| v1 baseline | n=36, mean -7.83 %, PF 0.13 | n=62, mean -5.60 %, PF 0.46 |
+| v1 + exhaustion (0.5) | n=32, -6.65 %, PF 0.16 | n=54, -7.23 %, PF 0.20 |
+| v1 + decay | n=21, -9.48 %, PF 0.05 | n=28, +1.80 %, PF 1.24; **-74.9 without the best row** |
+| v1 + independent_buyers | n=8, -9.20 %, PF 0.11 | n=14, +0.27 %, PF 1.02; **-121.4 without the best row** |
+| v1 + anti_dump | n=29, -7.29 %, PF 0.13 | n=52, -5.15 %, PF 0.47 |
+| v1 + liquidity | n=34, -7.77 %, PF 0.13 | n=60, -5.63 %, PF 0.47 |
+| v1 + exhaustion + anti_dump | n=27, -6.26 %, PF 0.16 | n=45, -5.81 %, PF 0.25 |
+
+- v1 picks **worse** than the average recorded decision in both periods, at T+60s, T+5m and T+15m.
+- No check helps in both periods. The two positive out-of-sample rows (decay, independent buyers) are one outlier each and lose in the selection period.
+- The exhaustion sweep chose 0.2 on the selection period; out of sample it gave n=25, -6.92 %, PF 0.07, worse than v1. This is the overfitting the chronological split is there to catch.
+- The breadth sweep had no value with n >= 10.
+
+**Conclusions (INFERRED from the above).**
+1. The momentum losses come from the strategy's entries (no edge after costs) and, for LIVE, from a size too small for the fixed costs. They do not come from a broken price feed or the paper model.
+2. No v2 check is justified by the data. All stay off; the defaults are not changed.
+3. A B5 pass is not expected with v1 or any tested variant. Running PAPER would add data but should not be read as a path to profit.
+4. Momentum stays OFF with WATCH monitoring, which records outcomes without trading. A future hypothesis (for example, volume and buyer acceleration with lower seller acceleration, near the high) must be stated before it is tested on WATCH data collected after today.
 
 ## 3. Research (GitHub repositories read from source, 2026-10-20)
 
@@ -193,11 +249,11 @@ Forward PAPER, at least 50 closed trades or 14 days. The pass rule:
    ```
    cd /opt/yonixalpha && docker compose --env-file .env -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.prod.yml exec -T api python -m yonixalpha_core.tools.momentum_research
    ```
-3. Based on the replay's out-of-sample rows, switch on only the checks that help. Then, if wanted, set momentum to PAPER for the B5 forward test.
+3. Done 2026-10-20 (section 2.3): no check helped out of sample, so none was switched on. Momentum stays OFF with WATCH monitoring.
 
 ## 9. Limitations and open questions
 
-- **Root cause per trade, and which checks help, are OPEN** until the tool runs on the server data.
+- **Root cause per trade is answered in section 2.3** for the 75 trades with decision-time data. The 7 without it stay unexplained. No check helped; the sample (129 v1-qualified decisions, 82 trades) is small and its decisions overlap.
 - **Qualified-wallet participation is not measured for momentum tokens.** The wallet intelligence covers launch buyers.
 - **Exits are unchanged pending the exit analysis.**
 - **The replay is limited by the ledger:**
