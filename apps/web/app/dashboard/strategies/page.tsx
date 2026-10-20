@@ -31,6 +31,7 @@ export default function StrategiesPage() {
                 <th>Strategy</th>
                 <th>Kind</th>
                 <th>Mode (effective)</th>
+                <th>Execution now</th>
                 <th>Open</th>
                 <th>Trades</th>
                 <th>Win rate</th>
@@ -57,6 +58,11 @@ export default function StrategiesPage() {
                     ) : (
                       <span className="muted">n/a</span>
                     )}
+                  </td>
+                  <td title={s.execution?.reason}>
+                    {s.execution ? (
+                      <span className={s.execution.effective_execution === "LIVE" ? "pill pill-danger" : "pill"}>{s.execution.effective_execution}</span>
+                    ) : "—"}
                   </td>
                   <td>{s.open_positions ?? "—"}</td>
                   <td>{s.trades ?? "—"}</td>

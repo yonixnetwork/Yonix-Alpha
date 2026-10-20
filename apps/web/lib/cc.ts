@@ -103,6 +103,15 @@ export interface StrategyOut {
   total_pnl?: string;
   profit_factor?: string | null;
   max_drawdown?: string;
+  /** What the mode does right now (yonixalpha_core.strategy_modes.execution_view). */
+  execution?: {
+    effective_execution: "NONE" | "PAPER" | "LIVE" | "APPROVAL";
+    live_authorized: boolean;
+    reason: string;
+    global_mode: string;
+    environment_live_permitted: boolean;
+  };
+  momentum?: { version: string; enabled_checks: string[]; monitor_when_off: boolean };
 }
 
 export interface ConfigModule {

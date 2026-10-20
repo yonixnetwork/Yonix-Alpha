@@ -1035,12 +1035,11 @@ def _liquidity(inp: AssessmentInput, plan: TradePlan) -> dict[str, Any]:
     return out
 
 
-# Strategies excluded from LIVE entries regardless of mode, until their
-# regression is investigated and validated (2026-10-13: momentum lost in LIVE
-# throughout, PF 0.05 over 33 trades, and PF 0.29 over 38 PAPER trades after
-# 2026-10-10). PAPER and SHADOW are unaffected; exits are never affected.
-# Lifting it is a reviewed code change, not a dashboard switch.
-LIVE_SUSPENDED_ENGINES = frozenset({"solana_momentum"})
+# The hard-coded LIVE suspension of solana_momentum (2026-10-13, after it
+# lost in LIVE with PF 0.05 over 33 trades) was replaced on 2026-10-20 by the
+# operator's own control: the strategy mode on the Strategies page, where
+# AUTO needs an explicit confirmation (strategy_modes.change_mode). A real
+# order still needs global LIVE, the environment locks and live readiness.
 
 TOKEN_CATEGORIES = ("FRESH", "NEAR_MIGRATION", "MIGRATED", "MOMENTUM")
 
@@ -1074,13 +1073,6 @@ def token_category(inp: AssessmentInput, settings: SafetySettings) -> str | None
     return "FRESH"
 
 
-def _check_live_eligibility(inp: AssessmentInput, out: list[Finding]) -> None:
-    if _live_target(inp) and inp.engine in LIVE_SUSPENDED_ENGINES:
-        out.append(_finding(RiskCategory.STRATEGY, "STRATEGY_NOT_LIVE_ELIGIBLE", RiskLevel.CRITICAL,
-                            f"{inp.engine} is suspended from LIVE entries until its regression is validated "
-                            "(PAPER evaluation continues)", FinalDecision.NO_TRADE, True))
-
-
 def _live_target(inp: AssessmentInput) -> bool:
     """Whether an executable decision for `inp` goes to the live wallet."""
     return inp.global_mode == GlobalMode.LIVE and inp.strategy_mode != StrategyMode.PAPER and inp.live_trading_permitted
@@ -1109,7 +1101,6 @@ def assess(inp: AssessmentInput, settings: SafetySettings, versions: dict[str, A
     _check_market(inp, findings)
     _check_established_migration(inp, settings, findings)
     _check_account(inp, settings, findings)
-    _check_live_eligibility(inp, findings)
 
     soft_reduce = any(f.action == FinalDecision.REDUCE_SIZE for f in findings)
     m = inp.market

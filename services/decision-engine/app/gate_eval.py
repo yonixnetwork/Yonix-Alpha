@@ -22,6 +22,7 @@ position only fills when the transaction confirms on chain.
 """
 
 import time
+from dataclasses import replace as dc_replace
 from datetime import datetime
 from decimal import Decimal
 
@@ -43,6 +44,7 @@ from yonixalpha_core.solana import pump_stream, pumpswap
 from yonixalpha_core.solana.codec import db_safe
 from yonixalpha_core.solana.assembler import Sources, assemble_fresh, assemble_migrated
 from yonixalpha_core.state_machine import CandidateState, apply_transition
+from yonixalpha_core.strategies import momentum_v2
 
 log = get_logger("decision-engine.gate")
 
@@ -165,6 +167,34 @@ def token_backoff_codes(a: Assessment) -> list[str]:
     return sorted(blocking) if blocking and blocking <= TOKEN_DATA_BACKOFF_CODES else []
 
 
+def momentum_v2_features(inp) -> dict:
+    """The v2 features of a momentum decision: its launch intelligence plus
+    the market / flow fields the gate snapshot records."""
+    m, fl = inp.market, inp.flow
+    snap = {"curve_progress": m.curve_progress if m is not None else None,
+            "liquidity_sol": m.liquidity_quote if m is not None else None,
+            "age_seconds": m.age_seconds if m is not None else None,
+            "creator_sold": fl.creator_sold if fl is not None else None}
+    return momentum_v2.features_from_intel(inp.intel, snap)
+
+
+def apply_momentum_v2(inp, evidence: dict, config: dict, *, enforce: bool) -> None:
+    """Runs every v2 check on this decision and records it (evidence
+    "momentum_v2"). With `enforce` (not an operator BUY) the enabled checks
+    can only take a qualified v1 signal away, never grant one; the version
+    the signal carries says which checks decided."""
+    sig = inp.signal
+    ev = momentum_v2.evaluate(momentum_v2_features(inp), sig.qualified if sig is not None else None, config)
+    evidence["momentum_v2"] = ev.to_dict()
+    if sig is None or not enforce:
+        return
+    if ev.enabled and sig.qualified and not ev.qualified:
+        inp.signal = dc_replace(sig, version=ev.version, qualified=False,
+                                reasons=[f"momentum v2 {ev.state}: {r}" for r in ev.reasons] + list(sig.reasons))
+    else:
+        inp.signal = dc_replace(sig, version=ev.version)
+
+
 def _move(candidate: TradingCandidate, target: CandidateState, reason: str) -> None:
     if candidate.state != target.value:
         apply_transition(candidate, target, reason=reason)
@@ -271,8 +301,10 @@ async def evaluate_with_gate(
     if inp.targets is not None:
         inp.targets.historical_mfe, inp.targets.samples = await pipeline.historical_excursion(session, engine)
     # Operator exit plan (dashboard strategy config); unset parts are automatic.
-    inp.overrides = pipeline.manual_overrides(await store.load_strategy_config(session, engine),
-                                              inp.market.price if inp.market else None, inp.side)
+    strategy_config = await store.load_strategy_config(session, engine)
+    inp.overrides = pipeline.manual_overrides(strategy_config, inp.market.price if inp.market else None, inp.side)
+    if engine == "solana_momentum":
+        apply_momentum_v2(inp, evidence, strategy_config, enforce=operator is None)
     lifecycle = "MIGRATED" if engine == "solana_migration" else "FRESH"
     if inp.liquidity_model is not None:
         adapter = "pumpswap_pool" if lifecycle == "MIGRATED" else "pump_curve"

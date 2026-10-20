@@ -345,7 +345,8 @@ async def load_strategy_mode(session: AsyncSession, strategy: str) -> StrategyMo
         return StrategyMode.PAPER
 
 
-async def set_strategy_mode(session: AsyncSession, strategy: str, mode: StrategyMode, user_id: uuid.UUID | None) -> None:
+async def set_strategy_mode(session: AsyncSession, strategy: str, mode: StrategyMode, user_id: uuid.UUID | None,
+                            extra: dict | None = None) -> None:
     before = await load_strategy_mode(session, strategy)
     stmt = (
         insert(StrategyConfig)
@@ -356,7 +357,8 @@ async def set_strategy_mode(session: AsyncSession, strategy: str, mode: Strategy
     )
     await session.execute(stmt)
     session.add(
-        AuditLog(user_id=user_id, event_type="strategy_mode.changed", detail={"strategy": strategy, "from": before.value, "to": mode.value})
+        AuditLog(user_id=user_id, event_type="strategy_mode.changed",
+                 detail={"strategy": strategy, "from": before.value, "to": mode.value, **(extra or {})})
     )
 
 

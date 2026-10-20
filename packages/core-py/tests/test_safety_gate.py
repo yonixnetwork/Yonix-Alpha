@@ -488,9 +488,14 @@ def test_live_target_only_with_every_permission():
     a = decide(healthy(engine="solana_fresh", global_mode=GlobalMode.LIVE, strategy_mode=StrategyMode.AUTO,
                        live_trading_permitted=True, live_ready=True))
     assert a.execution_target == ExecutionTarget.LIVE, a.reasons
-    # Momentum is suspended from LIVE entries whatever the modes (PAPER unaffected).
+    # Momentum is no longer suspended in code (2026-10-20): the operator's mode
+    # decides, under the same global LIVE locks as every strategy.
     m = decide(healthy(global_mode=GlobalMode.LIVE, strategy_mode=StrategyMode.AUTO, live_trading_permitted=True, live_ready=True))
-    assert m.decision == FinalDecision.NO_TRADE and "STRATEGY_NOT_LIVE_ELIGIBLE" in codes(m)
+    assert m.execution_target == ExecutionTarget.LIVE and "STRATEGY_NOT_LIVE_ELIGIBLE" not in codes(m), m.reasons
+    pm = decide(healthy(global_mode=GlobalMode.LIVE, strategy_mode=StrategyMode.PAPER, live_trading_permitted=True, live_ready=True))
+    assert pm.execution_target == ExecutionTarget.PAPER  # momentum in PAPER never goes LIVE
+    locked = decide(healthy(global_mode=GlobalMode.LIVE, strategy_mode=StrategyMode.AUTO, live_trading_permitted=False))
+    assert locked.decision == FinalDecision.NO_TRADE and "LIVE_NOT_PERMITTED" in codes(locked)
     assert decide().decision == FinalDecision.EXECUTE  # the same momentum input in PAPER
     b = decide(healthy(global_mode=GlobalMode.PAPER, strategy_mode=StrategyMode.AUTO, live_trading_permitted=True))
     assert b.execution_target == ExecutionTarget.PAPER
@@ -536,7 +541,6 @@ NO_GAP = SafetySettings(sizing_stop_gap_curve_pct=Decimal(0), sizing_stop_gap_po
 
 
 def _live(**kw):
-    # solana_fresh: the momentum engine is suspended from LIVE entries (gate.LIVE_SUSPENDED_ENGINES).
     return healthy(engine="solana_fresh", global_mode=GlobalMode.LIVE, strategy_mode=StrategyMode.AUTO,
                    live_trading_permitted=True, live_ready=True, **kw)
 

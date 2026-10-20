@@ -57,6 +57,25 @@ SOLANA_MANUAL_RULES = {
 }
 
 
+# Momentum v2 checks (strategies.momentum_v2): each switch off = the v1
+# decision; every check is evaluated and recorded either way.
+MOMENTUM_RULES = {
+    "mv2_exhaustion": ("bool",), "mv2_max_return_5m": _dec("0.05", "10"),
+    "mv2_decay": ("bool",),
+    "mv2_independent_buyers": ("bool",), "mv2_min_breadth": _dec("0", "1"), "mv2_max_top3_share": _dec("0.05", "1"),
+    "mv2_anti_dump": ("bool",),
+    "mv2_liquidity": ("bool",), "mv2_min_liquidity_sol": _dec("0", "1000"),
+    "mv2_qualified_wallets": ("bool",), "mv2_min_qualified_wallets": _int(1, 50),
+    "monitor_when_off": ("bool",),
+}
+
+
+def _momentum_defaults() -> dict[str, Any]:
+    from yonixalpha_core.strategies.momentum_v2 import DEFAULTS
+
+    return dict(DEFAULTS)
+
+
 CATALOG: dict[str, Entry] = {e.name: e for e in [
     Entry("solana_fresh", "Fresh Tokens (pump.fun)", "solana", "solana_fresh", "solana",
           "PAPER by default — pump.fun program stream, safety gate, curve-simulated fills. LIVE path (PumpPortal local "
@@ -67,8 +86,9 @@ CATALOG: dict[str, Entry] = {e.name: e for e in [
           "events. LIVE path implemented — awaiting credential verification",
           {}, SOLANA_MANUAL_RULES),
     Entry("solana_momentum", "Solana Momentum", "solana", "solana_momentum", "solana",
-          "PAPER — acceleration signal on pump.fun tokens older than 30 min; unvalidated heuristic",
-          {}, SOLANA_MANUAL_RULES),
+          "Acceleration signal (v1) on pump.fun tokens older than 30 min, with optional v2 checks (exhaustion, decay, "
+          "buyer breadth, anti-dump, liquidity, qualified wallets); unvalidated heuristic",
+          _momentum_defaults(), {**SOLANA_MANUAL_RULES, **MOMENTUM_RULES}),
 ]}
 
 MODE_KEYS = [n for n, e in CATALOG.items() if e.has_mode]

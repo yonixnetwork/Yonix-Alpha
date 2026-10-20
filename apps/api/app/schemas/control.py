@@ -69,6 +69,8 @@ class ModesOut(BaseModel):
 
 class ModeUpdate(BaseModel):
     mode: str
+    # Strategy modes only: switching to AUTO needs this true (strategy_modes).
+    confirm_auto: bool = False
 
 
 class BlacklistIn(BaseModel):

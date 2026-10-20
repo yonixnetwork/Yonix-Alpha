@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from yonixalpha_core import kill_switch, rpc_usage
 from yonixalpha_core.db.models import PaperPosition, RiskAssessment, RiskSettingsVersion
 from yonixalpha_core.safety import store
-from yonixalpha_core.safety.gate import LIVE_SUSPENDED_ENGINES, account_blockers
+from yonixalpha_core.safety.gate import account_blockers
 from yonixalpha_core.safety.settings import SafetySettings
 
 SOLANA_ENGINES = ("solana_fresh", "solana_migration", "solana_momentum")
@@ -144,7 +144,9 @@ async def strategy_summary(session: AsyncSession, redis: Any, engine: str, accou
     updated = await _last_update(session, engine) or await _last_update(session, store.GLOBAL_SCOPE)
     return {
         "engine": engine, "strategy_mode": mode, "status": status,
-        "live_eligible": engine not in LIVE_SUSPENDED_ENGINES,
+        # No strategy is excluded from LIVE in code any more: the strategy
+        # mode decides (strategy_modes), under the global LIVE locks.
+        "live_eligible": True,
         "effective": eff,
         "trade_size": (f"{settings.fixed_trade_size_sol} SOL fixed (policy {settings.fixed_size_policy})"
                        if settings.trade_size_mode == "FIXED_SOL"

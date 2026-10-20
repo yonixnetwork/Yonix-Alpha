@@ -212,6 +212,60 @@ def momentum_prefilter(trades: list, now: datetime, created_ts: int | None, sett
     return ok, stats
 
 
+MOMENTUM_WATCH_SECONDS = 3600  # one WATCH row per token per hour
+
+
+def momentum_watch_snapshot(trades: list, now: datetime, meta: dict[str, str], curve, progress: Decimal,
+                            settings: SafetySettings, config: dict) -> dict[str, Any]:
+    """What the momentum strategy would have seen, from the stream alone (no
+    RPC): the v1 signal, the v2 checks and the launch features they use.
+    Recorded while momentum is OFF so outcomes keep accumulating."""
+    from yonixalpha_core.solana.assembler import FLOW_WINDOW_SECONDS
+    from yonixalpha_core.strategies import momentum_v2
+    from yonixalpha_core.strategies.solana import momentum_signal
+
+    held = [t for t in trades if t.at <= now]
+    created = (datetime.fromtimestamp(int(meta["created_at"]), tz=timezone.utc) if meta.get("created_at") else None)
+    rec: dict[str, Any] = {
+        "momentum": launch_features.momentum(held, now, 6),
+        "flow_state": launch_features.flow_state(held, now, decimals=6),
+        "buyer_breadth": launch_features.buyer_breadth(held, now, target_buyers=int(settings.intel_buyer_breadth_target),
+                                                       meaningful_sol=float(settings.intel_meaningful_buy_sol)),
+        "now": launch_features.snapshot(held, created, now, decimals=6, supply_raw=int(opportunities.PUMP_SUPPLY_RAW),
+                                        interval_seconds=60) if created else {},
+    }
+    last = held[-1] if held else None
+    price_raw = Decimal(last.virtual_sol) / Decimal(last.virtual_token) if last and last.virtual_token else None
+    sig = momentum_signal(held, now, FLOW_WINDOW_SECONDS, 6)
+    creator = meta.get("creator") or None
+    creator_sold = any(not t.is_buy and t.trader == creator for t in held) if creator else None
+    snap = {"price_raw": str(price_raw) if price_raw is not None else None, "supply_raw": str(opportunities.PUMP_SUPPLY_RAW),
+            "curve_progress": str(progress), "age_seconds": (now - created).total_seconds() if created else None,
+            "liquidity_sol": str(Decimal(curve.rsol) / opportunities.LAMPORTS) if curve is not None and curve.rsol is not None
+            else None,
+            "creator_sold": creator_sold}
+    ev = momentum_v2.evaluate(momentum_v2.features_from_intel(rec, snap), sig.qualified, config)
+    snap["market_cap_sol"] = str(opportunities.market_cap_sol(price_raw, opportunities.PUMP_SUPPLY_RAW)) if price_raw else None
+    return {**snap, "signal_qualified": sig.qualified, "signal_strength": sig.strength, "signal_reasons": list(sig.reasons)[:6],
+            "momentum_v2": ev.to_dict(), "intel": json.loads(json.dumps(rec, default=str)),
+            "source": "momentum WATCH (strategy OFF): stream-only evaluation, no trade"}
+
+
+async def record_momentum_watch(redis: Redis, session_factory, mint: str, meta: dict[str, str], curve, progress: Decimal,
+                                trades: list, now: datetime, settings: SafetySettings, config: dict) -> bool:
+    if not await redis.set(f"{pump_stream.PREFIX}:mom_watch:{mint}", "1", nx=True, ex=MOMENTUM_WATCH_SECONDS):
+        return False
+    snap = momentum_watch_snapshot(trades, now, meta, curve, progress, settings, config)
+    v2 = snap["momentum_v2"]
+    async with session_factory() as session:
+        await opportunities.record(
+            session, key=f"mwatch:{mint}:{int(now.timestamp()) // MOMENTUM_WATCH_SECONDS}", mint=mint,
+            symbol=db_safe(meta.get("symbol")), engine="solana_momentum", stage="WATCH", decision=v2["state"], traded=False,
+            reasons=db_safe(v2["reasons"]), decided_at=now, snapshot=db_safe(snap))
+        await session.commit()
+    return True
+
+
 async def _finalize(redis: Redis, rows: list[dict], mint: str, meta: dict[str, str], report: observation.ObservationReport,
                     now: datetime, candidate_id=None) -> None:
     """A final observation outcome: never re-evaluated, stored with its full
@@ -410,12 +464,18 @@ async def run_funnel(redis: Redis, session_factory, settings: SafetySettings, no
     Momentum tab of Risk Settings drives the momentum pre-filter."""
     mom = momentum_settings or settings
     counts = {"considered": 0, "prefilter_failed": 0, "promoted": 0, "budget_full": 0, "migrations": 0,
-              "momentum_considered": 0, "momentum_promoted": 0, "observing": 0, "continue_monitoring": 0,
-              "rejected": 0, "expired": 0, "migration_detected": 0}
+              "momentum_considered": 0, "momentum_promoted": 0, "momentum_watch_recorded": 0, "observing": 0,
+              "continue_monitoring": 0, "rejected": 0, "expired": 0, "migration_detected": 0}
     budget = settings.max_active_candidates
     async with session_factory() as session:
         total, mig = await active_counts(session)
         momentum_off = await store.load_strategy_mode(session, "solana_momentum") == StrategyMode.OFF
+        momentum_config = await store.load_strategy_config(session, "solana_momentum")
+    from yonixalpha_core.strategies import momentum_v2
+
+    # OFF opens nothing; with monitor_when_off its prefilter passes are still
+    # evaluated from the stream (no RPC) and recorded as WATCH outcomes.
+    monitor = momentum_off and momentum_v2.config_of(momentum_config).get("monitor_when_off") is True
 
     active = await observe_fresh(redis, session_factory, settings, now, counts, total - mig,
                                  limit=fresh_limit(budget, mig))
@@ -441,7 +501,7 @@ async def run_funnel(redis: Redis, session_factory, settings: SafetySettings, no
 
     # Momentum: established tokens (not launches) trading faster right now.
     # Strategy OFF: no candidate is created (the gate would only reject it).
-    for mint in ([] if momentum_off else await pump_stream.active_mints(redis, now, MOMENTUM_ACTIVE_WITHIN_SECONDS)):
+    for mint in ([] if momentum_off and not monitor else await pump_stream.active_mints(redis, now, MOMENTUM_ACTIVE_WITHIN_SECONDS)):
         meta = await pump_stream.load_meta(redis, mint)
         if not meta or not meta.get("bonding_curve"):
             continue  # launched before this stream started: curve address unknown
@@ -459,8 +519,17 @@ async def run_funnel(redis: Redis, session_factory, settings: SafetySettings, no
                     or await redis.zscore(pump_stream.OBS_LIVE, mint) is not None):
                 continue
         counts["momentum_considered"] += 1
-        ok, stats = momentum_prefilter(await pump_stream.load_trades(redis, mint), now, created_ts, mom, near)
+        trades = await pump_stream.load_trades(redis, mint)
+        ok, stats = momentum_prefilter(trades, now, created_ts, mom, near)
         if not ok:
+            continue
+        if momentum_off:
+            try:
+                if await record_momentum_watch(redis, session_factory, mint, meta, curve, progress, trades, now, mom,
+                                               momentum_config):
+                    counts["momentum_watch_recorded"] += 1
+            except Exception as exc:  # noqa: BLE001 - monitoring evidence never stops the funnel
+                log.warning("momentum.watch_failed", mint=mint, error=f"{type(exc).__name__}: {str(exc)[:160]}")
             continue
         if active >= fresh_limit(budget, mig):
             counts["budget_full"] += 1
