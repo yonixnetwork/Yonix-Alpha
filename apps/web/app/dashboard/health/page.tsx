@@ -4,6 +4,7 @@ import Link from "next/link";
 import { Server } from "lucide-react";
 import PlanHealth from "@/components/PlanHealth";
 import ResourcePanel from "@/components/ResourcePanel";
+import ScannerPipeline from "@/components/ScannerPipeline";
 import ResearchPipeline from "@/components/ResearchPipeline";
 import SlowRequests from "@/components/SlowRequests";
 import UpdateMonitor from "@/components/UpdateMonitor";
@@ -39,6 +40,7 @@ export default function HealthPage() {
         </Link>
       </PageHeader>
       <ErrorNotice error={error} />
+      <ScannerPipeline />
       <ResourcePanel />
       <PlanHealth compact />
       {loading && !data && <Loading />}

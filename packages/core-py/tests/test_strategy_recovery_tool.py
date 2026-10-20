@@ -207,3 +207,21 @@ def test_curve_math():
     c = sr._curve(Decimal(10), [Decimal(1), Decimal(-3), Decimal(1)])
     assert c == {"end": Decimal(9), "peak": Decimal(11), "trough": Decimal(8), "dd": Decimal(3),
                  "dd_pct": Decimal(3) / Decimal(11)}
+
+
+async def test_stop_realism_compares_the_planned_stop_with_the_realized_loss(sf):
+    async with sf() as s:
+        await seed(s)
+        for p in (await s.execute(select(PaperPosition))).scalars():
+            p.plan = {**(p.plan or {}), "stop_distance_pct": "0.10"}
+        await s.commit()
+    async with sf() as s:
+        await s.execute(text("SET TRANSACTION READ ONLY"))
+        lines = await sr.build(s, ["stops"], 10, 12, [(datetime.fromisoformat(a), n) for a, n in sr.DEPLOYS], NOW)
+        await s.rollback()
+    out = "\n".join(lines)
+    # PAPER stop exits: -20%, -15%, -20.6% (migration) and -20% (fresh); the planned stop is 10%
+    row = next(x for x in lines if x.strip().startswith("PAPER MIGRATED stop_loss"))
+    assert row.split()[3] == "3" and "10.0%" in row, row
+    assert "LIVE" in out and "Nothing was written." in out
+    assert sr._pct([0.1, 0.2, 0.3, 0.4], 0.9) == 0.4 and sr._pct([], 0.5) is None

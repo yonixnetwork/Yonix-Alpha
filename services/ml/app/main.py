@@ -30,6 +30,14 @@ log = get_logger("ml.main")
 # expected outcome for a long time.
 TRAIN_INTERVAL_SECONDS = 3600
 EVM_INTERVAL_SECONDS = 1800  # each pass drains the EVM sample / wallet-label backlog (bounded per builder)
+# Solana wallet profiles (Smart Wallets, memecoin refocus Phase 4,
+# 2026-10-20): copy-engine rebuilds them, but it is off under SOLANA_ONLY
+# (COPY_TRADING_ENABLED=false), which left the Smart Wallets page frozen. While
+# copy-engine is off this service rebuilds the Solana profiles itself: the
+# same bounded, batched wallet_profiles.rebuild_solana (read launch_buyers,
+# write wallet_profiles). Research only: nothing is copied or traded. Gated by
+# the operating mode and host resources like every training step.
+WALLET_PROFILES_INTERVAL_SECONDS = int(os.getenv("WALLET_PROFILES_INTERVAL_SECONDS", str(6 * 3600)))
 SERVICE_NAME = "ml"
 # GitHub / PyPI update monitor (master §64-66): notifies, never deploys.
 # UPDATE_MONITOR=0 switches it off.
@@ -223,6 +231,45 @@ async def _evm_loop(session_factory, redis, stop_event: asyncio.Event) -> None:
             pass
 
 
+async def rebuild_solana_wallet_profiles(session_factory) -> dict:
+    from yonixalpha_core import wallet_profiles
+
+    async with session_factory() as session:
+        n = await wallet_profiles.rebuild_solana(session, datetime.now(timezone.utc))
+        await session.commit()
+    return {"solana_profiles": n}
+
+
+async def _wallet_profiles_loop(session_factory, redis, stop_event: asyncio.Event) -> None:
+    """Rebuilds Solana wallet profiles while copy-engine (their usual owner)
+    is off; skips while it runs, so the work is never done twice."""
+    step = "solana_wallet_profiles"
+    while not stop_event.is_set():
+        settings = get_settings()
+        if not system_profile.disabled_reason(settings, "copy-engine"):
+            reason = "SKIPPED - copy-engine is running and rebuilds the wallet profiles"
+            ok = False
+        else:
+            try:
+                ok, reason, _ = await _decide(session_factory, redis, settings, step, WALLET_PROFILES_INTERVAL_SECONDS)
+            except Exception as exc:  # noqa: BLE001
+                ok, reason = False, f"SKIPPED - mode / resources unreadable: {type(exc).__name__}"
+        if ok:
+            try:
+                out = await steps.timed(redis, step, lambda: rebuild_solana_wallet_profiles(session_factory), log)
+                log.info("wallet_profiles.completed", result=out)
+            except Exception as exc:  # noqa: BLE001
+                log.error("wallet_profiles.failed", error=str(exc))
+                await _record_system_event(session_factory, "wallet_profiles_failed", "error", {"error": str(exc)[:500]})
+        else:
+            await steps.skipped(redis, step, reason)
+        try:
+            wait = await _next_check_s(redis, step, WALLET_PROFILES_INTERVAL_SECONDS)
+            await asyncio.wait_for(stop_event.wait(), timeout=wait)
+        except asyncio.TimeoutError:
+            pass
+
+
 async def run() -> None:
     settings = get_settings()
     configure_logging(settings.LOG_LEVEL)
@@ -251,7 +298,7 @@ async def run() -> None:
 
     try:
         tasks = [_training_loop(session_factory, redis, settings, stop_event), _evm_loop(session_factory, redis, stop_event),
-                 heartbeat_loop(settings, "ml", stop_event)]
+                 _wallet_profiles_loop(session_factory, redis, stop_event), heartbeat_loop(settings, "ml", stop_event)]
         if UPDATE_MONITOR:
             tasks.append(update_monitor.run(session_factory, redis, settings, stop_event))
         await asyncio.gather(*tasks)

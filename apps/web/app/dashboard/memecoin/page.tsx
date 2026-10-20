@@ -5,6 +5,7 @@ import { LayoutDashboard } from "lucide-react";
 import { SellButton } from "@/components/ManualTrade";
 import { PnlOutcome, type PnlView } from "@/components/Pnl";
 import RiskSummary from "@/components/RiskSummary";
+import ScannerPipeline from "@/components/ScannerPipeline";
 import { ErrorNotice, Loading, PageHeader, Section, StatePill, fmtDuration, modeClass } from "@/components/ui";
 import { formatDecimal } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
@@ -102,6 +103,7 @@ export default function DashboardPage() {
           {data.system.execution.reason && <p className="muted small">{data.system.execution.reason}</p>}
         </div>
       </div>
+      <ScannerPipeline compact />
       <Section title="Open positions" actions={<Link className="btn btn-ghost btn-sm" href="/dashboard/positions">All</Link>}>
         {data.positions.length === 0 ? <p className="muted">No open positions.</p> : (
           <div className="table-scroll">

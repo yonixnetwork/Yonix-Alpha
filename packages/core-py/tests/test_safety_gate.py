@@ -529,6 +529,12 @@ def test_own_entry_counts_in_a_young_curves_real_reserve():
 
 # --- fixed per-trade costs (live network/priority fees, unreclaimed rent) ----
 
+# The fixed-cost tests below check how fixed costs enter the loss at the
+# STOP, so the stop-gap sizing assumption is off for them (it is covered by
+# tests/test_gap_sizing.py).
+NO_GAP = SafetySettings(sizing_stop_gap_curve_pct=Decimal(0), sizing_stop_gap_pool_pct=Decimal(0))
+
+
 def _live(**kw):
     # solana_fresh: the momentum engine is suspended from LIVE entries (gate.LIVE_SUSPENDED_ENGINES).
     return healthy(engine="solana_fresh", global_mode=GlobalMode.LIVE, strategy_mode=StrategyMode.AUTO,
@@ -536,9 +542,9 @@ def _live(**kw):
 
 
 def test_fixed_costs_are_counted_in_the_loss_at_the_stop_for_live_trades():
-    base = decide(_live()).plan
+    base = decide(_live(), NO_GAP).plan
     fixed = base.max_loss.value * Decimal("0.05")
-    a = decide(_live(fixed_cost_quote=fixed, fixed_cost_detail={"total": str(fixed)}))
+    a = decide(_live(fixed_cost_quote=fixed, fixed_cost_detail={"total": str(fixed)}), NO_GAP)
     assert a.execution_target == ExecutionTarget.LIVE, a.reasons
     p = a.plan
     loss = p.position_size.value * _loss_fraction(p.stop_distance_pct, p.entry_cost_bps, p.exit_cost_bps) + fixed
@@ -611,7 +617,7 @@ def test_fixed_costs_shrink_a_risk_bound_live_size_on_a_small_wallet():
     small = AccountState(Decimal("0.08"), Decimal("0.03"), 0, Decimal("0"), Decimal("0"), None, Decimal("0"), False)
     # The sizing math below with the fixed-cost share allowed up to its 10% ceiling (by default such a
     # trade is refused as FIXED_COSTS_TOO_HIGH, asserted at the end).
-    tiny = SafetySettings(min_position_size_quote=Decimal("0.001"), max_fixed_cost_pct=Decimal("0.10"))
+    tiny = replace(NO_GAP, min_position_size_quote=Decimal("0.001"), max_fixed_cost_pct=Decimal("0.10"))
     fixed = Decimal("0.000225")  # measured live round trip with the token account closed after the exit
     # A 10% stop: proportional costs 5.5% plus fixed 5.8% at this size leave no room before the stop.
     tight = decide(_live(account=small, fixed_cost_quote=fixed), tiny)
@@ -626,7 +632,7 @@ def test_fixed_costs_shrink_a_risk_bound_live_size_on_a_small_wallet():
     assert loss <= p.max_loss.value * Decimal("1.000001")
     # Default policy (regression audit 2026-10-10): fixed fees above 2% of this small size refuse the trade.
     default = decide(_live(account=small, market=wide, fixed_cost_quote=fixed),
-                     SafetySettings(min_position_size_quote=Decimal("0.001")))
+                     replace(NO_GAP, min_position_size_quote=Decimal("0.001")))
     assert not default.executable and "FIXED_COSTS_TOO_HIGH" in codes(default)
 
 
@@ -690,12 +696,12 @@ def test_paper_counts_the_same_fixed_costs_as_live_when_set():
     charge_live_fixed_costs the pipeline passes the LIVE round trip's fixed
     costs for a PAPER target too; the plan then sizes exactly as LIVE does
     and refuses what LIVE refuses."""
-    base = decide(_live()).plan
+    base = decide(_live(), NO_GAP).plan
     fixed = base.max_loss.value * Decimal("0.05")
-    live = decide(_live(fixed_cost_quote=fixed, fixed_cost_detail={"total": str(fixed)})).plan
-    a = decide(healthy(fixed_cost_quote=fixed, fixed_cost_detail={"total": str(fixed)}, paper_fixed_costs=True))
+    live = decide(_live(fixed_cost_quote=fixed, fixed_cost_detail={"total": str(fixed)}), NO_GAP).plan
+    a = decide(healthy(fixed_cost_quote=fixed, fixed_cost_detail={"total": str(fixed)}, paper_fixed_costs=True), NO_GAP)
     assert a.execution_target == ExecutionTarget.PAPER and a.plan.fixed_cost_quote == fixed
     assert a.plan.position_size.value == live.position_size.value
     assert a.plan.position_size.inputs["risk_budget_after_fixed_costs"] == a.plan.max_loss.value - fixed
-    over = decide(healthy(fixed_cost_quote=base.max_loss.value * Decimal("1.01"), paper_fixed_costs=True))
+    over = decide(healthy(fixed_cost_quote=base.max_loss.value * Decimal("1.01"), paper_fixed_costs=True), NO_GAP)
     assert not over.executable and "FIXED_COSTS_EXCEED_RISK" in codes(over)

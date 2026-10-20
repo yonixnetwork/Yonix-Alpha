@@ -13,6 +13,7 @@ export function stateClass(state: string | undefined | null): string {
     case "STALE":
       return "pill pill-warn";
     case "UNAVAILABLE":
+    case "DISCONNECTED":
       return "pill pill-danger";
     default:
       return "pill pill-off";

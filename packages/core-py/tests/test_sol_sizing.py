@@ -53,9 +53,14 @@ def healthy(**changes) -> AssessmentInput:
     return replace(base, **changes)
 
 
+# These tests check FIXED_SOL / RISK_PCT sizing against the loss at the STOP;
+# the stop-gap sizing assumption (tests/test_gap_sizing.py) is off here.
+NO_GAP = {"sizing_stop_gap_curve_pct": Decimal(0), "sizing_stop_gap_pool_pct": Decimal(0)}
+
+
 def fixed(size="0.05", max_loss="0.02", policy="REJECT", **kw) -> SafetySettings:
     return SafetySettings(trade_size_mode="FIXED_SOL", fixed_trade_size_sol=Decimal(size),
-                          max_loss_per_trade_sol=Decimal(max_loss), fixed_size_policy=policy, **kw)
+                          max_loss_per_trade_sol=Decimal(max_loss), fixed_size_policy=policy, **{**NO_GAP, **kw})
 
 
 def codes(a):
@@ -75,9 +80,9 @@ def test_fixed_sol_size_is_used_exactly_and_never_scaled_by_equity():
 
 
 def test_risk_pct_mode_is_unchanged_and_capped_by_the_absolute_loss_limit():
-    base = assess(healthy(), SafetySettings())
+    base = assess(healthy(), SafetySettings(**NO_GAP))
     assert base.plan.max_loss.value == Decimal("0.1")  # 10 SOL x 1%
-    capped = assess(healthy(), SafetySettings(max_loss_per_trade_sol=Decimal("0.004")))
+    capped = assess(healthy(), SafetySettings(max_loss_per_trade_sol=Decimal("0.004"), **NO_GAP))
     assert capped.plan.max_loss.value == Decimal("0.004") and "max_loss_per_trade_sol" in capped.plan.max_loss.method
     assert capped.plan.position_size.value < base.plan.position_size.value
 

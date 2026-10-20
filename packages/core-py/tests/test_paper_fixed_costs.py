@@ -4,6 +4,7 @@ book: the buy fee with the entry, the sell fee with every exit and the rent
 reclaim fee on close. Without them nothing changes."""
 
 import os
+from decimal import Decimal
 
 os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://yonixalpha:yonixalpha_test_pw@localhost:5432/yonixalpha_test")
 
@@ -33,7 +34,8 @@ async def db():
 
 
 async def _round_trip(db, key: str, **inp):
-    a = assess(healthy(**inp), SafetySettings())
+    # Fixed-cost accounting, independent of the stop-gap sizing assumption (off here).
+    a = assess(healthy(**inp), SafetySettings(sizing_stop_gap_curve_pct=Decimal(0), sizing_stop_gap_pool_pct=Decimal(0)))
     assert a.executable, a.reasons
     acct = await store.get_paper_account(db, "solana")
     before = acct.cash_balance
