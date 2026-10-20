@@ -107,6 +107,8 @@ def gate_snapshot(inp: Any, evidence: dict[str, Any], a: Any, decision_ctx: dict
         "price_age_seconds": (decision_ctx or {}).get("price_age_seconds"),
         "decision_eval_ms": (decision_ctx or {}).get("decision_eval_ms"),
         "operator_request": bool(getattr(inp, "operator_request", False)),
+        # Momentum v2 checks at the decision (strategies.momentum_v2), enforced or shadow.
+        "momentum_v2": evidence.get("momentum_v2"),
         # Launch / pool intelligence at the decision (solana.intel): causal
         # features for ML and review, with their own feature_version.
         "intel": json.loads(json.dumps(evidence.get("intel") or getattr(inp, "intel", None), default=str))

@@ -113,6 +113,31 @@ async def test_momentum_candidate_uses_momentum_strategy(db_session, redis_clien
     assert any("solana_momentum" in f.message for f in a.findings if f.code == "SIGNAL_NOT_QUALIFIED") or a.qualified
     row = (await db_session.execute(select(RiskAssessment))).scalar_one()
     assert row.assessment["versions"]["feature_set"] and row.assessment["versions"]["rules"]
+    # momentum v2 runs on every momentum decision and is recorded; with every check off the decision is v1's
+    v2 = row.assessment["inputs_snapshot"]["momentum_v2"]
+    assert v2["version"] == "1" and v2["enabled"] == [] and len(v2["checks"]) == 6
+    assert row.assessment["versions"]["strategy"] == "solana_momentum v1"
+
+
+def test_momentum_v2_can_only_take_a_qualified_signal_away():
+    from app.gate_eval import apply_momentum_v2
+    from yonixalpha_core.safety.models import StrategySignal
+
+    intel = {"momentum": {"return_1m": 0.05, "return_5m": 0.9, "buyer_acceleration": 2, "new_wallet_acceleration": 2}}
+    def inp(qualified):
+        return SimpleNamespace(signal=StrategySignal("solana_momentum", "1", qualified, 1.0, ["v1 ok"]), intel=intel,
+                               market=None, flow=None)
+    on = {"mv2_exhaustion": True}
+    a, ev = inp(True), {}
+    apply_momentum_v2(a, ev, on, enforce=True)
+    assert a.signal.qualified is False and a.signal.version == "2:exh" and "too late" in a.signal.reasons[0]
+    assert ev["momentum_v2"]["state"] == "REJECTED"
+    b = inp(False)
+    apply_momentum_v2(b, {}, {"mv2_exhaustion": False}, enforce=True)
+    assert b.signal.qualified is False  # never grants a qualification v1 did not give
+    c = inp(True)
+    apply_momentum_v2(c, {}, on, enforce=False)  # an operator BUY: recorded, not enforced
+    assert c.signal.qualified is True
 
 
 # --- LIVE path (provider boundaries mocked: no transaction is built here) ----

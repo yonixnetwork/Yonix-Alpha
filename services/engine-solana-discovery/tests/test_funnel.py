@@ -286,7 +286,8 @@ async def test_momentum_set_off_creates_no_momentum_candidates(redis, session_fa
     from yonixalpha_core.db.models import StrategyConfig
 
     async with session_factory() as s:
-        s.add(StrategyConfig(strategy="solana_momentum", mode="OFF"))
+        # monitoring off as well: nothing about momentum is evaluated
+        s.add(StrategyConfig(strategy="solana_momentum", mode="OFF", config={"monitor_when_off": False}))
         await s.commit()
     created = await launch(redis, "OLD", 3 * 3600)
     for i in range(30):
@@ -295,6 +296,41 @@ async def test_momentum_set_off_creates_no_momentum_candidates(redis, session_fa
     counts = await run_funnel(redis, session_factory, SETTINGS, NOW)
     assert counts["momentum_considered"] == 0 and counts["momentum_promoted"] == 0
     assert created and await candidates(session_factory) == []
+
+
+async def test_momentum_off_keeps_watching_and_records_outcomes_without_trading(redis, session_factory):
+    """OFF opens nothing; with monitor_when_off (the default) a token that
+    passes the momentum pre-filter is evaluated from the stream alone and
+    recorded as a WATCH outcome (once per hour), so evidence keeps coming."""
+    from sqlalchemy import select
+
+    from yonixalpha_core.db.models import OpportunityOutcome, StrategyConfig
+
+    async with session_factory() as s:
+        s.add(StrategyConfig(strategy="solana_momentum", mode="OFF", config={}))
+        await s.commit()
+    created = int((NOW - timedelta(hours=2)).timestamp())
+    await redis.hset(pump_stream.meta_key("HOT"), mapping={"symbol": "HOT", "created_at": created, "bonding_curve": "BC",
+                                                           "creator": "C"})
+    await redis.hset(pump_stream.curve_key("HOT"), mapping={"vsol": 1, "vtok": 1, "updated_at": 1, "rsol": 40 * SOL})
+    for i in range(10):
+        row = [int((NOW - timedelta(seconds=590 - i * 10)).timestamp()), f"p{i}", 1, 10**8, 10**12, 3 * 10**10, 10**15]
+        await redis.rpush(pump_stream.trades_key("HOT"), json.dumps(row))
+    for i in range(30):
+        row = [int((NOW - timedelta(seconds=290 - i * 5)).timestamp()), f"r{i}", 1, 10**8, 10**12, 3 * 10**10, 10**15]
+        await redis.rpush(pump_stream.trades_key("HOT"), json.dumps(row))
+    await redis.zadd(pump_stream.ACTIVE, {"HOT": int(NOW.timestamp()) - 10})
+    counts = await run_funnel(redis, session_factory, SETTINGS, NOW)
+    assert counts["momentum_promoted"] == 0 and counts["momentum_watch_recorded"] == 1
+    assert await candidates(session_factory) == []  # nothing is traded or sent to the gate
+    async with session_factory() as s:
+        [row] = (await s.execute(select(OpportunityOutcome))).scalars().all()
+    assert row.stage == "WATCH" and row.engine == "solana_momentum" and row.traded is False
+    v2 = row.snapshot["momentum_v2"]
+    assert v2["state"] in ("WATCH", "QUALIFIED", "WAIT", "REJECTED", "STALE") and len(v2["checks"]) == 6
+    assert row.snapshot["price_raw"] and row.snapshot["liquidity_sol"] == "40" and "momentum" in row.snapshot["intel"]
+    # once per hour per token
+    assert (await run_funnel(redis, session_factory, SETTINGS, NOW))["momentum_watch_recorded"] == 0
 
 
 async def test_migrations_cannot_take_the_slots_kept_for_fresh_launches(redis, session_factory):

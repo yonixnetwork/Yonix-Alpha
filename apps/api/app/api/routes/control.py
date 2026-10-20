@@ -40,7 +40,7 @@ from app.schemas.control import (
     SettingsVersionOut,
     TimelineEventOut,
 )
-from yonixalpha_core import config_validation, execution_funnel, kill_switch, system_profile
+from yonixalpha_core import config_validation, execution_funnel, kill_switch, strategy_modes, system_profile
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import (
     AuditLog,
@@ -237,7 +237,10 @@ async def put_strategy_mode(strategy: str, body: ModeUpdate, request: Request, d
         mode = StrategyMode(body.mode)
     except ValueError as exc:
         raise HTTPException(422, f"mode must be one of {[m.value for m in StrategyMode]}") from exc
-    await store.set_strategy_mode(db, strategy, mode, await _user_id(db, username))
+    try:
+        await strategy_modes.change_mode(db, strategy, mode, await _user_id(db, username), confirm_auto=body.confirm_auto)
+    except strategy_modes.ModeChangeRefused as exc:
+        raise HTTPException(409, exc.reason) from exc
     if mode in (StrategyMode.AUTO, StrategyMode.MANUAL):
         await _refuse_on_config_errors(db, settings, strategy)
     await db.commit()

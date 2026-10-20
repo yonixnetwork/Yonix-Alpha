@@ -34,12 +34,14 @@ function ManualBuyByMint({ engine, source }: { engine: string; source: string })
 /** The standard page for a strategy or engine: mode + config, live
  * positions with controls, decisions, and paper performance. `children`
  * adds strategy-specific sections above the tables. */
-export default function StrategyPage({ name, icon, children, positionsEngine, decisionsEngine }: {
+export default function StrategyPage({ name, icon, children, positionsEngine, decisionsEngine, extra }: {
   name: string;
   icon?: ReactNode;
   children?: ReactNode;
   positionsEngine?: string;
   decisionsEngine?: string;
+  /** Strategy-specific sections that need the loaded strategy (and can update it). */
+  extra?: (s: StrategyOut, setData: (s: StrategyOut) => void) => ReactNode;
 }) {
   const { data: s, error, setData } = useApi<StrategyOut>(`/api/strategies/${name}`, undefined, {
     reloadOn: ["strategy.updated", "trade.closed"],
@@ -50,6 +52,7 @@ export default function StrategyPage({ name, icon, children, positionsEngine, de
     <div>
       <PageHeader title={s.label} icon={icon} subtitle={s.account ? `Paper account: ${s.account}` : undefined} />
       <StrategyPanel s={s} onChange={setData} />
+      {extra?.(s, setData)}
       {SOLANA_SOURCE[s.name] && <ManualBuyByMint engine={s.name} source={SOLANA_SOURCE[s.name]} />}
       {children}
       {(

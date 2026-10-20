@@ -334,5 +334,6 @@ async def test_sol_sizing_saved_from_the_dashboard_is_returned_and_used_by_the_r
     assert acct["realized_pnl_today_sol"] == "0" and acct["open_positions_pnl_sol"] == "0"
     eng = {e["engine"]: e for e in s["strategies"]}
     assert eng["solana_migration"]["trade_size"].startswith("0.05 SOL fixed")
-    assert eng["solana_momentum"]["live_eligible"] is False and eng["solana_fresh"]["live_eligible"] is True
+    # No hidden code suspension: the strategy mode alone decides (momentum included).
+    assert eng["solana_momentum"]["live_eligible"] is True and eng["solana_fresh"]["live_eligible"] is True
     assert s["entries_blocked_today"]["total"] == 0

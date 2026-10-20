@@ -11,6 +11,11 @@
 > 1. `docs/MEMECOIN_UPGRADE_REPORT.md`: what was done in Phases 1-7 and what is still open.
 > 2. `docs/MEMECOIN_PHASE2_ROOT_CAUSE.md`: the root cause.
 > 3. `docs/MEMECOIN_REFOCUS_AUDIT.md`: the audit and gap matrix.
+> 4. `docs/MOMENTUM_STRATEGY_RESEARCH.md`: the momentum upgrade. Its points:
+>    - The v2 checks are off by default.
+>    - OFF / PAPER / AUTO are controlled from the web app; AUTO needs a typed confirmation.
+>    - The hard-coded `LIVE_SUSPENDED_ENGINES` is gone.
+>    - `tools/momentum_research` is the evidence tool.
 >
 > Since 2026-10-20 the environment locks keep LIVE off (`LIVE_TRADING_ENABLED=false`, `PAPER_TRADING=true`). Deploy with `scripts/deploy.sh`; it respects the Memecoin pause. The rules in section 11
 > still apply, except that Memecoin is now the system being upgraded, in

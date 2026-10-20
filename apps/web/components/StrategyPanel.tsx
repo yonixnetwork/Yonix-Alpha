@@ -10,11 +10,12 @@ import RuntimeApply from "@/components/RuntimeApply";
 
 const MODES = ["OFF", "MANUAL", "PAPER", "AUTO"];
 const MODE_HELP: Record<string, string> = {
-  OFF: "No evaluation, no entries.",
+  OFF: "No new entries and no entry orders. Open positions keep their stops, take-profits and exit management: switching OFF never sells anything.",
   MANUAL: "Every entry waits for your approval; approval never bypasses a safety check.",
-  PAPER: "Qualified trades are simulated in the paper book automatically.",
-  AUTO: "Automatic within the gate, never waits for approval. Paper unless the global mode is LIVE, the server's environment locks are open and the live worker is ready (Pump.fun strategies only).",
+  PAPER: "Qualified trades are simulated in the paper book automatically. Never a real transaction.",
+  AUTO: "Trades automatically, without asking you. It runs on PAPER unless the global mode is LIVE, the server's environment locks are open and the live worker is ready: then its entries are REAL orders. AUTO is automation, not permission for real money.",
 };
+const EXEC_CLASS: Record<string, string> = { LIVE: "pill pill-danger", PAPER: "pill pill-ok", NONE: "pill", APPROVAL: "pill pill-warn" };
 
 function asText(v: unknown): string {
   if (v === null || v === undefined) return "";
@@ -49,7 +50,8 @@ export default function StrategyPanel({ s, onChange }: { s: StrategyOut; onChang
 
   async function setMode(mode: string) {
     setModeSaved(false);
-    onChange(await apiPut<StrategyOut>(`/api/strategies/${s.name}/mode`, { mode }));
+    // The dialog is the confirmation; the server refuses AUTO without it.
+    onChange(await apiPut<StrategyOut>(`/api/strategies/${s.name}/mode`, { mode, confirm_auto: mode === "AUTO" }));
     setModeSaved(true);
   }
 
@@ -83,7 +85,23 @@ export default function StrategyPanel({ s, onChange }: { s: StrategyOut; onChang
                 disabled={s.mode === m}
                 ariaLabel={`Set ${s.label} mode to ${m}`}
                 title={`Set ${s.label} to ${m}?`}
-                body={MODE_HELP[m]}
+                body={
+                  <>
+                    <p>{MODE_HELP[m]}</p>
+                    {m === "OFF" && (s.open_positions ?? 0) > 0 && (
+                      <p>
+                        {s.open_positions} open position(s) stay open and keep being managed. To also sell them, use the
+                        separate emergency stop.
+                      </p>
+                    )}
+                    {m === "AUTO" && s.execution && (
+                      <p>
+                        Right now AUTO would trade on <b>{s.execution.live_authorized ? "LIVE (real money)" : "PAPER"}</b>.
+                      </p>
+                    )}
+                  </>
+                }
+                typeToConfirm={m === "AUTO" ? "AUTO" : undefined}
                 danger={m === "AUTO"}
                 onConfirm={() => setMode(m)}
               />
@@ -95,6 +113,17 @@ export default function StrategyPanel({ s, onChange }: { s: StrategyOut; onChang
             <span className={modeClass(s.effective_mode)}>{s.effective_mode}</span>
             {s.venue_mode_key && s.venue_mode_key !== s.name && <> (most restrictive of this and venue {s.venue_mode_key})</>}
           </div>
+          {s.execution && (
+            <div style={{ marginTop: 8 }}>
+              Execution now: <span className={EXEC_CLASS[s.execution.effective_execution] ?? "pill"}>{s.execution.effective_execution}</span>{" "}
+              · real money authorized:{" "}
+              <span className={s.execution.live_authorized ? "pill pill-danger" : "pill"}>{s.execution.live_authorized ? "YES" : "NO"}</span>{" "}
+              <span className="muted">
+                (global mode {s.execution.global_mode}; server live locks {s.execution.environment_live_permitted ? "open" : "closed"})
+              </span>
+              <div className="muted small">{s.execution.reason}</div>
+            </div>
+          )}
         </div>
       )}
       {s.trades !== undefined && (
