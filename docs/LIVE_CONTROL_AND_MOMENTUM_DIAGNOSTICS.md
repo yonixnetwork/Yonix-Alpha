@@ -83,9 +83,40 @@ Run after the deploy. The prefilter counters start at the deploy, so allow an ho
 python -m yonixalpha_core.tools.momentum_pipeline --hours 6
 ```
 
-## 3. Late entries: NEEDS SERVER DATA before any change
+## 3. Late entries (VERIFIED, `tools.entry_compare --days 14`, 2026-10-21, 81 056 labelled signals)
 
-The existing `tools.entry_timing` measures detection, promotion, the first gate evaluation, gate wait, queue, quote, signing and landing per candidate. It also measures the price change between detection, first signal and entry, and whether the token was already decelerating. No entry timing is changed until it has been read. A comparison of earliest valid entry, current, later and no-trade-if-extended entries will be built on the opportunity ledger only if those numbers show a delay worth testing.
+Every number is the executable return of a reference-size trade after fees, curve impact, measured latency and fixed costs. The hold-out is the last 40 % of signals by time (from 2026-10-15 15:45).
+
+**The stored frozen test period is unusable.** It is 11 minutes long, frozen when the first 200 signals existed. Readiness verdicts on the Entry Intelligence page that rest on it mean nothing. Future freezes need 7 days of data (PR #94). The stored value is unchanged; clearing it so the ML service re-freezes on the 7-day rule is an operator decision.
+
+**1. Every approach loses after costs, in the hold-out too.**
+
+| Approach | n (all / hold-out) | mean all | mean hold-out | PF hold-out |
+|---|---|---|---|---|
+| CURRENT_GATE_ENTRY (what the gate took) | 49 / 9 | −8.5 % | −12.2 % | 0.38 |
+| NAIVE_SAMPLE (1 launch in 50, at random) | 1345 / 520 | −9.6 % | −11.6 % | 0.25 |
+| EARLY_ACCELERATION (earliest shadow entry) | 21 223 / 8228 | −10.8 % | −11.8 % | 0.36 |
+| MOMENTUM_CONTINUATION | 3322 / 1215 | −7.8 % | −9.9 % | 0.37 |
+| MOMENTUM_RECOVERY (best mean) | 132 / 45 | −3.9 % | −8.3 % | 0.49 |
+| MIGRATED_CONTINUATION | 258 / 130 | −11.7 % | −13.9 % | 0.39 |
+
+- The gate's choice is barely different from a random launch.
+- The migrated variants have a positive median (+0.4 to +1.2 %) and win about half the time, but large losses make the mean −12 to −26 %. Entering migrated tokens early has a heavy rug / dump tail.
+
+**2. Entries are late, but an earlier entry is not shown to be better.**
+- For the 64 tokens the gate entered, the gate came a median 1803 s (30 min) after the earliest signal for the same token, after a median +72 % price move.
+- The labeller marks 64 % of the gate's hold-out entries as late.
+- On the 19 pairs with both outcomes, the earliest signal made +3.0 % (+4.8 summed without its best) against −13.4 % for the gate entry.
+- That comparison is biased upward. The pairs exist only because the gate later approved the token, which is information an early entry could not have had. The early signal also had not passed the gate's hard safety checks.
+- Across all signals, entering at the earliest signal (EARLY_ACCELERATION, −10.8 %) loses more than the gate entry.
+
+**3. "Skip when the price moved too far" (D) does not help.**
+- Gate entries after a 0-25 % move did worst (−29.9 %, n=8). Those after 25-100 % were small positives (n=10).
+- The threshold chosen on the first 60 % (skip above +200 %) changed nothing out of sample: the same 12 trades at −12.4 %.
+
+**Verdict.** Entries are late, but the data supports neither an earlier entry rule nor a skip-when-extended rule out of sample. No entry timing is changed.
+
+The question that remains is testable forward: does the earliest signal, after the gate's hard safety checks at that moment, beat the current entry? That belongs in the signal-testing workflow as an experiment, not in production rules.
 
 ## 4. PnL accounting and token-account rent (VERIFIED, code)
 
