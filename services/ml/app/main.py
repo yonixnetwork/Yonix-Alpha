@@ -10,7 +10,7 @@ from yonixalpha_core.db.models import SystemEvent
 from yonixalpha_core.db.redis import make_redis
 from yonixalpha_core.logging import configure_logging, get_logger
 from yonixalpha_core.notify import send_telegram_alert
-from yonixalpha_core import system_profile, update_monitor
+from yonixalpha_core import signal_center, system_profile, update_monitor
 from yonixalpha_core.ml import frozen, steps
 
 from app.ablation import run_ablation
@@ -270,6 +270,36 @@ async def _wallet_profiles_loop(session_factory, redis, stop_event: asyncio.Even
             pass
 
 
+SIGNAL_LOOP_SECONDS = 30
+SIGNAL_EVALUATE_EVERY = 10  # loops (5 min)
+
+
+async def _signal_loop(session_factory, stop_event: asyncio.Event) -> None:
+    """Signal Center (yonixalpha_core.signal_center): records predictions for
+    accepted experiments within seconds of each decision (never backfilled)
+    and evaluates them once the ledger has the price path. Predictions only:
+    nothing here trades or changes a strategy."""
+    n = 0
+    while not stop_event.is_set():
+        try:
+            async with session_factory() as session:
+                gen = await signal_center.generate(session)
+                if n % SIGNAL_EVALUATE_EVERY == 0:
+                    ev = await signal_center.evaluate(session)
+                    if ev["evaluated"]:
+                        log.info("signal_center.evaluated", **ev)
+                await session.commit()
+            if gen["signals"]:
+                log.info("signal_center.recorded", **gen)
+        except Exception as exc:  # noqa: BLE001 - the signal loop never stops the ML service
+            log.error("signal_center.failed", error=f"{type(exc).__name__}: {exc}"[:300])
+        n += 1
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=SIGNAL_LOOP_SECONDS)
+        except asyncio.TimeoutError:
+            pass
+
+
 async def run() -> None:
     settings = get_settings()
     configure_logging(settings.LOG_LEVEL)
@@ -298,7 +328,8 @@ async def run() -> None:
 
     try:
         tasks = [_training_loop(session_factory, redis, settings, stop_event), _evm_loop(session_factory, redis, stop_event),
-                 _wallet_profiles_loop(session_factory, redis, stop_event), heartbeat_loop(settings, "ml", stop_event)]
+                 _wallet_profiles_loop(session_factory, redis, stop_event), _signal_loop(session_factory, stop_event),
+                 heartbeat_loop(settings, "ml", stop_event)]
         if UPDATE_MONITOR:
             tasks.append(update_monitor.run(session_factory, redis, settings, stop_event))
         await asyncio.gather(*tasks)

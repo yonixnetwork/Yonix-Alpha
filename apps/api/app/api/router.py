@@ -17,6 +17,7 @@ from app.api.routes import (
     health,
     live,
     ml,
+    ml_lab,
     notifications,
     observations,
     paper,
@@ -45,6 +46,7 @@ api_router.include_router(candidates.router)
 api_router.include_router(signals.router)
 api_router.include_router(risk.router)
 api_router.include_router(ml.router)
+api_router.include_router(ml_lab.router)
 api_router.include_router(paper.router)
 api_router.include_router(live.router)
 api_router.include_router(control.router)
