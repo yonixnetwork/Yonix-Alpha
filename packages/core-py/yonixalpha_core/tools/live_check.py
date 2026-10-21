@@ -191,7 +191,9 @@ async def main(argv: list[str] | None = None) -> int:
                 print(f"  global mode last switched to LIVE at {str(switched)[:19]}")
             paper_after = sum(1 for r in (await s.execute(text(EXECUTABLE_SQL), {"since": since})).all()
                               if r[2] == "PAPER" and (switched is None or r[0] > switched))
-            if paper_after and not live_exec:
+            # Only a finding while the global mode is LIVE: after switching back to
+            # PAPER, paper-executable decisions are expected.
+            if paper_after and not live_exec and gm.value == "LIVE":
                 blockers.append(f"{paper_after} executable decision(s) went to PAPER after the switch to LIVE: the mode / "
                                 "lock / readiness above was not all set when they were made")
             codes = (await s.execute(text(MODE_CODES_SQL), {"since": since})).all()

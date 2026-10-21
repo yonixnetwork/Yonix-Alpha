@@ -146,6 +146,11 @@ async def ingest_logs(redis: Redis, logs: list[str], signature: str | None, rece
             pipe.rpush(trades_key(mint), json.dumps(row, separators=(",", ":")))
             pipe.ltrim(trades_key(mint), -MAX_TRADES_PER_MINT, -1)
             pipe.expire(trades_key(mint), TRADES_TTL)
+            # A token still trading keeps its launch metadata (curve address,
+            # created_at): without it the momentum scan cannot evaluate
+            # established tokens (2026-10-21: 44 % of momentum checks in an
+            # hour found no curve address). A no-op once the key is gone.
+            pipe.expire(meta_key(mint), META_TTL)
             curve = {
                 "vsol": f["virtual_sol_reserves"],
                 "vtok": f["virtual_token_reserves"],

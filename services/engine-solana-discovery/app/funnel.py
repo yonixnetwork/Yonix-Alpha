@@ -71,6 +71,26 @@ def fresh_limit(budget: int, migration_active: int) -> int:
     return min(non_migration_budget(budget), budget - migration_active)
 
 
+# Momentum keeps a reserve inside the fresh / momentum side while it is not
+# OFF (2026-10-21: fresh candidates held all 20 slots and every momentum
+# prefilter pass in the hour was dropped as budget_full). Fresh candidates
+# may not take the part of the reserve momentum is not using.
+MOMENTUM_RESERVE_FRACTION = 0.12
+
+
+def momentum_reserve(budget: int) -> int:
+    return int(budget * MOMENTUM_RESERVE_FRACTION)  # 25 -> 3; none below 9 slots
+
+
+def fresh_only_limit(budget: int, migration_active: int, momentum_active: int, momentum_on: bool) -> int:
+    """Slots fresh / entry-strategy candidates may fill now: the fresh /
+    momentum ceiling minus the momentum reserve momentum is not using yet,
+    never more than the slots migrations leave (fresh keeps its own floor
+    when migrations hold their maximum)."""
+    held = max(0, momentum_reserve(budget) - momentum_active) if momentum_on else 0
+    return max(0, min(non_migration_budget(budget) - held, budget - migration_active))
+
+
 OBSERVATION_RETENTION_DAYS = 3
 OBS_REPORT_TTL = 6 * 3600
 OUTCOME_COUNTER = {observation.REJECT: "rejected", observation.NO_TRADE: "expired",
@@ -98,9 +118,8 @@ async def fast_pass(redis: Redis, session_factory, settings: SafetySettings, now
     if not only:
         return counts
     async with session_factory() as session:
-        total, mig = await active_counts(session)
-    await observe_fresh(redis, session_factory, settings, now, counts, total - mig, only=only,
-                        limit=fresh_limit(settings.max_active_candidates, mig))
+        active, limit = await fresh_slots(session, settings.max_active_candidates)
+    await observe_fresh(redis, session_factory, settings, now, counts, active, only=only, limit=limit)
     pipe = redis.pipeline(transaction=False)
     for k, v in counts.items():
         if v:
@@ -117,8 +136,8 @@ async def create_strategy_candidate(session: AsyncSession, mint: str, meta: dict
     check as for any other candidate. Respects the gate budget."""
 
     settings, _ = await store.load_settings(session, "solana_fresh")
-    total, mig = await active_counts(session)
-    if total - mig >= fresh_limit(settings.max_active_candidates, mig):
+    active, limit = await fresh_slots(session, settings.max_active_candidates)
+    if active >= limit:
         return None
     return await create_candidate(session, "discovery", mint, meta, now, f"entry strategy {strategy} (PAPER mode)",
                                   {"entry_strategy": strategy, "paper_only": True})
@@ -144,12 +163,24 @@ async def active_candidate_count(session: AsyncSession) -> int:
 
 async def active_counts(session: AsyncSession) -> tuple[int, int]:
     """(all active gate candidates, of which migrated-token candidates)."""
+    by = await active_by_engine(session)
+    return sum(by.values()), by.get("migration", 0)
+
+
+async def active_by_engine(session: AsyncSession) -> dict[str, int]:
     rows = (await session.execute(
         select(TradingCandidate.engine, func.count()).where(
             TradingCandidate.state.in_(ACTIVE_STATES), TradingCandidate.detail["source"].astext == SOURCE
         ).group_by(TradingCandidate.engine))).all()
-    by = dict(rows)
-    return sum(by.values()), by.get("migration", 0)
+    return dict(rows)
+
+
+async def fresh_slots(session: AsyncSession, budget: int) -> tuple[int, int]:
+    """(active fresh + momentum candidates, slots fresh candidates may fill now)."""
+    by = await active_by_engine(session)
+    mig = by.get("migration", 0)
+    momentum_on = await store.load_strategy_mode(session, "solana_momentum") != StrategyMode.OFF
+    return sum(by.values()) - mig, fresh_only_limit(budget, mig, by.get("momentum", 0), momentum_on)
 
 
 async def _upsert_token(session: AsyncSession, mint: str, meta: dict[str, str], now: datetime) -> Token:
@@ -223,10 +254,12 @@ MOMENTUM_WATCH_SECONDS = 3600  # one WATCH row per token per hour
 
 
 def momentum_watch_snapshot(trades: list, now: datetime, meta: dict[str, str], curve, progress: Decimal,
-                            settings: SafetySettings, config: dict) -> dict[str, Any]:
+                            settings: SafetySettings, config: dict,
+                            why: str = "strategy OFF") -> dict[str, Any]:
     """What the momentum strategy would have seen, from the stream alone (no
     RPC): the v1 signal, the v2 checks and the launch features they use.
-    Recorded while momentum is OFF so outcomes keep accumulating."""
+    Recorded while momentum is OFF, and for prefilter passes dropped because
+    the slot budget was full, so outcomes keep accumulating either way."""
     from yonixalpha_core.solana.assembler import FLOW_WINDOW_SECONDS
     from yonixalpha_core.strategies import momentum_v2
     from yonixalpha_core.strategies.solana import momentum_signal
@@ -255,14 +288,15 @@ def momentum_watch_snapshot(trades: list, now: datetime, meta: dict[str, str], c
     snap["market_cap_sol"] = str(opportunities.market_cap_sol(price_raw, opportunities.PUMP_SUPPLY_RAW)) if price_raw else None
     return {**snap, "signal_qualified": sig.qualified, "signal_strength": sig.strength, "signal_reasons": list(sig.reasons)[:6],
             "momentum_v2": ev.to_dict(), "intel": json.loads(json.dumps(rec, default=str)),
-            "source": "momentum WATCH (strategy OFF): stream-only evaluation, no trade"}
+            "source": f"momentum WATCH ({why}): stream-only evaluation, no trade"}
 
 
 async def record_momentum_watch(redis: Redis, session_factory, mint: str, meta: dict[str, str], curve, progress: Decimal,
-                                trades: list, now: datetime, settings: SafetySettings, config: dict) -> bool:
+                                trades: list, now: datetime, settings: SafetySettings, config: dict,
+                                why: str = "strategy OFF") -> bool:
     if not await redis.set(f"{pump_stream.PREFIX}:mom_watch:{mint}", "1", nx=True, ex=MOMENTUM_WATCH_SECONDS):
         return False
-    snap = momentum_watch_snapshot(trades, now, meta, curve, progress, settings, config)
+    snap = momentum_watch_snapshot(trades, now, meta, curve, progress, settings, config, why)
     v2 = snap["momentum_v2"]
     async with session_factory() as session:
         await opportunities.record(
@@ -478,7 +512,8 @@ async def run_funnel(redis: Redis, session_factory, settings: SafetySettings, no
               "continue_monitoring": 0, "rejected": 0, "expired": 0, "migration_detected": 0}
     budget = settings.max_active_candidates
     async with session_factory() as session:
-        total, mig = await active_counts(session)
+        by_engine = await active_by_engine(session)
+        total, mig = sum(by_engine.values()), by_engine.get("migration", 0)
         momentum_off = await store.load_strategy_mode(session, "solana_momentum") == StrategyMode.OFF
         momentum_config = await store.load_strategy_config(session, "solana_momentum")
     from yonixalpha_core.strategies import momentum_v2
@@ -486,9 +521,10 @@ async def run_funnel(redis: Redis, session_factory, settings: SafetySettings, no
     # OFF opens nothing; with monitor_when_off its prefilter passes are still
     # evaluated from the stream (no RPC) and recorded as WATCH outcomes.
     monitor = momentum_off and momentum_v2.config_of(momentum_config).get("monitor_when_off") is True
+    watch_dropped = momentum_v2.config_of(momentum_config).get("monitor_when_off") is True
 
     active = await observe_fresh(redis, session_factory, settings, now, counts, total - mig,
-                                 limit=fresh_limit(budget, mig))
+                                 limit=fresh_only_limit(budget, mig, by_engine.get("momentum", 0), not momentum_off))
 
     since = int((now - timedelta(seconds=MAX_CANDIDATE_AGE_SECONDS)).timestamp())
     for mint, migrated_ts in await pump_stream.migrated_since(redis, since):
@@ -549,6 +585,13 @@ async def run_funnel(redis: Redis, session_factory, settings: SafetySettings, no
         if active >= fresh_limit(budget, mig):
             counts["budget_full"] += 1
             counts["momentum_budget_full"] += 1
+            if watch_dropped:  # observation does not depend on a free slot
+                try:
+                    if await record_momentum_watch(redis, session_factory, mint, meta, curve, progress, trades, now, mom,
+                                                   momentum_config, "slot budget full"):
+                        counts["momentum_watch_recorded"] += 1
+                except Exception as exc:  # noqa: BLE001 - monitoring evidence never stops the funnel
+                    log.warning("momentum.watch_failed", mint=mint, error=f"{type(exc).__name__}: {str(exc)[:160]}")
             continue
         if not await redis.set(f"{pump_stream.PREFIX}:mom_seen:{mint}", "1", nx=True, ex=MOMENTUM_REPROMOTE_SECONDS):
             counts["momentum_recently_promoted"] += 1

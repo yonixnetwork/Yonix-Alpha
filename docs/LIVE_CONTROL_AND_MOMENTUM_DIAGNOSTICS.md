@@ -97,7 +97,7 @@ The existing `tools.entry_timing` measures detection, promotion, the first gate 
 | Paper | Models the same items as estimates: buy and sell network fees, plus the close transaction or the unreclaimed rent. |
 | LIVE account cash | The synced wallet balance (on-chain truth). Deposits made outside the bot are not in the ledger. |
 
-**Correction to `MOMENTUM_STRATEGY_RESEARCH.md` §2.3:** the LIVE loss explanation stands: fixed costs are too large for about 0.004 SOL buys. However, the rent part is recoverable and is credited back once reclaimed, so it is not a final economic cost.
+**Correction to `MOMENTUM_STRATEGY_RESEARCH.md` §2.3 (confirmed by §4b):** the rent was reclaimed and is already in the booked result. The LIVE momentum loss is about 20 % consumed costs and about 80 % market: the entries rarely went up.
 
 The new read-only `tools.pnl_reconcile` lists, per LIVE position:
 
@@ -108,6 +108,71 @@ The new read-only `tools.pnl_reconcile` lists, per LIVE position:
 - MFE against both the market price and the cost basis.
 
 It also checks the paper account identity (starting + realized - open cost = cash). No historical row is changed: an existing, audited re-booking already applies when rent is reclaimed.
+
+## 4b. Server evidence (2026-10-21 20:07 UTC, read-only tools)
+
+**Live switch (`tools.live_check`).**
+
+| Item | State |
+|---|---|
+| `TRADING_ENABLED` | true |
+| `LIVE_TRADING_ENABLED` | **false** |
+| `PAPER_TRADING` | **true** |
+| Wallet key | configured |
+| Global mode | PAPER |
+| Strategies | fresh, migration and momentum all AUTO |
+| Order worker | `disabled: environment locks closed` (correct for these locks) |
+
+- **Cause:** the `.env` safety policy. This is not a code defect; the remaining defect was the silent UI, fixed in PR #92.
+- **Still needed for LIVE, by explicit decision only:**
+  - `LIVE_TRADING_ENABLED=true` and `PAPER_TRADING=false`, then recreate the containers;
+  - global mode LIVE.
+- **Warning:** the live wallet holds 0.103 SOL with a 0.05 SOL reserve.
+- **Corrected tool output:** `live_check` also printed "20 executable decisions went to PAPER after the switch to LIVE". That line refers to an Oct 15 switch, and the global mode is PAPER now. The line now appears only while the global mode is LIVE.
+- **Risk to note:** momentum is AUTO, not PAPER, so it would trade live the moment the locks and the global mode allow it. Setting it to PAPER keeps it paper-only whatever the global mode.
+
+**Momentum (`tools.momentum_pipeline --hours 1`).** Verdict **D: a system cause, not "no opportunity"**.
+
+| Stage | Count |
+|---|---|
+| Stream | CONNECTED |
+| Token checks | 8500 |
+| Reached the prefilter | 1419 (1315 failed, **104 passed**) |
+| Candidates | **0**: all 104 dropped as `budget_full` |
+| Gate decisions | 0 |
+
+Two causes:
+
+1. **Candidate slots.** Fresh and momentum share 20 of the 25 slots, and fresh candidates (up to 30 min each at the gate) held all of them.
+   - Fix: momentum keeps a reserve of 3 slots while it is not OFF (`funnel.momentum_reserve`, 12 % of the budget). Fresh candidates cannot take the unused part. Fresh keeps its floor of 5 when migrations hold their 20.
+   - A pass dropped for lack of a slot is now still recorded as a WATCH observation, so learning does not depend on slots.
+2. **Metadata coverage.** 3731 of 8500 checks (44 %) found no curve address. Launch metadata expired 6 h after the launch even while the token kept trading, so established tokens were invisible.
+   - Fix: every trade now refreshes the 6 h expiry, so an active token keeps its metadata. Tokens whose metadata already expired stay invisible.
+
+These fixes let momentum be evaluated. They do not change its entry rules, which the 2026-10-20 research found have no edge.
+
+**Late entries (`tools.entry_timing --hours 168`).**
+- 40 entered tokens; 16 entered 50 %+ above the first-detection price.
+- For migrated tokens much of that rise is by design: detection is the launch and the entry comes after migration.
+- The gate waited a median 1588 s before the approving evaluation (n=6). The waits were mostly data (`AUTO_SL_NO_VOLATILITY` 1446: the stop cannot be set until volatility is measurable) and safety.
+- Whether waiting costs money is measured by `tools.entry_compare` (new): earliest signal vs the gate entry for the same token, and the skip-when-extended rule chosen on the first 60 % and tested on the last 40 %.
+- No timing rule is changed before that output is read.
+
+**PnL and rent (`tools.pnl_reconcile --engine solana_momentum`).**
+
+| Item | SOL |
+|---|---|
+| LIVE momentum positions | 44 (9 failed with no fill, 35 filled) |
+| Spent | 0.169 |
+| Consumed costs | 0.0044 (2.6 %) |
+| Rent deposits | 0.0454; all reclaimed except 0.0015 (MCASH) |
+| Booked | −0.0212 = economic −0.0212 |
+
+- **The rent was not a loss.** It came back and is already in the booked result.
+- About 0.0044 SOL of the loss is consumed costs; the rest is the market.
+- Against the market fill price, about a third of the trades never rose at all (MFE 0.0 %), and the median MFE was about 2.5 %. The −40 % "MFE" in the earlier report was the cost basis (deposit + fees), not the market.
+- **PAPER momentum:** booked −0.4924 SOL, of which modelled fees were 0.3277 SOL. Costs were two thirds of the paper loss.
+- **Paper books:** the `solana` paper account reconciles exactly (difference 0). The archived `hyperliquid` account shows −15 (archived engine, not traded).
 
 ## 5. Not built yet
 

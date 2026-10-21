@@ -95,6 +95,17 @@ async def test_stream_ingest_decodes_and_counts(redis):
     assert await pump_stream.recent_unpromoted(redis, NOW, 3600) == []
 
 
+async def test_a_trade_keeps_an_active_tokens_launch_metadata(redis):
+    """2026-10-21: metadata expired 6 h after the launch even while the token
+    traded, so the momentum scan could not see established tokens."""
+    await seed_stream(redis)
+    await redis.expire(pump_stream.meta_key(MINT), 30)
+    c = Curve()
+    await pump_stream.ingest_logs(redis, logs_of(c.trade(wallet(9), NOW, 10**8, True)), None, NOW)
+    assert await redis.ttl(pump_stream.meta_key(MINT)) > 3600
+    assert (await pump_stream.load_meta(redis, MINT))["bonding_curve"] == CURVE
+
+
 async def test_a_zero_fee_event_never_makes_the_curve_look_free(redis):
     """A trade reporting 0 total fee keeps the last real rate; with no real
     rate ever seen the fee stays unknown, so the gate can't simulate (and

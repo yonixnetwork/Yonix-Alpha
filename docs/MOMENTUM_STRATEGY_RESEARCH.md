@@ -105,6 +105,11 @@ Afterwards the ledger also records:
 | PAPER winners | TP3 4 trades +0.3809, TP2 4 trades +0.0600, trailing 11 trades +0.1331. Median give-back 15-21 % of the move. | The exits worked; the entries did not feed them enough winners |
 | PAPER intel exits, 6 | -0.0716 SOL | MARKET_REVERSAL mostly |
 
+**Correction (2026-10-21, `tools.pnl_reconcile`, see `LIVE_CONTROL_AND_MOMENTUM_DIAGNOSTICS.md` §4b):**
+- The rent deposits were reclaimed and are already in the booked −0.0212 SOL. They were not a loss.
+- About 20 % of the LIVE loss is consumed fees; the rest is the market.
+- Against the market fill price, the median MFE was about +2.5 % and about a third of the trades never rose at all. The −40 % figure above is against the cost basis.
+
 Creator sells were not a cause: `creator_sold` was True on 1 of 61 losers. No trade shows a failed price feed in its loss class (`DATA_FAILURE` does not occur).
 
 **Winners vs losers (21 vs 61, decision-time medians).** The two groups look almost the same:
