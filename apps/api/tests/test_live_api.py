@@ -139,3 +139,22 @@ async def test_auto_reclaim_setting_is_a_validated_switch(client, auth_headers):
     ok = await client.put("/api/live/settings", headers=auth_headers, json={"auto_reclaim_rent": "false"})
     assert ok.status_code == 200 and ok.json()["settings"]["auto_reclaim_rent"] == "false"
     assert (await client.put("/api/live/settings", headers=auth_headers, json={"auto_reclaim_rent": "maybe"})).status_code == 422
+
+
+async def test_live_activation_names_the_lock_and_a_refused_switch_is_audited(app, client, auth_headers):
+    assert (await client.get("/api/control/live-activation")).status_code == 401
+    r = await client.get("/api/control/live-activation", headers=auth_headers)
+    assert r.status_code == 200
+    a = r.json()
+    assert a["state"] == "LOCKED" and a["can_activate"] is False and a["global_mode"] == "PAPER"
+    lock = a["blockers"][0]
+    assert lock["code"] == "ENV_LOCKS_CLOSED" and lock["category"] == "LOCKED_BY_SAFETY_POLICY" and lock["blocks_activation"]
+    assert "PRIVATE_KEY=" not in json.dumps(a)
+    refused = await client.put("/api/control/modes/global", json={"mode": "LIVE"}, headers=auth_headers)
+    assert refused.status_code == 409
+    detail = refused.json()["detail"]
+    assert detail["message"].startswith("LIVE refused:") and detail["blockers"][0]["code"] == "ENV_LOCKS_CLOSED"
+    assert (await client.get("/api/control/modes", headers=auth_headers)).json()["global_mode"] == "PAPER"
+    async with app.state.db_session_factory() as s:
+        rows = [a for a in (await s.execute(select(AuditLog))).scalars() if a.event_type == "global_mode.refused"]
+    assert len(rows) == 1 and rows[0].detail["codes"] == ["ENV_LOCKS_CLOSED"]

@@ -8,7 +8,7 @@ from yonixalpha_core.db.models import OpportunityOutcome, TokenObservation, Trad
 from yonixalpha_core.safety.settings import default_settings_for
 from yonixalpha_core.solana import pump_stream
 
-from app.funnel import FUNNEL, run_funnel
+from app.funnel import FUNNEL, funnel_hour_key, run_funnel
 
 NOW = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
 SETTINGS = default_settings_for("solana_fresh")
@@ -175,9 +175,15 @@ async def test_momentum_promotes_established_accelerating_tokens_only(redis, ses
     await add_established("STEADY", recent=12, prior=12)
     counts = await run_funnel(redis, session_factory, SETTINGS, NOW)
     assert counts["momentum_considered"] == 2 and counts["momentum_promoted"] == 1
+    # where the other token stopped is counted, overall and in this hour's bucket
+    assert counts["momentum_active"] == 2 and counts["momentum_prefilter_failed"] == 1
+    hour = await redis.hgetall(funnel_hour_key(NOW))
+    assert int(hour["momentum_prefilter_failed"]) == 1 and int(hour["passes"]) == 1
+    assert 0 < await redis.ttl(funnel_hour_key(NOW)) <= 48 * 3600
     [c] = await candidates(session_factory)
     assert c.engine == "momentum" and c.detail["mint"] == "HOT" and c.detail["strategy"] == "solana_momentum"
-    assert (await run_funnel(redis, session_factory, SETTINGS, NOW))["momentum_promoted"] == 0
+    again = await run_funnel(redis, session_factory, SETTINGS, NOW)
+    assert again["momentum_promoted"] == 0 and again["momentum_recently_promoted"] == 1
 
 
 async def test_momentum_prefilter_uses_the_momentum_engines_own_settings(redis, session_factory):

@@ -90,3 +90,22 @@ async def test_v2_checks_are_switched_on_from_the_config_and_version_the_strateg
     insight = await client.get(f"{URL}/insight", headers=auth_headers)
     assert insight.status_code == 200 and insight.json()["results"] == [] and "notes" in insight.json()
     assert (await client.get(f"{URL}/insight")).status_code == 401
+
+
+async def test_pipeline_reports_stages_counters_and_a_verdict(app, client, auth_headers):
+    assert (await client.get(f"{URL}/pipeline")).status_code == 401
+    redis = app.state.redis
+    hour = f"yx:pump:funnel:h:{datetime.now(timezone.utc):%Y%m%d%H}"
+    await redis.hset(hour, mapping={"passes": 10, "momentum_active": 8, "momentum_too_young": 3, "momentum_considered": 5,
+                                    "momentum_prefilter_failed": 5})
+    async with app.state.db_session_factory() as s:
+        await store.set_strategy_mode(s, "solana_momentum", StrategyMode.PAPER, None)
+        await s.commit()
+    r = await client.get(f"{URL}/pipeline", params={"hours": 2}, headers=auth_headers)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    stages = {st["stage"]: st for st in body["stages"]}
+    assert stages["SCANNED"]["value"] == 8 and stages["PREFILTER"]["detail"] == {"failed": 5, "passed": 0}
+    assert body["funnel_counters"] == "recorded" and body["mode"] == "PAPER"
+    assert "C_FILTERED" in [f["code"] for f in body["findings"]]
+    assert body["trail"] == []

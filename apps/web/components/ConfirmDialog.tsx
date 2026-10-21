@@ -15,6 +15,8 @@ interface ConfirmProps {
   disabled?: boolean;
   className?: string;
   ariaLabel?: string;
+  /** Tooltip on the button itself (e.g. why it is disabled). */
+  buttonTitle?: string;
   onConfirm: () => Promise<void> | void;
 }
 
@@ -60,6 +62,7 @@ export default function ConfirmButton(p: ConfirmProps) {
         className={p.className ?? (p.danger ? "btn btn-danger btn-sm" : "btn btn-ghost btn-sm")}
         disabled={p.disabled}
         aria-label={p.ariaLabel}
+        title={p.buttonTitle}
         onClick={() => ref.current?.showModal()}
       >
         {p.label}

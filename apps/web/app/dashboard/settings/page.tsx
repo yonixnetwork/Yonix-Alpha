@@ -4,11 +4,13 @@ import Link from "next/link";
 import { Settings } from "lucide-react";
 import ConfirmButton from "@/components/ConfirmDialog";
 import KeysPanel from "@/components/KeysPanel";
+import LiveActivationPanel from "@/components/LiveActivationPanel";
 import ProvidersPanel from "@/components/ProvidersPanel";
 import SnipePanel from "@/components/SnipePanel";
 import { ErrorNotice, modeClass, PageHeader, Section, Stat } from "@/components/ui";
 import { apiPut } from "@/lib/api";
 import type { ModesOut } from "@/lib/types";
+import { useState } from "react";
 import { useApi } from "@/lib/useApi";
 
 const GLOBAL_MODES = ["MANUAL", "PAPER", "LIVE"];
@@ -16,6 +18,7 @@ const GLOBAL_MODES = ["MANUAL", "PAPER", "LIVE"];
 export default function SettingsPage() {
   const modes = useApi<ModesOut>("/api/control/modes", undefined, { reloadOn: ["strategy.updated"] });
   const m = modes.data;
+  const [checked, setChecked] = useState(0);
   return (
     <div>
       <PageHeader title="Settings" icon={<Settings size={20} aria-hidden />} />
@@ -37,6 +40,7 @@ export default function SettingsPage() {
               they are closed. Live execution covers Pump.fun tokens (fresh and PumpSwap-migrated) only; BSC and Robinhood Chain
               are paper only. See Live Execution. To stop everything, use the kill switch or set strategies to OFF.
             </div>
+            <LiveActivationPanel refreshKey={checked} />
             <div className="btn-row" role="group" aria-label="Global mode">
               {GLOBAL_MODES.map((g) => (
                 <ConfirmButton
@@ -44,11 +48,16 @@ export default function SettingsPage() {
                   label={g}
                   className={m.global_mode === g ? "btn btn-sm" : "btn btn-ghost btn-sm"}
                   disabled={m.global_mode === g || (g === "LIVE" && !m.env.live_permitted)}
+                  buttonTitle={g === "LIVE" && !m.env.live_permitted ? "Locked by the server's .env: see the reasons above" : undefined}
                   title={`Set the global mode to ${g}?`}
                   body={g === "MANUAL" ? "Every entry on every strategy waits for your approval." : g === "PAPER" ? "Strategies run in their own modes, all simulated." : "Refused unless the server's environment locks are open."}
                   danger={g === "LIVE"}
                   onConfirm={async () => {
-                    modes.setData(await apiPut<ModesOut>("/api/control/modes/global", { mode: g }));
+                    try {
+                      modes.setData(await apiPut<ModesOut>("/api/control/modes/global", { mode: g }));
+                    } finally {
+                      setChecked((c) => c + 1);
+                    }
                   }}
                 />
               ))}
