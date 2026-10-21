@@ -49,6 +49,9 @@ MIN_LABELLED = 30
 MIN_TEST = 30
 MIN_FORWARD = 30
 MIN_FREEZE_TOTAL = 200  # labelled signals (all strategies) before the test period is frozen
+# ...and the labelled range must cover this long: frozen at the first 200
+# signals, the production test period (2026-10-10) was 11 minutes long.
+MIN_FREEZE_SPAN_DAYS = 7
 FREEZE_SETTING = "entry_eval_frozen"
 CHAMPION = ei.CURRENT_GATE_ENTRY
 PROMOTION = {
@@ -127,13 +130,14 @@ def calibration(rows: Iterable[dict], key: str = "score", bins: int = 4) -> dict
 
 def freeze_window(labelled_times: list[datetime]) -> dict[str, str] | None:
     """The frozen test period: the last 20% of the labelled time range, once
-    MIN_FREEZE_TOTAL labelled signals exist."""
+    MIN_FREEZE_TOTAL labelled signals exist over at least
+    MIN_FREEZE_SPAN_DAYS days."""
     if len(labelled_times) < MIN_FREEZE_TOTAL:
         return None
     ts = sorted(labelled_times)
     start, end = ts[0], ts[-1]
     span = (end - start).total_seconds()
-    if span <= 0:
+    if span < MIN_FREEZE_SPAN_DAYS * 86400:
         return None
     from datetime import timedelta
 

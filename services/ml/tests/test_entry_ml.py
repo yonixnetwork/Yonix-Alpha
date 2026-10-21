@@ -15,18 +15,18 @@ from app import entry_ml
 T0 = datetime(2026, 9, 1, tzinfo=timezone.utc)
 
 
-def _signals(n: int, start: datetime, prefix: str = "M") -> list[EntrySignal]:
+def _signals(n: int, start: datetime, prefix: str = "M", step_minutes: int = 10) -> list[EntrySignal]:
     rnd = random.Random(7)
     out = []
     for i in range(n):
         inflow = rnd.uniform(-1, 1)
         win = rnd.random() < (0.75 if inflow > 0 else 0.25)  # a learnable, noisy relation
         out.append(EntrySignal(mint=f"{prefix}{i:040d}", strategy=ei.EARLY_ACCELERATION, lifecycle="FRESH", decision=ei.CANDIDATE,
-                               decided_at=start + timedelta(minutes=10 * i), score=rnd.uniform(0, 1),
+                               decided_at=start + timedelta(minutes=step_minutes * i), score=rnd.uniform(0, 1),
                                features={"age_seconds": rnd.uniform(5, 120), "inflow_sol_per_s": inflow,
                                          "trades_total": rnd.randint(5, 60)},
                                outcome={"executable_return_pct": 12.0 if win else -9.0},
-                               outcome_at=start + timedelta(minutes=10 * i + 15)))
+                               outcome_at=start + timedelta(minutes=step_minutes * i + 15)))
     return out
 
 
@@ -40,7 +40,7 @@ async def test_insufficient_data_trains_nothing(db_session):
 
 
 async def test_registers_shadow_versions_on_a_frozen_test_period(db_session):
-    db_session.add_all(_signals(420, T0))
+    db_session.add_all(_signals(420, T0, step_minutes=28))  # ~8 days: the freeze needs 7
     await db_session.commit()
     first = await entry_ml.run_entry_cycle(db_session)
     assert first["status"] == "REGISTERED_SHADOW", first

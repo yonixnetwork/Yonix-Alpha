@@ -304,14 +304,14 @@ def test_metrics_profit_factor_drawdown_and_insufficient_samples():
 
 
 def test_frozen_test_period_and_promotion_against_the_champion():
-    champion = _rows(ei.CURRENT_GATE_ENTRY, [-4, 2, -6, 1] * 60, T0)
-    better = _rows(ei.EARLY_ACCELERATION, [6, -3, 8, 2] * 60, T0 + timedelta(seconds=7))
+    champion = _rows(ei.CURRENT_GATE_ENTRY, [-4, 2, -6, 1] * 60, T0, step=3600)  # 10 days
+    better = _rows(ei.EARLY_ACCELERATION, [6, -3, 8, 2] * 60, T0 + timedelta(seconds=7), step=3600)
     frozen = entry_eval.freeze_window([r["decided_at"] for r in champion + better])
     assert frozen is not None and frozen["test_start"] > frozen["validation_start"]
     out = entry_eval.comparison(champion + better, frozen, {ei.EARLY_ACCELERATION: "SHADOW"})
     st = out["strategies"][ei.EARLY_ACCELERATION]["readiness"]
     assert st["state"] in ("SHADOW", "DRIFT_DETECTED", "PAPER_VALIDATED") or "forward" in st["reason"]
-    worse = _rows(ei.MOMENTUM_CONTINUATION, [-8, 1, -9, 1] * 60, T0 + timedelta(seconds=11))
+    worse = _rows(ei.MOMENTUM_CONTINUATION, [-8, 1, -9, 1] * 60, T0 + timedelta(seconds=11), step=3600)
     out2 = entry_eval.comparison(champion + worse, frozen, {})
     assert out2["strategies"][ei.MOMENTUM_CONTINUATION]["readiness"]["state"] in ("VALIDATING", "LEARNING")
     assert out["strategies"][ei.CURRENT_GATE_ENTRY]["readiness"]["state"] == "BASELINE"
@@ -320,6 +320,8 @@ def test_frozen_test_period_and_promotion_against_the_champion():
 def test_paused_strategy_and_no_freeze_with_few_signals():
     assert entry_eval.readiness("X", {"unsplit": []}, {}, "PAUSED")["state"] == "PAUSED"
     assert entry_eval.freeze_window([T0] * 10) is None
+    # enough signals, but all within a few minutes: no freeze (production 2026-10-10: 11 minutes)
+    assert entry_eval.freeze_window([T0 + timedelta(seconds=i) for i in range(500)]) is None
 
 
 # --- latency split and events ------------------------------------------------------------------------------
