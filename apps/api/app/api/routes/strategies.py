@@ -9,10 +9,11 @@ environment flags; live execution exists only for the Pump.fun strategies
 (yonixalpha_core.live_trading).
 """
 
-from datetime import datetime, timezone
+import json
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from redis.asyncio import Redis
 from sqlalchemy import func, select
@@ -20,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_username, get_db, get_redis, get_settings
 from app.api.util import audit, user_id
-from yonixalpha_core import events, strategy_modes
+from yonixalpha_core import events, execution_funnel, momentum_pipeline, strategy_modes
 from yonixalpha_core.analytics import ClosedTrade, performance
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import PaperPosition, RiskAssessment
@@ -127,6 +128,24 @@ async def momentum_insight(since: datetime | None = None, db: AsyncSession = Dep
     entry type, recent decision explanations. Read-only; declared before
     /{name}."""
     return await momentum_insight_report(db, since)
+
+
+@router.get("/solana_momentum/pipeline")
+async def momentum_pipeline_report(hours: int = Query(24, ge=1, le=48), tokens: int = Query(30, ge=0, le=200),
+                                   db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
+                                   _: str = Depends(get_current_username)) -> dict:
+    """Why momentum is or is not trading: stage counters (stream, scan,
+    prefilter, candidate, gate, execution), the A-H verdict, and the latest
+    momentum candidates with the stage each reached and its final blocker
+    (the searchable audit trail). Read-only; declared before /{name}."""
+    out = await momentum_pipeline.report(db, redis, hours=hours)
+    if tokens:
+        since = datetime.now(timezone.utc) - timedelta(hours=hours)
+        ladder = await execution_funnel.pipeline(db, since, token_limit=tokens, candidate_engine="momentum")
+        out["trail"] = [{k: t.get(k) for k in ("mint", "symbol", "state", "promoted_at", "stage", "final_blocker",
+                                               "assessments", "any_signal", "any_executable", "execution_mode", "latest")}
+                        for t in ladder["tokens"]]
+    return json.loads(json.dumps(out, default=str))
 
 
 @router.get("/{name}")

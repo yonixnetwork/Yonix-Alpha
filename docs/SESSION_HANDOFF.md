@@ -16,6 +16,7 @@
 >    - OFF / PAPER / AUTO are controlled from the web app; AUTO needs a typed confirmation.
 >    - The hard-coded `LIVE_SUSPENDED_ENGINES` is gone.
 >    - `tools/momentum_research` is the evidence tool.
+> 5. `docs/LIVE_CONTROL_AND_MOMENTUM_DIAGNOSTICS.md` (2026-10-21): why the LIVE switch is refused (`/api/control/live-activation`), the momentum A-H pipeline verdict (`tools/momentum_pipeline`), and the rent / PnL accounting audit (`tools/pnl_reconcile`).
 >
 > Since 2026-10-20 the environment locks keep LIVE off (`LIVE_TRADING_ENABLED=false`, `PAPER_TRADING=true`). Deploy with `scripts/deploy.sh`; it respects the Memecoin pause. The rules in section 11
 > still apply, except that Memecoin is now the system being upgraded, in

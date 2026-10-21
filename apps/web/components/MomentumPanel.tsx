@@ -1,6 +1,7 @@
 "use client";
 
 import ConfirmButton from "@/components/ConfirmDialog";
+import MomentumPipelinePanel from "@/components/MomentumPipelinePanel";
 import ScannerPipeline from "@/components/ScannerPipeline";
 import { Empty, ErrorNotice, Loading, Pct, Section, Stat, StatePill } from "@/components/ui";
 import { apiPost } from "@/lib/api";
@@ -197,6 +198,8 @@ export default function MomentumPanel({ s, onChange }: { s: StrategyOut; onChang
           </>
         )}
       </Section>
+
+      <MomentumPipelinePanel />
 
       <Section title="Scanner and data sources">
         <ScannerPipeline compact />

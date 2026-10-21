@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { CheckCircle2, Send, XCircle } from "lucide-react";
+import LiveActivationPanel from "@/components/LiveActivationPanel";
 import LiveWalletsPanel from "@/components/LiveWalletsPanel";
 import SmokeTestPanel from "@/components/SmokeTestPanel";
 import { PnlOutcome, type PnlView } from "@/components/Pnl";
@@ -166,6 +167,7 @@ export default function LiveExecutionPage() {
         </div>
       </div>
 
+      <LiveActivationPanel />
       <LiveWalletsPanel />
       <SmokeTestPanel />
 

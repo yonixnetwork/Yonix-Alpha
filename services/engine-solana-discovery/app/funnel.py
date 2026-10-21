@@ -42,6 +42,13 @@ log = get_logger("engine-solana-discovery.funnel")
 
 SOURCE = "pump_stream"
 FUNNEL = f"{pump_stream.PREFIX}:funnel"
+# The same counts per UTC hour (FUNNEL itself only ever grows), kept two
+# days, so "in the last N hours" can be answered.
+FUNNEL_HOUR_TTL_SECONDS = 48 * 3600
+
+
+def funnel_hour_key(t: datetime) -> str:
+    return f"{FUNNEL}:h:{t.astimezone(timezone.utc):%Y%m%d%H}"
 MAX_CANDIDATE_AGE_SECONDS = 30 * 60
 MIN_AGE_SECONDS = 60
 PREFILTER_WINDOW_SECONDS = 300
@@ -465,6 +472,9 @@ async def run_funnel(redis: Redis, session_factory, settings: SafetySettings, no
     mom = momentum_settings or settings
     counts = {"considered": 0, "prefilter_failed": 0, "promoted": 0, "budget_full": 0, "migrations": 0,
               "momentum_considered": 0, "momentum_promoted": 0, "momentum_watch_recorded": 0, "observing": 0,
+              # where momentum tokens stop before the gate (scanner diagnostics)
+              "momentum_active": 0, "momentum_no_curve_address": 0, "momentum_curve_done": 0, "momentum_too_young": 0,
+              "momentum_prefilter_failed": 0, "momentum_budget_full": 0, "momentum_recently_promoted": 0,
               "continue_monitoring": 0, "rejected": 0, "expired": 0, "migration_detected": 0}
     budget = settings.max_active_candidates
     async with session_factory() as session:
@@ -502,12 +512,15 @@ async def run_funnel(redis: Redis, session_factory, settings: SafetySettings, no
     # Momentum: established tokens (not launches) trading faster right now.
     # Strategy OFF: no candidate is created (the gate would only reject it).
     for mint in ([] if momentum_off and not monitor else await pump_stream.active_mints(redis, now, MOMENTUM_ACTIVE_WITHIN_SECONDS)):
+        counts["momentum_active"] += 1
         meta = await pump_stream.load_meta(redis, mint)
         if not meta or not meta.get("bonding_curve"):
+            counts["momentum_no_curve_address"] += 1
             continue  # launched before this stream started: curve address unknown
         created_ts = int(meta["created_at"]) if meta.get("created_at") else None
         curve = await pump_stream.load_curve(redis, mint)
         if curve is None or curve.complete:
+            counts["momentum_curve_done"] += 1
             continue
         progress = Decimal(observation.curve_context(curve, int(meta.get("initial_real_token_reserves") or 0) or None)
                            .get("curve_progress") or 0)
@@ -517,11 +530,13 @@ async def run_funnel(redis: Redis, session_factory, settings: SafetySettings, no
             # migration and the fresh engine did not take it.
             if (not near or await redis.zscore(pump_stream.PROMOTED, mint) is not None
                     or await redis.zscore(pump_stream.OBS_LIVE, mint) is not None):
+                counts["momentum_too_young"] += 1
                 continue
         counts["momentum_considered"] += 1
         trades = await pump_stream.load_trades(redis, mint)
         ok, stats = momentum_prefilter(trades, now, created_ts, mom, near)
         if not ok:
+            counts["momentum_prefilter_failed"] += 1
             continue
         if momentum_off:
             try:
@@ -533,8 +548,10 @@ async def run_funnel(redis: Redis, session_factory, settings: SafetySettings, no
             continue
         if active >= fresh_limit(budget, mig):
             counts["budget_full"] += 1
+            counts["momentum_budget_full"] += 1
             continue
         if not await redis.set(f"{pump_stream.PREFIX}:mom_seen:{mint}", "1", nx=True, ex=MOMENTUM_REPROMOTE_SECONDS):
+            counts["momentum_recently_promoted"] += 1
             continue
         async with session_factory() as session:
             reason = ("momentum prefilter: accelerating activity, approaching migration "
@@ -548,9 +565,13 @@ async def run_funnel(redis: Redis, session_factory, settings: SafetySettings, no
                                  "funnel")
 
     pipe = redis.pipeline(transaction=False)
+    hour = funnel_hour_key(now)
     for k, v in counts.items():
         if v:
             pipe.hincrby(FUNNEL, k, v)
+            pipe.hincrby(hour, k, v)
+    pipe.hincrby(hour, "passes", 1)
+    pipe.expire(hour, FUNNEL_HOUR_TTL_SECONDS)
     pipe.hset(FUNNEL, "last_run_at", now.isoformat())
     await pipe.execute()
     await pump_stream.prune(redis, now)

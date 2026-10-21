@@ -40,7 +40,7 @@ from app.schemas.control import (
     SettingsVersionOut,
     TimelineEventOut,
 )
-from yonixalpha_core import config_validation, execution_funnel, kill_switch, strategy_modes, system_profile
+from yonixalpha_core import config_validation, execution_funnel, kill_switch, live_activation, strategy_modes, system_profile
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import (
     AuditLog,
@@ -211,6 +211,15 @@ async def get_modes(db: AsyncSession = Depends(get_db), settings: Settings = Dep
     )
 
 
+@router.get("/live-activation")
+async def get_live_activation(db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
+                              settings: Settings = Depends(get_settings), _: str = Depends(get_current_username)) -> dict:
+    """Whether the global mode can go LIVE and whether a LIVE order would be
+    created once it is, with every blocker named (yonixalpha_core.live_activation).
+    Read-only; no secret is returned."""
+    return await live_activation.status(db, redis, settings)
+
+
 @router.put("/modes/global", response_model=ModesOut)
 async def put_global_mode(body: ModeUpdate, request: Request, db: AsyncSession = Depends(get_db),
                           settings: Settings = Depends(get_settings), username: str = Depends(get_current_username)):
@@ -219,11 +228,15 @@ async def put_global_mode(body: ModeUpdate, request: Request, db: AsyncSession =
     except ValueError as exc:
         raise HTTPException(422, f"mode must be one of {[m.value for m in GlobalMode]}") from exc
     if mode == GlobalMode.LIVE and not store.live_trading_permitted(settings):
-        raise HTTPException(409, "LIVE refused: environment locks are closed (TRADING_ENABLED, LIVE_TRADING_ENABLED, "
-                                 "PAPER_TRADING=false are all required and are set on the server, not here)")
+        blockers = [b.__dict__ for b in live_activation.lock_blockers(settings)]
+        # A refused attempt is audited too, so "I pressed LIVE and nothing
+        # happened" can be checked afterwards.
+        await _audit(db, username, request, "global_mode.refused", {"to": "LIVE", "codes": [b["code"] for b in blockers]})
+        await db.commit()
+        raise HTTPException(409, {"message": "LIVE refused: " + blockers[0]["message"], "blockers": blockers})
     await store.set_global_mode(db, mode, await _user_id(db, username))
     if mode == GlobalMode.LIVE:
-        await _refuse_on_config_errors(db, settings, None)
+        await _refuse_on_config_errors(db, settings, None, request=request, username=username)
     await db.commit()
     return await get_modes(db, settings, username)
 
@@ -247,7 +260,8 @@ async def put_strategy_mode(strategy: str, body: ModeUpdate, request: Request, d
     return await get_modes(db, settings, username)
 
 
-async def _refuse_on_config_errors(db: AsyncSession, settings: Settings, mode_key: str | None) -> None:
+async def _refuse_on_config_errors(db: AsyncSession, settings: Settings, mode_key: str | None,
+                                   request: Request | None = None, username: str | None = None) -> None:
     """Validates the module configuration as it would be after this (not
     yet committed) change: a module that would then run AUTO/MANUAL (and,
     with global LIVE, live) while in CONFIGURATION_ERROR refuses the change.
@@ -260,6 +274,10 @@ async def _refuse_on_config_errors(db: AsyncSession, settings: Settings, mode_ke
     errors = [e for name in affected for e in config_validation.blocking_errors(result, name)]
     if errors:
         await db.rollback()
+        if request is not None and username is not None and mode_key is None:
+            await _audit(db, username, request, "global_mode.refused", {"to": "LIVE", "codes": ["CONFIGURATION_ERROR"],
+                                                                      "errors": errors})
+            await db.commit()
         raise HTTPException(409, {"detail": "CONFIGURATION_ERROR: the change needs configuration that is missing in .env",
                                   "errors": errors})
 

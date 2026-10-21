@@ -153,7 +153,8 @@ def _final_blocker(tok: dict[str, Any]) -> dict[str, Any] | None:
 
 
 async def pipeline(session: AsyncSession, since: datetime, engines: tuple[str, ...] = SOLANA_ENGINES,
-                   token_limit: int = 150, mint: str | None = None, discovered: int | None = None) -> dict[str, Any]:
+                   token_limit: int = 150, mint: str | None = None, discovered: int | None = None,
+                   candidate_engine: str | None = None) -> dict[str, Any]:
     """The status ladder for every candidate handed to the gate in the window
     (plus observation counts): how many tokens reached each stage, which
     blocker groups stopped the ones with a BUY signal, and each token's
@@ -169,7 +170,8 @@ async def pipeline(session: AsyncSession, since: datetime, engines: tuple[str, .
                  c.state_history->-1->>'reason' last_reason
           FROM trading_candidates c JOIN tokens t ON t.id = c.token_id
           WHERE c.created_at >= :since AND c.detail->>'source' = 'pump_stream'
-            AND (CAST(:mint AS text) IS NULL OR t.mint_address = :mint)),
+            AND (CAST(:mint AS text) IS NULL OR t.mint_address = :mint)
+            AND (CAST(:cengine AS text) IS NULL OR c.engine = :cengine)),
         a AS (
           SELECT ra.candidate_id, count(*) n, bool_or({_SIGNAL_OK}) any_signal,
                  bool_or({_SIGNAL_OK} AND {_RISK_OK}) any_risk_ok, bool_or(ra.executable) any_executable
@@ -185,7 +187,7 @@ async def pipeline(session: AsyncSession, since: datetime, engines: tuple[str, .
         SELECT c.*, coalesce(a.n, 0) assessments, a.any_signal, a.any_risk_ok, a.any_executable,
                l.decision latest_decision, l.evaluated_at latest_at, l.gate_engine, l.blocking latest_blocking
         FROM c LEFT JOIN a ON a.candidate_id = c.id LEFT JOIN l ON l.candidate_id = c.id
-        ORDER BY c.created_at DESC""", mint=mint, **p)
+        ORDER BY c.created_at DESC""", mint=mint, cengine=candidate_engine, **p)
     ids = [c["id"] for c in cands]
     positions: dict[Any, list[dict]] = {}
     orders: dict[Any, list[dict]] = {}
