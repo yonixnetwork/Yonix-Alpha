@@ -361,3 +361,54 @@ async def test_migrations_cannot_take_the_slots_kept_for_fresh_launches(redis, s
     counts = await run_funnel(redis, session_factory, SETTINGS, NOW)  # max_active_candidates 25
     assert counts["promoted"] == 3  # fresh launches still get their 5 kept slots
     assert counts["migrations"] == 0 and counts["budget_full"] >= 1  # migrations stop at 20 of 25
+
+
+def test_fresh_candidates_leave_the_momentum_reserve_free_while_momentum_is_on():
+    from app.funnel import fresh_limit, fresh_only_limit, momentum_reserve
+
+    assert momentum_reserve(25) == 3 and fresh_limit(25, 0) == 20
+    assert fresh_only_limit(25, 0, 0, True) == 17  # 3 slots fresh cannot take
+    assert fresh_only_limit(25, 0, 2, True) == 19  # momentum already uses 2 of its 3
+    assert fresh_only_limit(25, 0, 0, False) == 20  # momentum OFF: no reserve
+
+
+async def add_hot(redis, mint: str) -> None:
+    created = int((NOW - timedelta(hours=2)).timestamp())
+    await redis.hset(pump_stream.meta_key(mint), mapping={"symbol": mint, "created_at": created, "bonding_curve": "BC",
+                                                          "creator": "C"})
+    await redis.hset(pump_stream.curve_key(mint), mapping={"vsol": 1, "vtok": 1, "updated_at": 1, "rsol": 40 * SOL})
+    for i in range(10):
+        row = [int((NOW - timedelta(seconds=590 - i * 10)).timestamp()), f"p{i}", 1, 10**8, 10**12, 3 * 10**10, 10**15]
+        await redis.rpush(pump_stream.trades_key(mint), json.dumps(row))
+    for i in range(30):
+        row = [int((NOW - timedelta(seconds=290 - i * 5)).timestamp()), f"r{i}", 1, 10**8, 10**12, 3 * 10**10, 10**15]
+        await redis.rpush(pump_stream.trades_key(mint), json.dumps(row))
+    await redis.zadd(pump_stream.ACTIVE, {mint: int(NOW.timestamp()) - 10})
+
+
+async def test_momentum_gets_its_reserve_when_fresh_holds_the_rest(redis, session_factory):
+    """2026-10-21: fresh candidates held every fresh/momentum slot; 104
+    momentum prefilter passes in an hour were dropped as budget_full."""
+    from app.funnel import create_candidate
+
+    async with session_factory() as s:
+        for i in range(17):  # fresh at its own limit (20 - 3 reserved for momentum)
+            await create_candidate(s, "discovery", f"F{i}", {"symbol": f"F{i}"}, NOW, "test", {})
+    await add_hot(redis, "HOT")
+    counts = await run_funnel(redis, session_factory, SETTINGS, NOW)
+    assert counts["momentum_promoted"] == 1 and counts["momentum_budget_full"] == 0
+
+
+async def test_a_momentum_pass_dropped_for_a_full_budget_is_still_observed(redis, session_factory):
+    from app.funnel import create_candidate
+
+    async with session_factory() as s:
+        for i in range(20):  # every fresh/momentum slot taken (e.g. before the reserve existed)
+            await create_candidate(s, "discovery", f"F{i}", {"symbol": f"F{i}"}, NOW, "test", {})
+    await add_hot(redis, "HOT")
+    counts = await run_funnel(redis, session_factory, SETTINGS, NOW)
+    assert counts["momentum_promoted"] == 0 and counts["momentum_budget_full"] == 1
+    assert counts["momentum_watch_recorded"] == 1
+    async with session_factory() as s:
+        [row] = (await s.execute(select(OpportunityOutcome))).scalars().all()
+    assert row.stage == "WATCH" and row.traded is False and "slot budget full" in row.snapshot["source"]

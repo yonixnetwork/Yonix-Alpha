@@ -126,7 +126,7 @@ export default function MomentumPanel({ s, onChange }: { s: StrategyOut; onChang
           <Stat label="Strategy version" hint="1 = the original v1 signal; 2:… = v1 plus the checks that are on">
             {s.momentum?.version ?? "—"}
           </Stat>
-          <Stat label="Watching while OFF">{s.momentum?.monitor_when_off ? "yes (stream only, no trades)" : "no"}</Stat>
+          <Stat label="Watching (OFF, or no free slot)">{s.momentum?.monitor_when_off ? "yes (stream only, never a trade)" : "no"}</Stat>
           <Stat label="Open positions">{s.open_positions ?? 0}</Stat>
         </div>
         <div className="table-wrap">
