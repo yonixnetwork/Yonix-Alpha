@@ -17,7 +17,7 @@
 // active, Memecoin archived) is on the archive branch above.
 
 import { ArrowRightLeft, BarChart3, Bell, BellRing, Boxes, Brain, CandlestickChart, ClipboardCheck, Copy, Eye, Filter,
-  Fingerprint, FlaskConical, FlaskRound, Gauge, GitCompare, History, KeyRound, LayoutDashboard, LayoutGrid, Layers, Link2,
+  Fingerprint, FlaskConical, FlaskRound, Gauge, GitCompare, GraduationCap, History, KeyRound, LayoutDashboard, LayoutGrid, Layers, Link2,
   ListChecks, Network, Radio, Rocket, Search, Send, Server, Settings, ShieldAlert, ShieldCheck, SlidersHorizontal, Sparkles,
   Timer, Wallet, WalletCards, Workflow, type LucideIcon } from "lucide-react";
 
@@ -80,6 +80,7 @@ export const MEMECOIN_GROUPS: NavGroup[] = [
     items: [
       { href: "/dashboard/ml", label: "ML Intelligence", icon: Brain },
       { href: "/dashboard/ml/review", label: "ML Review", icon: Gauge },
+      { href: "/dashboard/ml/lab", label: "ML Training Lab", icon: GraduationCap },
     ],
   },
   {

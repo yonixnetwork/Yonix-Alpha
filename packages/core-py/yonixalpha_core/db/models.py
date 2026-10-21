@@ -3,6 +3,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    DDL,
     BigInteger,
     Boolean,
     CheckConstraint,
@@ -15,7 +16,9 @@ from sqlalchemy import (
     LargeBinary,
     Numeric,
     String,
+    Text,
     UniqueConstraint,
+    event,
     func,
     text,
 )
@@ -1699,3 +1702,109 @@ class EntrySignal(Base):
         Index("ix_entry_signals_strategy_decided_at", "strategy", "decided_at"),
         Index("ix_entry_signals_unlabelled", "decided_at", postgresql_where=text("outcome_at IS NULL")),
     )
+
+
+# --- ML Training Lab and Signal Center (migration 0048) -----------------------------------------------
+
+
+class MlManualLabel(Base):
+    """A label an operator gave a token or setup in the ML Training Lab: an
+    OPINION, kept apart from verified outcomes. The decision-time features are
+    copied at labelling time; the comparison with what the market did is
+    computed when read (ml_lab.verify), never written into the label."""
+
+    __tablename__ = "ml_manual_labels"
+    __table_args__ = (
+        UniqueConstraint("opportunity_id", "label", "created_by", name="uq_ml_manual_labels_opp_label_user"),
+        Index("ix_ml_manual_labels_created_at", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    opportunity_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("opportunity_outcomes.id", ondelete="SET NULL"), nullable=True, index=True)
+    mint: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    engine: Mapped[str] = mapped_column(String(32), nullable=False)
+    label: Mapped[str] = mapped_column(String(40), nullable=False)
+    value: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    features: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    feature_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    model_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="MANUAL")
+    created_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class MlExperiment(Base):
+    """A research idea turned into a testable experiment (ml_lab.propose).
+    DRAFT until the operator accepts it; only ACCEPTED experiments produce
+    signals, and only from decisions made after the acceptance. Never a
+    production strategy: signals are predictions, not orders."""
+
+    __tablename__ = "ml_experiments"
+    __table_args__ = (
+        CheckConstraint("status IN ('DRAFT','ACCEPTED','REJECTED','RETIRED')", name="ck_ml_experiments_status"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    idea: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="DRAFT", index=True)
+    proposal: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    testable: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    created_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    decided_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class MlSignal(Base):
+    """A timestamped prediction (signal_center): what was predicted, from what
+    was known at that moment, and what will count as success. IMMUTABLE: a
+    database trigger refuses every UPDATE and DELETE, so a signal can never be
+    rewritten once its outcome is known. The outcome lives in
+    ml_signal_outcomes."""
+
+    __tablename__ = "ml_signals"
+    __table_args__ = (Index("ix_ml_signals_experiment_decided_at", "experiment_id", "decided_at"),)
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    signal_key: Mapped[str] = mapped_column(String(160), nullable=False, unique=True)
+    source: Mapped[str] = mapped_column(String(16), nullable=False)  # EXPERIMENT | BASELINE
+    experiment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("ml_experiments.id", ondelete="RESTRICT"), nullable=True)
+    opportunity_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    mint: Mapped[str] = mapped_column(String(64), nullable=False)
+    engine: Mapped[str] = mapped_column(String(32), nullable=False)
+    category: Mapped[str] = mapped_column(String(16), nullable=False)
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    horizon: Mapped[str] = mapped_column(String(8), nullable=False)
+    prediction: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    inputs: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    definition: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    feature_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class MlSignalOutcome(Base):
+    """What happened to one signal, written once its horizon has passed."""
+
+    __tablename__ = "ml_signal_outcomes"
+
+    signal_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("ml_signals.id", ondelete="RESTRICT"), primary_key=True)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    outcome: Mapped[dict] = mapped_column(JSONB, nullable=False)
+
+
+ML_SIGNALS_IMMUTABLE_FN = DDL("""
+CREATE OR REPLACE FUNCTION ml_signals_immutable() RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION 'ml_signals rows are immutable: a recorded prediction is never changed or deleted';
+END;
+$$ LANGUAGE plpgsql
+""")
+ML_SIGNALS_IMMUTABLE_TRIGGER = DDL(
+    "CREATE TRIGGER ml_signals_immutable BEFORE UPDATE OR DELETE ON ml_signals "
+    "FOR EACH ROW EXECUTE FUNCTION ml_signals_immutable()")
+event.listen(MlSignal.__table__, "after_create", ML_SIGNALS_IMMUTABLE_FN)
+event.listen(MlSignal.__table__, "after_create", ML_SIGNALS_IMMUTABLE_TRIGGER)

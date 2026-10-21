@@ -205,20 +205,21 @@ These fixes let momentum be evaluated. They do not change its entry rules, which
 - **PAPER momentum:** booked −0.4924 SOL, of which modelled fees were 0.3277 SOL. Costs were two thirds of the paper loss.
 - **Paper books:** the `solana` paper account reconciles exactly (difference 0). The archived `hyperliquid` account shows −15 (archived engine, not traded).
 
-## 5. Not built yet
+## 5. ML Training Lab and Signal Center
 
-These follow the server evidence above:
+Built: see [ML_TRAINING_LAB.md](ML_TRAINING_LAB.md). It contains:
 
-- the ML Training Lab: observation queue, manual labels, idea-to-experiment form and dataset export;
-- the Signal Center with immutable predictions;
-- the entry-approach comparison.
+- the observation queue, manual labels (kept apart from the recorded outcome), the idea-to-experiment form and the dataset export;
+- immutable signals with outcomes and reports;
+- the learning cycle.
 
-What already exists and will be reused:
+It reuses:
 
-- the opportunity ledger: decision-time snapshots, outcomes T+5 s to T+60 m, executable returns;
-- ML governance: no auto-activation, frozen validation sets, champion/challenger;
-- the ML Review page;
+- the opportunity ledger;
+- ML governance;
 - WATCH observation.
+
+The entry-approach comparison is section 3.
 
 ## 6. Safety
 
