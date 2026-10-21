@@ -6,11 +6,11 @@ and fixed costs; entry_outcomes). Nothing is written or retrained.
 
     $C exec -T api python -m yonixalpha_core.tools.entry_compare [--days 14]
 
-1. Every strategy and baseline: all signals, the frozen test period
-   (entry_eval: the last 20 % of the labelled range, fixed once set) and
-   the readiness verdict against the champion CURRENT_GATE_ENTRY (what the
-   gate actually approved). Includes the result without the single best
-   signal, so one outlier cannot carry a strategy.
+1. Every strategy and baseline: all signals and a hold-out (the last 40 %
+   of the signals by time), against CURRENT_GATE_ENTRY (what the gate
+   actually approved). Includes the result without the single best signal,
+   so one outlier cannot carry a strategy. The stored entry_eval frozen test
+   period is shown and flagged when it is too short to mean anything.
 2. Earliest vs gate, paired by token: for tokens with a gate entry, the
    earliest earlier signal of any strategy for the same token and lifecycle
    ("A"), against the gate entry itself ("B"). A shadow signal has NOT been
@@ -39,10 +39,19 @@ from yonixalpha_core.config import get_settings
 from yonixalpha_core.db.base import make_engine, make_session_factory
 from yonixalpha_core.db.models import PlatformSetting
 
+# Only the outcome fields the comparison reads (the full outcome JSON of
+# 100k+ signals does not fit the server's memory budget).
 ROWS_SQL = """
-SELECT mint, strategy, lifecycle, decided_at, price_raw, score, ml_probability, outcome FROM entry_signals
-WHERE outcome_at IS NOT NULL AND decided_at >= :since ORDER BY decided_at LIMIT 50000
+SELECT mint, strategy, lifecycle, decided_at, price_raw, score, ml_probability,
+       jsonb_build_object('executable_return_pct', outcome->'executable_return_pct', 'bad_entry', outcome->'bad_entry',
+                          'late_entry', outcome->'late_entry', 'entry_position', outcome->'entry_position',
+                          'latency_displacement_pct', outcome->'latency_displacement_pct',
+                          'rule_exit', outcome->'rule_exit') AS outcome
+FROM entry_signals
+WHERE outcome_at IS NOT NULL AND decided_at >= :since ORDER BY decided_at LIMIT :limit
 """
+MAX_ROWS = 400000
+MIN_FROZEN_SPAN = timedelta(days=1)
 GATE = entry_eval.CHAMPION
 BUCKETS = ((None, 0.0, "moved down"), (0.0, 0.25, "0-25 %"), (0.25, 0.5, "25-50 %"), (0.5, 1.0, "50-100 %"),
            (1.0, 3.0, "100-300 %"), (3.0, None, "> 300 %"))
@@ -124,32 +133,40 @@ def extension_rule(pairs: list[tuple[dict, dict]]) -> dict[str, Any]:
 
 async def report(session, days: int, now: datetime | None = None) -> None:
     now = now or datetime.now(timezone.utc)
-    rows = [dict(r._mapping) for r in (await session.execute(text(ROWS_SQL), {"since": now - timedelta(days=days)})).all()]
+    rows = [dict(r._mapping) for r in (await session.execute(
+        text(ROWS_SQL), {"since": now - timedelta(days=days), "limit": MAX_ROWS})).all()]
     frozen_row = await session.get(PlatformSetting, entry_eval.FREEZE_SETTING)
     frozen = frozen_row.value if frozen_row else None
-    print(f"ENTRY COMPARISON, last {days} days: {len(rows)} labelled signals; frozen test period: "
-          f"{frozen['test_start'][:16] + ' .. ' + frozen['test_end'][:16] if frozen else 'not set yet'}")
+    print(f"ENTRY COMPARISON, last {days} days: {len(rows)} labelled signals"
+          + (f" (the first {MAX_ROWS} only: use fewer --days)" if len(rows) >= MAX_ROWS else ""))
     print("unit: executable return % of a reference-size trade after fees, curve impact, measured latency, fixed costs")
+    if frozen:
+        span = datetime.fromisoformat(frozen["test_end"]) - datetime.fromisoformat(frozen["test_start"])
+        print(f"frozen test period (entry_eval): {frozen['test_start'][:16]} .. {frozen['test_end'][:16]}"
+              + (f"  ** UNUSABLE: {span.total_seconds() / 60:.0f} minutes long (frozen when the first "
+                 f"{entry_eval.MIN_FREEZE_TOTAL} signals existed); readiness verdicts based on it mean nothing **"
+                 if span < MIN_FROZEN_SPAN else ""))
+    cut = rows[int(len(rows) * 0.6)]["decided_at"] if rows else None
+    if cut is not None:
+        print(f"this report's own chronological split: hold-out = the last 40 % of the signals, from {cut.isoformat()[:16]}")
 
-    print("\n1. STRATEGIES AND BASELINES (all signals | frozen test period | readiness vs CURRENT_GATE_ENTRY)")
+    print("\n1. STRATEGIES AND BASELINES (all signals | hold-out: last 40 % by time)")
     comp = entry_eval.comparison(rows, frozen, {})
     by: dict[str, list[dict]] = {}
     for r in rows:
         by.setdefault(r["strategy"], []).append(r)
     for name, c in comp["strategies"].items():
-        parts = entry_eval.split(by.get(name, []), frozen)
         all_rets = [x for r in by.get(name, []) if (x := ret(r)) is not None]
-        test_rets = [x for r in parts.get("test", []) if (x := ret(r)) is not None]
+        hold = [x for r in by.get(name, []) if r["decided_at"] >= cut and (x := ret(r)) is not None] if cut else []
         if not all_rets:
             continue
         m = c["all"]
         bad = m.get("bad_entry_rate")
         late = m.get("late_entry_rate")
-        print(f"  {name:<30} all  {fmt(summary(all_rets))}")
-        print(f"  {'':<30} test {fmt(summary(test_rets))}")
+        print(f"  {name:<30} all      {fmt(summary(all_rets))}")
+        print(f"  {'':<30} hold-out {fmt(summary(hold))}")
         print(f"  {'':<30} bad entries {'-' if bad is None else f'{bad * 100:.0f}%'}, late entries "
-              f"{'-' if late is None else f'{late * 100:.0f}%'}; readiness {c['readiness']['state']}"
-              + (f" ({c['readiness'].get('reason')})" if c['readiness'].get('reason') else ""))
+              f"{'-' if late is None else f'{late * 100:.0f}%'}")
 
     pairs = earliest_refs(rows)
     print(f"\n2. EARLIEST SIGNAL (A) vs GATE ENTRY (B), same token: {len(pairs)} pairs")

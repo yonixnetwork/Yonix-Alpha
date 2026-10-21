@@ -72,4 +72,4 @@ async def test_report_runs_on_the_database(capsys):
         await ec.report(s, 14, NOW)
     await engine.dispose()
     out = capsys.readouterr().out
-    assert "2 labelled signals" in out and "1 pairs" in out and "moved 100-300 %" in out and "Nothing was written" in out
+    assert "2 labelled signals" in out and "hold-out" in out and "1 pairs" in out and "moved 100-300 %" in out and "Nothing was written" in out
