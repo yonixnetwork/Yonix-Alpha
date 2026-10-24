@@ -269,3 +269,51 @@ Real-money execution stayed disabled in this work.
 5. Fund the wallet above reserve + size + costs. It was 0.103 SOL on 2026-10-22, with a 0.05 SOL reserve.
 6. Open Settings → Operating mode and LIVE control. Every check must pass; then use **Arm LIVE** with your password, `ENABLE LIVE` and a reason.
 7. To stop: **Disarm LIVE** (immediate), or the kill switch.
+
+## Phases 6–7: ML engine and monitoring
+
+These build on what exists: the ML Training Lab, the Signal Center, ML governance and ML Review. Nothing was replaced.
+
+### What the ML system keeps apart
+
+| Kind | Where it lives |
+|---|---|
+| Training / validation data | The shadow models train on the oldest 75 % of the ledger and validate on the newest 25 %; rows whose labels were not known yet are purged. Frozen validation sets are kept per model family. |
+| Out-of-sample evaluation | Holdout metrics and frozen-validation reports (`ml_validation_reports`). |
+| Immutable historical predictions | Signal Center signals (`ml_signals`: a trigger refuses UPDATE and DELETE), recorded within 120 s of a decision, never backfilled. |
+| Completed outcomes | `ml_signal_outcomes`, and the ledger's outcome columns, measured after the horizon. |
+| Production champion | `model_versions.status = active`, set only by an operator's promotion (audited `ml.promoted`). |
+| Challengers | `status = challenger`. Registered, never promoted automatically. |
+| Proposed changes awaiting approval | DRAFT experiments; challengers that passed validation (AWAITING MY APPROVAL). |
+
+### New in this change
+
+- **Prospective shadow scores.** The ml service's 30 s signal loop now scores ledger decisions of the last 3 minutes (`shadow_ml.score_new`, with the loaded models cached). A shadow prediction now exists before its T+5m outcome.
+  - Older rows scored by the training cycle are still written, but `ml.prediction_audit` counts them as RETROSPECTIVE and never evaluates them.
+  - The evaluation compares the decisions the return model favoured with the rest and with all of them, after costs. That is the baseline comparison for a model.
+- **ML engine monitoring** (ML Engine page, `GET /api/ml/monitor`, `yonixalpha_core.ml_monitor`), from saved records only:
+  - per model: champion, challenger, shadow, training time and samples, stage, contribution, status and why;
+  - experiment signals: total / evaluated / pending;
+  - shadow scores, prospective vs retrospective;
+  - closed PAPER trades per strategy, kept apart from predictions: win / loss / breakeven, average win and loss, profit factor, net, net per trade, drawdown, open positions, forward-test status;
+  - rejected decisions and what happened after them;
+  - experiments: proposed, accepted, rejected and retired, each with its verdict;
+  - the ML steps' last success;
+  - data-source health;
+  - audit-trail counts for proposals, acceptances, rejections, retirements, promotions, retirements of champions and contribution changes.
+- **Event history** (`GET /api/ml/history`): per decision, signal → decision → paper entry → exit → evaluation. **Open** shows the full timeline in the ML Training Lab.
+
+### Plain-language states
+
+| State | When |
+|---|---|
+| INSUFFICIENT DATA | Not validated yet, or the forward test lacks evidence. |
+| OBSERVING | Shadow only, or an accepted experiment still collecting signals. |
+| PAPER TESTING | A strategy in a forward test without a baseline. |
+| VALIDATION FAILED | A challenger failed its frozen validation. |
+| IMPROVEMENT NOT CONFIRMED | Not supported, inconclusive or deteriorating. |
+| CHALLENGER OUTPERFORMING BASELINE | Supported forward, or improving. |
+| AWAITING MY APPROVAL | A DRAFT experiment, a challenger that passed validation, or an experiment that beat its comparison. |
+| CHAMPION IN USE | The operator-promoted model. |
+
+No state is shown without a saved record behind it. Nothing trains, promotes or trades from this page; a model contributes only through ML governance's audited, stepwise, operator-only rules (LIVE_CONTRIBUTOR stays locked).

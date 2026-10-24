@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import MLReadiness from "@/components/MLReadiness";
+import { MlHistory, MlMonitorSummary } from "@/components/MlMonitor";
 import Pagination from "@/components/Pagination";
 import { apiGet, ApiError } from "@/lib/api";
 import { usePagedList } from "@/lib/usePagedList";
@@ -44,6 +45,8 @@ export default function MLPage() {
         </Link>
       </div>
 
+      <MlMonitorSummary />
+      <MlHistory />
       <MLReadiness />
 
       {stats && (

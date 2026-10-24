@@ -17,7 +17,7 @@ from app.ablation import run_ablation
 from app.entry_ml import run_entry_cycle
 from app.evm_ml import run_evm_cycle
 from app.gate_ml import run_cycle
-from app.shadow_ml import run_shadow_cycle
+from app.shadow_ml import run_shadow_cycle, score_new
 from app.train import train_and_maybe_register
 from app.validation import run_validation
 
@@ -282,6 +282,12 @@ async def _signal_loop(session_factory, stop_event: asyncio.Event) -> None:
     n = 0
     while not stop_event.is_set():
         try:
+            async with session_factory() as session:
+                # shadow predictions for new decisions, before their outcome exists (prospective)
+                scored_new = await score_new(session)
+                await session.commit()
+                if scored_new:
+                    log.debug("shadow_ml.scored_new", rows=scored_new)
             async with session_factory() as session:
                 gen = await signal_center.generate(session)
                 if n % SIGNAL_EVALUATE_EVERY == 0:
