@@ -16,11 +16,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_username, get_db, get_redis, get_settings
+from app.api import review_cache
 from app.api.routes.ml import _review
-from yonixalpha_core import solana_performance, system_profile
+from app.api.util import audit, jsonable, user_id
+from yonixalpha_core import forward_test, solana_performance, system_profile
 from yonixalpha_core.analytics import ClosedTrade, performance
 from yonixalpha_core.config import Settings
-from yonixalpha_core.db.models import PaperPosition, RiskAssessment
+from yonixalpha_core.db.models import PaperPosition, PlatformSetting, RiskAssessment
 from yonixalpha_core.safety import store
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
@@ -108,6 +110,7 @@ async def performance_report(
 @router.get("/solana-performance")
 async def solana_performance_report(request: Request, days: int = Query(7, ge=1, le=solana_performance.MAX_DAYS),
                                     outcomes: bool = True, refresh: bool = Query(False),
+                                    engine: str | None = Query(None, pattern="^solana_(fresh|migration|momentum)$"),
                                     redis: Redis = Depends(get_redis), _: str = Depends(get_current_username)) -> dict:
     """Solana PAPER vs LIVE: decisions, entries, closed trades by stage /
     hold time / entry quality / exit reason, missed winners, false positives
@@ -116,6 +119,52 @@ async def solana_performance_report(request: Request, days: int = Query(7, ge=1,
     of decisions took longer than the 25 s request limit on the server
     (2026-10-09); 202 until the first result is ready."""
     async def compute(db: AsyncSession) -> dict:
-        return await solana_performance.report(db, days, outcomes=outcomes)
+        return await solana_performance.report(db, days, outcomes=outcomes, engine=engine)
 
-    return await _review(request, redis, f"solana-performance:{days}:{int(outcomes)}", compute, refresh)
+    return await _review(request, redis, f"solana-performance:{days}:{int(outcomes)}:{engine or 'all'}", compute, refresh)
+
+
+@router.get("/solana-positions")
+async def solana_positions(engine: str | None = Query(None, pattern="^solana_(fresh|migration|momentum)$"),
+                           mode: str | None = Query(None, pattern="^(PAPER|LIVE)$"), limit: int = Query(50, ge=1, le=500),
+                           db: AsyncSession = Depends(get_db), _: str = Depends(get_current_username)) -> dict:
+    """Latest Solana positions one by one (solana_performance.positions):
+    booked PnL for closed positions only; an open position's marked value is
+    labelled unrealized."""
+    return {"positions": await solana_performance.positions(db, engine=engine, mode=mode, limit=limit),
+            "note": "net = booked realized PnL after every recorded cost; gross = net + fees; the slippage estimate "
+                    "is inside gross and net already. Open positions are never booked."}
+
+
+@router.get("/forward-test")
+async def forward_test_report(request: Request, refresh: bool = Query(False), redis: Redis = Depends(get_redis),
+                              _: str = Depends(get_current_username)) -> dict:
+    """The current forward-test period against its baseline
+    (yonixalpha_core.forward_test); computed in the background cache."""
+    async def compute(db: AsyncSession) -> dict:
+        return await forward_test.report(db)
+
+    return await _review(request, redis, "forward-test", compute, refresh)
+
+
+@router.get("/forward-test/history")
+async def forward_test_history(db: AsyncSession = Depends(get_db), _: str = Depends(get_current_username)) -> dict:
+    return {"periods": await forward_test.history(db),
+            "deployment": ((await db.get(PlatformSetting, forward_test.DEPLOY_KEY)) or PlatformSetting(value={})).value}
+
+
+@router.post("/forward-test/start")
+async def forward_test_start(body: dict, request: Request, db: AsyncSession = Depends(get_db),
+                             redis: Redis = Depends(get_redis), username: str = Depends(get_current_username)) -> dict:
+    """Opens a new forward-test period now (audited); the previous one is
+    ended and kept. Changes no trading setting."""
+    label = str(body.get("label") or "").strip()
+    if len(label) < 3:
+        raise HTTPException(422, "give the period a label (for example the deployed revision)")
+    period = await forward_test.start(db, redis, label=label, user=username, user_id=await user_id(db, username))
+    await audit(db, username, request, "forward_test.start_requested", {"id": period["id"], "label": period["label"]})
+    await db.commit()
+    # the next report is computed for the new period, never served from the old one
+    await redis.delete(review_cache.PREFIX + "forward-test", review_cache.PREFIX + "forward-test:last")
+    return jsonable({k: period.get(k) for k in ("id", "label", "started_at", "started_by", "deployment", "data_sources",
+                                                 "rules", "configuration")})

@@ -93,7 +93,7 @@ async def test_solana_performance_splits_paper_and_live_with_measured_numbers(ap
     assert (ex["side"], ex["route"], ex["orders"], ex["median_decision_to_confirm_ms"],
             ex["median_slippage_vs_expected_pct"]) == ("BUY", "pump", 1, 1900, 1.5)
     assert d["decisions_by_target"] == {}  # no gate decisions seeded: an empty section, not invented numbers
-    assert "no per-trade slippage record" in d["definitions"]["slippage"]
+    assert "never added again" in d["definitions"]["slippage"]
 
     bare = (await client.get("/api/analytics/solana-performance?days=1&outcomes=false", headers=auth_headers)).json()
     assert "missed_winners_by_rule" not in bare and bare["days"] == 1
