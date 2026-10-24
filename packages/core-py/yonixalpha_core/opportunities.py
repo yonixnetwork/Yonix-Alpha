@@ -341,8 +341,26 @@ async def _regime(redis, row: OpportunityOutcome, meta: dict) -> dict[str, Any]:
             "launches_last_hour_seen": launches, "migrations_last_hour_seen": migrations,
             "fee_bps": await _fee_bps(redis, row.mint),
             "strategy": row.engine, "feature_version": intel.get("feature_version"), "analysis_version": oa.ANALYSIS_VERSION,
-            "model": {"ml_score": (row.snapshot or {}).get("ml_score")},
-            "note": "launch / migration counts are what this system's stream saw in the hour before the decision"}
+            "model": {"ml_score": (row.snapshot or {}).get("ml_score")}, **(await _sol_usd_before(redis, row.decided_at)),
+            "note": "launch / migration counts are what this system's stream saw in the hour before the decision; "
+                    "sol_usd is the last cached SOL price, kept only when it was stamped before the decision"}
+
+
+async def _sol_usd_before(redis, decided_at: datetime) -> dict[str, Any]:
+    """The cached SOL/USD price (solana.sol_price) for the market-regime
+    record, only when it was stamped at or before the decision: never a
+    price from after it (2026-10-24: there was no SOL price history)."""
+    from yonixalpha_core.solana.sol_price import CACHE_KEY
+
+    try:
+        raw = await redis.get(CACHE_KEY)
+        c = json.loads(raw) if raw else None
+        at = datetime.fromisoformat(c["at"]) if c else None
+    except (ValueError, KeyError, TypeError):
+        return {}
+    if at is None or at > decided_at:
+        return {}
+    return {"sol_usd": c.get("price"), "sol_usd_at": c["at"]}
 
 
 async def _deployer(session: AsyncSession, redis, row: OpportunityOutcome, meta: dict, trades: list, now: datetime, wcfg,

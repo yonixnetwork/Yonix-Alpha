@@ -138,6 +138,12 @@ until ${COMPOSE} ps api --format json | grep -q '"Health":"healthy"'; do
 done
 echo "    api is healthy."
 
+# Which revision runs since when (yonixalpha_core.forward_test): a forward
+# test records it at its start. A failure here never fails the deploy.
+echo "==> Recording the deployed revision"
+${COMPOSE} exec -T api python -m yonixalpha_core.tools.forward_test record-deployment \
+    --revision "$(git rev-parse --short HEAD)" || echo "    recording the revision failed (ignored)"
+
 echo "==> Pruning dangling images from previous builds"
 docker image prune -f >/dev/null
 
