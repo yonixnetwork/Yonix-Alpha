@@ -33,7 +33,7 @@ from yonixalpha_core.safety.gate import Assessment
 from yonixalpha_core.safety.liquidity import BPS, ConstantProductModel, close_fill, open_fill
 from yonixalpha_core.safety.models import ExecutionQuote
 from yonixalpha_core.safety.planning import ratchet_trailing_stop
-from yonixalpha_core.safety.store import add_timeline_event, marked_value, venue_kind  # noqa: F401 - re-exported
+from yonixalpha_core.safety.store import add_timeline_event, adjust_cash, marked_value, venue_kind  # noqa: F401 - re-exported
 from yonixalpha_core.state_machine import CandidateState, apply_transition
 
 log = get_logger("core.paper_engine")
@@ -328,7 +328,7 @@ async def open_position(
     cost += buy_fee  # the buy transaction's network + priority fee, as LIVE pays it
     if cost > account.cash_balance:
         raise FillError(f"required {cost} exceeds paper cash {account.cash_balance}")
-    account.cash_balance -= cost
+    await adjust_cash(session, account, -cost)
 
     first_tp = plan.take_profits[0].price.value if plan.take_profits else None
     venue_info = {**(venue or {}), "kind": kind, "transfer_fee_bps": transfer_fee_bps, "margin": str(margin),
@@ -488,7 +488,7 @@ async def apply_step(
         if fixed.get("sell"):  # each LIVE exit is its own sell transaction
             returned -= fixed["sell"]
             fees_add += fixed["sell"]
-        account.cash_balance += returned
+        await adjust_cash(session, account, returned)
         position.proceeds_quote = (position.proceeds_quote or Decimal(0)) + returned
         position.fees_paid_quote = (position.fees_paid_quote or Decimal(0)) + fees_add
         await add_timeline_event(session, f"paper_exit.{reason}", now,
@@ -512,7 +512,7 @@ async def apply_step(
 
     if result.closed:
         if fixed.get("close"):  # rent reclaim transaction, or the rent left locked
-            account.cash_balance -= fixed["close"]
+            await adjust_cash(session, account, -fixed["close"])
             position.proceeds_quote = (position.proceeds_quote or Decimal(0)) - fixed["close"]
             position.fees_paid_quote = (position.fees_paid_quote or Decimal(0)) + fixed["close"]
         if fixed:

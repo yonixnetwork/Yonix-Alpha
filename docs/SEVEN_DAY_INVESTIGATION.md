@@ -41,6 +41,18 @@ This change is an in-place upgrade; nothing was rebuilt or deleted. Live executi
 |---|---|---|
 | 15 | Live needs three `.env` locks (`TRADING_ENABLED`, `LIVE_TRADING_ENABLED`, `PAPER_TRADING=false`) and the stored global mode LIVE. The global mode is already selected in the dashboard and stored in the database; the locks are a deployment ceiling. | `safety.store.live_trading_permitted`, `live_activation` |
 
+**Added after the 2026-10-24 server output (`tools.pnl_reconcile`, before deploying):**
+
+| # | Fact | Source |
+|---|---|---|
+| 16 | The `solana` paper book no longer matches its own closed trades: cash 8.817569, start 10, realized −1.118834, nothing open. That is a difference of **−0.063596 SOL**; on 2026-10-22 it was 0. | `tools.pnl_reconcile` |
+| 17 | The decision engine (entries) and the position manager (exits) both write that row from different processes with a read-modify-write and no lock. A transaction that read the balance earlier overwrites a change committed in between. Reproduced in `tests/test_paper_cash_concurrency.py`: the old pattern loses an exit's +0.3. **Fixed**: every cash change is now one atomic `cash = cash + delta` (`safety.store.adjust_cash`). The −0.0636 already lost stays; correcting it is the operator's decision and must be audited. | code, test |
+| 18 | Per-trade booked PnL is not affected; only the book's cash is. The cash feeds RISK_PCT sizing and the paper-cash check. | code |
+| 19 | Paper, all time, every Solana strategy negative: fresh 79 trades −0.423 SOL; migration 166 trades −0.180 SOL; momentum 50 trades −0.515 SOL. | same |
+| 20 | Live, all time: 105 positions, booked −0.0479 SOL (fresh −0.0131, migration −0.0135, momentum −0.0212). About 0.0076 SOL of rent is still refundable in 5 empty token accounts. | same |
+| 21 | Three closed LIVE positions have no booked PnL (PVE, VIBEPAD, 7wmm1gDa). These are data gaps, not zero results. | same |
+| 22 | Last 24 h: 37 paper entries (fresh 10, migration 27) and 0 momentum entries, even though momentum is AUTO: 246 momentum decisions were refused. | `tools.live_check` |
+
 ### DATA GAPS
 
 - **Daily momentum PAPER results for the last 7 days.** Which days were profitable, from how many trades, and whether a single trade carried a day: not in any output I have. Run `performance_report --engine solana_momentum`.

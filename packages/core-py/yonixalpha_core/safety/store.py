@@ -389,6 +389,24 @@ async def get_paper_account(session: AsyncSession, name: str) -> PaperAccount:
     return (await session.execute(select(PaperAccount).where(PaperAccount.name == name))).scalar_one()
 
 
+async def adjust_cash(session: AsyncSession, account: PaperAccount, delta: Decimal) -> Decimal:
+    """Changes a book's cash by `delta` in the database (cash = cash + delta),
+    never by writing back a balance computed from an earlier read: the decision
+    engine (entries) and the position manager (exits) write the same row from
+    different processes, and a read-modify-write lost one of two overlapping
+    updates (2026-10-24: the solana book was 0.0636 SOL below its own closed
+    trades). The object receives the committed value without being marked
+    changed, so the ORM never writes a stale absolute balance back."""
+    from sqlalchemy.orm.attributes import set_committed_value
+
+    await session.flush()  # a pending change to this account (or the row itself) is written first
+    new = (await session.execute(update(PaperAccount).where(PaperAccount.id == account.id)
+                                 .values(cash_balance=PaperAccount.cash_balance + delta)
+                                 .returning(PaperAccount.cash_balance))).scalar_one()
+    set_committed_value(account, "cash_balance", new)
+    return new
+
+
 def venue_kind(p: PaperPosition) -> str:
     return ((p.plan or {}).get("venue") or {}).get("kind", "spot")
 

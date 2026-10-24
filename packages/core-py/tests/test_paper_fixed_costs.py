@@ -19,6 +19,8 @@ from yonixalpha_core.safety import assess  # noqa: E402
 from yonixalpha_core.safety import store  # noqa: E402
 from yonixalpha_core.safety.settings import SafetySettings  # noqa: E402
 
+STORED = Decimal("1e-17")  # paper_accounts.cash_balance keeps 18 decimals; a few roundings stay below this
+
 from tests.test_safety_gate import MODEL, NOW, healthy  # noqa: E402
 
 
@@ -62,13 +64,15 @@ async def test_live_fixed_costs_are_charged_to_the_paper_book(db):
                                          a.plan.entry_cost_bps, None)
     assert pos.entry_cost_quote == a.plan.position_size.value + fees["buy"]
     assert pos.fees_paid_quote >= plain_fill.fee_quote + fixed  # pool fees on both legs plus every fixed cost
-    assert acct.cash_balance == before + pos.realized_pnl  # the book moved by exactly the realized result
+    # the book moved by exactly the realized result, at the 18 decimals the database stores (each atomic
+    # cash change is rounded to the column, safety.store.adjust_cash)
+    assert abs(acct.cash_balance - (before + pos.realized_pnl)) <= STORED
 
 
 async def test_paper_without_fixed_costs_is_unchanged(db):
     a, pos, acct, before = await _round_trip(db, "plain")
     assert a.plan.fixed_cost_quote is None and pos.entry_cost_quote == a.plan.position_size.value
-    assert acct.cash_balance == before + pos.realized_pnl
+    assert abs(acct.cash_balance - (before + pos.realized_pnl)) <= STORED
 
 
 async def test_the_fixed_cost_difference_is_exactly_the_fixed_costs(db):

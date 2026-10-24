@@ -193,7 +193,7 @@ async def test_paper_entry_partial_tp_and_trailing_exit(redis, db):
     await db.commit()
 
     size = a.plan.position_size.value
-    assert account.cash_balance == Decimal(10) - size
+    assert account.cash_balance == (Decimal(10) - size).quantize(Decimal("1e-18"))  # as the database stores it
     assert pos.entry_price > a.plan.entry_price  # fill includes fee + impact
     assert cand.state == CandidateState.MANAGING.value
 
@@ -209,7 +209,7 @@ async def test_paper_entry_partial_tp_and_trailing_exit(redis, db):
     await db.commit()
     assert r2.closed and pos.status == "closed" and pos.exit_reason == "trailing_stop"
     assert pos.realized_pnl == pos.proceeds_quote - pos.entry_cost_quote
-    assert account.cash_balance == Decimal(10) - size + pos.proceeds_quote
+    assert abs(account.cash_balance - (Decimal(10) - size + pos.proceeds_quote)) <= Decimal("1e-17")  # 18 stored decimals
     assert cand.state == CandidateState.CLOSED.value
     label = (await db.execute(select(MLFeatureSnapshot.label))).scalar_one()
     assert label == (1 if pos.realized_pnl > 0 else 0)
