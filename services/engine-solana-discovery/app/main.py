@@ -154,6 +154,31 @@ async def _retention_loop(session_factory, stop_event: asyncio.Event) -> None:
             pass
 
 
+LARGE_TRADE_SECONDS = 20
+
+
+async def _large_trade_loop(redis, session_factory, stop_event: asyncio.Event) -> None:
+    """Large-buy observation (yonixalpha_core.large_trades): records large
+    buys with a matched control moment and, 15 min later, what followed.
+    Research only, whatever the trading mode; a failure never stops the scanner."""
+    from yonixalpha_core import large_trades
+
+    while not stop_event.is_set():
+        try:
+            async with session_factory() as session:
+                rec = await large_trades.process(session, redis)
+                tracked = await large_trades.track(session, redis)
+                await session.commit()
+            if rec["events"] or tracked["completed"] or tracked["incomplete"]:
+                log.info("large_trades.pass", **rec, **tracked)
+        except Exception as exc:  # noqa: BLE001 - observation never stops the service
+            log.warning("large_trades.failed", error=f"{type(exc).__name__}: {exc}"[:300])
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=LARGE_TRADE_SECONDS)
+        except asyncio.TimeoutError:
+            pass
+
+
 async def run() -> None:
     settings = get_settings()
     configure_logging(settings.LOG_LEVEL)
@@ -243,6 +268,7 @@ async def run() -> None:
                 _health_check_loop(rpc, session_factory, stop_event),
                 _funnel_loop(redis, session_factory, stop_event),
                 _retention_loop(session_factory, stop_event),
+                _large_trade_loop(redis, session_factory, stop_event),
                 entry_shadow.run(redis, session_factory, rpc, settings, stop_event, create_strategy_candidate),
                 run_watcher("engine-solana-discovery", settings, session_factory, stop_event, rpc=rpc, ws_urls=next_ws_url,
                             redis=redis),
