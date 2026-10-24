@@ -1808,3 +1808,33 @@ ML_SIGNALS_IMMUTABLE_TRIGGER = DDL(
     "FOR EACH ROW EXECUTE FUNCTION ml_signals_immutable()")
 event.listen(MlSignal.__table__, "after_create", ML_SIGNALS_IMMUTABLE_FN)
 event.listen(MlSignal.__table__, "after_create", ML_SIGNALS_IMMUTABLE_TRIGGER)
+
+
+class LargeTradeEvent(Base):
+    """A large buy on a Pump.fun curve, or its matched CONTROL moment (another
+    active token at the same time without one), with the market state before
+    it and what happened after it (yonixalpha_core.large_trades). Research
+    observation only: nothing trades on it."""
+
+    __tablename__ = "large_trade_events"
+    __table_args__ = (
+        CheckConstraint("kind IN ('EVENT','CONTROL')", name="ck_large_trade_events_kind"),
+        CheckConstraint("status IN ('TRACKING','COMPLETE','INCOMPLETE')", name="ck_large_trade_events_status"),
+        UniqueConstraint("kind", "mint", "at", name="uq_large_trade_events_kind_mint_at"),
+        Index("ix_large_trade_events_status_at", "status", "at"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    kind: Mapped[str] = mapped_column(String(8), nullable=False)
+    pair_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    mint: Mapped[str] = mapped_column(String(64), nullable=False)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    wallet: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    sol: Mapped[Decimal | None] = mapped_column(Numeric(20, 9), nullable=True)
+    rel_liquidity: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
+    rel_volume: Mapped[Decimal | None] = mapped_column(Numeric(12, 4), nullable=True)
+    pre: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    post: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default="TRACKING")
+    definition_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

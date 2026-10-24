@@ -317,3 +317,69 @@ These build on what exists: the ML Training Lab, the Signal Center, ML governanc
 | CHAMPION IN USE | The operator-promoted model. |
 
 No state is shown without a saved record behind it. Nothing trains, promotes or trades from this page; a model contributes only through ML governance's audited, stepwise, operator-only rules (LIVE_CONTRIBUTOR stays locked).
+
+## Phase 5: large buys and wallet behaviour (`yonixalpha_core/large_trades.py`)
+
+### The hypothesis being tested
+
+A large buy draws other buyers, and earlier holders then sell into it. This is tested; nothing sells or buys because of it.
+
+### Definition (`lbuy-2026.10.1`; a change gets a new version)
+
+A **large buy** is a curve buy that meets all of these:
+- at least 0.3 SOL;
+- at least 2 % of the curve's virtual SOL reserves;
+- at least 3 × the median buy of the 60 s before it;
+- at least 3 trades in those 60 s (a quieter token cannot be measured).
+
+There is at most one event per token per 5 min.
+
+### How it is recorded
+
+1. The stream marks candidates at ingest, with two comparisons per trade.
+2. The discovery service checks them every 20 s and records each **EVENT** with one **CONTROL**: another active token at the same moment, with enough trades and no large buy of its own.
+3. The recording runs whatever the trading mode, and a failure never stops the scanner.
+
+**Before the moment (60 s):**
+- trades, buys and sells;
+- distinct buyers and sellers;
+- net SOL flow;
+- price move;
+- virtual SOL reserves;
+- token age;
+- whether the large buyer is the token's creator.
+
+**After the moment, at 30 s / 60 s / 5 min / 15 min**, from stored trades only:
+- price return;
+- net SOL flow;
+- new buyers;
+- sells by earlier holders (count and SOL);
+- for an EVENT, the share the large buyer itself sold.
+
+A row whose stored history no longer covers the window is INCOMPLETE. Rows are kept 30 days.
+
+### The study
+
+`$C exec -T api python -m yonixalpha_core.tools.large_buy_study --days 14`
+
+- Pairs are split by time: the first 60 % for exploration, the last 40 % as a hold-out.
+- For each horizon and measure it shows the EVENT mean against the CONTROL mean, a 95 % bootstrap interval of the difference, and the sample sizes.
+- A finding needs at least 30 hold-out pairs, the same sign in both periods, and a hold-out interval excluding 0. Otherwise it says INSUFFICIENT DATA or NOT CONFIRMED.
+- **"Buying right after a large buy"** is the hold-out return minus a 3 % cost **estimate**: two 1.25 % curve fees plus fixed costs on a 0.05 SOL trade. It is not a measured fill.
+- **Related wallets:** only "is the creator" is known. Other relations, such as funding links, are reported as unknown, never assumed.
+
+Data starts at deployment, so expect INSUFFICIENT DATA for the first days.
+
+### Wallet intelligence (existing; reused, not rebuilt)
+
+Wallet profiles (`wallet_pnl`) use FIFO realized PnL per token. Open holdings are not valued, and sells without a recorded buy are never counted as gains.
+
+A wallet with fewer than 5 closed trades is shown as INSUFFICIENT_DATA, so one large win does not make a wallet "smart". The proven-wallet feature uses the same minimum. Launch-buyer reputation uses a causal Beta estimate that shrinks small samples.
+
+Known limits, stated rather than hidden:
+- copy delay;
+- wallet clustering uncertainty;
+- histories that begin with the stream;
+- survivorship of tokens the stream saw.
+
+Optional external sources (X narrative, enrichment) are off by default and fail gracefully. The on-chain stream and the ledger do not depend on them.

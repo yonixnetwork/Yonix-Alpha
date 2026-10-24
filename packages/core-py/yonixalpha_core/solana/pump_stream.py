@@ -42,6 +42,15 @@ NAMES = f"{PREFIX}:name"  # + ":" + normalized name -> first mint that used it
 NAME_TTL = 24 * 3600
 CREATOR_TTL = 7 * 86400
 
+# Large-buy observation (yonixalpha_core.large_trades): a buy of at least
+# LARGE_BUY_MIN_LAMPORTS that is at least LARGE_BUY_MIN_LIQUIDITY_SHARE of the
+# curve's virtual SOL reserves is noted here, at ingest (two comparisons per
+# trade); large_trades then checks it against the recent volume and records it.
+LARGE_CANDIDATES = f"{PREFIX}:large_candidates"  # zset "mint|ts|trader|lamports" -> ts
+LARGE_BUY_MIN_LAMPORTS = 300_000_000  # 0.3 SOL
+LARGE_BUY_MIN_LIQUIDITY_SHARE = 0.02
+LARGE_CANDIDATES_RETENTION = 1800
+
 META_TTL = 6 * 3600
 CURVE_TTL = 6 * 3600
 TRADES_TTL = 3 * 3600
@@ -171,6 +180,9 @@ async def ingest_logs(redis: Redis, logs: list[str], signature: str | None, rece
             pipe.hset(curve_key(mint), mapping=curve)
             pipe.expire(curve_key(mint), CURVE_TTL)
             pipe.zadd(ACTIVE, {mint: ts})
+            if (f["is_buy"] and int(f["sol_amount"]) >= LARGE_BUY_MIN_LAMPORTS
+                    and int(f["sol_amount"]) >= LARGE_BUY_MIN_LIQUIDITY_SHARE * int(f["virtual_sol_reserves"])):
+                pipe.zadd(LARGE_CANDIDATES, {f"{mint}|{ts}|{f['user']}|{int(f['sol_amount'])}": ts})
         elif kind == "complete":
             pipe.hset(curve_key(mint), mapping={"complete": 1, "completed_at": ts or int(received_at.timestamp())})
             pipe.expire(curve_key(mint), CURVE_TTL)
@@ -329,4 +341,5 @@ async def prune(redis: Redis, now: datetime) -> None:
     pipe.zremrangebyscore(NEAR_COMPLETE, "-inf", t - NEAR_COMPLETE_RETENTION)
     pipe.zremrangebyscore(OBS_FINAL, "-inf", t - PROMOTED_RETENTION)
     pipe.zremrangebyscore(OBS_LIVE, "-inf", t - RECENT_RETENTION)
+    pipe.zremrangebyscore(LARGE_CANDIDATES, "-inf", t - LARGE_CANDIDATES_RETENTION)
     await pipe.execute()
