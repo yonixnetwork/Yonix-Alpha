@@ -160,6 +160,8 @@ async def _live_mode(db, redis, ready: bool, sol: str = "5"):
         await redis.set(live_trading.READY_KEY, json.dumps({"status": "ready", "min_sol_reserve": "0.05",
                                                             "wallet_max_age_seconds": "120"}))
         await redis.set(live_trading.WALLET_KEY, json.dumps({"sol": sol, "at": datetime.now(timezone.utc).isoformat()}))
+        # a ready worker whose mandatory live checks pass (yonixalpha_core.live_control)
+        await redis.set("yx:live:control", json.dumps({"ok": True, "failed": [], "at": datetime.now(timezone.utc).isoformat()}))
 
 
 async def test_live_auto_creates_a_pending_buy_order_not_a_position(db_session, redis_client):
@@ -216,6 +218,24 @@ async def test_live_without_a_ready_worker_is_no_trade(db_session, redis_client)
     assert a.decision.value == "NO_TRADE" and "LIVE_NOT_READY" in {f.code for f in a.findings}
     assert (await db_session.execute(select(ExecutionOrder))).scalars().all() == []
     assert (await db_session.execute(select(PaperPosition))).scalars().all() == []
+
+
+async def test_live_with_a_failing_live_check_is_no_trade(db_session, redis_client):
+    """The worker is ready, but a mandatory live check fails (live_control):
+    no LIVE order is created, the decision says why."""
+    import json
+
+    from yonixalpha_core.db.models import ExecutionOrder
+
+    curve = await seed_healthy_launch(redis_client, NOW)
+    await _live_mode(db_session, redis_client, ready=True)
+    await redis_client.set("yx:live:control", json.dumps({"ok": False, "failed": ["scanner"],
+                                                          "at": datetime.now(timezone.utc).isoformat()}))
+    cand = await make_candidate(db_session)
+    a = await evaluate_with_gate(db_session, redis_client, LIVE_ENV, Sources(redis_client, FakeRpc(curve)), cand, NOW)
+    assert a.decision.value == "NO_TRADE" and "LIVE_NOT_READY" in {f.code for f in a.findings}
+    assert any("scanner" in f.message for f in a.findings if f.code == "LIVE_NOT_READY")
+    assert (await db_session.execute(select(ExecutionOrder))).scalars().all() == []
 
 
 async def test_live_mode_with_locks_closed_never_goes_live(db_session, redis_client):

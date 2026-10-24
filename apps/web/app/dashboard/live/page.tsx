@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { CheckCircle2, Send, XCircle } from "lucide-react";
-import LiveActivationPanel from "@/components/LiveActivationPanel";
+import LiveControlPanel from "@/components/LiveControlPanel";
 import LiveWalletsPanel from "@/components/LiveWalletsPanel";
 import SmokeTestPanel from "@/components/SmokeTestPanel";
 import { PnlOutcome, type PnlView } from "@/components/Pnl";
@@ -161,13 +161,13 @@ export default function LiveExecutionPage() {
           Verification: <span className="pill pill-warn">{s.verification}</span>
         </div>
         <div className="muted" style={{ marginTop: 6 }}>
-          Enabling live execution needs all of: TRADING_ENABLED=true, LIVE_TRADING_ENABLED=true and PAPER_TRADING=false in
-          .env; WALLET_PRIVATE_KEY (and optionally WALLET_PUBLIC_KEY) in .env; a Solana RPC; the order worker reporting
-          ready; and the global mode set to LIVE. The dashboard cannot change the .env locks.
+          Live execution needs the server ceiling open once (TRADING_ENABLED=true, LIVE_TRADING_ENABLED=true,
+          PAPER_TRADING=false in .env) and WALLET_PRIVATE_KEY on the server. After that LIVE is armed and disarmed in the
+          LIVE control below, which needs your password, a typed phrase, a reason and every server check passing.
         </div>
       </div>
 
-      <LiveActivationPanel />
+      <LiveControlPanel />
       <LiveWalletsPanel />
       <SmokeTestPanel />
 

@@ -180,8 +180,11 @@ async def get_live_account(session: AsyncSession) -> PaperAccount:
     return acct
 
 
-async def live_readiness(redis: Redis | None, app_settings: Any, now: datetime | None = None) -> tuple[bool, str | None]:
-    """Everything that must hold before a LIVE order may be created."""
+async def live_readiness(redis: Redis | None, app_settings: Any, now: datetime | None = None,
+                         entries: bool = True) -> tuple[bool, str | None]:
+    """Everything that must hold before a LIVE order may be created.
+    `entries=False` for maintenance orders that open nothing (rent reclaim):
+    the mandatory entry checks (live_control) then do not apply."""
     import json
 
     if not live_trading_permitted(app_settings):
@@ -204,6 +207,14 @@ async def live_readiness(redis: Redis | None, app_settings: Any, now: datetime |
         return False, f"wallet balance is {age:.0f}s old"
     if Decimal(w["sol"]) <= Decimal(state.get("min_sol_reserve", "0.05")):
         return False, f"wallet balance {w['sol']} SOL is at or below the reserve"
+    # The mandatory live checks (live_control), re-run by the order worker every
+    # few seconds: a failing or stale result stops every new LIVE order.
+    if entries:
+        from yonixalpha_core import live_control
+
+        ok, why = await live_control.enforcement_ok(redis, now)
+        if not ok:
+            return False, why
     return True, None
 
 
@@ -259,7 +270,9 @@ async def enter_live(session: AsyncSession, redis: Redis | None, account: PaperA
                 "max_fee_transfer_lamports": int(size * LAMPORTS * live.max_platform_fee_bps / 10_000),
                 "max_priority_fee_lamports": int(live.max_priority_fee_sol * LAMPORTS)},
         status="PENDING", idempotency_key=f"entry:{assessment_id}",
-        diagnostics={"decision": provenance.get("decision")} if provenance.get("decision") else None,
+        diagnostics={**({"decision": provenance.get("decision")} if provenance.get("decision") else {}),
+                     **({"smoke_test_run": smoke} if (smoke := (provenance.get("venue") or {}).get("smoke_test_run")) else {})}
+        or None,
     )
     session.add(order)
     await session.flush()
@@ -719,6 +732,28 @@ async def _apply_reclaim(session: AsyncSession, redis: Redis | None, app_setting
     await events.publish(redis, "balance.updated", {"account_id": None}, "live")
 
 
+def is_smoke_order(order: ExecutionOrder) -> bool:
+    return bool((order.diagnostics or {}).get("smoke_test_run"))
+
+
+async def buy_block_reason(session: AsyncSession, redis: Redis | None, order: ExecutionOrder,
+                           now: datetime | None = None) -> str | None:
+    """Why a LIVE BUY must not be sent now, or None. Exits are never held by
+    this: only new entries."""
+    from yonixalpha_core import kill_switch, live_control
+    from yonixalpha_core.safety import store
+    from yonixalpha_core.safety.models import GlobalMode
+
+    if redis is not None and await kill_switch.is_engaged(redis):
+        return "kill switch engaged"
+    ok, why = await live_control.enforcement_ok(redis, now)
+    if not ok:
+        return why
+    if not is_smoke_order(order) and await store.load_global_mode(session) != GlobalMode.LIVE:
+        return "the global mode is not LIVE (LIVE was disarmed)"  # the smoke test runs with PAPER on purpose
+    return None
+
+
 async def process_order(session_factory, redis: Redis | None, app_settings: Any, executor: SolanaLiveExecutor,
                         order_id, now_fn=lambda: datetime.now(timezone.utc)) -> str:
     """Runs one PENDING LIVE order end to end. Returns the final status."""
@@ -727,6 +762,13 @@ async def process_order(session_factory, redis: Redis | None, app_settings: Any,
                                        .with_for_update(skip_locked=True))).scalar_one_or_none()
         if order is None or order.status != "PENDING":
             return "skipped"
+        if order.side == "BUY" and (why := await buy_block_reason(session, redis, order, now_fn())):
+            # checked under the order's row lock, just before signing: a BUY queued before LIVE was disarmed,
+            # the kill switch engaged or a mandatory check failed is never sent (SELLs are never held here)
+            await apply_outcome(session, redis, app_settings, order, ExecOutcome("FAILED", error=why), now_fn())
+            order.status = "CANCELLED"
+            await session.commit()
+            return order.status
         order.attempts += 1
         order.updated_at = now_fn()
         rent = None

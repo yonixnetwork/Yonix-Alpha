@@ -240,7 +240,7 @@ async def reclaim_rent(body: RentReclaim, request: Request, db: AsyncSession = D
     if body.confirm is not True:
         raise HTTPException(422, "confirm must be true")
     now = datetime.now(timezone.utc)
-    ready, reason = await live_trading.live_readiness(redis, settings, now)
+    ready, reason = await live_trading.live_readiness(redis, settings, now, entries=False)  # opens nothing
     if not ready:
         raise HTTPException(409, f"live order worker not ready: {reason}")
     order = await live_trading.request_rent_reclaim(db, now, None, "rent_reclaim_manual")

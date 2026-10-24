@@ -34,6 +34,8 @@ async def _wallet(db, redis, sol: str) -> None:
     await redis.set(live_trading.READY_KEY, json.dumps({"status": "ready", "min_sol_reserve": "0.05",
                                                         "wallet_max_age_seconds": "120"}))
     await redis.set(live_trading.WALLET_KEY, json.dumps({"sol": sol, "at": datetime.now(timezone.utc).isoformat()}))
+    # a ready worker whose mandatory live checks pass (yonixalpha_core.live_control)
+    await redis.set("yx:live:control", json.dumps({"ok": True, "failed": [], "at": datetime.now(timezone.utc).isoformat()}))
 
 
 async def _arm(db, redis, category="FRESH", sol="0.02") -> LiveSmokeTest:

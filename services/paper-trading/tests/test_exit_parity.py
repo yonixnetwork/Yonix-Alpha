@@ -19,6 +19,9 @@ from yonixalpha_core.db.models import ExecutionOrder, PaperPosition
 
 from tests.test_live_worker import LIVE_ON, NOW, confirmed, open_live
 
+# BUYs are sent only while LIVE is armed and the live checks pass (yonixalpha_core.live_control).
+pytestmark = pytest.mark.usefixtures("live_armed")
+
 TOKENS_RAW = 3_000_000_000_000
 
 

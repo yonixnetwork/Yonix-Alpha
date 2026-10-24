@@ -17,10 +17,12 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
-from yonixalpha_core import kill_switch, live_trading
+from yonixalpha_core import kill_switch, live_control, live_trading
 from yonixalpha_core.db.models import ExecutionOrder
 from yonixalpha_core.live_trading import LIVE_ACCOUNT, READY_KEY
 from yonixalpha_core.logging import get_logger
+from yonixalpha_core.safety import store
+from yonixalpha_core.safety.models import GlobalMode
 from yonixalpha_core.safety.store import live_trading_permitted
 from yonixalpha_core.solana.live_exec import ExecOutcome, SolanaLiveExecutor
 from yonixalpha_core.solana.pumpportal import PumpPortalClient
@@ -40,7 +42,8 @@ async def _publish(redis, status: str, reason: str | None = None, **extra) -> No
                                            **{k: str(v) for k, v in extra.items()}}), ex=READY_TTL_SECONDS)
 
 
-async def cancel_live_orders(session_factory, redis, app_settings, reason: str, side: str | None = None) -> int:
+async def cancel_live_orders(session_factory, redis, app_settings, reason: str, side: str | None = None,
+                             keep_smoke: bool = False) -> int:
     now = datetime.now(timezone.utc)
     async with session_factory() as session:
         q = select(ExecutionOrder).where(
@@ -48,7 +51,8 @@ async def cancel_live_orders(session_factory, redis, app_settings, reason: str, 
             ExecutionOrder.status == "PENDING")
         if side is not None:
             q = q.where(ExecutionOrder.side == side)
-        orders = (await session.execute(q)).scalars().all()
+        orders = [o for o in (await session.execute(q)).scalars().all()
+                  if not (keep_smoke and live_trading.is_smoke_order(o))]
         for order in orders:
             await live_trading.apply_outcome(session, redis, app_settings, order, ExecOutcome("FAILED", error=reason), now)
             order.status = "CANCELLED"
@@ -91,6 +95,19 @@ async def wait_for_work(session_factory, stop_event: asyncio.Event, handled: set
             return
 
 
+async def _genesis_hash(rpc) -> str | None:
+    """The network the RPC serves (live_control checks it is mainnet). None
+    when unknown: the network check then fails, never passes."""
+    if rpc is None:
+        return None
+    try:
+        h = await rpc.call("getGenesisHash", [])
+        return h if isinstance(h, str) else None
+    except Exception as exc:  # noqa: BLE001 - retried on the next loop
+        log.warning("live.genesis_hash_failed", error=f"{type(exc).__name__}: {exc}"[:200])
+        return None
+
+
 def build_executor(app_settings, rpc, http_client, jupiter=None) -> tuple[SolanaLiveExecutor | None, str | None]:
     if not live_trading_permitted(app_settings):
         return None, "environment locks closed"
@@ -113,6 +130,9 @@ async def live_worker_loop(session_factory, redis, app_settings, rpc, http_clien
         reason = None
     last_reconcile = None
     reconciled_once = False
+    genesis = None
+    genesis_tried = None
+    last_control = None
     while not stop_event.is_set():
         handled: set = set()
         try:
@@ -137,14 +157,38 @@ async def live_worker_loop(session_factory, redis, app_settings, rpc, http_clien
                     last_reconcile, reconciled_once = now, True
                     log.info("live.reconciled", **{k: str(v) for k, v in report.items()})
                 if reconciled_once:
+                    if genesis is None and (genesis_tried is None or (now - genesis_tried).total_seconds() >= 60):
+                        genesis_tried = now
+                        genesis = await _genesis_hash(getattr(executor, "rpc", None) or rpc)
                     await _publish(redis, "ready", wallet=executor.wallet.pubkey, min_sol_reserve=live.min_sol_reserve,
-                                   wallet_max_age_seconds=live.wallet_max_age_seconds, account=LIVE_ACCOUNT)
+                                   wallet_max_age_seconds=live.wallet_max_age_seconds, account=LIVE_ACCOUNT,
+                                   **({"genesis_hash": genesis} if genesis else {}))
+                    # The mandatory live checks (live_control), re-run every CONTROL_SECONDS: a failing or
+                    # stale result stops every new LIVE order (live_trading.live_readiness, process_order).
+                    if last_control is None or (now - last_control).total_seconds() >= live_control.CONTROL_SECONDS:
+                        async with session_factory() as session:
+                            rec = await live_control.publish_enforcement(session, redis, app_settings, now)
+                        last_control = now
+                        if not rec["ok"]:
+                            log.warning("live.checks_failing", failed=rec["failed"])
                     # Kill switch: a BUY queued just before it was engaged is not
                     # sent; SELLs (exits) keep running.
                     killed = await kill_switch.is_engaged(redis)
                     if killed and (n := await cancel_live_orders(session_factory, redis, app_settings,
                                                                  "kill switch engaged", side="BUY")):
                         log.warning("live.buys_cancelled_kill_switch", count=n)
+                    # LIVE disarmed in the dashboard, or a mandatory check failing: queued BUYs are
+                    # cancelled at once (the smoke test, armed separately, runs with PAPER on purpose).
+                    async with session_factory() as session:
+                        disarmed = await store.load_global_mode(session) != GlobalMode.LIVE
+                    checks_ok, why = await live_control.enforcement_ok(redis)
+                    if not checks_ok and (n := await cancel_live_orders(
+                            session_factory, redis, app_settings, f"live check failed: {why}", side="BUY")):
+                        log.warning("live.buys_cancelled_checks", count=n, reason=why)
+                    if disarmed and (n := await cancel_live_orders(
+                            session_factory, redis, app_settings, "LIVE disarmed: the global mode is not LIVE",
+                            side="BUY", keep_smoke=True)):
+                        log.warning("live.buys_cancelled_disarmed", count=n)
                     async with session_factory() as session:
                         q = select(ExecutionOrder.id).where(
                             ExecutionOrder.mode == "LIVE", ExecutionOrder.provider == live_trading.LIVE_PROVIDER,
