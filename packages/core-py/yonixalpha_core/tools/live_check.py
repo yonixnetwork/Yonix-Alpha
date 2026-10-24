@@ -14,6 +14,7 @@ A decision goes to the live wallet only when ALL of these hold
   - the live order worker (paper-trading) reports ready: wallet synced,
     balance above the reserve
   - the kill switch is off, and the chain / new-entries switches are on
+  - the mandatory LIVE checks pass (yonixalpha_core.live_control, section 3b)
   - and the gate finds the token executable (every safety check passed)
 """
 
@@ -176,6 +177,18 @@ async def main(argv: list[str] | None = None) -> int:
                 if free < MIN_USEFUL_FREE_SOL:
                     blockers.append(f"the wallet has only {max(free, Decimal(0))} SOL above the {live_settings.min_sol_reserve} SOL "
                                     "reserve: not enough for a buy. Add SOL to the trading wallet")
+
+            print("\n3b. LIVE control (the mandatory checks the dashboard and the order worker enforce)")
+            from yonixalpha_core import live_control
+
+            ctl_view = await live_control.overview(s, redis, settings)
+            print(f"  state: {ctl_view['label']} — {ctl_view['summary']}")
+            for c in ctl_view["checks"]:
+                print(f"  [{c['status']}] {c['label']:<46} {c['detail'][:110]}"
+                      + (f"\n         do: {c['action']}" if c["status"] == "FAIL" else ""))
+            if ctl_view.get("last_change"):
+                lc_ = ctl_view["last_change"]
+                print(f"  last change: {lc_['from']} -> {lc_['to']} by {lc_['by']} at {lc_['at'][:19]}: {lc_['reason']}")
 
             print(f"\n4. Gate decisions, last {args.hours} h (engine, target, executable, count)")
             rows = (await s.execute(text(DECISIONS_SQL), {"since": since})).all()

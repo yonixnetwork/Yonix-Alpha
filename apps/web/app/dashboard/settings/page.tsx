@@ -4,7 +4,7 @@ import Link from "next/link";
 import { Settings } from "lucide-react";
 import ConfirmButton from "@/components/ConfirmDialog";
 import KeysPanel from "@/components/KeysPanel";
-import LiveActivationPanel from "@/components/LiveActivationPanel";
+import LiveControlPanel from "@/components/LiveControlPanel";
 import ProvidersPanel from "@/components/ProvidersPanel";
 import SnipePanel from "@/components/SnipePanel";
 import { ErrorNotice, modeClass, PageHeader, Section, Stat } from "@/components/ui";
@@ -13,7 +13,8 @@ import type { ModesOut } from "@/lib/types";
 import { useState } from "react";
 import { useApi } from "@/lib/useApi";
 
-const GLOBAL_MODES = ["MANUAL", "PAPER", "LIVE"];
+// LIVE is armed only in the LIVE control below (password, phrase, reason, server checks).
+const GLOBAL_MODES = ["MANUAL", "PAPER"];
 
 export default function SettingsPage() {
   const modes = useApi<ModesOut>("/api/control/modes", undefined, { reloadOn: ["strategy.updated"] });
@@ -36,11 +37,11 @@ export default function SettingsPage() {
               <Stat label="Live permitted">{m.env.live_permitted ? "yes" : "no"}</Stat>
             </div>
             <div className="notice">
-              The environment flags live in the server&apos;s .env and cannot be changed from the dashboard. LIVE is refused while
-              they are closed. Live execution covers Pump.fun tokens (fresh and PumpSwap-migrated) only; BSC and Robinhood Chain
+              The environment flags in the server&apos;s .env are a ceiling, set once: while they are closed LIVE cannot be armed.
+              With the ceiling open, LIVE is armed and disarmed here, in the LIVE control below. Live execution covers Pump.fun tokens (fresh and PumpSwap-migrated) only; BSC and Robinhood Chain
               are paper only. See Live Execution. To stop everything, use the kill switch or set strategies to OFF.
             </div>
-            <LiveActivationPanel refreshKey={checked} />
+            <LiveControlPanel key={checked} />
             <div className="btn-row" role="group" aria-label="Global mode">
               {GLOBAL_MODES.map((g) => (
                 <ConfirmButton

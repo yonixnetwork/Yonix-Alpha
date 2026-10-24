@@ -9,12 +9,16 @@ both modes."""
 from datetime import timedelta
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import select
 
 from yonixalpha_core import exit_plan, live_trading
 from yonixalpha_core.db.models import ExecutionOrder, PaperPosition, PlatformSetting, TradeTimelineEvent
 
 from tests.test_live_worker import NOW, open_live
+
+# BUYs are sent only while LIVE is armed and the live checks pass (yonixalpha_core.live_control).
+pytestmark = pytest.mark.usefixtures("live_armed")
 
 TOKENS_RAW = 3_000_000_000_000  # open_live: 3,000,000 tokens at 6 decimals
 

@@ -17,6 +17,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_username, get_db, get_redis, get_settings
+from app.api.util import jsonable, require_password
 from app.schemas.common import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, Page
 from app.schemas.control import (
     AssessmentDetail,
@@ -40,7 +41,9 @@ from app.schemas.control import (
     SettingsVersionOut,
     TimelineEventOut,
 )
-from yonixalpha_core import config_validation, execution_funnel, kill_switch, live_activation, strategy_modes, system_profile
+from yonixalpha_core import (
+    config_validation, execution_funnel, kill_switch, live_activation, live_control, strategy_modes, system_profile,
+)
 from yonixalpha_core.config import Settings
 from yonixalpha_core.db.models import (
     AuditLog,
@@ -234,11 +237,75 @@ async def put_global_mode(body: ModeUpdate, request: Request, db: AsyncSession =
         await _audit(db, username, request, "global_mode.refused", {"to": "LIVE", "codes": [b["code"] for b in blockers]})
         await db.commit()
         raise HTTPException(409, {"message": "LIVE refused: " + blockers[0]["message"], "blockers": blockers})
-    await store.set_global_mode(db, mode, await _user_id(db, username))
     if mode == GlobalMode.LIVE:
-        await _refuse_on_config_errors(db, settings, None, request=request, username=username)
+        # LIVE is armed only through the live control: password, typed
+        # confirmation, a reason and every mandatory check on the server.
+        await _audit(db, username, request, "global_mode.refused", {"to": "LIVE", "codes": ["USE_LIVE_CONTROL"]})
+        await db.commit()
+        raise HTTPException(409, {"message": "LIVE is armed only through the live control (POST /api/control/live-control/arm: "
+                                             "password, confirmation, reason and the mandatory checks)",
+                                  "blockers": [{"code": "USE_LIVE_CONTROL"}]})
+    previous = (await store.load_global_mode(db)).value
+    await store.set_global_mode(db, mode, await _user_id(db, username))
+    if previous == GlobalMode.LIVE.value:
+        await live_control.record_change(db, user=username, to=mode.value, previous=previous,
+                                         reason="global mode set from the mode buttons", ev=None)
     await db.commit()
     return await get_modes(db, settings, username)
+
+
+@router.get("/live-control")
+async def get_live_control(db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
+                           settings: Settings = Depends(get_settings), _: str = Depends(get_current_username)) -> dict:
+    """The operating state (observation only, PAPER, LIVE armed but blocked,
+    LIVE eligible), every mandatory check with its reason, the last change
+    and how the control works (yonixalpha_core.live_control). Read-only."""
+    return jsonable(await live_control.overview(db, redis, settings))
+
+
+@router.post("/live-control/arm")
+async def arm_live(body: dict, request: Request, db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
+                   settings: Settings = Depends(get_settings), username: str = Depends(get_current_username)) -> dict:
+    """Arms LIVE: the server ceiling must be open, the operator re-enters the
+    password, types the confirmation phrase and gives a reason, and every
+    mandatory check must pass now. Audited whether it succeeds or not."""
+    reason = " ".join(str(body.get("reason") or "").split())[:300]
+    if str(body.get("confirm") or "") != live_control.CONFIRM_PHRASE:
+        raise HTTPException(422, f"type {live_control.CONFIRM_PHRASE!r} to confirm")
+    if len(reason) < 5:
+        raise HTTPException(422, "give a reason (at least 5 characters)")
+    await require_password(db, redis, username, str(body.get("password") or ""), request, "live_control",
+                           {"action": "arm"})
+    ev = await live_control.evaluate(db, redis, settings)
+    previous = ev["global_mode"]
+    if not ev["arming_ok"]:
+        failed = [c for c in ev["checks"] if c["status"] == live_control.FAIL]
+        await _audit(db, username, request, "live_control.arm_refused",
+                     {"reason": reason, "failed": [c["code"] for c in failed], "from": previous})
+        await db.commit()
+        raise HTTPException(409, {"message": "LIVE not armed: " + "; ".join(f"{c['label']}: {c['detail']}" for c in failed),
+                                  "failed": jsonable(failed)})
+    await store.set_global_mode(db, GlobalMode.LIVE, await _user_id(db, username))
+    await _refuse_on_config_errors(db, settings, None, request=request, username=username)
+    change = await live_control.record_change(db, user=username, to="LIVE", previous=previous, reason=reason, ev=ev)
+    await _audit(db, username, request, "live_control.armed", {**change, "checks": [c["code"] for c in ev["checks"]]})
+    await db.commit()
+    return jsonable(await live_control.overview(db, redis, settings))
+
+
+@router.post("/live-control/disarm")
+async def disarm_live(body: dict, request: Request, db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
+                      settings: Settings = Depends(get_settings), username: str = Depends(get_current_username)) -> dict:
+    """Back to PAPER at once. No password: stopping is never made harder.
+    Queued LIVE buys are cancelled by the order worker within a second;
+    exits keep running; no position is closed."""
+    reason = " ".join(str(body.get("reason") or "").split())[:300] or "disarmed from the dashboard"
+    previous = (await store.load_global_mode(db)).value
+    await store.set_global_mode(db, GlobalMode.PAPER, await _user_id(db, username))
+    change = await live_control.record_change(db, user=username, to="PAPER", previous=previous, reason=reason, ev=None)
+    await _audit(db, username, request, "live_control.disarmed", change)
+    await db.commit()
+    return jsonable(await live_control.overview(db, redis, settings))
 
 
 @router.put("/modes/strategy/{strategy}", response_model=ModesOut)

@@ -184,3 +184,88 @@ Every ledger decision in the period is listed with its first reason and the meas
 - watched or skipped for lack of a slot.
 
 Decisions dropped before the ledger (no curve address, too young) appear only in `momentum_pipeline`.
+
+## Phase 8: dashboard LIVE control (`yonixalpha_core/live_control.py`)
+
+### Who decides what
+
+| Layer | Where | Role |
+|---|---|---|
+| Server ceiling | `.env`: `TRADING_ENABLED`, `LIVE_TRADING_ENABLED`, `PAPER_TRADING=false` | Set **once** by the server owner. While it is closed, nothing can trade live. It is the deployment-level hard limit and emergency stop, not the everyday switch. Unchanged. |
+| Operating mode | Dashboard: Settings or Live Execution → **Operating mode and LIVE control** | The everyday selector, stored in the database: PAPER / MANUAL with the buttons, LIVE only through **Arm LIVE**. |
+| Kill switch | Risk page | Stops every new entry at once; exits continue. |
+
+**The conflict found:** the dashboard could already store global mode LIVE, but with your current `.env` (`LIVE_TRADING_ENABLED=false`, `PAPER_TRADING=true`) the ceiling is closed, so dashboard activation is impossible. That is by design and is not bypassed.
+
+**The safe migration:** open the ceiling once (steps below). From then on PAPER ↔ LIVE is a dashboard action. Opening the ceiling alone trades nothing: the global mode stays PAPER until you arm LIVE.
+
+### States
+
+| State | Meaning |
+|---|---|
+| OBSERVATION ONLY | No strategy may enter; the scanner keeps observing. |
+| PAPER trading | Entries are simulated. The panel lists what would block LIVE. |
+| LIVE armed, blocked | The global mode is LIVE, but a mandatory check fails: no live order is created or sent. Each reason is shown. |
+| LIVE enabled and eligible | Every check passes; a decision that passes the gate may execute in the live wallet. |
+
+### Mandatory checks, enforced on the server
+
+**Every order** (re-run by the order worker every 15 s; the smoke test is included):
+
+| Check | What it verifies |
+|---|---|
+| Ceiling | The `.env` ceiling is open. |
+| Kill switch | It is released. |
+| Wallet | The wallet is configured. |
+| Signer | The order worker is ready to sign. |
+| RPC | Wallet read fresh, and no more than 50 % of RPC calls rate-limited. |
+| Network | Solana mainnet, by the genesis hash the worker reads from the RPC. |
+| Program and token addresses | The mainnet addresses. |
+| Balance | Covers the reserve, the largest live size, the fixed costs and the token-account rent. |
+| Duplicate-order protection | Unique idempotency key in the database, and no sent order unresolved for more than 5 min. |
+| Exposure | Open live positions below the maximum; an exposure cap set. |
+| Scanner | Data fresh. |
+| Risk engine | Heartbeat fresh. |
+| Critical faults | No LIVE position needing review or with failed exits. |
+
+**To arm:**
+
+| Check | What it verifies |
+|---|---|
+| Entry switches | On. |
+| Strategy | At least one strategy set to MANUAL or AUTO. |
+| Configuration | Complete, validated as it would be with LIVE on. |
+| Sizing | Position size set, and a maximum loss per trade set (SOL). |
+| Stop policy | Every entry has a stop. |
+| Limits | Slippage and price-impact limits within the hard limits. |
+
+**Arming** needs your password (5 wrong attempts lock it for 15 min), the typed phrase `ENABLE LIVE`, a reason, and every check passing at that moment.
+
+Each attempt is audited: who, when, from, to, reason, and the failing checks if refused.
+
+The PAPER / MANUAL buttons can never arm LIVE.
+
+### Enforcement
+
+Hiding a button would not be security, so the server enforces every rule:
+
+- **Order creation:** `live_trading.live_readiness` refuses to create a LIVE order unless the worker's latest check record (`yx:live:control`, 60 s TTL) is fresh and passing.
+- **Before signing:** under the order's row lock, the worker refuses to send a BUY while the global mode is not LIVE, the kill switch is engaged, or the checks fail.
+- **Every second:** the worker cancels queued BUYs in those cases.
+- **Fix:** before this change, a BUY queued just before switching back to PAPER would still have been sent.
+- **Exits are never held:** SELL orders keep running when LIVE is disarmed, and nothing is closed automatically.
+- **Exceptions:** rent reclaim opens nothing and is exempt. The smoke test keeps running with global PAPER, as before, but now needs the same checks.
+
+No ML training, model promotion, paper profit or page refresh can arm LIVE: only `POST /api/control/live-control/arm` sets it.
+
+### Remaining steps before you could choose to go live
+
+Real-money execution stayed disabled in this work.
+
+1. Decide that you want to. Momentum is not profitable in paper (50 trades, −0.515 SOL): see the forward test.
+2. On the server, set in `.env`: `TRADING_ENABLED=true`, `LIVE_TRADING_ENABLED=true`, `PAPER_TRADING=false`. Then run `bash scripts/deploy.sh`. The global mode stays PAPER.
+3. In Risk settings, set `max_loss_per_trade_sol` above 0 for each strategy that may trade live.
+4. Set that strategy to MANUAL (approve each entry) or AUTO.
+5. Fund the wallet above reserve + size + costs. It was 0.103 SOL on 2026-10-22, with a 0.05 SOL reserve.
+6. Open Settings → Operating mode and LIVE control. Every check must pass; then use **Arm LIVE** with your password, `ENABLE LIVE` and a reason.
+7. To stop: **Disarm LIVE** (immediate), or the kill switch.

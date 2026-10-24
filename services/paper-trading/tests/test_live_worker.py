@@ -33,6 +33,9 @@ from yonixalpha_core.testing.pump import MINT, FakeRpc, empty_account, logs_of, 
 from app.gate_manage import manage_gate_positions
 from app.live_worker import live_worker_loop
 
+# BUYs are sent only while LIVE is armed and the live checks pass (yonixalpha_core.live_control).
+pytestmark = pytest.mark.usefixtures("live_armed")
+
 NOW = datetime.now(timezone.utc).replace(microsecond=0)
 FRESH = default_settings_for("solana_fresh")
 WALLET = wallet(140)
@@ -716,3 +719,82 @@ async def test_failed_reclaim_is_reported_and_changes_no_position(session_factor
         assert (await s.get(PaperPosition, pid)).realized_pnl == before
         titles = (await s.execute(select(Notification.title))).scalars().all()
     assert "Rent reclaim failed" in titles
+
+
+async def _run_worker(session_factory, redis_client, ex, oid):
+    stop = asyncio.Event()
+    task = asyncio.create_task(live_worker_loop(session_factory, redis_client, LIVE_ON, None, None, stop, executor=ex))
+    for _ in range(50):
+        await asyncio.sleep(0.1)
+        async with session_factory() as s:
+            if (await s.get(ExecutionOrder, oid)).status != "PENDING":
+                break
+    stop.set()
+    await task
+
+
+async def _disarm(session_factory):
+    from yonixalpha_core.db.models import PlatformSetting
+
+    async with session_factory() as s:
+        (await s.get(PlatformSetting, "global_mode")).value = {"mode": "PAPER"}
+        await s.commit()
+
+
+async def test_disarming_live_never_holds_an_exit(session_factory, redis_client):
+    curve, a, pid, cid, ex, spent = await open_live(session_factory, redis_client)
+    await _disarm(session_factory)  # LIVE switched off with a LIVE position open
+    async with session_factory() as s:
+        p = await s.get(PaperPosition, pid)
+        out = await live_trading.manage_live_position(s, p, p.stop_loss * Decimal("0.8"), None, NOW + timedelta(seconds=20))
+        await s.commit()
+        sell_id = (await s.get(PaperPosition, pid)).pending_order_id
+    assert out["requested"] == "stop_loss"
+    ex.outcomes.append(confirmed("sig-sell", 60_000_000, -3_000_000_000_000))
+    assert await live_trading.process_order(session_factory, redis_client, LIVE_ON, ex, sell_id) == "CONFIRMED"
+    async with session_factory() as s:
+        assert (await s.get(PaperPosition, pid)).status == "closed"  # the stop still sold; nothing was stranded
+
+
+async def test_disarming_live_cancels_a_queued_buy_in_the_worker_and_at_send_time(session_factory, redis_client):
+    _, a, pid, oid, _ = await enter(session_factory, redis_client)
+    await _disarm(session_factory)
+    ex = FakeExecutor(lamports=5_000_000_000)
+    ex.outcomes.append(confirmed("sig-must-not-send", -100_000_000, 2_000_000))
+    assert await live_trading.process_order(session_factory, redis_client, LIVE_ON, ex, oid) == "CANCELLED"
+    async with session_factory() as s:
+        order = await s.get(ExecutionOrder, oid)
+        assert "not LIVE" in (order.error or "") and (await s.get(PaperPosition, pid)).status == "failed"
+    assert len(ex.outcomes) == 1 and ex.requests == []  # nothing was signed or sent
+
+
+async def test_the_worker_cancels_a_buy_queued_before_live_was_disarmed(session_factory, redis_client):
+    _, a, pid, oid, _ = await enter(session_factory, redis_client)
+    await _disarm(session_factory)
+    ex = FakeExecutor(lamports=5_000_000_000)
+    ex.outcomes.append(confirmed("sig-must-not-send", -100_000_000, 2_000_000))
+    await _run_worker(session_factory, redis_client, ex, oid)
+    async with session_factory() as s:
+        assert (await s.get(ExecutionOrder, oid)).status == "CANCELLED"
+    assert len(ex.outcomes) == 1
+
+
+async def test_failing_live_checks_cancel_a_queued_buy(session_factory, redis_client, monkeypatch):
+    import json as _json
+
+    from yonixalpha_core import live_control
+
+    async def failing(session, redis, settings, now=None):
+        rec = {"ok": False, "at": datetime.now(timezone.utc).isoformat(), "failed": ["scanner"]}
+        await redis.set(live_control.CONTROL_KEY, _json.dumps(rec), ex=live_control.CONTROL_TTL)
+        return rec
+
+    monkeypatch.setattr(live_control, "publish_enforcement", failing)
+    _, a, pid, oid, _ = await enter(session_factory, redis_client)
+    ex = FakeExecutor(lamports=5_000_000_000)
+    ex.outcomes.append(confirmed("sig-must-not-send", -100_000_000, 2_000_000))
+    await _run_worker(session_factory, redis_client, ex, oid)
+    async with session_factory() as s:
+        order = await s.get(ExecutionOrder, oid)
+        assert order.status == "CANCELLED" and "scanner" in (order.error or "")
+    assert len(ex.outcomes) == 1  # nothing was sent

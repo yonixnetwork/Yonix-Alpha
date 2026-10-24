@@ -59,6 +59,8 @@ async def test_armed_with_every_switch_then_cancelled(app, client, auth_headers)
         await redis.set(live_trading.READY_KEY, json.dumps({"status": "ready", "min_sol_reserve": "0.05",
                                                             "wallet_max_age_seconds": "120"}))
         await redis.set(live_trading.WALLET_KEY, json.dumps({"sol": "0.3", "at": datetime.now(timezone.utc).isoformat()}))
+        # the smoke test buys real tokens: the mandatory live checks apply to it too (live_control)
+        await redis.set("yx:live:control", json.dumps({"ok": True, "failed": [], "at": datetime.now(timezone.utc).isoformat()}))
         r = await client.post("/api/live/smoke-test/arm", headers=auth_headers, json={**ARM, "max_sol": "0.05"})
         assert r.status_code == 409 and "at most LIVE_SMOKE_TEST_MAX_SOL" in r.json()["detail"]["reason"]
         r = await client.post("/api/live/smoke-test/arm", headers=auth_headers, json=ARM)
