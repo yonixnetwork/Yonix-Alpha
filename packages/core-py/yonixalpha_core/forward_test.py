@@ -87,7 +87,9 @@ ORDER BY exit_at LIMIT 20000
 """
 SIGNALS_SQL = """
 SELECT engine, stage, decision, traded,
-       left(coalesce(nullif(split_part(split_part(reasons->>0, ':', 1), ' (', 1), ''), '-'), 60) AS reason,
+       -- numbers become N so "liquidity 0.0031 below minimum 20" and "liquidity 0.0051 ..." are one group
+       left(regexp_replace(coalesce(nullif(split_part(split_part(reasons->>0, ':', 1), ' (', 1), ''), '-'),
+                           '[0-9]+([.][0-9]+)?', 'N', 'g'), 60) AS reason,
        count(*) AS n, count(*) FILTER (WHERE status = 'COMPLETE') AS complete,
        count(*) FILTER (WHERE executable_return_pct IS NOT NULL) AS measured,
        count(*) FILTER (WHERE executable_return_pct > 0) AS positive,

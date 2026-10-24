@@ -142,8 +142,19 @@ OPEN_SQL = """
 SELECT coalesce(execution_mode, 'PAPER') AS mode, engine, status, count(*) AS n, sum(entry_cost_quote) AS cost,
        min(entry_at) AS oldest_entry
 FROM paper_positions
-WHERE engine LIKE 'solana%' AND (CAST(:engine AS text) IS NULL OR engine = CAST(:engine AS text)) AND status <> 'closed'
+WHERE engine LIKE 'solana%' AND (CAST(:engine AS text) IS NULL OR engine = CAST(:engine AS text))
+  AND status NOT IN ('closed', 'failed')
 GROUP BY 1, 2, 3 ORDER BY 1, 2, 3
+"""
+
+# A LIVE BUY that never filled leaves a 'failed' position with no quantity and no cost
+# (live_trading): not open, not a trade; counted apart by its entry time.
+FAILED_SQL = """
+SELECT coalesce(execution_mode, 'PAPER') AS mode, count(*) AS n
+FROM paper_positions
+WHERE engine LIKE 'solana%' AND (CAST(:engine AS text) IS NULL OR engine = CAST(:engine AS text))
+  AND status = 'failed' AND entry_at >= :since AND entry_at < :until
+GROUP BY 1 ORDER BY 1
 """
 
 CAPITAL_SQL = "SELECT starting_balance FROM paper_accounts WHERE name = 'solana'"
@@ -262,9 +273,15 @@ async def report(session: AsyncSession, days: int = 7, now: datetime | None = No
     if since is None:
         days = max(1, min(int(days), MAX_DAYS))
         since = until - timedelta(days=days)
-    window_s = max((until - since).total_seconds(), 1.0)
-    span_days = window_s / 86400
     p = {"since": since, "until": until, "near": NEAR_MIGRATION_PROGRESS, "engine": engine}
+    rate_from = since
+    if until - since > timedelta(days=MAX_DAYS):
+        # all-time: rates (trades per day, open at once) over the time the strategy has traded, not since the epoch
+        first = (await session.execute(text(f"SELECT min(pp.entry_at) FROM paper_positions pp WHERE {WHERE_CLOSED}"), p)
+                 ).scalar_one_or_none()
+        rate_from = max(since, first) if first else since
+    window_s = max((until - rate_from).total_seconds(), 1.0)
+    span_days = window_s / 86400
 
     modes: dict[str, dict[str, Any]] = {}
     for r in (await session.execute(text(TRADES_SQL), p)).all():
@@ -301,6 +318,7 @@ async def report(session: AsyncSession, days: int = 7, now: datetime | None = No
     open_positions = [{"mode": r.mode, "engine": r.engine, "status": r.status, "count": int(r.n),
                        "cost_sol": _f(r.cost, 6), "oldest_entry": r.oldest_entry.isoformat() if r.oldest_entry else None}
                       for r in (await session.execute(text(OPEN_SQL), p)).all()]
+    failed_entries = {r.mode: int(r.n) for r in (await session.execute(text(FAILED_SQL), p)).all()}
 
     decisions = {r.target: {"signals": int(r.evaluated), "qualified": int(r.qualified),
                             "rejected": int(r.evaluated) - int(r.qualified)}
@@ -309,8 +327,9 @@ async def report(session: AsyncSession, days: int = 7, now: datetime | None = No
                for r in (await session.execute(text(ENTRIES_SQL), p)).all()}
     out: dict[str, Any] = {
         "since": since.isoformat(), "until": until.isoformat(), "days": round(span_days, 3), "engine": engine,
+        "rates_from": rate_from.isoformat(),
         "chain": "solana", "decisions_by_target": decisions, "entries_by_mode": entries, "trades_by_mode": modes,
-        "open_positions": open_positions, "coverage": coverage,
+        "open_positions": open_positions, "failed_entries": failed_entries, "coverage": coverage,
         "execution_live": [{"side": r.side, "route": r.route, "status": r.status, "orders": int(r.n),
                             "median_decision_to_submit_ms": _f(r.decision_to_submit_ms, 0),
                             "median_decision_to_confirm_ms": _f(r.decision_to_confirm_ms, 0),
@@ -343,11 +362,13 @@ async def report(session: AsyncSession, days: int = 7, now: datetime | None = No
         "profit_factor": "gross winning PnL / gross losing PnL; undefined when there is no losing trade",
         "wins_losses": "win: booked PnL > 0; loss: < 0; breakeven: exactly 0",
         "expectancy": "net PnL per closed trade, after every recorded cost",
-        "avg_open_positions": "time spent in positions / window length: the average number open at once",
+        "avg_open_positions": "time spent in positions / window length: the average number open at once. For an "
+                              "all-time window, trades per day and this use the time since the first entry (rates_from)",
         "age": "token age at the decision (ledger snapshot)",
         "regime": "launches the stream saw in the hour before the decision, split into thirds of this window's "
                   "trades (QUIET / NORMAL / BUSY: relative to this window, see coverage for the ranges)",
         "open_positions": "never valued here and never in any PnL: only closed positions are booked",
+        "failed_entries": "LIVE BUYs that never filled (no quantity, no cost): neither open nor trades, counted by entry time",
         "max_drawdown": "largest fall of the cumulative realized PnL (SOL) from its running peak",
         "missed_winner": "rejected, then the counterfactual was classified MISSED_WIN",
         "false_positive": "entered and closed at a loss",
@@ -394,7 +415,7 @@ def position_row(r: Any) -> dict[str, Any]:
     net = float(r.pnl) if closed and r.pnl is not None else None
     fees = float(r.fees) if r.fees is not None else None
     marked = None
-    if not closed and r.last_price is not None and r.remaining_quantity is not None and r.cost is not None:
+    if r.status != "failed" and not closed and r.last_price is not None and r.remaining_quantity is not None and r.cost is not None:
         marked = float(r.remaining_quantity) * float(r.last_price) + float(r.proceeds or 0) - float(r.cost)
     end = r.exit_at if closed else None
     return {
