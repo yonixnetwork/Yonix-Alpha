@@ -88,7 +88,8 @@ def window_block(title: str, r: dict, *, groups: bool = True, daily: bool = Fals
     for mode in ("PAPER", "LIVE"):
         m = r["trades_by_mode"].get(mode)
         opened = [o for o in r["open_positions"] if o["mode"] == mode]
-        if not m and not opened:
+        failed = (r.get("failed_entries") or {}).get(mode)
+        if not m and not opened and not failed:
             continue
         out.append(f"  {mode}: {metrics_line((m or {}).get('overall'))}")
         if m and m.get("overall") and m["overall"].get("trades"):
@@ -96,6 +97,8 @@ def window_block(title: str, r: dict, *, groups: bool = True, daily: bool = Fals
         for o in opened:
             out.append(f"      OPEN (not booked): {o['count']} {o['status']} position(s), cost {_n(o['cost_sol'], 5)} SOL, "
                        f"oldest entry {(o['oldest_entry'] or '-')[:16]}")
+        if failed:
+            out.append(f"      entries that never filled (failed, no cost, not trades, not open): {failed}")
         if m and daily:
             for day, d in m["by_day"].items():
                 out.append(f"    {day}  {metrics_line(d)}")
@@ -177,6 +180,12 @@ def render(r: dict[str, Any], hours: int) -> str:
                        f"exec {_pc(g['median_executable_return_pct'])} peak {_pc(g['median_peak_pct'])}")
         if not r["rejected"]:
             out.append("  none recorded")
+        unmeasured = sorted({g["engine"] for g in r["rejected"]} - {g["engine"] for g in r["rejected"] if g["measured"]})
+        for e in unmeasured:
+            out.append(f"  {e}: no decision has a measured outcome. The executable return is simulated on the bonding "
+                       "curve only; " + ("migrated tokens trade on a PumpSwap pool, which the ledger does not simulate"
+                                         if e == "solana_migration" else "none was measurable in this window")
+                       + ", so these decisions cannot be judged from this table (DATA GAP)")
     if "experiments" in r:
         out.append("\nSIGNAL CENTER EXPERIMENTS (predictions recorded before their outcome)")
         for x in r["experiments"]:

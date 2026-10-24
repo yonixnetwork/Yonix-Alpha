@@ -205,3 +205,37 @@ async def test_the_regime_keeps_a_sol_price_only_from_before_the_decision():
                                                                        "sol_usd_at": (NOW - timedelta(seconds=30)).isoformat()}
     assert await opportunities._sol_usd_before(Fake(after), NOW) == {}  # stamped after the decision: never used
     assert await opportunities._sol_usd_before(Fake(None), NOW) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_live_entry_that_never_filled_is_neither_open_nor_a_trade_and_reasons_group_without_numbers(sf):
+    async with sf() as s:
+        failed = pos(None, mode="LIVE", status="failed")
+        failed.quantity, failed.entry_cost_quote, failed.exit_at = Decimal(0), Decimal(0), NOW - timedelta(hours=1)
+        s.add_all([failed, pos(None, status="open")])
+        for i, liq in enumerate(("0.0031", "0.0051", "17.8841")):
+            s.add(OpportunityOutcome(key=f"gate:m{i}", mint=f"MM{i}", engine="solana_migration", stage="GATE",
+                                     decision="EXPIRED", traded=False, decided_at=NOW - timedelta(hours=2),
+                                     reasons=[f"liquidity {liq} below minimum 20"], snapshot={}))
+        await s.commit()
+        r = await sp.report(s, since=NOW - timedelta(hours=24), until=NOW, engine="solana_momentum", outcomes=False)
+        assert [o["status"] for o in r["open_positions"]] == ["open"] and r["failed_entries"] == {"LIVE": 1}
+        assert "LIVE" not in r["trades_by_mode"]
+        sigs = await ft.signals(s, NOW - timedelta(hours=24), NOW, ("solana_migration",))
+        assert [(g["reason"], g["count"]) for g in sigs] == [("liquidity N below minimum N", 3)]
+        text = performance_report.render(await performance_report.build(
+            s, ("day", "rejected"), None, None, 5, 24, NOW), 24)
+        assert "never filled (failed, no cost, not trades, not open): 1" in text
+        assert "solana_migration: no decision has a measured outcome" in text and "PumpSwap pool" in text
+
+
+@pytest.mark.asyncio
+async def test_all_time_rates_count_from_the_first_entry_not_from_the_epoch(sf):
+    async with sf() as s:
+        s.add_all([pos("0.01", exit_at=NOW - timedelta(days=2)), pos("-0.01", exit_at=NOW - timedelta(hours=1))])
+        await s.commit()
+        r = await sp.report(s, since=performance_report.EPOCH, until=NOW, engine="solana_momentum", outcomes=False)
+        assert 1.9 < r["days"] < 2.1 and r["rates_from"] > performance_report.EPOCH.isoformat()
+        assert r["trades_by_mode"]["PAPER"]["overall"]["trades_per_day"] == 1.0
+        week = await sp.report(s, since=NOW - timedelta(days=7), until=NOW, engine="solana_momentum", outcomes=False)
+        assert week["days"] == 7 and week["trades_by_mode"]["PAPER"]["overall"]["trades_per_day"] == 0.29

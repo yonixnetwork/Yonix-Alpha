@@ -78,6 +78,8 @@ export default function SolanaPerformancePage() {
               <p className="muted small">Open positions are never part of any PnL above.</p>
               <ul className="small">{data.open_positions.map((o: J, i: number) => <li key={i}>{o.mode} {o.engine}: {o.count} {o.status}, cost {v(o.cost_sol)} SOL, oldest entry {v(o.oldest_entry)}</li>)}</ul>
             </Section>)}
+          {Object.keys(data.failed_entries ?? {}).length > 0 && (
+            <p className="muted small">Entries that never filled (failed, no cost; neither open nor trades): {Object.entries(data.failed_entries).map(([m, n]) => `${m} ${n}`).join(", ")}</p>)}
           {modes.length === 0 && <Section title="Closed trades"><Empty>No closed Solana trades in this window.</Empty></Section>}
           {modes.map((m) => {
             const t = data.trades_by_mode[m];

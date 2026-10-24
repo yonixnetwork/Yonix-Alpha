@@ -53,6 +53,34 @@ This change is an in-place upgrade; nothing was rebuilt or deleted. Live executi
 | 21 | Three closed LIVE positions have no booked PnL (PVE, VIBEPAD, 7wmm1gDa). These are data gaps, not zero results. | same |
 | 22 | Last 24 h: 37 paper entries (fresh 10, migration 27) and 0 momentum entries, even though momentum is AUTO: 246 momentum decisions were refused. | `tools.live_check` |
 
+**Added after the first post-deploy output (revision e0149d5, 2026-10-24 21:27 UTC; PAPER):**
+
+| # | Fact | Source |
+|---|---|---|
+| 23 | Momentum, all time: 50 trades, net −0.515 SOL, fees 0.332 SOL (gross −0.183). 23 stop-loss exits lost −0.992 SOL; 4 take-profit-3 exits made +0.381 and 11 trailing stops +0.133. Average loss −14.7 % (median −12.9 %); single stop exits reached −23 %, −30 % and −35 %. | `performance_report --section all` |
+| 24 | Momentum by token age: 30 min–2 h, 29 trades, −0.025 (PF 0.95, positive before fees); 2–24 h, 18 trades, −0.526 (PF 0.11). Entries with a deterioration indicator: 13 trades, −0.297 (PF 0.21). Both groups are below 20 trades. | same |
+| 25 | Momentum traded once in the 7 complete days to 2026-10-24 (−0.023). Most of its 50 trades are from 2026-10-10/11. A daily momentum pattern cannot be read from this week. | `--section week` |
+| 26 | Fresh, 7 days: 24 trades, net −0.063. Daily: +0.057 (1 trade), −0.104 (5), −0.188 (6), −0.013 (6), +0.184 (6). 6 stop losses lost −0.572 (average loss −45.7 %, largest −0.160); 12 take-profit-3 exits made +0.432. | same |
+| 27 | Migration, 7 days: 53 trades, net −0.022, gross +0.025: the fees (0.048) turn a small gross gain into a loss. | same |
+| 28 | Every migration ledger decision shows "measured 0". By design: the executable return is simulated on the bonding curve only, and a migrated token trades on a PumpSwap pool (`opportunities._finalize`). Migration refusals cannot be judged from the ledger. | code |
+| 29 | Shadow return model, prospective scores only: favoured 102 rows, mean −3.7 %; not favoured 5 338 rows, −9.9 %. The ranking points the right way, but even the favoured group loses on average. | `--section predictions` |
+| 30 | The paper book difference is still −0.063596 SOL just after deploying the cash fix. Expected: the fix stops new losses and does not restore old ones. | `tools.pnl_reconcile` |
+
+**Report defects found in that output, fixed:**
+- 11 LIVE entries that never filled (`failed`, no quantity, no cost) were listed as "OPEN (not booked)". They are now counted apart as entries that never filled.
+- Ledger reasons were split by their numbers: "liquidity 0.0031 below minimum 20" and "liquidity 0.0051 ..." were separate rows. Numbers now read N, so one reason is one row.
+- The all-time "trades/day 0.01" and "avg open at once 0.0" were measured from 2000-01-01. All-time rates now start at the first entry (`rates_from`).
+- An engine with no measured outcome now gets a DATA GAP line saying why.
+
+**Why a day is profitable and the next is not (fresh and momentum, PAPER):**
+1. **Few trades per day.** About 6 a day for fresh, so one or two exits decide a day's sign.
+2. **Wins and losses are lopsided.** A fresh win is capped near +27 % (take profit 3). A stop exit averaged −46 %: the price passes the stop between two observations, and the exit fills far below it. One stop exit (−0.16) can cancel about five wins (+0.033 each).
+3. **Bad days are the days with stop exits;** 2026-10-23 had six wins and no stop exit.
+
+So the daily sign mostly reflects whether a stop exit happened that day. It does not show a change in edge. Over the 7 days the result is −0.063 SOL.
+
+**Not changed (each needs forward-test evidence first):** stop placement and gap handling; excluding 2–24 h momentum tokens; excluding entries with deterioration indicators; position size. Each group above has fewer than 20 trades or comes from a single period.
+
 ### DATA GAPS
 
 - **Daily momentum PAPER results for the last 7 days.** Which days were profitable, from how many trades, and whether a single trade carried a day: not in any output I have. Run `performance_report --engine solana_momentum`.
