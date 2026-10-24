@@ -13,7 +13,7 @@ from app.api.deps import get_current_username, get_db, get_redis
 from app.api.util import audit, jsonable, user_id
 from app.schemas.common import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, Page
 from app.schemas.ml import MLStatsOut, ModelVersionOut
-from yonixalpha_core import events, opportunities
+from yonixalpha_core import events, ml_monitor, opportunities
 from yonixalpha_core.config import get_settings
 from yonixalpha_core.db.models import DataQualityEvent, MLFeatureSnapshot, ModelVersion, OpportunityOutcome
 from yonixalpha_core.ml import registry
@@ -321,6 +321,29 @@ async def opportunities_compare(request: Request, days: int = Query(7, ge=1, le=
     since = datetime.now(timezone.utc) - timedelta(days=days)
     return await _review(request, redis, f"opportunities-compare:{days}",
                          lambda db: opportunities.comparison(db, since), refresh)
+
+
+@router.get("/monitor")
+async def ml_monitor_view(request: Request, days: int = Query(7, ge=1, le=30), refresh: bool = Query(False),
+                          redis: Redis = Depends(get_redis), _: str = Depends(get_current_username)) -> dict:
+    """ML engine monitoring (yonixalpha_core.ml_monitor): champion /
+    challenger per model, experiments and their verdicts, predictions and
+    outcomes, paper trades apart from predictions, rejected decisions,
+    training activity, data sources, audit trail. Read-only; background cache."""
+    async def compute(db: AsyncSession) -> dict:
+        return jsonable(await ml_monitor.overview(db, redis, days=days))
+
+    return await _review(request, redis, f"ml-monitor:{days}", compute, refresh)
+
+
+@router.get("/history")
+async def ml_history(engine: str | None = Query(None, pattern="^solana_(fresh|migration|momentum)$"),
+                     traded: bool | None = None, hours: int = Query(48, ge=1, le=168),
+                     limit: int = Query(100, ge=1, le=500), db: AsyncSession = Depends(get_db),
+                     _: str = Depends(get_current_username)) -> dict:
+    """Signal -> decision -> paper entry -> exit -> evaluation per ledger
+    decision, newest first; each opens in the ML Training Lab timeline."""
+    return {"rows": jsonable(await ml_monitor.history(db, engine=engine, traded=traded, hours=hours, limit=limit))}
 
 
 @router.get("/steps")

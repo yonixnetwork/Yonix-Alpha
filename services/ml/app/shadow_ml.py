@@ -259,7 +259,31 @@ async def train_all(session: AsyncSession, now: datetime | None = None) -> dict[
     return out
 
 
-async def score_recent(session: AsyncSession, now: datetime | None = None, limit: int = 500) -> int:
+_LOADED: dict[tuple[str, int], Any] = {}  # (name, version) -> estimator; a version's artifact never changes
+
+
+def _estimator(m: ModelVersion) -> Any:
+    key = (m.name, int(m.version))
+    if key not in _LOADED:
+        if len(_LOADED) > 64:
+            _LOADED.clear()
+        _LOADED[key] = joblib.load(io.BytesIO(m.artifact))
+    return _LOADED[key]
+
+
+PROSPECTIVE_MAX_AGE = timedelta(seconds=180)
+
+
+async def score_new(session: AsyncSession, now: datetime | None = None) -> int:
+    """Scores ledger rows decided in the last PROSPECTIVE_MAX_AGE, so a shadow
+    prediction is written before its T+5m outcome exists (run every 30 s by
+    the ml service's signal loop; the training cycle's score_recent covers
+    older rows, which ml.prediction_audit counts as retrospective)."""
+    return await score_recent(session, now, limit=200, max_age=PROSPECTIVE_MAX_AGE)
+
+
+async def score_recent(session: AsyncSession, now: datetime | None = None, limit: int = 500,
+                       max_age: timedelta | None = None) -> int:
     """Shadow scores on recent ledger rows (decision-time features only)."""
     now = now or datetime.now(timezone.utc)
     # only this ledger's own models: shadow_evm_* / shadow_wallet_* (app.evm_ml) share target names
@@ -270,9 +294,9 @@ async def score_recent(session: AsyncSession, now: datetime | None = None, limit
                                                                ModelVersion.name.in_(own)))).scalars().all()
     if not models:
         return 0
-    loaded = [(m, joblib.load(io.BytesIO(m.artifact))) for m in models]
+    loaded = [(m, _estimator(m)) for m in models]
     rows = (await session.execute(select(OpportunityOutcome).where(OpportunityOutcome.ml_shadow.is_(None),
-                                                                   OpportunityOutcome.decided_at >= now - SCORE_LOOKBACK)
+                                                                   OpportunityOutcome.decided_at >= now - (max_age or SCORE_LOOKBACK))
                                   .order_by(OpportunityOutcome.decided_at.desc()).limit(limit))).scalars().all()
     for row in rows:
         x = features(row.snapshot or {}, row.decided_at, row.engine, row.stage)

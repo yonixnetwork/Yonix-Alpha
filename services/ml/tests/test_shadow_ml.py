@@ -124,3 +124,29 @@ async def test_training_reads_the_newest_rows_only_and_retrains_at_most_daily(db
     await db_session.commit()
     again = await shadow_ml.train_all(db_session, now=datetime.now(timezone.utc))
     assert again["P_UPSIDE_50"]["status"] == "skipped_retrained_within_24h"
+
+
+async def test_new_decisions_are_scored_within_minutes_so_the_prediction_is_prospective(db_session):
+    """score_new (the ml service's 30 s signal loop) scores only decisions of
+    the last few minutes, before their T+5m outcome exists; older unscored
+    rows are left to the training cycle (counted as retrospective)."""
+    from yonixalpha_core.ml import prediction_audit
+
+    await _ledger(db_session)
+    await shadow_ml.train_all(db_session)
+    await db_session.commit()
+    trained = (await db_session.execute(select(ModelVersion.trained_at))).scalars().first()
+    rng = random.Random(3)
+    fresh, old = _row(1000, rng), _row(1001, rng)
+    now = max(trained, T0) + timedelta(days=1)
+    fresh.key, fresh.decided_at, fresh.status = "fresh", now - timedelta(seconds=40), "TRACKING"
+    old.key, old.decided_at, old.status = "old", now - timedelta(minutes=30), "TRACKING"
+    db_session.add_all([fresh, old])
+    await db_session.commit()
+    assert await shadow_ml.score_new(db_session, now=now) == 1
+    await db_session.commit()
+    rows = {r.key: r for r in (await db_session.execute(select(OpportunityOutcome).where(
+        OpportunityOutcome.key.in_(("fresh", "old"))))).scalars()}
+    assert rows["fresh"].ml_shadow is not None and rows["old"].ml_shadow is None
+    scored_at = datetime.fromisoformat(rows["fresh"].ml_shadow["scored_at"])
+    assert prediction_audit.classify(rows["fresh"].decided_at, scored_at, trained) == "PROSPECTIVE"

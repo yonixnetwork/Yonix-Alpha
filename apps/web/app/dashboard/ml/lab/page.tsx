@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { GraduationCap } from "lucide-react";
 import { Empty, ErrorNotice, Loading, PageHeader, Pct, Section, Stat, TokenLink } from "@/components/ui";
 import { ApiError, apiFetch, apiPost, apiPut } from "@/lib/api";
@@ -377,6 +377,11 @@ function DatasetExport() {
 
 export default function MlLabPage() {
   const [openId, setOpenId] = useState<string | null>(null);
+  // /dashboard/ml/lab?observation=<id>: opened from the ML engine's event history
+  useEffect(() => {
+    const id = new URLSearchParams(window.location.search).get("observation");
+    if (id && /^[0-9a-f-]{36}$/i.test(id)) setOpenId(id);
+  }, []);
   const labels = useApi<LabelsSummary>("/api/ml-lab/labels", undefined, { refreshMs: 120000 });
   return (
     <>
