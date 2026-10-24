@@ -43,7 +43,7 @@ from yonixalpha_core.chains.evm.settings import load as evm_settings_load
 from yonixalpha_core.db.models import EvmToken, PaperAccount, PaperPosition
 from yonixalpha_core.safety.models import AccountState, ExecutionQuote, FinalDecision, ManualOverrides, Observation, Venue
 from yonixalpha_core.safety.planning import plan_trade
-from yonixalpha_core.safety.store import add_timeline_event, load_settings, settings_block_reason
+from yonixalpha_core.safety.store import add_timeline_event, adjust_cash, load_settings, settings_block_reason
 
 NATIVE = {"bsc": "BNB", "robinhood": "ETH"}
 CATEGORY_SWITCHES = ("FRESH", "MIGRATED", "MOMENTUM")  # categories the operator can switch off (settings.CATEGORIES)
@@ -364,7 +364,7 @@ async def open_position(session: AsyncSession, d: EntryDecision, row: EvmToken, 
     qty = Decimal(d.buy.amount_out) / E18
     if cost > acct.cash_balance:
         raise paper_engine.FillError(f"required {cost} exceeds paper cash {acct.cash_balance}")
-    acct.cash_balance -= cost
+    await adjust_cash(session, acct, -cost)
     plan = d.plan
     price = cost / qty
     venue = {"kind": "spot", "chain": d.chain, "launchpad": d.launchpad, "token": row.token, "route": d.buy.route,

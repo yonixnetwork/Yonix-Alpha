@@ -36,7 +36,7 @@ from yonixalpha_core.db.models import (
     ExecutionOrder, PaperAccount, PaperPosition, PlatformSetting, ReconciliationEvent, TradeTimelineEvent, TradingCandidate,
 )
 from yonixalpha_core.logging import get_logger
-from yonixalpha_core.safety.store import add_timeline_event, live_trading_permitted
+from yonixalpha_core.safety.store import add_timeline_event, adjust_cash, live_trading_permitted
 from yonixalpha_core.solana import rent_reclaim
 from yonixalpha_core.solana.live_exec import ExecOutcome, SolanaLiveExecutor, wallet_balances
 from yonixalpha_core.solana.pumpportal import TradeRequest
@@ -429,7 +429,7 @@ async def apply_outcome(session: AsyncSession, redis: Redis | None, app_settings
                 "costs_sol": ((order.diagnostics or {}).get("price") or {}).get("costs_sol")}}
             position.status = "open"
             if account is not None:
-                account.cash_balance -= cost
+                await adjust_cash(session, account, -cost)
             if position.candidate_id:
                 cand = await session.get(TradingCandidate, position.candidate_id)
                 if cand is not None and cand.state == CandidateState.ENTRY_PENDING.value:
@@ -459,7 +459,7 @@ async def apply_outcome(session: AsyncSession, redis: Redis | None, app_settings
                 idx = int(order.reason.rsplit("_", 1)[1]) - 1
                 position.tp_hits = sorted(set((position.tp_hits or []) + [idx]))
             if account is not None:
-                account.cash_balance += received
+                await adjust_cash(session, account, received)
             price = received / sold
             await add_timeline_event(session, f"live_exit.{order.reason}", now,
                                      {"signature": order.signature, "tokens_sold": str(sold), "sol_received": str(received),

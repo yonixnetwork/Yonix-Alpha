@@ -35,7 +35,7 @@ from yonixalpha_core.safety.liquidity import ConstantProductModel
 from yonixalpha_core.safety.models import FinalDecision, ManualOverrides
 from yonixalpha_core.safety.planning import plan_trade
 from yonixalpha_core.safety.store import account_state as solana_account_state
-from yonixalpha_core.safety.store import add_timeline_event, load_settings
+from yonixalpha_core.safety.store import add_timeline_event, adjust_cash, load_settings
 from yonixalpha_core.solana import pump_stream
 from yonixalpha_core.solana.flow import measured_volatility
 
@@ -561,7 +561,7 @@ class CopyEngine:
             cost = plan.position_size.value
             if cost > acct.cash_balance:
                 return o.skip("INSUFFICIENT_PAPER_CASH", f"{cost} > {acct.cash_balance}")
-            acct.cash_balance -= cost
+            await adjust_cash(session, acct, -cost)
             meta = await pump_stream.load_meta(self.redis, mint) or {}
             now = self.now()
             p = PaperPosition(
