@@ -156,6 +156,28 @@ So a Saturday loss before 21:27 UTC cannot come from this deploy. After it, none
 
 *Not changed:* thresholds, exits, sizing, strategy modes. Each candidate needs forward-test evidence or the operator's decision. A per-trade loss cap for fresh is a risk limit for the operator to set, not a fix made to improve past results.
 
+**Seven complete days, 2026-10-18 .. 2026-10-25 (`performance_report --section week`, PAPER):**
+
+| Strategy | Trades | Net SOL | What decides it |
+|---|---|---|---|
+| fresh | 30 | −0.169 | 9 stop-losses −0.639 (average −0.071 each) against 14 take-profit-3 exits +0.487. Average loss −36.8 % vs average win +26.5 %. |
+| migration | 61 | −0.047 | Gross +0.006, fees 0.052: costs (about 4 % of a 0.022 SOL trade) turn a breakeven gross result into a loss. |
+| momentum | 1 | −0.023 | It hardly trades. |
+
+- Entry quality, fresh: CLEAN 27 trades +0.112 (PF 1.27); DETERIORATING 3 trades −0.282.
+- Entry quality, other strategies: momentum all time 13 DETERIORATING −0.297 (PF 0.21); migration all time 27 DETERIORATING −0.151 (PF 0.29) vs 150 CLEAN −0.042.
+- **Market activity does not support the "quiet market" idea.** Fresh in the 7 days: QUIET +0.154, NORMAL −0.190, BUSY −0.133, 10 trades each. That is the opposite of what the Friday-vs-Saturday launch counts suggested. That hypothesis is weakened.
+- The simulated fill: median latency 2.0 s and median price move 0.0 % on each of the three days. The 苦根 fill (+34 % in 10 s) is an outlier, not the rule.
+
+**Hypotheses fixed now (2026-10-25), judged on the forward period only (from 2026-10-24 21:27 UTC); not applied to trading:**
+- **H1, entry quality:** entries with one or more deterioration indicators at the decision have a lower net per trade than CLEAN entries, in each strategy.
+  - Test: the forward test's `by_entry_quality` groups.
+  - Supported only if DETERIORATING is lower in fresh and migration, and the pooled difference interval lies below 0.
+  - Earlier results do not count: they shaped the question.
+- **H2, stop gaps:** realized stop-loss exits lose more than twice the planned stop distance in at least a quarter of cases.
+  - Test: `strategy_recovery --section stops` on positions closed after 2026-10-24 21:27.
+  - If supported, the sizing assumption (`sizing_stop_gap_curve_pct` / `_pool_pct`) does not cover real losses, and the per-trade loss cap matters more than any entry rule.
+
 
 ### DATA GAPS
 
