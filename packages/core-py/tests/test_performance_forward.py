@@ -150,6 +150,12 @@ async def test_forward_test_freezes_rules_records_the_deployment_and_flags_chang
             assert (await ft.report(s, now=NOW))["rules"]["min_closed_trades"] == 30
         finally:
             ft.RULES["min_closed_trades"] = 30
+        # a new challenger (routine retraining) is never loaded for decisions: listed, not a configuration change
+        s.add(ModelVersion(name="c", version=1, status="challenger", feature_names=[], training_sample_count=1,
+                           metrics={}, artifact=b"x"))
+        await s.commit()
+        r = await ft.report(s, now=NOW)
+        assert r["configuration_changed"] == [] and r["challenger_models"]["now"] == {"c": "v1 challenger"}
         # a configuration change after the start is named
         row = await s.get(StrategyConfig, "solana_momentum")
         row.mode = "AUTO"

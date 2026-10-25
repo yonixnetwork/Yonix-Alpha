@@ -41,6 +41,10 @@ def render(r: dict[str, Any]) -> str:
            f"  baseline: closed trades {r['baseline_window'][0][:16]} .. {r['baseline_window'][1][:16]}",
            f"  rules (frozen at the start): {json.dumps({k: v for k, v in r['rules'].items() if k != 'unit'})}",
            f"  configuration: {r['configuration_note']}"]
+    ch = r.get("challenger_models") or {}
+    if ch.get("now") != ch.get("at_start"):
+        out.append(f"  challenger models (never used for decisions): at the start {ch.get('at_start') or 'none'}; "
+                   f"now {ch.get('now') or 'none'}")
     for engine, s in r["strategies"].items():
         for mode, m in s["modes"].items():
             j = m["judgement"]

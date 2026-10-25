@@ -84,7 +84,9 @@ SNAP_FIELDS = ("market_cap_sol", "liquidity_sol", "age_seconds", "curve_progress
                "signal_strength", "price_age_seconds", "decision_eval_ms")
 AUDIT_PATTERNS = ("risk_settings.%", "strategy_mode%", "strategy_config%", "trading_control%", "kill_switch%",
                   "paper_execution%", "paper_account%", "live_execution%", "system_profile%", "retention%",
-                  "exit_protection%", "entry_intelligence%", "strategy_routing%", "rpc.%")
+                  "exit_protection%", "entry_intelligence%", "strategy_routing%", "rpc.%",
+                  # added 2026-10-25: automatic demotions, model promotions, LIVE toggle, deploys, forward tests
+                  "entry_intel.%", "ml.%", "ml_lab.%", "global_mode%", "live_control.%", "deployment.%", "forward_test.%")
 PLATFORM_KEYS = ("paper_execution", "data_retention", "exit_protection_settings", "entry_intelligence", "system_profile",
                  "global_mode", "strategy_routing")
 
