@@ -91,3 +91,15 @@ def test_the_setting_is_on_by_default_and_can_be_switched_off():
     s, errors = paper_execution.parse_settings({"charge_live_fixed_costs": False})
     assert not errors and s.charge_live_fixed_costs is False and s.to_dict()["charge_live_fixed_costs"] is False
     assert paper_execution.parse_settings({"charge_live_fixed_costs": "yes"})[1]
+
+
+async def test_every_exit_step_is_kept_on_the_position(db):
+    # exit_reason keeps only the last step; the whole exit path stays on the position (2026-10-25)
+    _, pos, _, _ = await _round_trip(db, "steps")
+    steps = pos.plan[paper_engine.EXIT_STEPS_KEY]
+    assert [s["reason"] for s in steps] == ["manual_exit"] and pos.exit_reason == "manual_exit"
+    assert Decimal(steps[0]["received"]) == pos.proceeds_quote + (pos.plan.get("fixed_cost_detail") or {}).get("close", 0)
+    for i in range(paper_engine.MAX_EXIT_STEPS + 5):
+        paper_engine.record_exit_step(pos, NOW, f"take_profit_{i}", Decimal(1), Decimal(0), None)
+    kept = pos.plan[paper_engine.EXIT_STEPS_KEY]
+    assert len(kept) == paper_engine.MAX_EXIT_STEPS and kept[-1]["reason"] == f"take_profit_{paper_engine.MAX_EXIT_STEPS + 4}"

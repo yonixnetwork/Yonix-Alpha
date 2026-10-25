@@ -491,6 +491,7 @@ async def apply_step(
         await adjust_cash(session, account, returned)
         position.proceeds_quote = (position.proceeds_quote or Decimal(0)) + returned
         position.fees_paid_quote = (position.fees_paid_quote or Decimal(0)) + fees_add
+        record_exit_step(position, now, reason, qty, returned, fill.price)
         await add_timeline_event(session, f"paper_exit.{reason}", now,
                                  {"quantity": str(qty), "returned": str(returned), "fill_price": str(fill.price),
                                   "impact_bps": str(fill.impact_bps),
@@ -524,6 +525,21 @@ async def apply_step(
                                      position_id=position.id)
         await close_position(session, position, now, result.exits[-1][1] if result.exits else "closed", price)
     return result
+
+
+EXIT_STEPS_KEY = "exit_steps"
+MAX_EXIT_STEPS = 50
+
+
+def record_exit_step(position: PaperPosition, now: datetime, reason: str, quantity: Decimal, received: Decimal,
+                     price: Decimal | None) -> None:
+    """Every partial or final exit on the position itself (plan["exit_steps"]), so a trade's whole exit path is
+    known after the timeline events are pruned: exit_reason keeps only the last step (2026-10-25: a trade
+    sold mostly by exit-intelligence reductions at a loss was reported as take_profit_1)."""
+    steps = list((position.plan or {}).get(EXIT_STEPS_KEY) or [])
+    steps.append({"at": now.isoformat(), "reason": reason, "quantity": str(quantity), "received": str(received),
+                  "price": None if price is None else str(price)})
+    position.plan = {**(position.plan or {}), EXIT_STEPS_KEY: steps[-MAX_EXIT_STEPS:]}
 
 
 async def _protect_exits(session: AsyncSession, position: PaperPosition, s: PositionState, result: StepResult,

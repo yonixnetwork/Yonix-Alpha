@@ -461,6 +461,7 @@ async def apply_outcome(session: AsyncSession, redis: Redis | None, app_settings
             if account is not None:
                 await adjust_cash(session, account, received)
             price = received / sold
+            paper_engine.record_exit_step(position, now, order.reason, sold, received, price)
             await add_timeline_event(session, f"live_exit.{order.reason}", now,
                                      {"signature": order.signature, "tokens_sold": str(sold), "sol_received": str(received),
                                       "price": str(price)},
