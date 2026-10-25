@@ -108,6 +108,43 @@ So a Saturday loss before 21:27 UTC cannot come from this deploy. After it, none
 - Service warnings are pruned after the retention days (default 3), so Friday's may be gone.
 - Scanner stage counters are kept 48 h (`momentum_pipeline`).
 
+**Results from the server (2026-10-25 11:35 UTC; server and database in UTC; PAPER):**
+
+*Verified*
+1. **Same code and settings on Friday and Saturday.** The server ran ec79ecc from 2026-10-22 07:56 until #99/#100 were pulled at 20:57–21:07 on Saturday. No risk-settings version after 2026-10-21. No automatic demotion, model promotion or global-mode change. Every gate model version in the window is `superseded` and was never activated. Positions carry no model version, so decisions were rule-based.
+2. **Every Saturday trade closed by 17:40:36 UTC.** That is before the RPC outage (Helius off 19:11–20:28; `rpc_outage` ×2, `rpc_health_check_failed` ×157) and before the deploy. Neither caused Saturday's result.
+3. **Momentum** had no closed trade on either day. Its PAPER → AUTO switch (Saturday 10:06) cannot explain the difference.
+4. **Friday** (+0.1837 SOL, 20 trades):
+   - fresh: 6/6 wins, +0.1843 (5 × take-profit 3);
+   - migration: 14 trades, −0.0006.
+   - The best trade is 28.5 % of the wins; without it, fresh is still +0.132. So the profit came from several independent trades, not one winner.
+   - Three near-migration fresh trades (SHEKEL, TRUMP2, zCondom) gave +0.137.
+5. **Saturday** (−0.0795, 19 trades):
+   - fresh: 2/7 wins, −0.0494. Stops at −30.4 % (ONION, planned 10 %), −30.4 % (TAHOE), −25.5 % (Nuannuan), and a −18.2 % exit on APOGEE, whose price fell 86 % within 148 s.
+   - migration: 3/12 wins, −0.0301. Eight stop-losses (−0.0341), including $MRLY at −66.4 % in 25 s against a 10 % planned stop. The other seven stops lost about as planned (average −14.5 %).
+6. **Only the price after entry differs.**
+   - Same between the days: entry delay (0 s), slippage estimate (median 1.31 %), liquidity (about 57 SOL), size (median 0.0223), fees (3.4–4.3 %).
+   - Different: maximum rise after entry, median +26.5 % Friday vs +10.9 % Saturday and +10.6 % Sunday; maximum fall −8.7 % vs −21.8 % and −15.8 %.
+7. **Friday is the only positive day of the last six:** 10-20 −0.0945, 10-21 −0.1895, 10-22 −0.0591, 10-23 +0.1837, 10-24 −0.0795, 10-25 (partial) −0.0871. There was no profitable period that then got worse.
+8. **Size spreads the results.**
+   - Migration has `max_loss_per_trade_sol` 0.0067, so its trades are about 0.022 SOL.
+   - Fresh has none, so risk-based sizing gives 0.04–0.17 SOL.
+   - Trades of at least 0.1 SOL in 7 days: 20, net −0.349, of which near-migration fresh trades: 14, −0.262, median loss −56.6 %.
+
+*Hypotheses (not established)*
+- **Random variation** around a negative average for fresh (−0.0092 per trade over the 14-day baseline). This fits best.
+- **Market activity:** median launches per hour seen by decisions were 1,432–1,464 on Friday and 1,099–1,242 on Saturday. SOL price is not known for these days.
+- **Late entries after a run-up:** median 5-minute move before entry +11.9 % Friday vs +54.9 % Saturday, but only 3–4 trades a day have that value.
+- **Weaker buying at entry:** median buyers/sellers 3.2 vs 2.0.
+- **Gap risk:** fast dumps (−65 % in 25 s, −86 % in 148 s) pass the stop between observations.
+
+*Anomalies to inspect (one position each)*
+- KUNGFU: last exit `take_profit_1` at +28 %, but net −8 %. An earlier partial exit is probably the cause.
+- 苦根: paper entry 35.9 % above the decision price.
+- TRUMP2: entry 5.1 % below the decision price.
+
+*Not changed:* thresholds, exits, sizing, strategy modes. Each candidate needs forward-test evidence or the operator's decision. A per-trade loss cap for fresh is a risk limit for the operator to set, not a fix made to improve past results.
+
 
 ### DATA GAPS
 
