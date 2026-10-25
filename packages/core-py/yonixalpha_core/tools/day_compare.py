@@ -70,6 +70,13 @@ WHERE pp.engine = ANY(:engines) AND pp.status = 'closed' AND pp.exit_at >= :sinc
 ORDER BY pp.exit_at LIMIT :limit
 """
 
+# every closed trade's net, for the best-trade share (independent of how many trades are listed)
+NETS_SQL = """
+SELECT pp.engine, coalesce(pp.execution_mode, 'PAPER') AS mode, pp.realized_pnl AS pnl
+FROM paper_positions pp
+WHERE pp.engine = ANY(:engines) AND pp.status = 'closed' AND pp.exit_at >= :since AND pp.exit_at < :until
+"""
+
 FUNNEL_SQL = """
 SELECT engine, decision, traded, count(*) AS n
 FROM opportunity_outcomes WHERE decided_at >= :since AND decided_at < :until AND engine = ANY(:engines)
@@ -188,8 +195,7 @@ def trade_row(r: Any, large: dict[str, list]) -> dict[str, Any]:
     }
 
 
-def concentration(trades: list[dict]) -> dict[str, Any]:
-    nets = [t["net_sol"] for t in trades if t["net_sol"] is not None]
+def concentration(nets: list[float]) -> dict[str, Any]:
     if not nets:
         return {}
     best = max(nets)
@@ -217,17 +223,19 @@ async def day(session, d: date, tz: ZoneInfo, engines: tuple[str, ...], limit: i
         if not has_large_table_data:
             large = {}  # not recorded that day (before 2026-10-24 21:27 UTC): unknown, not zero
     trades = [trade_row(r, large) for r in rows]
+    nets: dict[tuple[str, str], list[float]] = {}
+    for r in (await session.execute(text(NETS_SQL), p)).all():
+        if r.pnl is not None:
+            nets.setdefault((r.engine, r.mode), []).append(float(r.pnl))
     results = {}
     for e in engines:
         rep = await sp.report(session, since=since, until=until, engine=e, outcomes=False)
-        mine = [t for t in trades if t["engine"] == e]
         results[e] = {
             "modes": {m: {"overall": v.get("overall"), "by_exit_reason": v.get("by_exit_reason"),
                           "by_stage": v.get("by_stage"), "by_age": v.get("by_age"),
                           "by_entry_quality": v.get("by_entry_quality")}
                       for m, v in rep["trades_by_mode"].items()},
-            "concentration": {m: concentration([t for t in mine if t["mode"] == m]) for m in ("PAPER", "LIVE")
-                              if any(t["mode"] == m for t in mine)},
+            "concentration": {m: concentration(nets[(e, m)]) for m in ("PAPER", "LIVE") if (e, m) in nets},
             "decisions_by_target": rep["decisions_by_target"], "entries_by_mode": rep["entries_by_mode"],
             "failed_entries": rep.get("failed_entries"), "coverage": rep["coverage"],
         }
@@ -324,7 +332,7 @@ def render(r: dict[str, Any]) -> str:
             out.append(f"  {e:<17} " + "  ".join(f"{g['decision']}{'/traded' if g['traded'] else ''} {g['n']}" for g in rows[:8]))
         for g in d["top_refusals"][:8]:
             out.append(f"    refused {g['engine']:<17} {g['decision']:<10} n {g['count']:<5} {g['reason'][:70]}")
-        out.append(f"TRADES ({len(d['trades'])}{', truncated' if d['trades_truncated'] else ''}); prices in SOL per token")
+        out.append(f"TRADES ({len(d['trades'])}{', list limited by --trades' if d['trades_truncated'] else ''}); prices in SOL per token")
         for t in d["trades"]:
             out.append(f"  {t['mode']:<5} {t['stage']:<14} {str(t['symbol'] or '?')[:10]:<10} {t['mint']}  {t['strategy'] or '-'} model {t['model_version'] or '-'}")
             out.append(f"      decided {_t(t['decided_at'])}  entry {_t(t['entry_at'])} (delay {_v(t['entry_delay_s'], 1)} s) @ {t['entry_price']}"
@@ -401,7 +409,7 @@ async def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--date", action="append", help="YYYY-MM-DD, repeatable; default the last 3 days in --tz")
     ap.add_argument("--tz", default="UTC", help="IANA time zone for the day boundaries, e.g. UTC or Europe/London")
     ap.add_argument("--engine", choices=ENGINES, help="one strategy; default all Solana strategies")
-    ap.add_argument("--trades", type=int, default=60, help="at most this many trades listed per day")
+    ap.add_argument("--trades", type=int, default=60, help="at most this many trades listed per day (0: none, the summary only)")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
     tz = ZoneInfo(args.tz)
@@ -411,7 +419,7 @@ async def main(argv: list[str] | None = None) -> int:
     try:
         async with make_session_factory(engine)() as s:
             await s.execute(text("SET TRANSACTION READ ONLY"))
-            r = await build(s, dates, tz, (args.engine,) if args.engine else ENGINES, max(1, args.trades))
+            r = await build(s, dates, tz, (args.engine,) if args.engine else ENGINES, max(0, args.trades))
     finally:
         await engine.dispose()
     print(json.dumps(r, indent=1, default=str) if args.json else render(r))

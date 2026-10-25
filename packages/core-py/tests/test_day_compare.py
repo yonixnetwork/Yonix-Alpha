@@ -90,6 +90,10 @@ async def test_days_side_by_side_with_decision_context_concentration_and_changes
         assert fri["market"]["sol_usd_change_pct"] == -5.0 and fri["market"]["samples"] == 2
         assert fri["top_refusals"][0]["reason"] == "TOP HOLDER"
         assert any(x["what"] == "entry_intel.strategy_demoted" for x in r["changes"]["audit log"])
+        summary = await dc.build(s, [date(2026, 10, 23)], ZoneInfo("UTC"), ("solana_fresh",), 0)
+        assert summary["days"][0]["trades"] == [] and summary["days"][0]["trades_truncated"]  # --trades 0: summary only
+        assert summary["days"][0]["results"]["solana_fresh"]["modes"]["PAPER"]["overall"]["trades"] == 2
+        assert summary["days"][0]["results"]["solana_fresh"]["concentration"]["PAPER"]["best_trade"] == 0.2
         text = dc.render(r)
         assert "SIDE BY SIDE" in text and "BIGMINT" in text and "Nothing was written" in text
         assert "net without best" in text and "strategy_demoted" in text
