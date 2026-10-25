@@ -24,7 +24,7 @@ from yonixalpha_core.state_machine import CandidateState
 
 from app.entry import try_open_position
 from app.gate_manage import manage_gate_positions, track_outcomes
-from yonixalpha_core import opportunities
+from yonixalpha_core import market_samples, opportunities
 from yonixalpha_core.solana.followups import track_observation_followups
 from app.live_worker import live_worker_loop
 from app.manage import evaluate_open_position
@@ -174,6 +174,14 @@ async def _paper_trading_loop(
                 # most one Jupiter quote a minute); unknown stays unknown.
                 if jupiter is not None:
                     await sol_price.sol_usd(redis, jupiter, None, None, now)
+                # SOL/USD and stream activity every 5 min, for day-to-day comparisons (tools.day_compare);
+                # observation only, a failure is logged and changes nothing else
+                try:
+                    async with session_factory() as session:
+                        if await market_samples.record(session, redis, now):
+                            await session.commit()
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("market_samples.failed", error=f"{type(exc).__name__}: {exc}"[:300])
             except Exception as exc:  # noqa: BLE001
                 log.error("gate_loop.failed", error=str(exc))
                 await _record_system_event(session_factory, "gate_loop_failed", "error", {"error": str(exc)})

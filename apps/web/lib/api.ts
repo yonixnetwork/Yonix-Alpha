@@ -31,7 +31,8 @@ export function getRefreshToken(): string | null {
 }
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string, public requestId: string | null = null) {
+  /** `detail`: the API's error detail as sent (for example the failing checks of a refused LIVE toggle). */
+  constructor(public status: number, message: string, public requestId: string | null = null, public detail: unknown = undefined) {
     super(message);
   }
 }
@@ -116,7 +117,7 @@ export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
   });
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({}));
-    throw new ApiError(res.status, describeDetail(errBody.detail) ?? `Request failed (${res.status})`);
+    throw new ApiError(res.status, describeDetail(errBody.detail) ?? `Request failed (${res.status})`, null, errBody.detail);
   }
   announceRevision(res);
   return res.json() as Promise<T>;

@@ -81,6 +81,34 @@ So the daily sign mostly reflects whether a stop exit happened that day. It does
 
 **Not changed (each needs forward-test evidence first):** stop placement and gap handling; excluding 2–24 h momentum tokens; excluding entries with deterioration indicators; position size. Each group above has fewer than 20 trades or comes from a single period.
 
+### Friday 2026-10-23 vs the weekend (started 2026-10-25)
+
+**Did a code change cause it?** The server ran the same revision (#95 or earlier; deploys were not recorded before #96) from Friday until about 21:27 UTC on Saturday. Then #96–#100 were deployed (e0149d5). Every non-test change in that deploy was reviewed (`git diff ec79ecc e0149d5`):
+
+| Change | Can it change which tokens are traded, the size or the exits? |
+|---|---|
+| Paper cash written atomically (`adjust_cash`, #100) | Sizing reads the cash; the fix only stops lost updates. The amounts are the same. |
+| LIVE checks in `live_readiness` / the order worker (#97) | LIVE orders only; the gate, PAPER entries and exits are not touched. |
+| SOL price kept on ledger rows (`_regime`, #96) | Recording only, after the decision. |
+| Large-buy candidates at stream ingest; observation loop (#99) | Recording only. A failure is logged and never stops the scanner. |
+| Shadow scores for new decisions every 30 s (#98) | Writes `ml_shadow` only; shadow models are never loaded for decisions. |
+| Reports, API read endpoints, dashboard pages (#96–#101) | Read-only. |
+
+So a Saturday loss before 21:27 UTC cannot come from this deploy. After it, none of these changes alters a decision. What could have changed without a code change, and is now listed by `day_compare` CHANGES:
+- settings or strategy-mode edits;
+- an automatic entry-strategy demotion (`entry_intel.strategy_demoted`, PAPER → SHADOW, only on a 95 % interval below 0);
+- model versions;
+- deploys.
+
+**New tool: `tools.day_compare`.** It shows each day's results, the trades one by one with what the decision saw, the funnel, the market, data quality and every recorded change around the days. Days follow `--tz`.
+
+**Data gaps for these days:**
+- No SOL/USD history before 2026-10-25. Ledger rows only carry it from the Saturday deploy, and only when the cached price was older than the decision. Now recorded: `market_samples`, every 5 min (SOL/USD, launches and migrations per hour, active tokens, stream heartbeat).
+- Large buys before a decision exist only from about 21:27 UTC on 2026-10-24.
+- Service warnings are pruned after the retention days (default 3), so Friday's may be gone.
+- Scanner stage counters are kept 48 h (`momentum_pipeline`).
+
+
 ### DATA GAPS
 
 - **Daily momentum PAPER results for the last 7 days.** Which days were profitable, from how many trades, and whether a single trade carried a day: not in any output I have. Run `performance_report --engine solana_momentum`.
@@ -279,11 +307,13 @@ Decisions dropped before the ledger (no curve address, too young) appear only in
 | Stop policy | Every entry has a stop. |
 | Limits | Slippage and price-impact limits within the hard limits. |
 
-**Arming** needs your password (5 wrong attempts lock it for 15 min), the typed phrase `ENABLE LIVE`, a reason, and every check passing at that moment.
+**Switching LIVE on** (changed 2026-10-25, at your request): the **LIVE trading OFF / ON toggle** (Settings and Live Execution). ON opens a dialog that says real funds may be used. After you confirm, the server runs every check. If any check fails, LIVE stays OFF and the page lists each failing check with its reason and what to do. There is no password and no typed phrase any more; a logged-in dashboard session plus the dialog is enough, so keep the dashboard login safe. OFF is immediate.
+
+While the `.env` ceiling is closed, four checks also fail because of it: signer, RPC, network and balance. The order worker does not start the live signer, read the wallet or check the network until the ceiling is open. Those checks say so and are re-run once it is open; none was removed.
 
 Each attempt is audited: who, when, from, to, reason, and the failing checks if refused.
 
-The PAPER / MANUAL buttons can never arm LIVE.
+The PAPER / MANUAL buttons can never switch LIVE on.
 
 ### Enforcement
 
@@ -307,8 +337,8 @@ Real-money execution stayed disabled in this work.
 3. In Risk settings, set `max_loss_per_trade_sol` above 0 for each strategy that may trade live.
 4. Set that strategy to MANUAL (approve each entry) or AUTO.
 5. Fund the wallet above reserve + size + costs. It was 0.103 SOL on 2026-10-22, with a 0.05 SOL reserve.
-6. Open Settings → Operating mode and LIVE control. Every check must pass; then use **Arm LIVE** with your password, `ENABLE LIVE` and a reason.
-7. To stop: **Disarm LIVE** (immediate), or the kill switch.
+6. Open Settings → LIVE trading and click **ON**, then confirm. The server switches only if every check passes; otherwise it lists what to fix.
+7. To stop: click **OFF** (immediate), or use the kill switch.
 
 ## Phases 6–7: ML engine and monitoring
 

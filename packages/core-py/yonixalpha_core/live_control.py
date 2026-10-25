@@ -61,7 +61,6 @@ CONTROL_KEY = "yx:live:control"
 CONTROL_TTL = 60
 CONTROL_SECONDS = 15
 LAST_CHANGE_KEY = "live_control"  # platform setting: the last arm / disarm
-CONFIRM_PHRASE = "ENABLE LIVE"
 MAINNET_GENESIS = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
 EXPECTED_PROGRAMS = {"PUMP": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
                      "PUMP_AMM": "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
@@ -72,6 +71,8 @@ WORKER_MAX_AGE = 60  # the worker republishes every loop; its key expires after 
 MAX_RATE_LIMITED_SHARE = 0.5
 READINESS = ("ceiling", "kill_switch", "wallet", "signer", "rpc", "network", "program_addresses", "balance",
              "duplicate_protection", "exposure", "scanner", "risk_engine", "critical_faults")
+# checks the order worker can only pass once the ceiling is open (it publishes "disabled" while it is closed)
+CEILING_DEPENDENT = ("signer", "rpc", "network", "balance")
 ARMING = ("entry_switches", "strategy_selected", "configuration", "sizing", "stop_policy", "slippage_limits")
 PASS, FAIL = "PASS", "FAIL"
 LIVE_ENGINES = live_activation.ENGINES
@@ -254,6 +255,13 @@ async def evaluate(session: AsyncSession, redis: Any, settings: Any, now: dateti
                      f"entry slippage limit {live.entry_slippage_pct} %, max entry impact {g.max_entry_impact_bps} bps, "
                      f"max slippage {g.max_slippage_bps} bps", "Lower the limits on Live Execution / Risk settings.", "arming"))
 
+    if not act["locks_open"]:
+        # While the ceiling is closed the order worker does not start the signer, read the wallet or check the
+        # network (services/paper-trading live_worker): those checks fail because of the ceiling. They stay checks.
+        for c in checks:
+            if c.status == FAIL and c.code in CEILING_DEPENDENT:
+                c.detail += " (because the server ceiling is closed: the order worker starts the live signer only after it is opened)"
+                c.action = "Open the server ceiling first (see the first check); this check is then re-run. " + c.action
     failed = [c for c in checks if c.status == FAIL]
     readiness_ok = not [c for c in failed if c.kind == "readiness"]
     return {"checked_at": now.isoformat(), "checks": [asdict(c) for c in checks], "readiness_ok": readiness_ok,
@@ -289,10 +297,11 @@ async def overview(session: AsyncSession, redis: Any, settings: Any, now: dateti
     enforced = await _json(redis, CONTROL_KEY)
     return {**ev, **state(ev, entries_possible), "last_change": dict(last.value) if last else None,
             "worker_enforcement": enforced and {k: enforced.get(k) for k in ("ok", "at", "failed")},
-            "confirm_phrase": CONFIRM_PHRASE,
+            "toggle": {"on": ev["global_mode"] == GlobalMode.LIVE.value},
             "how_it_works": [
-                "The server ceiling (.env) is set once; while it is closed LIVE cannot be armed.",
-                "Arming LIVE needs your password, the phrase ENABLE LIVE, a reason and every check passing.",
+                "The server ceiling (.env) is set once; while it is closed LIVE cannot be switched on.",
+                "Switching LIVE on: confirm in the dialog; the server then runs every check below and switches only if all "
+                "pass. A refusal keeps LIVE off and lists each failing check with what to do.",
                 "The order worker re-runs the readiness checks every 15 s; a failing check stops new live orders.",
                 "Disarming returns to PAPER at once: queued live buys are cancelled, exits keep running, nothing is closed.",
                 "No ML result, model promotion, paper profit or page refresh can arm LIVE."]}
