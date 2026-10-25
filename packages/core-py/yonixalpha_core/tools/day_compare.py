@@ -54,6 +54,7 @@ from yonixalpha_core.strategies import momentum_v2
 
 ENGINES = forward_test.ENGINES
 SMALL = 20
+MAX_TRADES = 5000  # closed trades read per day (a day has had at most a few dozen)
 
 TRADES_SQL = """
 SELECT pp.id, coalesce(pp.execution_mode, 'PAPER') AS mode, pp.engine, pp.strategy, pp.model_version, pp.symbol,
@@ -215,7 +216,9 @@ def concentration(nets: list[float]) -> dict[str, Any]:
 async def day(session, d: date, tz: ZoneInfo, engines: tuple[str, ...], limit: int) -> dict[str, Any]:
     since, until = day_window(d, tz)
     p = {"since": since, "until": until, "engines": list(engines)}
-    rows = (await session.execute(text(TRADES_SQL), {**p, "limit": limit})).all()
+    # every trade of the day for the medians; only the first `limit` are listed (2026-10-25: with --trades 0 the
+    # medians were computed from the listed trades only, so they were all empty)
+    rows = (await session.execute(text(TRADES_SQL), {**p, "limit": MAX_TRADES})).all()
     mints = sorted({r.mint for r in rows if r.decided_at})
     large: dict[str, list] = {}
     if mints:
@@ -228,7 +231,8 @@ async def day(session, d: date, tz: ZoneInfo, engines: tuple[str, ...], limit: i
             "SELECT EXISTS (SELECT 1 FROM large_trade_events WHERE at >= :since AND at < :until)"), p)).scalar()
         if not has_large_table_data:
             large = {}  # not recorded that day (before 2026-10-24 21:27 UTC): unknown, not zero
-    trades = [trade_row(r, large) for r in rows]
+    every = [trade_row(r, large) for r in rows]
+    trades = every[:limit]
     nets: dict[tuple[str, str], list[float]] = {}
     for r in (await session.execute(text(NETS_SQL), p)).all():
         if r.pnl is not None:
@@ -256,21 +260,21 @@ async def day(session, d: date, tz: ZoneInfo, engines: tuple[str, ...], limit: i
                for r in (await session.execute(text(QUALITY_SQL), p)).all()}
     events = [{"service": r.service, "severity": r.severity, "event": r.event_type, "n": int(r.n)}
               for r in (await session.execute(text(EVENTS_SQL), p)).all()]
-    entries = [t for t in trades if t["entry_delay_s"] is not None]
+    entries = [t for t in every if t["entry_delay_s"] is not None]
     return {
         "date": d.isoformat(), "since_utc": since.isoformat(), "until_utc": until.isoformat(),
         "partial": until > datetime.now(timezone.utc), "results": results, "trades": trades,
-        "trades_truncated": len(rows) >= limit, "funnel": funnel,
+        "trades_truncated": len(every) > limit, "trades_total": len(every), "funnel": funnel,
         "top_refusals": sorted(refusals, key=lambda g: -g["count"])[:12], "data_quality": quality,
         "service_events": events, "market": await market_samples.window(session, since, until),
         "medians": {"entry_delay_s": _med([t["entry_delay_s"] for t in entries]),
-                    "fill_latency_s": _med([t["fill_latency_s"] for t in trades]),
-                    "fill_move_pct": _med([t["fill_move_pct"] for t in trades]),
-                    "return_5m_before_pct": _med([t["return_5m_before_pct"] for t in trades]),
-                    "liquidity_sol": _med([t["liquidity_sol"] for t in trades]),
-                    "buy_sell_ratio": _med([t["buy_sell_ratio"] for t in trades]),
-                    "slippage_estimate_pct": _med([t["slippage_estimate_pct"] for t in trades]),
-                    "age_s": _med([_num(t["age_s"]) for t in trades])},
+                    "fill_latency_s": _med([t["fill_latency_s"] for t in every]),
+                    "fill_move_pct": _med([t["fill_move_pct"] for t in every]),
+                    "return_5m_before_pct": _med([t["return_5m_before_pct"] for t in every]),
+                    "liquidity_sol": _med([t["liquidity_sol"] for t in every]),
+                    "buy_sell_ratio": _med([t["buy_sell_ratio"] for t in every]),
+                    "slippage_estimate_pct": _med([t["slippage_estimate_pct"] for t in every]),
+                    "age_s": _med([_num(t["age_s"]) for t in every])},
     }
 
 
@@ -340,7 +344,8 @@ def render(r: dict[str, Any]) -> str:
             out.append(f"  {e:<17} " + "  ".join(f"{g['decision']}{'/traded' if g['traded'] else ''} {g['n']}" for g in rows[:8]))
         for g in d["top_refusals"][:8]:
             out.append(f"    refused {g['engine']:<17} {g['decision']:<10} n {g['count']:<5} {g['reason'][:70]}")
-        out.append(f"TRADES ({len(d['trades'])}{', list limited by --trades' if d['trades_truncated'] else ''}); prices in SOL per token")
+        out.append(f"TRADES ({len(d['trades'])} of {d['trades_total']} listed"
+                   f"{', the rest left out by --trades' if d['trades_truncated'] else ''}; medians use all); prices in SOL per token")
         for t in d["trades"]:
             out.append(f"  {t['mode']:<5} {t['stage']:<14} {str(t['symbol'] or '?')[:10]:<10} {t['mint']}  {t['strategy'] or '-'} model {t['model_version'] or '-'}")
             out.append(f"      decided {_t(t['decided_at'])}  order {_t(t['entry_at'])}  simulated fill after {t['fill_latency_s'] if t['fill_latency_s'] is not None else '-'} s, "
