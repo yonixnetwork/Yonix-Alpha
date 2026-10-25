@@ -153,9 +153,15 @@ async def configuration(session: AsyncSession) -> dict[str, Any]:
             "risk_settings_versions": risk, "settings": settings, "models_active_or_challenger": models}
 
 
+def _models(conf: dict[str, Any], status: str) -> dict[str, str]:
+    return {k: v for k, v in (conf.get("models_active_or_challenger") or {}).items() if str(v).endswith(" " + status)}
+
+
 def fingerprint(conf: dict[str, Any]) -> dict[str, str]:
+    """What decides trades. Only ACTIVE models are loaded for decisions (ml.registry.get_active_model), so a new
+    challenger from routine retraining is not a configuration change (2026-10-25: it was flagged as one)."""
     out = {"global_mode": _h(conf.get("global_mode")), "risk_settings": _h(conf.get("risk_settings_versions")),
-           "models": _h(conf.get("models_active_or_challenger"))}
+           "models": _h(_models(conf, "active"))}
     for name, s in (conf.get("strategies") or {}).items():
         out[f"strategy:{name}"] = _h(s)
     for k, v in (conf.get("settings") or {}).items():
@@ -285,8 +291,11 @@ async def report(session: AsyncSession, redis: Any = None, now: datetime | None 
     fwd, base = await _pnls(session, started, until), await _pnls(session, base_since, started)
     conf = await configuration(session)
     fp_now = fingerprint(conf)
-    changed = sorted(k for k in set(fp_now) | set(period.get("fingerprint") or {})
-                     if fp_now.get(k) != (period.get("fingerprint") or {}).get(k))
+    # recomputed from the configuration stored at the start, so every period is compared by the same rule
+    fp_start = fingerprint(period["configuration"]) if period.get("configuration") else (period.get("fingerprint") or {})
+    changed = sorted(k for k in set(fp_now) | set(fp_start) if fp_now.get(k) != fp_start.get(k))
+    challengers = {"at_start": _models(period.get("configuration") or {}, "challenger"),
+                   "now": _models(conf, "challenger")}
     strategies: dict[str, Any] = {}
     roll_since = max(started, until - timedelta(days=7))
     for engine in ENGINES:
@@ -319,6 +328,7 @@ async def report(session: AsyncSession, redis: Any = None, now: datetime | None 
                                                 "data_sources", "configuration")},
         "rules": rules, "elapsed_days": round(elapsed, 2), "baseline_window": [base_since.isoformat(), started.isoformat()],
         "configuration_changed": changed,
+        "challenger_models": {**challengers, "note": "challengers are never used for decisions; listed, not a change"},
         "configuration_note": ("unchanged since the start" if not changed else
                                "CHANGED since the start: " + ", ".join(changed)
                                + ". Results after the change mix two configurations; start a new period to judge "
