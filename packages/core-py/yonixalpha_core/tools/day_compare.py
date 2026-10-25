@@ -62,7 +62,8 @@ SELECT pp.id, coalesce(pp.execution_mode, 'PAPER') AS mode, pp.engine, pp.strate
        pp.realized_pnl AS pnl, pp.realized_pnl_pct AS pnl_pct,
        pp.plan->>'stop_distance_pct' AS stop_pct, pp.plan->'position_size'->>'value' AS size,
        pp.plan->>'entry_price' AS decision_price, pp.plan->'venue'->>'kind' AS venue,
-       pp.plan->>'lifecycle' AS lifecycle, o.decided_at, o.snapshot, o.regime
+       pp.plan->>'lifecycle' AS lifecycle, pp.plan->'entry_delay' AS fill_delay, pp.plan->'exit_steps' AS exit_steps,
+       o.decided_at, o.snapshot, o.regime
 FROM paper_positions pp
 LEFT JOIN LATERAL (SELECT decided_at, snapshot, regime FROM opportunity_outcomes oo
                    WHERE oo.position_id = pp.id ORDER BY oo.decided_at LIMIT 1) o ON true
@@ -173,7 +174,12 @@ def trade_row(r: Any, large: dict[str, list]) -> dict[str, Any]:
         "strategy": r.strategy, "model_version": r.model_version,
         "decided_at": r.decided_at.isoformat() if r.decided_at else None,
         "entry_at": r.entry_at.isoformat(), "exit_at": r.exit_at.isoformat(),
+        # entry_at is the order time; the simulated fill lands later (paper_execution.settle_entry_delay)
         "entry_delay_s": round((r.entry_at - r.decided_at).total_seconds(), 1) if r.decided_at else None,
+        "fill_latency_s": _r((r.fill_delay or {}).get("latency_s"), 1),
+        "fill_move_pct": _r((r.fill_delay or {}).get("price_change_pct") or (r.fill_delay or {}).get("charged_live_drift_pct"), 2),
+        "fill_measured": (r.fill_delay or {}).get("measured"),
+        "exit_path": [x.get("reason") for x in (r.exit_steps or [])] or None,
         "hold_s": round((r.exit_at - r.entry_at).total_seconds(), 1),
         "entry_price": _num(r.entry_price), "exit_price": _num(r.exit_price), "size_sol": _r(r.size, 6),
         "cost_sol": _r(r.cost, 6), "fees_sol": _r(r.fees, 6), "net_sol": _r(r.pnl, 6), "net_pct": sp._pct(r.pnl_pct),
@@ -258,6 +264,8 @@ async def day(session, d: date, tz: ZoneInfo, engines: tuple[str, ...], limit: i
         "top_refusals": sorted(refusals, key=lambda g: -g["count"])[:12], "data_quality": quality,
         "service_events": events, "market": await market_samples.window(session, since, until),
         "medians": {"entry_delay_s": _med([t["entry_delay_s"] for t in entries]),
+                    "fill_latency_s": _med([t["fill_latency_s"] for t in trades]),
+                    "fill_move_pct": _med([t["fill_move_pct"] for t in trades]),
                     "return_5m_before_pct": _med([t["return_5m_before_pct"] for t in trades]),
                     "liquidity_sol": _med([t["liquidity_sol"] for t in trades]),
                     "buy_sell_ratio": _med([t["buy_sell_ratio"] for t in trades]),
@@ -335,8 +343,11 @@ def render(r: dict[str, Any]) -> str:
         out.append(f"TRADES ({len(d['trades'])}{', list limited by --trades' if d['trades_truncated'] else ''}); prices in SOL per token")
         for t in d["trades"]:
             out.append(f"  {t['mode']:<5} {t['stage']:<14} {str(t['symbol'] or '?')[:10]:<10} {t['mint']}  {t['strategy'] or '-'} model {t['model_version'] or '-'}")
-            out.append(f"      decided {_t(t['decided_at'])}  entry {_t(t['entry_at'])} (delay {_v(t['entry_delay_s'], 1)} s) @ {t['entry_price']}"
-                       f"  exit {_t(t['exit_at'])} @ {t['exit_price']}  hold {t['hold_s']} s  {t['exit_reason']}")
+            out.append(f"      decided {_t(t['decided_at'])}  order {_t(t['entry_at'])}  simulated fill after {t['fill_latency_s'] if t['fill_latency_s'] is not None else '-'} s, "
+                       f"price moved {_v(t['fill_move_pct'], 2)}%{'' if t['fill_measured'] in (None, True) else ' (not measured)'} "
+                       f"-> entry @ {t['entry_price']}"
+                       f"  exit {_t(t['exit_at'])} @ {t['exit_price']}  hold {t['hold_s']} s  {t['exit_reason']}"
+                       + (f" (exit path: {' > '.join(t['exit_path'])})" if t['exit_path'] else " (exit path not recorded before 2026-10-25)"))
             out.append(f"      size {_v(t['size_sol'], 4)}  fees {_v(t['fees_sol'], 5)}  NET {_v(t['net_sol'], 5)} ({_v(t['net_pct'], 1)}%)"
                        f"  planned stop {_v(t['planned_stop_pct'], 3)}  max up {_v(t['max_up_pct'], 1)}%  max down {_v(t['max_down_pct'], 1)}%"
                        f"  slippage est {_v(t['slippage_estimate_pct'], 2)}%")
@@ -376,7 +387,8 @@ def render(r: dict[str, Any]) -> str:
                                           for m, c in x["concentration"].items() if m == "PAPER" and c), default=None)),
             ("signals evaluated", lambda d: sum(v["signals"] for x in d["results"].values() for v in x["decisions_by_target"].values())),
             ("PAPER entries", lambda d: sum((x["entries_by_mode"].get("PAPER") or {}).get("entries", 0) for x in d["results"].values())),
-            ("median entry delay s", lambda d: d["medians"]["entry_delay_s"]),
+            ("median fill latency s", lambda d: d["medians"]["fill_latency_s"]),
+            ("median move during fill %", lambda d: d["medians"]["fill_move_pct"]),
             ("median 5m move before %", lambda d: d["medians"]["return_5m_before_pct"]),
             ("median liquidity SOL", lambda d: d["medians"]["liquidity_sol"]),
             ("median buy/sell ratio", lambda d: d["medians"]["buy_sell_ratio"]),

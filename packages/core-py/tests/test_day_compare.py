@@ -62,6 +62,8 @@ def test_day_boundaries_follow_the_time_zone():
 async def test_days_side_by_side_with_decision_context_concentration_and_changes(sf):
     async with sf() as s:
         big = closed("0.2", FRI, "take_profit_3", mint="BIGMINT")
+        big.plan = {**big.plan, "entry_delay": {"latency_s": 2.5, "price_change_pct": "3.1", "measured": True},
+                    "exit_steps": [{"reason": "exit_intel_reduce"}, {"reason": "take_profit_3"}]}
         s.add_all([big, closed("-0.01", FRI + timedelta(hours=1), "stop_loss"),
                    closed("-0.05", FRI + timedelta(days=1), "stop_loss")])
         await s.flush()
@@ -85,6 +87,8 @@ async def test_days_side_by_side_with_decision_context_concentration_and_changes
         assert t["entry_delay_s"] == 4.0 and t["return_5m_before_pct"] == 20.0 and t["liquidity_sol"] == 12.5
         assert t["max_up_pct"] == 27.5 and t["slippage_estimate_pct"] == 2.0 and t["stage"] == "FRESH"
         assert t["large_buys_5m_before"] is None  # no large-buy data that day: unknown, never 0
+        assert t["fill_latency_s"] == 2.5 and t["fill_move_pct"] == 3.1  # the simulated fill, after the order
+        assert t["exit_path"] == ["exit_intel_reduce", "take_profit_3"]
         c = fri["results"]["solana_fresh"]["concentration"]["PAPER"]
         assert c["best_trade"] == 0.2 and c["net_without_best"] == -0.01 and c["best_share_of_wins_pct"] == 100.0
         assert fri["market"]["sol_usd_change_pct"] == -5.0 and fri["market"]["samples"] == 2
@@ -97,6 +101,7 @@ async def test_days_side_by_side_with_decision_context_concentration_and_changes
         text = dc.render(r)
         assert "SIDE BY SIDE" in text and "BIGMINT" in text and "Nothing was written" in text
         assert "net without best" in text and "strategy_demoted" in text
+        assert "exit path: exit_intel_reduce > take_profit_3" in text and "simulated fill after 2.5 s" in text
 
 
 @pytest.mark.asyncio

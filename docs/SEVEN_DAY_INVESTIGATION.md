@@ -123,7 +123,8 @@ So a Saturday loss before 21:27 UTC cannot come from this deploy. After it, none
    - fresh: 2/7 wins, −0.0494. Stops at −30.4 % (ONION, planned 10 %), −30.4 % (TAHOE), −25.5 % (Nuannuan), and a −18.2 % exit on APOGEE, whose price fell 86 % within 148 s.
    - migration: 3/12 wins, −0.0301. Eight stop-losses (−0.0341), including $MRLY at −66.4 % in 25 s against a 10 % planned stop. The other seven stops lost about as planned (average −14.5 %).
 6. **Only the price after entry differs.**
-   - Same between the days: entry delay (0 s), slippage estimate (median 1.31 %), liquidity (about 57 SOL), size (median 0.0223), fees (3.4–4.3 %).
+   - Same between the days: slippage estimate (median 1.31 %), liquidity (about 57 SOL), size (median 0.0223), fees (3.4–4.3 %).
+   - *Correction (2026-10-25):* the "entry delay 0 s" printed by the first `day_compare` measured only the order time. The simulated fill lands 2.5–10 s later (`paper_execution.settle_entry_delay`). `day_compare` now prints that latency and the price move during it, for both days.
    - Different: maximum rise after entry, median +26.5 % Friday vs +10.9 % Saturday and +10.6 % Sunday; maximum fall −8.7 % vs −21.8 % and −15.8 %.
 7. **Friday is the only positive day of the last six:** 10-20 −0.0945, 10-21 −0.1895, 10-22 −0.0591, 10-23 +0.1837, 10-24 −0.0795, 10-25 (partial) −0.0871. There was no profitable period that then got worse.
 8. **Size spreads the results.**
@@ -138,10 +139,20 @@ So a Saturday loss before 21:27 UTC cannot come from this deploy. After it, none
 - **Weaker buying at entry:** median buyers/sellers 3.2 vs 2.0.
 - **Gap risk:** fast dumps (−65 % in 25 s, −86 % in 148 s) pass the stop between observations.
 
-*Anomalies to inspect (one position each)*
-- KUNGFU: last exit `take_profit_1` at +28 %, but net −8 %. An earlier partial exit is probably the cause.
-- 苦根: paper entry 35.9 % above the decision price.
-- TRUMP2: entry 5.1 % below the decision price.
+*Anomalies, inspected with `execution_funnel --mint`*
+- **KUNGFU:** four exit-intelligence reductions (23:38–00:04, sellers outnumbering buyers, volume collapsing) sold most of the position at a loss. Only the small remainder reached take-profit 1. `exit_reason` keeps only the last step, so the loss was reported under `take_profit_1`.
+  - Fixed: every exit step is now recorded on the position (`plan.exit_steps`, paper and LIVE).
+  - `day_compare` prints the whole exit path.
+- **苦根:** the decision fill was at 1.691e-7. The simulated fill 10 s later was 34 % higher, at 2.269e-7, measured from pool trades.
+  - Take-profit and stop levels stay where the decision put them (paper and LIVE alike). The higher fill was already above TP1 and TP2, so both fired at once, and TP3 then closed the trade at −2.1 %.
+  - This is an exit-design question, not a simulation error: levels set from the decision price, not the fill. Not changed.
+- **TRUMP2:** the price fell 6.4 % during the 4 s fill, so the fill was cheaper. The fill model works both ways, as intended.
+
+*Sunday 2026-10-25 (to 11:35 UTC):* 14 trades, −0.0871.
+- Fresh: 2 stop exits, −0.052; eToro −20.1 % within 11 s.
+- Momentum: SHARD −0.023.
+- Migration: 4/11 wins, −0.012.
+- Recorded market samples: SOL/USD 100.84 → 101.19 (+0.35 %); median launches per hour 944–1,036, lower again than Friday.
 
 *Not changed:* thresholds, exits, sizing, strategy modes. Each candidate needs forward-test evidence or the operator's decision. A per-trade loss cap for fresh is a risk limit for the operator to set, not a fix made to improve past results.
 
