@@ -17,7 +17,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_username, get_db, get_redis, get_settings
-from app.api.util import jsonable, require_password
+from app.api.util import jsonable
 from app.schemas.common import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, Page
 from app.schemas.control import (
     AssessmentDetail,
@@ -242,8 +242,8 @@ async def put_global_mode(body: ModeUpdate, request: Request, db: AsyncSession =
         # confirmation, a reason and every mandatory check on the server.
         await _audit(db, username, request, "global_mode.refused", {"to": "LIVE", "codes": ["USE_LIVE_CONTROL"]})
         await db.commit()
-        raise HTTPException(409, {"message": "LIVE is armed only through the live control (POST /api/control/live-control/arm: "
-                                             "password, confirmation, reason and the mandatory checks)",
+        raise HTTPException(409, {"message": "LIVE is switched on only with the LIVE toggle (POST /api/control/live-control/arm: "
+                                             "confirmation and the mandatory checks)",
                                   "blockers": [{"code": "USE_LIVE_CONTROL"}]})
     previous = (await store.load_global_mode(db)).value
     await store.set_global_mode(db, mode, await _user_id(db, username))
@@ -266,16 +266,15 @@ async def get_live_control(db: AsyncSession = Depends(get_db), redis: Redis = De
 @router.post("/live-control/arm")
 async def arm_live(body: dict, request: Request, db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
                    settings: Settings = Depends(get_settings), username: str = Depends(get_current_username)) -> dict:
-    """Arms LIVE: the server ceiling must be open, the operator re-enters the
-    password, types the confirmation phrase and gives a reason, and every
-    mandatory check must pass now. Audited whether it succeeds or not."""
-    reason = " ".join(str(body.get("reason") or "").split())[:300]
-    if str(body.get("confirm") or "") != live_control.CONFIRM_PHRASE:
-        raise HTTPException(422, f"type {live_control.CONFIRM_PHRASE!r} to confirm")
-    if len(reason) < 5:
-        raise HTTPException(422, "give a reason (at least 5 characters)")
-    await require_password(db, redis, username, str(body.get("password") or ""), request, "live_control",
-                           {"action": "arm"})
+    """The dashboard's LIVE toggle switched ON (2026-10-25: a toggle with a
+    confirmation dialog replaced the password + typed phrase). `confirm` must be
+    true: the operator accepted the real-funds dialog. The server ceiling must
+    be open and every mandatory check must pass now; otherwise LIVE stays off
+    and the 409 lists each failing check with its reason and what to do.
+    Audited whether it succeeds or not. The browser decides nothing here."""
+    reason = " ".join(str(body.get("reason") or "").split())[:300] or "switched on with the dashboard toggle"
+    if body.get("confirm") is not True:
+        raise HTTPException(422, "confirm in the dialog that real funds may be used (confirm: true)")
     ev = await live_control.evaluate(db, redis, settings)
     previous = ev["global_mode"]
     if not ev["arming_ok"]:
@@ -283,7 +282,8 @@ async def arm_live(body: dict, request: Request, db: AsyncSession = Depends(get_
         await _audit(db, username, request, "live_control.arm_refused",
                      {"reason": reason, "failed": [c["code"] for c in failed], "from": previous})
         await db.commit()
-        raise HTTPException(409, {"message": "LIVE not armed: " + "; ".join(f"{c['label']}: {c['detail']}" for c in failed),
+        raise HTTPException(409, {"message": f"LIVE stays OFF: {len(failed)} check(s) failed: "
+                                             + "; ".join(f"{c['label']}: {c['detail']}" for c in failed),
                                   "failed": jsonable(failed)})
     await store.set_global_mode(db, GlobalMode.LIVE, await _user_id(db, username))
     await _refuse_on_config_errors(db, settings, None, request=request, username=username)

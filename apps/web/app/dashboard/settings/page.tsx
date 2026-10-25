@@ -38,7 +38,7 @@ export default function SettingsPage() {
             </div>
             <div className="notice">
               The environment flags in the server&apos;s .env are a ceiling, set once: while they are closed LIVE cannot be armed.
-              With the ceiling open, LIVE is armed and disarmed here, in the LIVE control below. Live execution covers Pump.fun tokens (fresh and PumpSwap-migrated) only; BSC and Robinhood Chain
+              With the ceiling open, LIVE is switched on and off here, with the LIVE toggle below. Live execution covers Pump.fun tokens (fresh and PumpSwap-migrated) only; BSC and Robinhood Chain
               are paper only. See Live Execution. To stop everything, use the kill switch or set strategies to OFF.
             </div>
             <LiveControlPanel key={checked} />

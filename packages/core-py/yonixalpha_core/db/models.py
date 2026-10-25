@@ -1838,3 +1838,20 @@ class LargeTradeEvent(Base):
     status: Mapped[str] = mapped_column(String(12), nullable=False, default="TRACKING")
     definition_version: Mapped[str] = mapped_column(String(32), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class MarketSample(Base):
+    """The market around the Solana strategies, sampled every few minutes
+    (yonixalpha_core.market_samples): SOL/USD and what the Pump.fun stream saw.
+    Added 2026-10-25 because day-to-day comparisons had no SOL price history
+    and no market activity outside the decisions themselves."""
+
+    __tablename__ = "market_samples"
+
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    sol_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
+    sol_usd_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    launches_last_hour: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    migrations_last_hour: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    active_tokens_5m: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    stream_heartbeat_age_s: Mapped[int | None] = mapped_column(Integer, nullable=True)
