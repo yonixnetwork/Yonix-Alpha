@@ -523,3 +523,48 @@ Known limits, stated rather than hidden:
 - survivorship of tokens the stream saw.
 
 Optional external sources (X narrative, enrichment) are off by default and fail gracefully. The on-chain stream and the ledger do not depend on them.
+
+## Full-history audit (2026-10-27)
+
+### New read-only tools
+- **`tools.history_audit`:** every position and ledger decision from the first record on, PAPER and LIVE apart. It shows:
+  - the data range of every table and the retention setting;
+  - position status counts;
+  - full metrics;
+  - daily, hourly and weekly results, and results per strategy version;
+  - token concentration;
+  - traded vs refused decisions with their measured outcome.
+- **`tools.ml_audit`:**
+  - the registry: has any version ever been ACTIVE;
+  - usage: could a model have influenced a decision;
+  - prospective predictions vs outcomes: calibration, AUC and Brier score for binary targets; return quintiles against the baseline gate and a naive take-everything baseline;
+  - leakage checks.
+
+  A verdict is UNKNOWN below 100 prospective predictions with outcomes.
+
+### ML's role, verified in the code
+- A gate model is loaded for a decision only when an operator promoted it to ACTIVE (`safety.pipeline.champion_prediction`). Promotion is an explicit, audited call (`ml.registry.promote_challenger`).
+- Even then the model can only add caution: `ML_BELOW_MIN` → WAIT, and only if `min_ml_confidence` is set. It can never lift a risk block.
+- `shadow_*` models are never loaded for decisions.
+- `ml.governance` contribution defaults to SHADOW 0 %; LIVE_CONTRIBUTOR is locked.
+- So ML is observation-first by construction, and a model influences trading only after the operator's approval.
+- The 2026-10-25 server output listed every gate model version as `superseded` or `challenger` and every position with model `-`, consistent with no ML influence on any trade in that window. `ml_audit --section usage` confirms it for the whole history.
+
+### Defect fixed
+- `opportunities.gate_snapshot` read `ml.score`, but `MLInput` carries the champion's score as `confidence`.
+- With a promoted champion, every gate ledger row would have raised `AttributeError` and been dropped silently (the call sits in a try/except).
+- It never fired because no champion was active. Fixed and tested.
+
+### Recording added
+The gate's proposed plan is now stored in the ledger snapshot (`plan`) for every decision, traded or not:
+- entry price, stop, stop distance, take-profits;
+- size, maximum loss;
+- entry / exit cost estimates, fixed costs;
+- planned loss at the stop, binding cap.
+
+It also stores the champion score when there is one (`ml_gate`). The risk assessment that held the plan is pruned after the retention days.
+
+### Data limits
+- `data_retention` is 3 days. `risk_assessments`, `trading_candidates` and `trade_timeline_events` are pruned. A full pipeline trace (candidate → every gate evaluation → events) exists only for the last 3 days.
+- Older trades keep their position row and their ledger snapshot: the decision-time features and the outcome.
+- Partial exits are recorded on the position from 2026-10-25 (`plan.exit_steps`).

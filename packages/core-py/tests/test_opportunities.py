@@ -120,6 +120,19 @@ def test_gate_snapshot_records_what_the_decision_saw():
     assert s["price_sol"] and s["market_cap_sol"] and s["liquidity_sol"] == "30" and s["buyers"] == 25 and s["sellers"] == 8
     assert s["buy_sell_ratio"] == "3.12" and s["deterioration_indicators"] == ["buyer_stall"]
     assert s["data_errors"] == ["holders rpc: timeout"] and s["signal_qualified"] is True
+    # the plan the gate proposed is kept with the decision (the risk assessment is pruned after retention)
+    assert s["plan"]["stop_distance_pct"] and s["plan"]["position_size"] and s["plan"]["take_profits"]
+    assert s["ml_gate"] is None and s["ml_score"] is None
+
+
+def test_gate_snapshot_with_a_champion_score_does_not_fail():
+    # MLInput holds the champion's score as `confidence`; the snapshot used `.score` and raised (2026-10-27)
+    from yonixalpha_core.safety.models import MLInput
+
+    inp = healthy()
+    inp.ml = MLInput("gate_solana_fresh", 7, 0.61)
+    s = opp.gate_snapshot(inp, {}, assess(inp, SafetySettings()), None)
+    assert s["ml_score"] == 0.61 and s["ml_gate"] == {"model": "gate_solana_fresh", "version": 7, "score": 0.61}
 
 
 async def _closed_trade(db, *, pnl: str, high: str, low: str, snapshot: dict, entry_diag: dict | None = None,

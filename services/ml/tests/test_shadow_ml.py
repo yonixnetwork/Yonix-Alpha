@@ -150,3 +150,9 @@ async def test_new_decisions_are_scored_within_minutes_so_the_prediction_is_pros
     assert rows["fresh"].ml_shadow is not None and rows["old"].ml_shadow is None
     scored_at = datetime.fromisoformat(rows["fresh"].ml_shadow["scored_at"])
     assert prediction_audit.classify(rows["fresh"].decided_at, scored_at, trained) == "PROSPECTIVE"
+
+
+def test_the_ml_audit_reads_the_same_label_for_every_shadow_target():
+    from yonixalpha_core.tools.ml_audit import BINARY_LABELS
+
+    assert BINARY_LABELS == shadow_ml.BINARY_TARGETS

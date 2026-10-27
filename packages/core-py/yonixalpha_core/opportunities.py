@@ -100,13 +100,19 @@ def gate_snapshot(inp: Any, evidence: dict[str, Any], a: Any, decision_ctx: dict
         "signal_qualified": sig.qualified if sig is not None else None,
         "signal_strength": sig.strength if sig is not None else None,
         "signal_reasons": list(sig.reasons)[:6] if sig is not None else None,
-        "ml_score": ml.score if ml is not None else None,
+        # MLInput carries the champion's score as `confidence` (pipeline.champion_prediction); `ml.score` raised
+        # AttributeError, so with a promoted champion every gate ledger row would have been dropped (2026-10-27)
+        "ml_score": ml.confidence if ml is not None else None,
         "deterioration_indicators": q.get("indicators"),
         "entry_exit_check": (inp.entry_exit_check or {}).get("action"),
         "data_errors": [str(e)[:160] for e in (evidence.get("errors") or [])][:6],
         "price_age_seconds": (decision_ctx or {}).get("price_age_seconds"),
         "decision_eval_ms": (decision_ctx or {}).get("decision_eval_ms"),
         "operator_request": bool(getattr(inp, "operator_request", False)),
+        # The plan the gate proposed at this decision, traded or not (2026-10-27): the risk assessment that held it
+        # is pruned after the retention days; the ledger keeps it for outcome comparisons.
+        "plan": plan_summary(getattr(a, "plan", None)),
+        "ml_gate": {"model": ml.model_name, "version": ml.model_version, "score": ml.confidence} if ml is not None else None,
         # Momentum v2 checks at the decision (strategies.momentum_v2), enforced or shadow.
         "momentum_v2": evidence.get("momentum_v2"),
         # Launch / pool intelligence at the decision (solana.intel): causal
@@ -114,6 +120,23 @@ def gate_snapshot(inp: Any, evidence: dict[str, Any], a: Any, decision_ctx: dict
         "intel": json.loads(json.dumps(evidence.get("intel") or getattr(inp, "intel", None), default=str))
         if evidence.get("intel") or getattr(inp, "intel", None) else None,
     }
+
+
+def plan_summary(plan: Any) -> dict[str, Any] | None:
+    """Entry, stop, take-profits, size and cost estimates of a TradePlan, as strings (None when there is no plan)."""
+    if plan is None:
+        return None
+
+    def v(x: Any) -> str | None:
+        x = getattr(x, "value", x)
+        return None if x is None else str(x)
+
+    return {"entry_price": v(plan.entry_price), "stop_loss": v(plan.stop_loss), "stop_distance_pct": v(plan.stop_distance_pct),
+            "take_profits": [v(tp.price) for tp in (plan.take_profits or [])], "position_size": v(plan.position_size),
+            "max_loss": v(plan.max_loss), "entry_cost_bps": v(plan.entry_cost_bps), "exit_cost_bps": v(plan.exit_cost_bps),
+            "fixed_cost_quote": v(plan.fixed_cost_quote), "planned_loss_at_stop": v(plan.planned_loss_at_stop),
+            "sizing_loss_pct": v(plan.sizing_loss_pct), "binding_cap": plan.binding_cap,
+            "token_category": plan.token_category}
 
 
 def observation_snapshot(report: dict[str, Any]) -> dict[str, Any]:
