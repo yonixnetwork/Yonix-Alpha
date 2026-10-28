@@ -38,7 +38,7 @@ def pos(pnl, at, *, status="closed", mint=None, engine="solana_fresh", strategy=
     return PaperPosition(id=uuid.uuid4(), symbol="T", provider="paper", side="LONG", engine=engine, asset_id=mint or uuid.uuid4().hex,
                          entry_price=Decimal(1), quantity=Decimal(1), take_profit=[], status=status, execution_mode="PAPER",
                          realized_pnl=None if pnl is None else Decimal(str(pnl)),
-                         realized_pnl_pct=None if pnl is None else Decimal(str(pnl)) * 100,
+                         realized_pnl_pct=None if pnl is None else Decimal(str(pnl)) / Decimal("0.1"),  # a fraction, as stored
                          fees_paid_quote=Decimal("0.001"), entry_cost_quote=Decimal("0.1"), proceeds_quote=Decimal(0),
                          entry_at=at - timedelta(minutes=2), exit_at=at if status == "closed" else None,
                          exit_reason="stop_loss" if pnl is not None and float(pnl) < 0 else "take_profit_3", strategy=strategy, plan={})
@@ -54,6 +54,9 @@ async def test_the_whole_history_is_counted_and_losses_attributed(sf):
                                  decided_at=T0, snapshot={}, executable_return_pct=Decimal("12.5"), status="COMPLETE"))
         s.add(OpportunityOutcome(key="g2", mint="M2", engine="solana_fresh", stage="GATE", decision="EXECUTE", traded=True,
                                  decided_at=T0, snapshot={}, status="TRACKING"))
+        s.add_all([OpportunityOutcome(key=f"c{i}", mint=f"C{i}", engine="solana_fresh", stage="POOL", decision="NO_TRADE",
+                                      traded=False, decided_at=T0, snapshot={}, executable_return_pct=Decimal("-3.00"),
+                                      status="COMPLETE") for i in range(20)])
         await s.commit()
         r = await ha.build(s, ha.SECTIONS, ("solana_fresh",), None, None)
     st = {x["status"]: x["count"] for x in r["status"]}
@@ -65,10 +68,16 @@ async def test_the_whole_history_is_counted_and_losses_attributed(sf):
     c = r["concentration"]["solana_fresh PAPER"]
     assert c["losses"] == 3 and c["losses_making_80pct_of_gross_loss"] == 1 and c["worst_tokens"][0]["mint"] == "BAD"
     assert c["net_without_best5_tokens_sol"] == -0.22
+    # -0.2 and 2 x -0.01 SOL on 0.1 SOL: -200 %, -10 %, -10 % (stored as fractions)
+    assert c["loss_size_bands_pct"] == {"0..-10": 0, "-10..-20": 2, "-20..-40": 0, "below -40": 1}
+    assert c["median_loss_pct"] == -10.0
     led = {(x["decision"], x["traded"]): x for x in r["ledger"]}
     assert led[("REJECT", False)]["mean_exec_pct"] == 12.5 and led[("EXECUTE", True)]["unresolved"] == 1
+    assert led[("REJECT", False)]["constant"] is False  # one measured row is too few to call constant
+    assert led[("NO_TRADE", False)]["constant"] is True  # 20 identical values: costs only, flagged
     assert any(t["table"] == "paper_positions" and t["earliest"] for t in r["range"])
     text = ha.render(r)
+    assert "costs only, no price move was measured" in text
     assert "CONCENTRATION" in text and "Nothing was written" in text and "data_retention setting" in text
 
 
