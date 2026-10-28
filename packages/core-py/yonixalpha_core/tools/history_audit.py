@@ -104,6 +104,7 @@ SELECT engine, stage, decision, traded, count(*) AS n,
        count(*) FILTER (WHERE executable_return_pct IS NOT NULL) AS measured,
        count(*) FILTER (WHERE executable_return_pct > 0) AS positive,
        avg(executable_return_pct) AS mean_exec, percentile_cont(0.5) WITHIN GROUP (ORDER BY executable_return_pct) AS med_exec,
+       min(executable_return_pct) AS min_exec, max(executable_return_pct) AS max_exec,
        min(decided_at) AS first_at, max(decided_at) AS last_at
 FROM opportunity_outcomes
 WHERE engine = ANY(:engines) AND (CAST(:since AS timestamptz) IS NULL OR decided_at >= :since)
@@ -156,7 +157,8 @@ def concentration(tokens: list, trades: list) -> dict[str, Any]:
                 break
         worst = sorted(toks, key=lambda t: float(t.net))[:5]
         best = sorted(toks, key=lambda t: -float(t.net))[:5]
-        pcts = [float(t.pnl_pct) for t in trades if (t.engine, t.mode) == key and t.pnl_pct is not None and t.pnl < 0]
+        # realized_pnl_pct is stored as a fraction of the entry cost (-0.34 = -34 %)
+        pcts = [100 * float(t.pnl_pct) for t in trades if (t.engine, t.mode) == key and t.pnl_pct is not None and t.pnl < 0]
         net = sum(pnl)
         out[f"{key[0]} {key[1]}"] = {
             "trades": len(pnl), "tokens": len(toks), "net_sol": round(net, 6), "gross_loss_sol": round(gross_loss, 6),
@@ -202,6 +204,9 @@ async def build(s, sections: tuple[str, ...], engines: tuple[str, ...], since: d
         out["ledger"] = [{"engine": r.engine, "stage": r.stage, "decision": r.decision, "traded": r.traded,
                           "count": int(r.n), "unresolved": int(r.unresolved), "measured": int(r.measured),
                           "positive": int(r.positive), "mean_exec_pct": _f(r.mean_exec, 2), "median_exec_pct": _f(r.med_exec, 2),
+                          "min_exec_pct": _f(r.min_exec, 2), "max_exec_pct": _f(r.max_exec, 2),
+                          "constant": int(r.measured) >= 20 and r.min_exec is not None
+                          and float(r.max_exec - r.min_exec) < 0.01,
                           "first": _iso(r.first_at), "last": _iso(r.last_at)}
                          for r in (await s.execute(text(LEDGER_SQL), p)).all()]
     return out
@@ -278,6 +283,9 @@ def render(r: dict[str, Any]) -> str:
                        f"n {x['count']:<7} unresolved {x['unresolved']:<5} measured {x['measured']:<7} positive {x['positive']:<6} "
                        f"mean {_v(x['mean_exec_pct'], 2)}% median {_v(x['median_exec_pct'], 2)}%  "
                        f"{(x['first'] or '-')[:10]} .. {(x['last'] or '-')[:10]}")
+            if x.get("constant"):
+                out.append("      ^ every measured row has the same value: costs only, no price move was measured "
+                           "(not a result of the decisions)")
     out.append("\nA group under 20 trades is (small): variation, not an edge. PAPER is not evidence of LIVE results. "
                "Nothing was written.")
     return "\n".join(out)
