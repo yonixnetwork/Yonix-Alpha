@@ -13,7 +13,7 @@ cancel LIVE orders that should not exist.
 
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
@@ -34,7 +34,14 @@ log = get_logger("paper-trading.live")
 POLL_SECONDS = 1.0
 PENDING_CHECK_SECONDS = 0.2  # between loops, a new PENDING order is picked up within this
 RECONCILE_SECONDS = 30
+# A failing wallet read (e.g. the RPC answering HTTP 429) is retried 2, 4, 8 .. 60 s
+# apart instead of every loop, so the worker does not keep a rate limit hit.
+RECONCILE_RETRY_MAX_SECONDS = 60
 READY_TTL_SECONDS = 60
+
+
+def reconcile_backoff(failures: int) -> float:
+    return float(min(RECONCILE_RETRY_MAX_SECONDS, 2 ** max(1, failures)))
 
 
 async def _publish(redis, status: str, reason: str | None = None, **extra) -> None:
@@ -133,6 +140,7 @@ async def live_worker_loop(session_factory, redis, app_settings, rpc, http_clien
     genesis = None
     genesis_tried = None
     last_control = None
+    reconcile_failures, reconcile_retry_at, last_error = 0, None, None
     while not stop_event.is_set():
         handled: set = set()
         try:
@@ -153,9 +161,18 @@ async def live_worker_loop(session_factory, redis, app_settings, rpc, http_clien
                 # Reconcile first only at start-up; after that, pending orders go
                 # first and the periodic reconcile runs after them.
                 if not reconciled_once:
-                    report = await live_trading.reconcile(session_factory, redis, app_settings, executor, now)
-                    last_reconcile, reconciled_once = now, True
-                    log.info("live.reconciled", **{k: str(v) for k, v in report.items()})
+                    if reconcile_retry_at is not None and now < reconcile_retry_at:
+                        await _publish(redis, "error", last_error)  # still not ready; the next read is backed off
+                    else:
+                        try:
+                            report = await live_trading.reconcile(session_factory, redis, app_settings, executor, now)
+                        except Exception:
+                            reconcile_failures += 1
+                            reconcile_retry_at = now + timedelta(seconds=reconcile_backoff(reconcile_failures))
+                            raise
+                        reconcile_failures, reconcile_retry_at = 0, None
+                        last_reconcile, reconciled_once = now, True
+                        log.info("live.reconciled", **{k: str(v) for k, v in report.items()})
                 if reconciled_once:
                     if genesis is None and (genesis_tried is None or (now - genesis_tried).total_seconds() >= 60):
                         genesis_tried = now
@@ -202,11 +219,19 @@ async def live_worker_loop(session_factory, redis, app_settings, rpc, http_clien
                         status = await live_trading.process_order(session_factory, redis, app_settings, executor, order_id)
                         log.info("live.order_processed", order_id=str(order_id), status=status)
                 now = datetime.now(timezone.utc)
-                if last_reconcile is not None and (now - last_reconcile).total_seconds() >= RECONCILE_SECONDS:
-                    report = await live_trading.reconcile(session_factory, redis, app_settings, executor, now)
+                if last_reconcile is not None and (now - last_reconcile).total_seconds() >= RECONCILE_SECONDS \
+                        and (reconcile_retry_at is None or now >= reconcile_retry_at):
+                    try:
+                        report = await live_trading.reconcile(session_factory, redis, app_settings, executor, now)
+                    except Exception:
+                        reconcile_failures += 1
+                        reconcile_retry_at = now + timedelta(seconds=reconcile_backoff(reconcile_failures))
+                        raise
+                    reconcile_failures, reconcile_retry_at = 0, None
                     last_reconcile = now
                     log.info("live.reconciled", **{k: str(v) for k, v in report.items()})
         except Exception as exc:  # noqa: BLE001 - the worker must keep running; the error is reported
+            last_error = type(exc).__name__
             log.error("live.worker_failed", error=f"{type(exc).__name__}: {exc}")
             await alert_error("paper-trading", "live.worker_failed", {"error": f"{type(exc).__name__}: {exc}"})
             await _publish(redis, "error", f"{type(exc).__name__}")
