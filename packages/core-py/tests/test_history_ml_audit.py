@@ -113,6 +113,7 @@ async def test_only_prospective_predictions_are_judged_and_usage_shows_no_champi
     reg = {m["name"]: m for m in r["registry"]}
     assert reg["gate_solana_fresh"]["ever_activated"] == 0 and reg["gate_solana_fresh"]["promotable"] is False
     assert r["usage"]["ledger_rows_scored_by_a_champion_at_the_decision"] == {}
+    assert r["usage"]["models_ever_active"] == 0 and r["leakage"]["ledger_rows_with_scores"] == 120
     assert r["leakage"]["scores"] == {"PROSPECTIVE": 180, "RETROSPECTIVE": 60} and r["leakage"]["scored_after_the_t5m_horizon"] == 60
     ret = r["predictions"]["ALL E_EXECUTABLE_RETURN"]
     assert ret["n"] == 90 and ret["rank_correlation"] == 1.0
@@ -120,4 +121,20 @@ async def test_only_prospective_predictions_are_judged_and_usage_shows_no_champi
     up = r["predictions"]["ALL P_UPSIDE_50"]
     assert up["n"] == 90 and up["roc_auc"] == 1.0 and up["brier"] < up["brier_of_base_rate"]
     text = ma.render(r)
+    assert "no decision used a model" in text
     assert "ever ACTIVE 0" in text and "PROSPECTIVE PREDICTIONS" in text and "LEAKAGE" in text
+
+
+@pytest.mark.asyncio
+async def test_champion_scores_are_counted_only_once_a_model_was_active(sf):
+    async with sf() as s:
+        s.add(ModelVersion(name="gate_solana_fresh", version=2, status="active", feature_names=[], training_sample_count=300,
+                           metrics={}, artifact=b"x", trained_at=T0, activated_at=T0 + timedelta(hours=1)))
+        for i, (stage, score) in enumerate([("GATE", 0.7), ("GATE", None), ("OBSERVATION", 0.7)]):
+            s.add(OpportunityOutcome(key=f"c{i}", mint=f"C{i}", engine="solana_fresh", stage=stage, decision="EXECUTE",
+                                     traded=False, decided_at=T0 + timedelta(hours=2), snapshot={"ml_score": score}))
+        await s.commit()
+        r = await ma.build(s, ("usage",), ("solana_fresh",), None, None)
+    u = r["usage"]
+    assert u["models_ever_active"] == 1 and u["first_active_at"].startswith("2026-10-01T10:00")
+    assert u["ledger_rows_scored_by_a_champion_at_the_decision"] == {"solana_fresh": 1}

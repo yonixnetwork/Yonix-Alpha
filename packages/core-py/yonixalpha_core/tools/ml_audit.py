@@ -48,7 +48,6 @@ from yonixalpha_core.ml.prediction_audit import classify
 
 SECTIONS = ("registry", "usage", "predictions", "leakage")
 MIN_N = 100
-MAX_ROWS = 300_000
 # shadow targets -> ledger label key (services/ml/app/shadow_ml.BINARY_TARGETS; kept equal by test)
 BINARY_LABELS = {"P_UPSIDE_50": "upside_50", "P_UPSIDE_100": "upside_100", "P_UPSIDE_200": "upside_200",
                  "P_MIGRATE": "migrate_60m", "P_FAST_DUMP": "fast_dump", "P_RECOVERY": "recovery", "P_RUG": "rug_60m"}
@@ -75,8 +74,12 @@ PRED_SQL = f"""
 SELECT engine, decided_at, traded, executable_return_pct AS ret, labels, mint,
        ml_shadow->>'scored_at' AS scored_at, ml_shadow->'scores' AS scores
 FROM opportunity_outcomes WHERE ml_shadow IS NOT NULL AND {WINDOW}
-ORDER BY decided_at LIMIT {MAX_ROWS}
 """
+STREAM_ROWS = 2000  # rows per fetch: the ledger is read in batches, never held in memory at once
+
+# A champion score can only exist after some model was first made ACTIVE.
+FIRST_ACTIVE_SQL = "SELECT min(coalesce(activated_at, trained_at)) AS at, count(*) AS n FROM model_versions " \
+                   "WHERE activated_at IS NOT NULL OR status = 'active'"
 
 
 BOOT_CAP = 5000  # values per group the bootstrap resamples (a fixed-seed subsample above that keeps it fast)
@@ -221,9 +224,13 @@ async def build(s, sections: tuple[str, ...], engines: tuple[str, ...], since: d
         pos = (await s.execute(text(
             "SELECT engine, coalesce(execution_mode, 'PAPER') AS mode, count(*) FILTER (WHERE model_version IS NOT NULL) AS with_model, "
             "count(*) AS n FROM paper_positions WHERE engine = ANY(:engines) GROUP BY 1, 2 ORDER BY 1, 2"), p)).all()
-        champ = (await s.execute(text(
-            f"SELECT engine, count(*) AS n FROM opportunity_outcomes WHERE {WINDOW} AND snapshot->>'ml_score' IS NOT NULL "
-            "GROUP BY 1 ORDER BY 1"), p)).all()
+        first = (await s.execute(text(FIRST_ACTIVE_SQL))).one()
+        # No model ever ACTIVE: no decision could carry a champion score, so the
+        # snapshots (large, and many) are not read at all.
+        champ = [] if first.at is None else (await s.execute(text(
+            f"SELECT engine, count(*) AS n FROM opportunity_outcomes WHERE {WINDOW} AND stage = 'GATE' "
+            "AND decided_at >= :first_active AND snapshot->>'ml_score' IS NOT NULL GROUP BY 1 ORDER BY 1"),
+            {**p, "first_active": first.at})).all()
         below = (await s.execute(text(
             "SELECT count(*) AS n, min(evaluated_at) AS lo, max(evaluated_at) AS hi FROM risk_assessments ra "
             "WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(ra.assessment->'findings') f WHERE f->>'code' = 'ML_BELOW_MIN')"))).one()
@@ -234,19 +241,22 @@ async def build(s, sections: tuple[str, ...], engines: tuple[str, ...], since: d
             "min_ml_confidence_by_scope": {r.scope: r.v for r in minconf},
             "positions_with_model_version": [{"engine": r.engine, "mode": r.mode, "with_model": int(r.with_model), "of": int(r.n)}
                                              for r in pos],
+            "models_ever_active": int(first.n), "first_active_at": _iso(first.at),
             "ledger_rows_scored_by_a_champion_at_the_decision": {r.engine: int(r.n) for r in champ},
             "ml_below_min_findings_retained": {"count": int(below.n), "from": _iso(below.lo), "to": _iso(below.hi)},
         }
     if "predictions" in sections or "leakage" in sections:
         trained = {(r.name, int(r.version)): r.trained_at for r in (await s.execute(text(
             "SELECT name, version, trained_at FROM model_versions"))).all()}
-        rows = (await s.execute(text(PRED_SQL), p)).all()
+        stream = await s.stream(text(PRED_SQL).execution_options(yield_per=STREAM_ROWS), p)
+        n_rows = 0
         kinds = {"PROSPECTIVE": 0, "RETROSPECTIVE": 0}
         late, newer_model = 0, 0
         per_target: dict[tuple[str, str], dict[str, list]] = {}
         mints: dict[str, int] = {}
         unlabelled = 0
-        for r in rows:
+        async for r in stream:
+            n_rows += 1
             mints[r.mint] = mints.get(r.mint, 0) + 1
             labels = r.labels or {}
             if not labels or "unknown" in labels:
@@ -286,7 +296,7 @@ async def build(s, sections: tuple[str, ...], engines: tuple[str, ...], since: d
         if "leakage" in sections:
             repeated = sorted(mints.values(), reverse=True)
             out["leakage"] = {
-                "ledger_rows_with_scores": len(rows), "rows_truncated_at": MAX_ROWS if len(rows) >= MAX_ROWS else None,
+                "ledger_rows_with_scores": n_rows,
                 "scores": kinds, "scored_after_the_t5m_horizon": late, "scored_by_a_model_trained_after_the_decision": newer_model,
                 "tokens": len(mints), "rows_per_token_max": repeated[0] if repeated else None,
                 "rows_on_tokens_with_more_than_one_row": sum(v for v in repeated if v > 1),
@@ -323,6 +333,8 @@ def render(r: dict[str, Any]) -> str:
         out.append(f"  min_ml_confidence per scope (latest version): {u['min_ml_confidence_by_scope']}")
         out.append("  positions carrying a model version: " + ", ".join(
             f"{x['engine']} {x['mode']} {x['with_model']}/{x['of']}" for x in u["positions_with_model_version"]))
+        out.append(f"  models ever made ACTIVE: {u['models_ever_active']}"
+                   f"{' (first ' + u['first_active_at'][:16] + ')' if u['first_active_at'] else ': none, so no decision used a model'}")
         out.append(f"  ledger decisions scored by a champion at the decision: {u['ledger_rows_scored_by_a_champion_at_the_decision'] or 'none'}")
         b = u["ml_below_min_findings_retained"]
         out.append(f"  ML_BELOW_MIN findings in the retained risk assessments: {b['count']} ({(b['from'] or '-')[:16]} .. {(b['to'] or '-')[:16]})")
@@ -351,7 +363,7 @@ def render(r: dict[str, Any]) -> str:
     if "leakage" in r:
         lk = r["leakage"]
         out.append("\nLEAKAGE AND SAMPLE CHECKS")
-        out.append(f"  ledger rows with scores {lk['ledger_rows_with_scores']}{' (truncated)' if lk['rows_truncated_at'] else ''}; "
+        out.append(f"  ledger rows with scores {lk['ledger_rows_with_scores']}; "
                    f"scores {lk['scores']}; scored after T+5m {lk['scored_after_the_t5m_horizon']}; by a model trained after the "
                    f"decision {lk['scored_by_a_model_trained_after_the_decision']}")
         out.append(f"  tokens {lk['tokens']}; max rows on one token {lk['rows_per_token_max']}; rows on tokens with more than one row "
