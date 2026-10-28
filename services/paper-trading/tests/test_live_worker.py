@@ -461,6 +461,35 @@ async def test_worker_reconciles_before_processing_and_then_reports_ready(sessio
     assert n == 0
 
 
+class RateLimitedRpc:
+    """Every call refused, like an RPC answering HTTP 429."""
+
+    def __init__(self):
+        self.calls = 0
+
+    async def call(self, method, params=None):
+        self.calls += 1
+        raise RuntimeError("All RPC endpoints failed (HTTP 429)")
+
+
+async def test_a_failing_wallet_read_is_backed_off_and_the_worker_stays_not_ready(session_factory, redis_client):
+    from app.live_worker import reconcile_backoff
+
+    assert [reconcile_backoff(n) for n in (1, 2, 3, 6, 9)] == [2.0, 4.0, 8.0, 60.0, 60.0]
+    ex = FakeExecutor()
+    ex.rpc = RateLimitedRpc()
+    stop = asyncio.Event()
+    task = asyncio.create_task(live_worker_loop(session_factory, redis_client, LIVE_ON, None, None, stop, executor=ex))
+    await asyncio.sleep(3.5)  # the loop ticks every second; reads at 0 s and 2 s only (then 6 s)
+    stop.set()
+    await task
+    assert ex.rpc.calls == 2
+    state = json.loads(await redis_client.get(live_trading.READY_KEY))
+    assert state["status"] == "error"
+    ready, _ = await live_trading.live_readiness(redis_client, LIVE_ON, datetime.now(timezone.utc))
+    assert not ready
+
+
 async def test_kill_switch_cancels_a_queued_live_buy_and_never_sends_it(session_factory, redis_client):
     from yonixalpha_core import kill_switch
 
