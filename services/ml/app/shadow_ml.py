@@ -41,6 +41,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import set_committed_value
 
 from yonixalpha_core.db.models import ModelVersion, OpportunityOutcome
 from yonixalpha_core.logging import get_logger
@@ -298,6 +299,7 @@ async def score_recent(session: AsyncSession, now: datetime | None = None, limit
     rows = (await session.execute(select(OpportunityOutcome).where(OpportunityOutcome.ml_shadow.is_(None),
                                                                    OpportunityOutcome.decided_at >= now - (max_age or SCORE_LOOKBACK))
                                   .order_by(OpportunityOutcome.decided_at.desc()).limit(limit))).scalars().all()
+    payloads: list[tuple[OpportunityOutcome, dict[str, Any]]] = []
     for row in rows:
         x = features(row.snapshot or {}, row.decided_at, row.engine, row.stage)
         scores: dict[str, Any] = {}
@@ -311,9 +313,23 @@ async def score_recent(session: AsyncSession, now: datetime | None = None, limit
                 value = float(est.predict(vec)[0])
             if math.isfinite(value):
                 scores[target] = {"value": round(value, 4), "model": m.name, "version": m.version}
-        row.ml_shadow = {"scored_at": now.isoformat(), "feature_version": FEATURE_VERSION, "scores": scores,
-                         "not_trained": NOT_TRAINED, "note": "SHADOW: never used for decisions or position sizing"}
-    return len(rows)
+        payloads.append((row, {"scored_at": now.isoformat(), "feature_version": FEATURE_VERSION, "scores": scores,
+                                  "not_trained": NOT_TRAINED, "note": "SHADOW: never used for decisions or position sizing"}))
+    await session.commit()  # end the read before any write
+    # One row per short transaction: the ledger (opportunities.track) updates the same
+    # recent rows in its own long transaction, and a multi-row write here could
+    # deadlock with it. Holding a single row lock, this side can only wait, never
+    # close a cycle. A row scored meanwhile (ml_shadow set) is left as it is.
+    written = 0
+    for row, payload in payloads:
+        res = await session.execute(update(OpportunityOutcome)
+                                    .where(OpportunityOutcome.id == row.id, OpportunityOutcome.ml_shadow.is_(None))
+                                    .values(ml_shadow=payload).execution_options(synchronize_session=False))
+        await session.commit()
+        if res.rowcount:
+            set_committed_value(row, "ml_shadow", payload)  # the loaded object matches the database, no second write
+            written += 1
+    return written
 
 
 async def run_shadow_cycle(session_factory) -> dict[str, Any]:

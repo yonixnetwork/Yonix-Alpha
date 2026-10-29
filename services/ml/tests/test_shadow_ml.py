@@ -88,6 +88,50 @@ async def test_shadow_models_train_score_and_stay_out_of_the_decision_path(db_se
     assert s["scores"]["P_UPSIDE_50"]["model"] == "shadow_p_upside_50"
 
 
+async def test_scoring_cannot_deadlock_with_a_ledger_transaction(db_session):
+    """Server 2026-10-29: the ledger's long transaction and a multi-row score
+    write locked the same rows in different orders (DeadlockDetectedError).
+    Here a second transaction holds the oldest row being scored, then updates
+    every other one while the scorer waits: written one row at a time, the
+    scorer holds nothing while it waits, so both finish."""
+    import asyncio
+    import os
+
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    await _ledger(db_session)
+    await shadow_ml.train_all(db_session)
+    await db_session.commit()
+    now = T0 + timedelta(minutes=10 * 299 + 5)
+    keys = (await db_session.execute(select(OpportunityOutcome.key).where(
+        OpportunityOutcome.decided_at >= now - shadow_ml.SCORE_LOOKBACK).order_by(OpportunityOutcome.decided_at))).scalars().all()
+    await db_session.commit()
+    oldest, others = keys[0], keys[1:]
+    async def score_and_commit() -> int:  # as run_shadow_cycle does
+        n = await shadow_ml.score_recent(db_session, now=now)
+        await db_session.commit()
+        return n
+
+    ledger = create_async_engine(os.environ["DATABASE_URL"])
+    try:
+        async with ledger.connect() as conn:
+            tx = await conn.begin()
+            await conn.execute(text("UPDATE opportunity_outcomes SET updated_at = now() WHERE key = :k"), {"k": oldest})
+            scoring = asyncio.create_task(score_and_commit())
+            await asyncio.sleep(1.5)  # the scorer reaches the locked row (written last) and waits
+            await conn.execute(text("UPDATE opportunity_outcomes SET updated_at = now() WHERE key = ANY(:k)"), {"k": others})
+            await tx.commit()
+        scored = await asyncio.wait_for(scoring, 30)
+    finally:
+        await ledger.dispose()
+    assert scored == len(keys)
+    n = (await db_session.execute(select(OpportunityOutcome).where(OpportunityOutcome.key.in_(keys),
+                                                                  OpportunityOutcome.ml_shadow.is_not(None)))).scalars().all()
+    assert len(n) == len(keys)
+    assert await shadow_ml.score_recent(db_session, now=now) == 0  # nothing scored twice
+
+
 async def test_too_few_rows_is_reported_not_trained(db_session):
     await _ledger(db_session, n=50)
     out = await shadow_ml.train_all(db_session)
